@@ -61,7 +61,7 @@ AgentDesk intentionally keeps a separate `target/` directory per worktree. Shari
 - `.cargo/config.toml` no longer hard-codes `rustc-wrapper`, so bare `cargo build` / `cargo test` / `cargo check` works on every machine regardless of whether `sccache` is installed. No more `RUSTC_WRAPPER=` workaround for agents or subagents.
 - for bare Cargo commands, opt in manually with `export RUSTC_WRAPPER=sccache` after installing `sccache`. This uses inherited settings or sccache's own defaults; it does not apply AgentDesk's cache size or idle settings.
 - release/deploy scripts and the installer's source-build path call `setup_sccache_env` from `scripts/_defaults.sh` to activate caching when sccache is installed.
-- Linux/Windows CI configures sccache through workflow environment settings and the Mozilla action. Hosted macOS disables it; trusted macOS uses its separate runner-local settings.
+- Linux/Windows CI configures sccache through workflow environment settings and the Mozilla action. macOS CI runs only on GitHub-hosted runners and disables sccache.
 - the shell helper and POSIX campaign wrapper (`scripts/build_token.py`) default to `SCCACHE_CACHE_SIZE=40G` and `SCCACHE_IDLE_TIMEOUT=0` (no idle exit). Unset or empty values use these defaults; nonempty overrides remain intact. The campaign wrapper skips activation entirely when `RUSTC_WRAPPER` or `CARGO_BUILD_RUSTC_WRAPPER` is already present, even empty, so a manually configured wrapper does not receive these defaults.
 
 The 40G limit allows up to 30G more local disk use than the previous limit; it does not preallocate that space. New environment settings do not reconfigure an already running daemon. See the [sccache setup guide](docs/ci/sccache-setup.md) for activation and daemon-restart boundaries.

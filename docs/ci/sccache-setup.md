@@ -130,12 +130,9 @@ If sccache is not installed, both release scripts **print a warning and continue
 Cache storage is backed by GitHub Actions cache (automatic when using the
 action) — no manual GCS/S3 wiring needed.
 
-macOS hosted jobs explicitly clear both `RUSTC_WRAPPER` and
-`SCCACHE_GHA_ENABLED` before build steps so a Homebrew `sccache` binary does
-not try to use the GitHub Actions backend without the action token. Trusted
-self-hosted macOS jobs in `ci-macos-trusted.yml` do not use the GHA backend;
-they clear `SCCACHE_GHA_ENABLED` and opt into the runner-local `sccache`
-binary when installed.
+All macOS CI jobs use GitHub-hosted runners and explicitly clear both
+`RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` before build steps so a Homebrew
+`sccache` binary does not use the GitHub Actions backend without the action token.
 
 ### 2.4 Build token wrapper (campaign build path)
 
@@ -178,7 +175,6 @@ environment byte-identical: the cache is dropped, never the build.
 | Installer source build (helper available) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `scripts/install.sh` + `setup_sccache_env` |
 | CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | inherited/upstream | workflow env + action |
 | CI macOS hosted | none | disabled | n/a | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |
-| CI macOS self-hosted trusted | resolved `sccache` path when installed | disabled | `$HOME/.cache/sccache` | `20G` | inherited/upstream | `ci-macos-trusted.yml` + runner launchd env |
 
 Helper rows show defaults when sccache is available and size/idle values are unset
 or empty. Nonempty caller values override them. The campaign row also requires

@@ -204,6 +204,52 @@ class GiantFileProgressTest(unittest.TestCase):
         self.reject(lambda b, c, f: c["modules"].update(
             {SURVIVOR: 1201}), "new or growing giant")
 
+    def test_pinned_base_giant_gets_wiring_slack_but_new_and_unpinned_do_not(self):
+        slack = PROGRESS.WIRING_SLACK_LINES
+        self.assertEqual(slack, 30)
+        errors = lambda b, c, f: "; ".join(PROGRESS.pr_evaluation(b, c, f)[1])
+        base, candidate, facts = self.ordinary_fixture()
+        base["pins"] = {SURVIVOR: 1200}
+        candidate["modules"][SURVIVOR] = 1200 + slack
+        self.assertEqual(PROGRESS.pr_evaluation(base, candidate, facts),
+                         ("pr_ordinary_no_regression", []))
+        candidate["modules"][SURVIVOR] = 1201 + slack
+        self.assertIn(f"new or growing giant: {SURVIVOR} grew to {1201 + slack} > base 1200 "
+                      f"+ slack {slack}", errors(base, candidate, facts))
+        # An unpinned giant has no frozen cap, so any growth still fails.
+        base["pins"] = {}
+        candidate["modules"][SURVIVOR] = 1201
+        self.assertIn(f"new or growing giant: {SURVIVOR}", errors(base, candidate, facts))
+        # Crossing the threshold is a new giant even for a pinned path.
+        candidate["modules"][SURVIVOR] = 1200
+        base["modules"]["src/future.rs"] = 990
+        base["pins"] = {SURVIVOR: 1200, "src/future.rs": 990}
+        candidate["modules"]["src/future.rs"] = 1000
+        self.assertIn("new or growing giant: src/future.rs", errors(base, candidate, facts))
+        del base["modules"]["src/future.rs"]
+        self.assertIn("new or growing giant: src/future.rs", errors(base, candidate, facts))
+        # The strict-progress path shares the same growth rule.
+        base, candidate, facts = copy.deepcopy(self.fixture())
+        base["pins"] = {SURVIVOR: 1200}
+        candidate["modules"][SURVIVOR] = 1200 + slack
+        self.assertEqual(PROGRESS.progress_errors(base, candidate, facts), [])
+        self.reject(lambda b, c, f: (b.update(pins={SURVIVOR: 1200}),
+                                     c["modules"].update({SURVIVOR: 1201 + slack})),
+                    "new or growing giant")
+
+    def test_base_pins_read_the_frozen_table_and_grant_no_slack_when_unreadable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(PROGRESS.base_pins(root), {})
+            pin = root / PROGRESS.GIANT_PIN
+            pin.parent.mkdir(parents=True)
+            pin.write_text('[giant_file_ratchet]\n"src/a.rs" = 1200\n', encoding="utf-8")
+            self.assertEqual(PROGRESS.base_pins(root), {"src/a.rs": 1200})
+            for broken in ("[giant_file_ratchet\n", '[giant_file_ratchet]\n"src/a.rs" = 0\n'):
+                with self.subTest(broken=broken):
+                    pin.write_text(broken, encoding="utf-8")
+                    self.assertEqual(PROGRESS.base_pins(root), {})
+
     def test_same_path_child_and_movement_are_required(self):
         self.reject(lambda b, c, f: c["modules"].pop(ROOT_FILE), "same-path progress")
         self.reject(lambda b, c, f: c["modules"].update(
@@ -1349,6 +1395,141 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
                 self.assertIn(reason, evidence["reason"])
                 self.assertEqual(evidence["event_base_sha"], self.event_base)
                 self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
+
+    def test_giant_pinned_at_base_grows_only_within_wiring_slack(self):
+        self.git("checkout", "-q", "main")
+        self.put(P.GIANT_PIN, '[giant_file_ratchet]\n"src/fixture.rs" = 1100\n')
+        pinned_base = self.commit("pin the fixture giant")
+        slack = P.WIRING_SLACK_LINES
+        for lines, expected_rc in ((1100 + slack, 0), (1101 + slack, 2)):
+            with self.subTest(lines=lines):
+                self.git("read-tree", "--reset", "-u", pinned_base)
+                self.put("docs/pr.txt", "PR-only change\n")
+                self.put("src/fixture.rs", "pub fn fixture() {}\n" * lines)
+                self.git("add", "-A")
+                changed = self.git("commit-tree", self.git("write-tree"), "-p", pinned_base,
+                                   "-p", self.head, "-m", "pinned integration candidate")
+                self.git("checkout", "-qf", "--detach", changed)
+                rc, evidence, _, _, _ = self.run_candidate(candidate=changed)
+                self.assertEqual(rc, expected_rc, evidence)
+                self.assertEqual(evidence["comparison_base_sha"], pinned_base)
+                if expected_rc:
+                    self.assertIn(f"grew to {lines} > base 1100 + slack {slack}", evidence["reason"])
+                else:
+                    self.assertEqual(evidence["selector"], "pr_ordinary_no_regression")
+
+
+GONE, KEPT, SMALL = "src/gone.rs", "src/kept.rs", "src/small.rs"
+
+
+def deletion_registry(*paths):
+    return ("grandfathered_baseline_paths = [\n" + "".join(f'  "{path}",\n' for path in paths)
+            + "]\ngrandfathered = []\n\n" + "".join(entry(path, NEW) for path in paths))
+
+
+class GiantFileDeletionTest(unittest.TestCase):
+    """Real Git deletion of a registered giant evaluated through main()."""
+
+    git, put, commit = (GiantFileCandidateBaseTest.git, GiantFileCandidateBaseTest.put,
+                        GiantFileCandidateBaseTest.commit)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.evidence = Path(self.temp.name) / "evidence.json"
+        self.overdue = set()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "deletion@example.invalid")
+        self.git("config", "user.name", "Giant Deletion Test")
+        self.put(P.EVALUATOR, Path(P.__file__).read_text(encoding="utf-8"))
+        self.put(P.GIANT_PIN, "# unchanged pins\n")
+        self.put(P.METADATA, '{"ratchets": 2}\n')
+        self.put(SMALL, "pub fn small() {}\n" * 10)
+        for path in (GONE, KEPT):
+            self.put(path, "pub fn giant() {}\n" * 1200)
+        self.ledger((GONE, KEPT))
+        self.base = self.commit("base")
+        patch = mock.patch.object(P, "ROOT", self.repo)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def ledger(self, paths, transition=None):
+        self.put(P.REGISTRY, deletion_registry(*paths))
+        self.put(P.TRANSITION, "# transition\n" + "".join(
+            f"{path}\n" for path in (paths if transition is None else transition)))
+
+    def snapshot(self, root, evaluation_date=None):
+        registry = (root / P.REGISTRY).read_text()
+        registrations = {path: META_ROOT for path in (GONE, KEPT) if f'file = "{path}"' in registry}
+        return {"modules": {path: len((root / path).read_text().splitlines())
+                            for path in (GONE, KEPT, SMALL) if (root / path).exists()},
+                "registrations": registrations,
+                "overdue": sorted(self.overdue & registrations.keys())}
+
+    def run_pr(self, *, delete=(GONE,), ledger=(KEPT,), transition=None, files=None):
+        self.git("checkout", "-qf", "--detach", self.base)
+        for path in delete:
+            (self.repo / path).unlink()
+        self.ledger(ledger, transition)
+        for path, text in {P.METADATA: '{"ratchets": 1}\n', **(files or {})}.items():
+            self.put(path, text)
+        head = self.commit("delete giant")
+        self.git("checkout", "-qf", "--detach", self.base)
+        self.git("merge", "--no-ff", "-qm", "candidate", head)
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": self.git("rev-parse", "HEAD"),
+               "GFP_BASE_SHA": self.base, "GFP_HEAD_SHA": head}
+        with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.object(
+                P, "EVIDENCE", self.evidence), mock.patch.object(
+                G, "giant_file_snapshot", side_effect=self.snapshot), redirect_stderr(io.StringIO()):
+            rc = P.main()
+        return rc, json.loads(self.evidence.read_text())
+
+    def test_exact_deletion_passes_before_strict_progress(self):
+        for overdue in (set(), {GONE}):
+            with self.subTest(overdue=overdue):
+                self.overdue = overdue
+                rc, evidence = self.run_pr()
+                self.assertEqual(rc, 0, evidence)
+                self.assertEqual((evidence["selector"], evidence["deleted"], evidence["retired"]),
+                                 ("pr_giant_deletion", [GONE], []))
+                self.assertEqual(evidence["base_overdue"], sorted(overdue))
+
+    def test_inexact_ledger_pin_change_or_new_giant_rejects(self):
+        cases = [({"ledger": (), "transition": (KEPT,)}, ("registry is not the exact deleted-entry removal",
+                                                           f"retained metadata changed: {KEPT}")),
+                 ({"files": {P.GIANT_PIN: "# changed pins\n"}}, ("giant pin blob changed",)),
+                 ({"files": {SMALL: "pub fn small() {}\n" * 1000}}, (f"new or growing giant: {SMALL}",)),
+                 ({"transition": ()}, ("transition list is not the exact deleted-path removal",))]
+        for options, reasons in cases:
+            with self.subTest(reasons=reasons):
+                rc, evidence = self.run_pr(**options)
+                self.assertEqual((rc, evidence["selector"], evidence.get("deleted")),
+                                 (2, "pr_giant_deletion", [GONE]), evidence)
+                self.assertEqual(evidence["reason"], "; ".join(reasons))
+
+    def test_entry_removal_needs_an_actual_file_deletion(self):
+        # The kept file is edited in place: Git reports "M", not "D", and the PR is not ledger-only.
+        rc, evidence = self.run_pr(delete=(), files={GONE: "pub fn edited() {}\n" * 1200})
+        self.assertEqual((rc, evidence["selector"], "deleted" in evidence),
+                         (2, "pr_ordinary_no_regression", False), evidence)
+        self.assertEqual(evidence["reason"],
+                         "frozen authority blob changed; registry changed in ordinary no-regression PR")
+        base = {"overdue": [], "modules": {GONE: 1200, KEPT: 1200},
+                "registrations": {GONE: META_ROOT, KEPT: META_ROOT}}
+        candidate = copy.deepcopy(base)
+        candidate["registrations"].pop(GONE)
+        facts = {"changed": {P.REGISTRY, P.TRANSITION}, "statuses": {P.REGISTRY: "M", P.TRANSITION: "M"},
+                 "authority_equal": False, "registry_equal": False}
+        self.assertEqual(P.pr_evaluation(base, candidate, facts), ("pr_ordinary_no_regression", [
+            "frozen authority blob changed", "registry changed in ordinary no-regression PR"]))
+        candidate["modules"].pop(GONE)
+        facts.update(statuses={GONE: "D"}, pin_equal=True, deletion_ledgers={
+            P.REGISTRY: (deletion_registry(KEPT), deletion_registry(KEPT)), P.TRANSITION: ("", "")})
+        self.assertEqual(P.pr_evaluation(base, candidate, facts), (
+            "pr_giant_deletion", [f"registry entry not found for deleted giant: {GONE}"]))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,2115 @@
+//! `o-shadow report`: judges one window against the E1 sample, population and classification bar.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::metrics::MetricsSnapshot;
+use super::root::{ShadowRoot, StoredRecord};
+use super::tap::CHECKPOINT_SECS;
+use super::{
+    DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
+    PopulationSnapshot, PopulationSource, REPORT_VERSION, SCHEMA_VERSION, ShadowProvider,
+    ShadowRecord, ShadowTurn, ShadowUnit, SourceId, SyntheticEntry, UnitKey, UnitKind,
+};
+use crate::services::agent_protocol::RuntimeHandoffKind;
+
+pub const MIN_TOTAL_TURNS: usize = 30;
+pub const MIN_PROFILE_TURNS: usize = 10;
+pub const MIN_TOOL_TURNS: usize = 3;
+pub const MIN_SPLIT_TURNS: usize = 1;
+/// The fixed measurement window; a longer one would admit turns the design does not count.
+pub const WINDOW_MINUTES: i64 = 120;
+/// One minute allows CLI scheduling jitter (six checkpoints), without extending evidence collection.
+pub const REPORT_GRACE_SECS: i64 = 60;
+/// Criteria the records cannot show; the coordinator records them next to the verdict.
+pub const EXTERNAL_CHECKS: [&str; 2] = ["write_zero_audit", "resource_limits"];
+
+/// Provider behind a TUI runtime kind; exhaustive so a new kind fails to compile here.
+fn tui_provider(kind: RuntimeHandoffKind) -> Option<&'static str> {
+    match kind {
+        RuntimeHandoffKind::ClaudeTui => Some("claude"),
+        RuntimeHandoffKind::CodexTui => Some("codex"),
+        RuntimeHandoffKind::LegacyTmuxWrapper
+        | RuntimeHandoffKind::ProcessBackend
+        | RuntimeHandoffKind::ClaudeEAdapter => None,
+    }
+}
+
+/// TUI profile of a provider id, or `unknown:<id>` when no TUI runtime kind serves it.
+pub fn profile_of(provider: &str) -> String {
+    use RuntimeHandoffKind::*;
+    [
+        LegacyTmuxWrapper,
+        ClaudeTui,
+        CodexTui,
+        ProcessBackend,
+        ClaudeEAdapter,
+    ]
+    .into_iter()
+    .find(|kind| tui_provider(*kind) == Some(provider))
+    .map_or_else(
+        || format!("unknown:{provider}"),
+        |kind| kind.as_str().to_string(),
+    )
+}
+
+fn provider_id(provider: ShadowProvider) -> &'static str {
+    match provider {
+        ShadowProvider::Claude => "claude",
+        ShadowProvider::Codex => "codex",
+    }
+}
+
+/// S2: TUI kinds the shadow bound in the run live at `from` and any later run up to `to`.
+pub fn bound_kinds<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    read_at: DateTime<Utc>,
+) -> PopulationSource {
+    let mut kinds = BTreeSet::new();
+    for record in records {
+        match record {
+            ShadowRecord::Header { started_at, .. } if *started_at <= from => kinds.clear(),
+            ShadowRecord::Binding { change } if change.at <= to => {
+                kinds.extend(
+                    change
+                        .new
+                        .iter()
+                        .map(|b| profile_of(provider_id(b.provider))),
+                );
+            }
+            _ => {}
+        }
+    }
+    let observed_kinds = kinds.into_iter().collect();
+    PopulationSource {
+        name: "s2_bindings".into(),
+        read_at,
+        ok: true,
+        observed_kinds,
+    }
+}
+
+/// Channels bound to a provider at any moment of `[from, to]`, kept after an unbind or restart.
+pub fn bound_channels<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<(u64, String)> {
+    let mut live: BTreeMap<u64, (&'static str, DateTime<Utc>)> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    // A binding lasts until its channel changes or the run ends at the next header.
+    let mut close = |channel, (provider, start): (&'static str, _), end| {
+        if start <= to && from <= end {
+            seen.insert((channel, provider));
+        }
+    };
+    for record in records {
+        match record {
+            ShadowRecord::Header { started_at, .. } => (std::mem::take(&mut live).into_iter())
+                .for_each(|(channel, bound)| close(channel, bound, *started_at)),
+            ShadowRecord::Binding { change } => {
+                if let Some(bound) = live.remove(&change.channel_id) {
+                    close(change.channel_id, bound, change.at);
+                }
+                if let Some(b) = &change.new {
+                    live.insert(change.channel_id, (provider_id(b.provider), change.at));
+                }
+            }
+            _ => {}
+        }
+    }
+    live.into_iter()
+        .for_each(|(channel, bound)| close(channel, bound, to));
+    (seen.into_iter())
+        .map(|(channel, provider)| (channel, provider.to_string()))
+        .collect()
+}
+
+/// Sources the latest observer run still has attached, with their attach time: cleared by a new
+/// header, dropped when rebound away or broken by an anomaly.
+pub fn attached_sources<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+) -> Vec<(SourceId, DateTime<Utc>)> {
+    let mut attached: Vec<(SourceId, DateTime<Utc>)> = Vec::new();
+    for record in records {
+        match record {
+            ShadowRecord::Header { .. } => attached.clear(),
+            ShadowRecord::Attach {
+                source,
+                attached_at,
+                ..
+            } => attached.push((source.clone(), *attached_at)),
+            ShadowRecord::Binding { change } => {
+                attached.retain(|(s, _)| change.old.as_ref().is_none_or(|old| old.source != *s))
+            }
+            ShadowRecord::Anomaly { anomaly } => attached.retain(|(s, _)| *s != anomaly.source),
+            _ => {}
+        }
+    }
+    attached
+}
+
+/// One operator verdict from `report --classify`; only Expected, Legacy_defect and O_defect apply.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Classification {
+    pub diff_key: String,
+    pub cause: DiffCause,
+    pub note: String,
+}
+
+/// The `--classify` file; an unreadable one fails the report instead of being skipped.
+pub enum ClassifyInput {
+    Absent,
+    Entries(Vec<Classification>),
+    Unreadable(String),
+}
+
+/// A non-Match diff in the window: the cause it was recorded with and the one judged.
+#[derive(Debug, Serialize)]
+pub struct DiffEntry {
+    pub diff_key: String,
+    pub class: DiffClass,
+    pub recorded: DiffCause,
+    pub cause: DiffCause,
+}
+
+pub struct ReportInput<'a> {
+    /// Records with their storage time, which dates the rows that carry no time of their own.
+    pub records: &'a [StoredRecord],
+    pub manifest: &'a [SyntheticEntry],
+    pub population: &'a PopulationSnapshot,
+    pub allowlist: &'a [u64],
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub reported_at: DateTime<Utc>,
+    pub classify: &'a ClassifyInput,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ProfileCounts {
+    pub turns: usize,
+    pub tool_turns: usize,
+    pub split_turns: usize,
+    pub synthetic_turns: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReportOutcome {
+    pub pass: bool,
+    pub failures: Vec<String>,
+    pub warnings: Vec<String>,
+    pub external_checks: [&'static str; 2],
+    /// `[schema, identity, report]` versions this verdict was computed under.
+    pub versions: [u32; 3],
+    pub t0: DateTime<Utc>,
+    pub t1: DateTime<Utc>,
+    pub total_turns: usize,
+    pub profiles: BTreeMap<String, ProfileCounts>,
+    pub uncounted_turns: BTreeMap<String, usize>,
+    pub synthetic: BTreeMap<String, &'static str>,
+    pub metrics: MetricsSnapshot,
+    pub diffs: Vec<DiffEntry>,
+    /// Cause totals over every in-window diff, as recorded and after operator classification.
+    pub causes_before: BTreeMap<String, usize>,
+    pub causes_after: BTreeMap<String, usize>,
+    /// Operator changes keyed `recorded->classified`.
+    pub reclassified: BTreeMap<String, usize>,
+    /// Operator entries that replaced an automatic `OOnlyTool` cause.
+    pub auto_overridden: usize,
+    pub o_only_tool: usize,
+}
+
+fn record_time(
+    record: &ShadowRecord,
+    units: &HashMap<&UnitKey, &ShadowUnit>,
+    legacy: &HashMap<u64, DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    match record {
+        ShadowRecord::Header { started_at: at, .. }
+        | ShadowRecord::Attach {
+            attached_at: at, ..
+        }
+        | ShadowRecord::WindowStart { t0: at, .. }
+        | ShadowRecord::Binding {
+            change: super::BindingChange { at, .. },
+        } => Some(*at),
+        ShadowRecord::Population { snapshot } => Some(snapshot.taken_at),
+        ShadowRecord::Legacy { msg } => Some(msg.created_at),
+        ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } => Some(unit.sealed_at),
+        ShadowRecord::Derived {
+            output: DeriveOutput::TurnClosed(turn),
+        } => Some(turn.closed_at),
+        // A diff belongs to the sample it judges: its unit's sealing, else its Legacy post.
+        ShadowRecord::Diff { diff } => match &diff.unit_key {
+            Some(key) => units.get(key).map(|u| u.sealed_at),
+            None => diff
+                .legacy_msg_ids
+                .iter()
+                .filter_map(|id| legacy.get(id))
+                .min()
+                .copied(),
+        },
+        _ => None,
+    }
+}
+
+/// A durable, exclusive receipt consumes the attempt even when evaluation fails or the process exits.
+pub fn evaluate_once(root: &ShadowRoot, input: &ReportInput) -> std::io::Result<ReportOutcome> {
+    let opened = input.records.iter().position(|line| {
+        matches!(&line.record, ShadowRecord::WindowStart { t0, .. } if (input.from..=input.to).contains(t0))
+    });
+    let mut repeated = false;
+    if let Some(opened) = opened
+        && let ShadowRecord::WindowStart { t0, .. } = &input.records[opened].record
+        && let Some(run) = (0..opened)
+            .rev()
+            .find(|i| matches!(input.records[*i].record, ShadowRecord::Header { .. }))
+    {
+        repeated =
+            !root.claim_report_attempt(run + 1, &input.records[run], *t0, input.reported_at)?;
+    }
+    let mut outcome = evaluate(input);
+    if repeated {
+        outcome
+            .failures
+            .push("report_attempt_already_recorded".into());
+        outcome.pass = false;
+    }
+    Ok(outcome)
+}
+
+fn evaluate(input: &ReportInput) -> ReportOutcome {
+    let (mut failures, mut warnings) = (Vec::new(), Vec::new());
+    let records: Vec<&ShadowRecord> = input.records.iter().map(|s| &s.record).collect();
+    let starts: Vec<_> = (records.iter().enumerate())
+        .filter_map(|(at, r)| match r {
+            ShadowRecord::WindowStart { t0, sources } if (input.from..=input.to).contains(t0) => {
+                Some((at, *t0, sources))
+            }
+            _ => None,
+        })
+        .collect();
+    if starts.len() != 1 {
+        let found = starts.len();
+        failures.push(format!(
+            "window needs exactly one window_start record, found {found}"
+        ));
+    }
+    let t0 = starts.first().map_or(input.from, |(_, t0, _)| *t0);
+    // The window is fixed at two hours from the recorded t0; `--to` must name that instant.
+    let t1 = t0 + Duration::minutes(WINDOW_MINUTES);
+    if (input.to - t1).abs() >= Duration::seconds(1) {
+        failures.push(format!(
+            "window end {} is not t0 + {WINDOW_MINUTES} minutes ({t1})",
+            input.to
+        ));
+    }
+    // Closers at or below this extent were on disk before t0 (or before a mid-window attach).
+    let mut boundary: HashMap<&SourceId, u64> = HashMap::new();
+    if let Some((at, t0, sources)) = starts.first() {
+        boundary.extend(sources.iter().map(|s| (&s.source, s.window_start_extent)));
+        // Attach rows from before t0 may land after the WindowStart line; the run's later rows count too.
+        let later = records[at + 1..].iter();
+        let later = later.take_while(|r| !matches!(r, ShadowRecord::Header { .. }));
+        let later = later.filter_map(|r| match r {
+            ShadowRecord::Attach {
+                source,
+                attached_at,
+                ..
+            } => Some((source.clone(), *attached_at)),
+            _ => None,
+        });
+        let missed = attached_sources(records[..*at].iter().copied())
+            .into_iter()
+            .chain(later)
+            .filter(|(source, attached_at)| attached_at < t0 && !boundary.contains_key(source))
+            .map(|(source, _)| source)
+            .collect::<HashSet<_>>()
+            .len();
+        if missed > 0 {
+            failures.push(format!(
+                "window_start missed {missed} source(s) attached before t0"
+            ));
+        }
+    }
+    let mut units: HashMap<&UnitKey, &ShadowUnit> = HashMap::new();
+    let (mut excluded, mut legacy) = (HashSet::new(), HashMap::new());
+    let mut turns: Vec<&ShadowTurn> = Vec::new();
+    for record in records.iter().copied() {
+        match record {
+            ShadowRecord::Attach {
+                source,
+                attach_extent,
+                attached_at,
+                ..
+            } if (t0..=t1).contains(attached_at) => {
+                boundary.entry(source).or_insert(*attach_extent);
+            }
+            ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } => {
+                units.insert(&unit.unit_key, unit);
+            }
+            ShadowRecord::Derived {
+                output: DeriveOutput::TurnClosed(turn),
+            } => turns.push(turn),
+            ShadowRecord::Derived {
+                output: DeriveOutput::Excluded { unit_key, .. },
+            } => {
+                excluded.insert(unit_key);
+            }
+            ShadowRecord::Legacy { msg } => {
+                legacy.insert(msg.msg_id, msg.created_at);
+            }
+            _ => {}
+        }
+    }
+
+    // Version mix and in-window totals.
+    let window = Duration::seconds(MATCH_WINDOW.as_secs() as i64);
+    let late = t1 + window * 2;
+    // Units and Legacy rows near t1 are judged only after two match windows.
+    if input.reported_at < late {
+        failures.push(format!(
+            "reported before {late}, when the last diffs are judged"
+        ));
+    }
+    if input.reported_at > late + Duration::seconds(REPORT_GRACE_SECS) {
+        failures.push("report_grace_exceeded".into());
+    }
+    // Evidence is dated when read, so one run must read from t0 until `late` without restarting.
+    let opened = starts.first().map_or(records.len(), |(line, ..)| *line);
+    let header_at = |i: &usize| matches!(records[*i], ShadowRecord::Header { .. });
+    let run = (0..opened).rev().find(header_at);
+    let end = (opened..records.len())
+        .find(header_at)
+        .unwrap_or(records.len());
+    // A start is timed by its own clock and its line's, so neither order nor skew hides it.
+    let began = |i: usize| match &input.records[i] {
+        StoredRecord {
+            at,
+            record: ShadowRecord::Header { started_at, .. },
+        } => Some(((*at).min(*started_at), (*at).max(*started_at))),
+        _ => None,
+    };
+    if run.and_then(began).is_none_or(|(_, last)| last > t0) {
+        failures.push("observer run that read window_start began after t0".into());
+    }
+    let restarted = (0..records.len())
+        .filter(|i| Some(*i) != run)
+        .filter_map(|i| Some((i, began(i)?)))
+        .any(|(i, (first, last))| first <= late && (last >= t0 || i > opened));
+    if restarted {
+        failures.push(format!(
+            "observer restarted before {late}; work in flight was lost"
+        ));
+    }
+    let run = run.unwrap_or(0);
+    let stall = Duration::seconds(3 * CHECKPOINT_SECS);
+    // Captures held for the window derive on the pass after its line, so untimed ones land by `late`.
+    let reach = late - stall * 2;
+    if let Some(recorded) = starts.first().map(|(line, ..)| input.records[*line].at)
+        && !(t0..=reach).contains(&recorded)
+    {
+        failures.push(format!(
+            "window_start recorded at {recorded}, outside [t0, {reach}]"
+        ));
+    }
+    // The derive keeps the first window it applies and takes extents from later ones.
+    let others = (run..end)
+        .filter(|i| *i != opened && input.records[*i].at <= late)
+        .filter(|i| matches!(records[*i], ShadowRecord::WindowStart { .. }))
+        .count();
+    if others > 0 {
+        failures.push(format!(
+            "observer run applied {others} other window_start before {late}"
+        ));
+    }
+    let checkpoints: Vec<DateTime<Utc>> = (input.records[run..end].iter())
+        .filter(|s| matches!(s.record, ShadowRecord::TapGap { .. }))
+        .map(|s| s.at)
+        .collect();
+    let continuous = checkpoints
+        .first()
+        .is_some_and(|first| *first <= t0 + stall)
+        && checkpoints.last().is_some_and(|last| *last >= late)
+        && (checkpoints.windows(2)).all(|w| w[1] <= t0 || w[0] >= late || w[1] - w[0] <= stall);
+    if !continuous {
+        failures.push(format!(
+            "tap collection not recorded every {stall} from t0 to {late}"
+        ));
+    }
+    // Later runs can overwrite unit evidence; measure again in a single uninterrupted run.
+    if end < records.len() {
+        failures.push("later_run_present".into());
+    }
+    let mut sealed_in_run = HashSet::new();
+    if records[run..end].iter().any(|record| match record {
+        ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } => !sealed_in_run.insert(&unit.unit_key),
+        _ => false,
+    }) {
+        failures.push("duplicate_seal_in_run".into());
+    }
+    // A pre-window anomaly can leave its feed halted throughout the measurement.
+    if input.records[run..end]
+        .iter()
+        .any(|line| line.at <= late && matches!(line.record, ShadowRecord::Anomaly { .. }))
+    {
+        failures.push("capture_anomaly_in_run".into());
+    }
+    let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
+    let mut halted = 0;
+    let mut metrics = MetricsSnapshot::default();
+    let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
+    let mut window_diffs: Vec<&DiffRecord> = Vec::new();
+    for line in input.records {
+        let record = &line.record;
+        if let ShadowRecord::Header {
+            schema_version,
+            identity_version,
+            ..
+        } = record
+        {
+            header = Some((*schema_version, *identity_version));
+        }
+        let at = record_time(record, &units, &legacy);
+        if let ShadowRecord::Diff { diff } = record {
+            if let Some(key) = &diff.unit_key {
+                classes.insert(key, diff.class);
+            }
+        }
+        // A loss happened after the previous collection; it may hide events window units are
+        // judged on when that span meets `[t0 - W, late]`.
+        let in_window = match (record, at) {
+            (ShadowRecord::TapGap { .. }, _) => {
+                lost = collected.is_none_or(|previous| previous < late) && line.at >= t0 - window;
+                collected = Some(line.at);
+                lost
+            }
+            (ShadowRecord::Diff { diff }, _) if diff.class == DiffClass::TapGap => lost,
+            (_, Some(at)) => t0 <= at && at <= t1,
+            // Untimed evidence counts wherever a read from the window could have been stored.
+            (_, None) => t0 - window <= line.at && line.at <= late,
+        };
+        if in_window {
+            stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
+            halted += usize::from(matches!(record, ShadowRecord::Anomaly { .. }));
+            metrics.record(record);
+            if let ShadowRecord::Diff { diff } = record {
+                window_diffs.push(diff);
+            }
+        }
+    }
+    if stale > 0 {
+        failures.push(format!(
+            "stale samples: {stale} in-window records under another version"
+        ));
+    }
+
+    let (mut seen, mut counted, mut uncounted) = (HashSet::new(), Vec::new(), BTreeMap::new());
+    for turn in turns
+        .into_iter()
+        .filter(|t| (t0..=t1).contains(&t.closed_at))
+    {
+        let key = (turn.channel_id, turn.provider, turn.native_turn_id.as_str());
+        let reason = if !turn.live {
+            turn.excluded_reason
+                .clone()
+                .unwrap_or_else(|| "not_live".into())
+        } else if boundary
+            .get(&turn.source_range.source)
+            .is_none_or(|b| turn.source_range.end <= *b)
+        {
+            "before_window_boundary".into()
+        } else if !seen.insert(key) {
+            "duplicate_turn_key".into()
+        } else {
+            counted.push(turn);
+            continue;
+        };
+        *uncounted.entry(reason).or_insert(0) += 1;
+    }
+
+    // A turn open across t0 can carry warm-up units; only units sealed past the boundary are samples.
+    let sampled = |key: &UnitKey| {
+        units.get(key).is_some_and(|u| {
+            let bound = boundary.get(&u.source_range.source);
+            (t0..=t1).contains(&u.sealed_at) && bound.is_some_and(|b| u.source_range.start >= *b)
+        })
+    };
+    let is_split = |key: &UnitKey| {
+        key.kind == UnitKind::Body
+            && sampled(key)
+            && units.get(key).is_some_and(|u| u.pieces.len() >= 2)
+            && !matches!(
+                classes.get(key),
+                Some(DiffClass::OSchemaBlocked | DiffClass::OUnsealed)
+            )
+    };
+    let population = input.population;
+    let tokens: HashSet<&str> = input.manifest.iter().map(|e| e.token.as_str()).collect();
+    let mut profiles: BTreeMap<String, ProfileCounts> = population
+        .profiles
+        .iter()
+        .map(|p| (p.clone(), ProfileCounts::default()))
+        .collect();
+    for turn in &counted {
+        let counts = profiles
+            .entry(profile_of(provider_id(turn.provider)))
+            .or_default();
+        counts.turns += 1;
+        let tool = |k: &UnitKey| k.kind == UnitKind::Tool && sampled(k);
+        counts.tool_turns += usize::from(turn.unit_keys.iter().any(tool));
+        counts.split_turns += usize::from(turn.unit_keys.iter().any(is_split));
+        counts.synthetic_turns += usize::from(
+            turn.synthetic_tokens
+                .iter()
+                .any(|t| tokens.contains(t.as_str())),
+        );
+    }
+
+    let mut synthetic = BTreeMap::new();
+    for entry in input.manifest.iter().filter(|e| e.created_at <= t1) {
+        // A thread can carry one entry per provider it was bound to in the window.
+        let mut kinds = (population.channels.iter())
+            .filter(|c| c.channel_id == entry.channel_id)
+            .map(|c| profile_of(&c.provider));
+        if !kinds.any(|kind| kind == entry.expected_runtime_kind) {
+            failures.push(format!(
+                "synthetic {}: channel is not effective {}",
+                entry.entry_id, entry.expected_runtime_kind
+            ));
+        }
+        let hit = counted
+            .iter()
+            .find(|t| t.synthetic_tokens.contains(&entry.token));
+        if hit.is_some_and(|t| profile_of(provider_id(t.provider)) != entry.expected_runtime_kind) {
+            failures.push(format!(
+                "synthetic {}: ran under another profile",
+                entry.entry_id
+            ));
+        }
+        let status = match hit {
+            None => "not_executed",
+            Some(turn) if turn.synthetic_tokens.len() >= 2 => "merged",
+            Some(_) => "live",
+        };
+        synthetic.insert(entry.entry_id.clone(), status);
+    }
+
+    let in_population: BTreeSet<&String> = population.profiles.iter().collect();
+    if in_population.is_empty() {
+        failures.push("population is empty".into());
+    }
+    for profile in &population.profiles {
+        let allowlisted = population.channels.iter().any(|c| {
+            profile_of(&c.provider) == *profile && input.allowlist.contains(&c.channel_id)
+        });
+        if profile.starts_with("unknown:") {
+            failures.push(format!(
+                "{profile}: effective TUI without a TUI runtime kind"
+            ));
+        } else if !allowlisted {
+            failures.push(format!("{profile}: no allowlisted effective-TUI channel"));
+        }
+    }
+    for aux in &population.aux {
+        if !aux.ok {
+            warnings.push(format!("coverage_unverified: {}", aux.name));
+        }
+        for kind in aux
+            .observed_kinds
+            .iter()
+            .filter(|k| !in_population.contains(k))
+        {
+            failures.push(format!(
+                "{}: observed {kind} outside the population",
+                aux.name
+            ));
+        }
+    }
+    for (profile, counts) in &profiles {
+        let bar = (MIN_PROFILE_TURNS, MIN_TOOL_TURNS, MIN_SPLIT_TURNS);
+        if !in_population.contains(profile) {
+            failures.push(format!(
+                "{profile}: {} turns outside the population",
+                counts.turns
+            ));
+        } else if counts.turns < bar.0 || counts.tool_turns < bar.1 || counts.split_turns < bar.2 {
+            failures.push(format!("{profile}: below sample bar {counts:?}"));
+        }
+    }
+    if counted.len() < MIN_TOTAL_TURNS {
+        failures.push(format!(
+            "total live turns {} < {MIN_TOTAL_TURNS}",
+            counted.len()
+        ));
+    }
+    // Only evidence stored by `late` can prove completion; later rows must not repair this window.
+    let completion_records = || {
+        input
+            .records
+            .iter()
+            .filter(|line| line.at <= late)
+            .map(|line| &line.record)
+    };
+    let decided: HashSet<&UnitKey> = completion_records()
+        .filter_map(|r| match r {
+            ShadowRecord::Diff { diff } => diff.unit_key.as_ref(),
+            _ => None,
+        })
+        .collect();
+    let undecided = (units.values())
+        .filter(|u| (t0..=t1).contains(&u.sealed_at) && !decided.contains(&u.unit_key))
+        .count();
+    let unsealed = (counted.iter().flat_map(|t| &t.unit_keys))
+        .filter(|k| !units.contains_key(k) && !excluded.contains(k))
+        .collect::<HashSet<_>>()
+        .len();
+    let windowless = uncounted.get("no_window").copied().unwrap_or(0) as u64;
+    // A window Legacy message is settled once a diff names it or it retired deleted.
+    let settled: HashSet<u64> = completion_records()
+        .flat_map(|r| match r {
+            ShadowRecord::Diff { diff } => diff.legacy_msg_ids.clone(),
+            ShadowRecord::Legacy { msg } if msg.deleted => vec![msg.msg_id],
+            _ => Vec::new(),
+        })
+        .collect();
+    let open = (legacy.iter())
+        .filter(|(id, at)| (t0..=t1).contains(*at) && !settled.contains(*id))
+        .count();
+    for (count, what) in [
+        (undecided as u64, "window units without a terminal diff"),
+        (
+            open as u64,
+            "window Legacy messages without a terminal diff",
+        ),
+        (halted as u64, "capture anomalies that halted a source"),
+        (unsealed as u64, "units of counted turns never sealed"),
+        (
+            windowless,
+            "turns closed before the observer applied the window",
+        ),
+    ] {
+        if count > 0 {
+            failures.push(format!("{count} {what}"));
+        }
+    }
+    let judged = classify(&window_diffs, input.classify, &mut failures);
+    let after = |cause| judged.causes_after.get(&label(cause)).copied().unwrap_or(0) as u64;
+    for (count, what) in [
+        (after(DiffCause::Unknown), "diffs still Unknown"),
+        (after(DiffCause::ODefect), "diffs classified O_defect"),
+        (
+            metrics.split_over_limit_total,
+            "split pieces over the Discord limit",
+        ),
+        (metrics.tap_dropped_total, "tap events dropped"),
+    ] {
+        if count > 0 {
+            failures.push(format!("{count} {what}"));
+        }
+    }
+    ReportOutcome {
+        pass: failures.is_empty(),
+        failures,
+        warnings,
+        external_checks: EXTERNAL_CHECKS,
+        versions: [SCHEMA_VERSION, IDENTITY_VERSION, REPORT_VERSION],
+        t0,
+        t1,
+        total_turns: counted.len(),
+        profiles,
+        uncounted_turns: uncounted,
+        synthetic,
+        metrics,
+        diffs: judged.diffs,
+        causes_before: judged.causes_before,
+        causes_after: judged.causes_after,
+        reclassified: judged.reclassified,
+        auto_overridden: judged.auto_overridden,
+        o_only_tool: judged.o_only_tool,
+    }
+}
+
+fn label(value: impl Serialize) -> String {
+    let value = serde_json::to_value(value).ok();
+    let text = value.as_ref().and_then(|v| v.as_str());
+    text.unwrap_or_default().to_string()
+}
+
+/// Operator-facing identity of a diff: its unit key, else its Legacy ids, else its class.
+fn diff_key(diff: &DiffRecord) -> String {
+    let (channel, class) = (diff.channel_id, label(diff.class));
+    match (&diff.unit_key, diff.legacy_msg_ids.as_slice()) {
+        (Some(k), _) => {
+            let (provider, kind) = (label(k.provider), label(k.kind));
+            format!("{}/{provider}/{kind}/{}", k.channel_id, k.native_key)
+        }
+        (None, []) => format!("{channel}/{class}"),
+        (None, ids) => {
+            let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+            format!("{channel}/{class}/{}", ids.join("+"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct Judged {
+    diffs: Vec<DiffEntry>,
+    causes_before: BTreeMap<String, usize>,
+    causes_after: BTreeMap<String, usize>,
+    reclassified: BTreeMap<String, usize>,
+    auto_overridden: usize,
+    o_only_tool: usize,
+}
+
+/// Applies operator causes to the window's non-Match diffs; every input defect is a failure.
+fn classify(diffs: &[&DiffRecord], input: &ClassifyInput, failures: &mut Vec<String>) -> Judged {
+    let mut judged = Judged::default();
+    let mut seen_keys: HashMap<String, usize> = HashMap::new();
+    for diff in diffs {
+        *judged.causes_before.entry(label(diff.cause)).or_default() += 1;
+        judged.o_only_tool += usize::from(diff.cause == DiffCause::OOnlyTool);
+        if diff.class == DiffClass::Match {
+            *judged.causes_after.entry(label(diff.cause)).or_default() += 1;
+            continue;
+        }
+        let base = diff_key(diff);
+        let n = seen_keys.entry(base.clone()).or_default();
+        *n += 1;
+        let diff_key = if *n == 1 { base } else { format!("{base}#{n}") };
+        let (class, recorded, cause) = (diff.class, diff.cause, diff.cause);
+        judged.diffs.push(DiffEntry {
+            diff_key,
+            class,
+            recorded,
+            cause,
+        });
+    }
+    let entries = match input {
+        ClassifyInput::Absent => &[][..],
+        ClassifyInput::Entries(entries) => entries.as_slice(),
+        ClassifyInput::Unreadable(error) => {
+            failures.push(format!("classify: unreadable input: {error}"));
+            &[][..]
+        }
+    };
+    let mut used = HashSet::new();
+    for entry in entries {
+        let key = &entry.diff_key;
+        let operator_cause = matches!(
+            entry.cause,
+            DiffCause::Expected | DiffCause::LegacyDefect | DiffCause::ODefect
+        );
+        let target = judged.diffs.iter_mut().find(|d| &d.diff_key == key);
+        let problem = if entry.note.trim().is_empty() {
+            "has an empty note"
+        } else if !used.insert(key.as_str()) {
+            "is listed twice"
+        } else if !operator_cause {
+            "names a cause operators cannot assign"
+        } else if target.is_none() {
+            "is not a diff of this report"
+        } else {
+            ""
+        };
+        match target {
+            Some(diff) if problem.is_empty() => {
+                if diff.recorded == DiffCause::OOnlyTool {
+                    judged.auto_overridden += 1;
+                }
+                if diff.recorded != entry.cause {
+                    let pair = format!("{}->{}", label(diff.recorded), label(entry.cause));
+                    *judged.reclassified.entry(pair).or_default() += 1;
+                }
+                diff.cause = entry.cause;
+            }
+            _ => failures.push(format!("classify: {key} {problem}")),
+        }
+    }
+    for diff in &judged.diffs {
+        *judged.causes_after.entry(label(diff.cause)).or_default() += 1;
+    }
+    judged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::tui_o::shadow::{
+        LegacyMsg, PieceDigest, PopulationChannel, SourceAnomaly, SourceAnomalyKind, SourceRange,
+        WindowStartSource,
+    };
+    use chrono::TimeZone;
+
+    fn t(minutes: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_800_000_000 + minutes * 60, 0).unwrap()
+    }
+
+    fn src(ino: u64) -> SourceId {
+        SourceId {
+            session_id: "s".into(),
+            path: "/c.jsonl".into(),
+            dev: 1,
+            ino,
+        }
+    }
+
+    fn key(n: usize, kind: UnitKind) -> UnitKey {
+        let native_key = format!("m{n}");
+        UnitKey {
+            channel_id: 7,
+            provider: ShadowProvider::Claude,
+            native_key,
+            kind,
+        }
+    }
+
+    fn turn(n: usize, end: u64, tokens: &[&str], unit_keys: Vec<UnitKey>) -> ShadowRecord {
+        let turn = ShadowTurn {
+            channel_id: 7,
+            provider: ShadowProvider::Claude,
+            native_turn_id: format!("u{n}"),
+            source_range: SourceRange {
+                source: src(1),
+                start: end - 1,
+                end,
+            },
+            opened_at: t(10),
+            closed_at: t(10),
+            unit_keys,
+            autonomous: false,
+            synthetic_tokens: tokens.iter().map(|t| t.to_string()).collect(),
+            live: true,
+            excluded_reason: None,
+        };
+        ShadowRecord::Derived {
+            output: DeriveOutput::TurnClosed(turn),
+        }
+    }
+
+    fn sealed(key: UnitKey, pieces: u32) -> ShadowRecord {
+        let digest = |index| PieceDigest {
+            index,
+            units: 1,
+            sha256: String::new(),
+        };
+        let source_range = SourceRange {
+            source: src(1),
+            start: 150,
+            end: 151,
+        };
+        let (kind, pieces) = (key.kind, (0..pieces).map(digest).collect());
+        let unit = ShadowUnit {
+            unit_key: key,
+            kind,
+            source_range,
+            sealed_at: t(5),
+            pieces,
+        };
+        ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        }
+    }
+
+    fn header(identity_version: u32) -> ShadowRecord {
+        let (schema_version, build, started_at) = (SCHEMA_VERSION, String::new(), t(-5));
+        ShadowRecord::Header {
+            schema_version,
+            identity_version,
+            build,
+            started_at,
+        }
+    }
+
+    fn window_start(extent: u64) -> ShadowRecord {
+        let sources = vec![WindowStartSource {
+            source: src(1),
+            window_start_extent: extent,
+        }];
+        ShadowRecord::WindowStart { t0: t(0), sources }
+    }
+
+    fn snapshot(
+        profiles: &[&str],
+        channels: &[(u64, &str)],
+        aux: Vec<PopulationSource>,
+    ) -> PopulationSnapshot {
+        let channel = |(channel_id, provider): &(u64, &str)| PopulationChannel {
+            channel_id: *channel_id,
+            provider: provider.to_string(),
+            effective_tui: true,
+            basis: "resolver".into(),
+        };
+        PopulationSnapshot {
+            taken_at: t(0),
+            config_path: String::new(),
+            config_sha256: String::new(),
+            config_mtime: None,
+            providers: Vec::new(),
+            channels: channels.iter().map(channel).collect(),
+            profiles: profiles.iter().map(|p| p.to_string()).collect(),
+            aux,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn matched(unit_key: UnitKey) -> ShadowRecord {
+        let (unit_key, class, cause) = (Some(unit_key), DiffClass::Match, DiffCause::Expected);
+        ShadowRecord::Diff {
+            diff: DiffRecord {
+                channel_id: 7,
+                unit_key,
+                class,
+                legacy_msg_ids: vec![1],
+                cause,
+            },
+        }
+    }
+
+    /// A unit sealed past the window-start extent and its terminal diff.
+    fn decided(key: UnitKey, pieces: u32) -> [ShadowRecord; 2] {
+        [sealed(key.clone(), pieces), matched(key)]
+    }
+
+    /// 30 live claude turns closing past extent 100; three use tools, one has a two-piece body.
+    fn passing() -> Vec<ShadowRecord> {
+        let (single, split) = (key(0, UnitKind::Body), key(1, UnitKind::Body));
+        let mut records = vec![header(IDENTITY_VERSION), window_start(100)];
+        records.extend(
+            decided(single.clone(), 1)
+                .into_iter()
+                .chain(decided(split.clone(), 2)),
+        );
+        records.extend((11..14).flat_map(|n| decided(key(n, UnitKind::Tool), 1)));
+        for n in 0..30 {
+            let units = match n {
+                0 => vec![single.clone(), split.clone()],
+                1..=3 => vec![key(10 + n, UnitKind::Tool)],
+                _ => Vec::new(),
+            };
+            records.push(turn(n, 200 + n as u64, &[], units));
+        }
+        records
+    }
+
+    fn judge(
+        records: &[ShadowRecord],
+        manifest: &[SyntheticEntry],
+        population: &PopulationSnapshot,
+    ) -> ReportOutcome {
+        judge_at(records, manifest, population, t(120), t(130))
+    }
+
+    /// Stores fixture rows inside the window; a run starts and a window opens when they say.
+    fn stored(records: &[ShadowRecord]) -> Vec<StoredRecord> {
+        let at = |record: &ShadowRecord| StoredRecord {
+            at: match record {
+                ShadowRecord::Header { started_at, .. } => *started_at,
+                ShadowRecord::WindowStart { t0, .. } => *t0,
+                _ => t(10),
+            },
+            record: record.clone(),
+        };
+        // The run then records a tap collection every 20 s from before t0 until after `late`.
+        let collected = (0..400).map(|i| StoredRecord {
+            at: t(-1) + Duration::seconds(20 * i),
+            record: ShadowRecord::TapGap { dropped: 0 },
+        });
+        records.iter().map(at).chain(collected).collect()
+    }
+
+    /// Stores `extra` at `at`, before the first collection recorded after it.
+    fn inserted(
+        mut records: Vec<StoredRecord>,
+        at: DateTime<Utc>,
+        extra: &[ShadowRecord],
+    ) -> Vec<StoredRecord> {
+        let checkpoint = |s: &StoredRecord| matches!(s.record, ShadowRecord::TapGap { dropped: 0 });
+        let index =
+            (records.iter().position(|s| checkpoint(s) && s.at > at)).unwrap_or(records.len());
+        let extra = extra.iter().map(|record| StoredRecord {
+            at,
+            record: record.clone(),
+        });
+        records.splice(index..index, extra);
+        records
+    }
+
+    fn classified(records: &[ShadowRecord], classify: ClassifyInput) -> ReportOutcome {
+        let (allowlist, from, to, reported_at) = (&[7][..], t(-1), t(120), t(130));
+        evaluate(&ReportInput {
+            records: &stored(records),
+            manifest: &[],
+            population: &claude(),
+            allowlist,
+            from,
+            to,
+            reported_at,
+            classify: &classify,
+        })
+    }
+
+    fn judge_at(
+        records: &[ShadowRecord],
+        manifest: &[SyntheticEntry],
+        population: &PopulationSnapshot,
+        to: DateTime<Utc>,
+        reported_at: DateTime<Utc>,
+    ) -> ReportOutcome {
+        judge_stored(&stored(records), manifest, population, to, reported_at)
+    }
+
+    fn judge_stored(
+        records: &[StoredRecord],
+        manifest: &[SyntheticEntry],
+        population: &PopulationSnapshot,
+        to: DateTime<Utc>,
+        reported_at: DateTime<Utc>,
+    ) -> ReportOutcome {
+        let (allowlist, from) = (&[7][..], t(-1));
+        evaluate(&ReportInput {
+            records,
+            manifest,
+            population,
+            allowlist,
+            from,
+            to,
+            reported_at,
+            classify: &ClassifyInput::Absent,
+        })
+    }
+
+    fn claude() -> PopulationSnapshot {
+        snapshot(&["claude_tui"], &[(7, "claude")], Vec::new())
+    }
+
+    #[test]
+    fn a_complete_window_passes_counting_turns_not_units_and_skipping_backlog() {
+        let mut records = passing();
+        let tools: Vec<UnitKey> = (97..100).map(|n| key(n, UnitKind::Tool)).collect();
+        records.extend(tools.iter().flat_map(|k| decided(k.clone(), 1)));
+        records.push(turn(99, 500, &[], tools));
+        records.extend((40..45).map(|n| turn(n, 100, &[], vec![key(n, UnitKind::Tool)])));
+        let outcome = judge(&records, &[], &claude());
+        assert!(outcome.pass, "{:?}", outcome.failures);
+        let counts = ProfileCounts {
+            turns: 31,
+            tool_turns: 4,
+            split_turns: 1,
+            synthetic_turns: 0,
+        };
+        assert_eq!(outcome.profiles["claude_tui"], counts);
+        assert_eq!(outcome.uncounted_turns["before_window_boundary"], 5);
+    }
+
+    #[test]
+    fn window_start_and_version_defects_fail_the_window() {
+        let without_start: Vec<_> = passing()
+            .into_iter()
+            .filter(|r| !matches!(r, ShadowRecord::WindowStart { .. }))
+            .collect();
+        assert!(!judge(&without_start, &[], &claude()).pass);
+        let mut twice = passing();
+        twice.push(window_start(100));
+        assert!(!judge(&twice, &[], &claude()).pass);
+        let mut missed = passing();
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 0,
+            capture_start: 0,
+            attached_at: t(-2),
+        };
+        missed.insert(1, attach);
+        assert!(judge(&missed, &[], &claude()).failures[0].contains("missed 1 source"));
+        let mut stale = passing();
+        stale.extend([header(IDENTITY_VERSION - 1), turn(80, 900, &[], Vec::new())]);
+        let failures = judge(&stale, &[], &claude()).failures;
+        assert!(
+            failures.iter().any(|f| f.starts_with("stale samples")),
+            "{failures:?}"
+        );
+        for to in [t(10), t(121)] {
+            let failures = judge_at(&passing(), &[], &claude(), to, to + Duration::minutes(10));
+            let failures = failures.failures;
+            assert!(
+                failures.iter().any(|f| f.contains("t0 + 120 minutes")),
+                "{failures:?}"
+            );
+        }
+        let mut late_attach = passing();
+        late_attach.push(ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 0,
+            capture_start: 0,
+            attached_at: t(-2),
+        });
+        let failures = judge(&late_attach, &[], &claude()).failures;
+        assert!(
+            failures.iter().any(|f| f.contains("missed 1 source")),
+            "{failures:?}"
+        );
+        let early = judge_at(&passing(), &[], &claude(), t(120), t(129)).failures;
+        assert!(
+            early.iter().any(|f| f.starts_with("reported before")),
+            "{early:?}"
+        );
+    }
+
+    #[test]
+    fn operator_classification_resolves_listed_diffs_and_rejects_bad_input() {
+        let diff = |unit_key, class, legacy_msg_ids, cause| ShadowRecord::Diff {
+            diff: DiffRecord {
+                channel_id: 7,
+                unit_key,
+                class,
+                legacy_msg_ids,
+                cause,
+            },
+        };
+        let mut records = passing();
+        records.extend([
+            diff(
+                Some(key(0, UnitKind::Body)),
+                DiffClass::LegacyMissing,
+                vec![],
+                DiffCause::Unknown,
+            ),
+            diff(
+                Some(key(11, UnitKind::Tool)),
+                DiffClass::LegacyMissing,
+                vec![],
+                DiffCause::OOnlyTool,
+            ),
+            diff(None, DiffClass::LegacyExtra, vec![9], DiffCause::Unknown),
+        ]);
+        let open = classified(&records, ClassifyInput::Absent);
+        assert!(
+            open.failures.iter().any(|f| f == "2 diffs still Unknown"),
+            "{:?}",
+            open.failures
+        );
+        assert_eq!((open.o_only_tool, open.diffs.len()), (1, 3));
+        let keys: Vec<String> = open.diffs.iter().map(|d| d.diff_key.clone()).collect();
+        let entry = |key: &String, cause, note: &str| Classification {
+            diff_key: key.clone(),
+            cause,
+            note: note.into(),
+        };
+        let resolved = vec![
+            entry(&keys[0], DiffCause::Expected, "streamed then edited away"),
+            entry(&keys[2], DiffCause::LegacyDefect, "legacy echo"),
+        ];
+        let done = classified(&records, ClassifyInput::Entries(resolved.clone()));
+        assert!(done.pass, "{:?}", done.failures);
+        let count = |pairs: &[(&str, usize)]| {
+            pairs
+                .iter()
+                .map(|(k, n)| (k.to_string(), *n))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            done.causes_before,
+            count(&[("Expected", 5), ("OOnlyTool", 1), ("Unknown", 2)])
+        );
+        assert_eq!(
+            done.causes_after,
+            count(&[("Expected", 6), ("Legacy_defect", 1), ("OOnlyTool", 1)])
+        );
+        assert_eq!(
+            done.reclassified,
+            count(&[("Unknown->Expected", 1), ("Unknown->Legacy_defect", 1)])
+        );
+        let mut blamed = resolved.clone();
+        blamed.push(entry(
+            &keys[1],
+            DiffCause::ODefect,
+            "tool line should have posted",
+        ));
+        let blamed = classified(&records, ClassifyInput::Entries(blamed));
+        assert!(
+            blamed
+                .failures
+                .iter()
+                .any(|f| f == "1 diffs classified O_defect")
+        );
+        assert_eq!(blamed.auto_overridden, 1);
+        let bad_inputs = [
+            vec![entry(&"7/nope".to_string(), DiffCause::Expected, "x")],
+            vec![resolved[0].clone(), resolved[0].clone()],
+            vec![entry(&keys[0], DiffCause::Expected, " ")],
+            vec![entry(&keys[0], DiffCause::Unknown, "x")],
+        ];
+        for bad in bad_inputs {
+            let mut input = resolved.clone();
+            input.retain(|e| bad.iter().all(|b| b.diff_key != e.diff_key));
+            input.extend(bad);
+            let outcome = classified(&records, ClassifyInput::Entries(input));
+            let flagged = outcome.failures.iter().any(|f| f.starts_with("classify:"));
+            assert!(flagged && !outcome.pass, "{:?}", outcome.failures);
+        }
+        let unreadable = classified(&records, ClassifyInput::Unreadable("eof".into()));
+        assert!(
+            unreadable
+                .failures
+                .iter()
+                .any(|f| f.starts_with("classify:"))
+        );
+    }
+
+    #[test]
+    fn samples_count_only_units_sealed_inside_the_window_boundary() {
+        // A turn open across t0 keeps its warm-up tool and split units out of this window's bars.
+        let warm_up = [key(1, UnitKind::Body), key(11, UnitKind::Tool)];
+        let mut records = passing();
+        for record in &mut records {
+            if let ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } = record
+            {
+                if warm_up.contains(&unit.unit_key) {
+                    unit.sealed_at = t(-1);
+                    (unit.source_range.start, unit.source_range.end) = (50, 60);
+                }
+            }
+        }
+        let outcome = judge(&records, &[], &claude());
+        let counts = &outcome.profiles["claude_tui"];
+        assert_eq!((counts.tool_turns, counts.split_turns), (2, 0));
+        assert!(!outcome.pass);
+        // A unit sealed after t1 belongs to no sample of this window, whatever its diff says.
+        let mut records = passing();
+        let late = key(900, UnitKind::Body);
+        let ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(mut unit),
+        } = sealed(late.clone(), 1)
+        else {
+            unreachable!()
+        };
+        unit.sealed_at = t(120) + Duration::seconds(1);
+        records.push(ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        });
+        records.push(ShadowRecord::Diff {
+            diff: DiffRecord {
+                channel_id: 7,
+                unit_key: Some(late),
+                class: DiffClass::LegacyMissing,
+                legacy_msg_ids: vec![],
+                cause: DiffCause::Unknown,
+            },
+        });
+        let outcome = judge(&records, &[], &claude());
+        assert!(outcome.pass, "{:?}", outcome.failures);
+    }
+
+    #[test]
+    fn undecided_unsealed_or_windowless_samples_fail_the_window() {
+        let fails_with = |records: &[ShadowRecord], text: &str| {
+            let failures = judge(records, &[], &claude()).failures;
+            assert!(
+                failures.iter().any(|f| f.contains(text)),
+                "{text}: {failures:?}"
+            );
+        };
+        let undecided: Vec<_> = passing()
+            .into_iter()
+            .filter(|r| !matches!(r, ShadowRecord::Diff { .. }))
+            .collect();
+        fails_with(&undecided, "without a terminal diff");
+        let mut unsealed = passing();
+        unsealed.push(turn(70, 700, &[], vec![key(70, UnitKind::Tool)]));
+        fails_with(&unsealed, "never sealed");
+        let mut windowless = passing();
+        let mut closed = turn(71, 701, &[], Vec::new());
+        if let ShadowRecord::Derived {
+            output: DeriveOutput::TurnClosed(turn),
+        } = &mut closed
+        {
+            (turn.live, turn.excluded_reason) = (false, Some("no_window".into()));
+        }
+        windowless.push(closed);
+        fails_with(&windowless, "before the observer applied the window");
+    }
+
+    #[test]
+    fn population_gaps_fail_while_unreadable_history_only_warns() {
+        let unread = PopulationSource {
+            name: "s3_sessions".into(),
+            read_at: t(0),
+            ok: false,
+            observed_kinds: Vec::new(),
+        };
+        let outcome = judge(
+            &passing(),
+            &[],
+            &snapshot(&["claude_tui"], &[(7, "claude")], vec![unread]),
+        );
+        assert!(outcome.pass && outcome.warnings == ["coverage_unverified: s3_sessions"]);
+        let codex = snapshot(
+            &["claude_tui", "codex_tui"],
+            &[(7, "claude"), (8, "codex")],
+            Vec::new(),
+        );
+        let failures = judge(&passing(), &[], &codex).failures;
+        assert!(
+            failures
+                .iter()
+                .any(|f| f == "codex_tui: no allowlisted effective-TUI channel"),
+            "{failures:?}"
+        );
+        let bound = PopulationSource {
+            name: "s2_bindings".into(),
+            read_at: t(0),
+            ok: true,
+            observed_kinds: vec!["codex_tui".into()],
+        };
+        assert!(
+            !judge(
+                &passing(),
+                &[],
+                &snapshot(&["claude_tui"], &[(7, "claude")], vec![bound])
+            )
+            .pass
+        );
+        assert!(
+            !judge(
+                &passing(),
+                &[],
+                &snapshot(
+                    &["claude_tui", "unknown:qwen"],
+                    &[(7, "claude")],
+                    Vec::new()
+                )
+            )
+            .pass
+        );
+    }
+
+    #[test]
+    fn synthetic_entries_count_executed_turns_and_flag_merges_and_profile_mismatch() {
+        let entry = |id: &str, kind: &str| SyntheticEntry {
+            entry_id: id.into(),
+            channel_id: 7,
+            expected_runtime_kind: kind.into(),
+            prompt_id: "p".into(),
+            token: format!("[o-shadow-synth:{id}]"),
+            intended_tools: 3,
+            intended_split: false,
+            operator: "op".into(),
+            created_at: t(1),
+        };
+        let manifest: Vec<_> = ["a", "b", "c", "d"]
+            .map(|id| entry(id, "claude_tui"))
+            .into();
+        let mut records = passing();
+        records.push(turn(60, 600, &["[o-shadow-synth:a]"], Vec::new()));
+        records.push(turn(
+            61,
+            601,
+            &["[o-shadow-synth:b]", "[o-shadow-synth:c]"],
+            Vec::new(),
+        ));
+        let outcome = judge(&records, &manifest, &claude());
+        assert!(outcome.pass, "{:?}", outcome.failures);
+        let statuses: Vec<_> = outcome.synthetic.values().copied().collect();
+        assert_eq!(statuses, ["live", "merged", "merged", "not_executed"]);
+        assert_eq!(outcome.profiles["claude_tui"].synthetic_turns, 2);
+        let wrong = [entry("a", "codex_tui")];
+        assert!(!judge(&records, &wrong, &claude()).pass);
+        // Thread 7 was bound to codex, then claude: either provider's profile is effective there.
+        let both = snapshot(&["claude_tui"], &[(7, "codex"), (7, "claude")], Vec::new());
+        let failures = judge(&records, &manifest, &both).failures;
+        assert!(
+            !failures.iter().any(|f| f.contains("not effective")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn a_tap_loss_is_dated_by_the_span_since_the_previous_collection() {
+        let (channel_id, unit_key, class) = (0, None, DiffClass::TapGap);
+        let (legacy_msg_ids, cause) = (Vec::new(), DiffCause::Unknown);
+        let diff = DiffRecord {
+            channel_id,
+            unit_key,
+            class,
+            legacy_msg_ids,
+            cause,
+        };
+        let gap = [
+            ShadowRecord::TapGap { dropped: 1 },
+            ShadowRecord::Diff { diff },
+        ];
+        // `stalled` drops the collections after t119 that a stalled observer never made.
+        let judge_gap_at = |minutes, stalled: bool| {
+            let mut records = stored(&passing());
+            records.retain(|s| !stalled || s.at <= t(119) || s.at > t(minutes));
+            let records = inserted(records, t(minutes), &gap);
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
+        };
+        // Lost and collected at t1+11m, after every unit of the window was judged.
+        assert_eq!(judge_gap_at(131, false), Vec::<String>::new());
+        // From one match window before t0 until `late`, a loss may hide events window units needed.
+        let hidden = ["1 diffs still Unknown", "1 tap events dropped"];
+        assert_eq!(judge_gap_at(123, false), hidden);
+        assert_eq!(judge_gap_at(-4, false), hidden);
+        assert_eq!(judge_gap_at(-6, false), Vec::<String>::new());
+        // Lost at t119 but collected only at t131: the span since t119 meets the window.
+        let failures = judge_gap_at(131, true);
+        assert!(
+            failures[0].starts_with("tap collection not recorded"),
+            "{failures:?}"
+        );
+        assert_eq!(failures[1..], hidden);
+    }
+
+    #[test]
+    fn an_observer_restart_even_after_the_last_judgement_fails_with_later_run_present() {
+        let restart = |minutes| ShadowRecord::Header {
+            schema_version: SCHEMA_VERSION,
+            identity_version: IDENTITY_VERSION,
+            build: String::new(),
+            started_at: t(minutes),
+        };
+        let judge_restart_at = |minutes| {
+            let records = inserted(stored(&passing()), t(minutes), &[restart(minutes)]);
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
+        };
+        // A restart at t119 drops held captures, pending units and unretired Legacy rows.
+        let failures = judge_restart_at(119);
+        assert!(
+            failures[0].starts_with("observer restarted before"),
+            "{failures:?}"
+        );
+        assert!(
+            failures[1].starts_with("tap collection not recorded"),
+            "{failures:?}"
+        );
+        assert_eq!(failures[2..], ["later_run_present"]);
+        assert_eq!(judge_restart_at(131), ["later_run_present"]);
+    }
+
+    #[test]
+    fn a_thread_stays_covered_after_restart_but_the_report_fails_with_later_run_present() {
+        use crate::services::tui_o::shadow::{BindingChange, SourceBinding};
+        let bind = |channel_id, at, bound: bool| {
+            let (provider, source) = (ShadowProvider::Claude, src(1));
+            let new = bound.then(|| SourceBinding {
+                channel_id,
+                provider,
+                source,
+            });
+            let old = None;
+            let change = BindingChange {
+                channel_id,
+                old,
+                new,
+                at,
+            };
+            ShadowRecord::Binding { change }
+        };
+        let mut records = passing();
+        records.insert(1, bind(7, t(-2), true));
+        // The session ended and the observer restarted after the window's last judgement.
+        let (schema_version, identity_version, build) = (SCHEMA_VERSION, IDENTITY_VERSION, "");
+        let restart = ShadowRecord::Header {
+            schema_version,
+            identity_version,
+            build: build.into(),
+            started_at: t(131),
+        };
+        let records = inserted(stored(&records), t(131), &[restart]);
+        let threads = bound_channels(records.iter().map(|s| &s.record), t(0), t(120));
+        assert_eq!(threads, [(7, "claude".to_string())]);
+        let channels: Vec<(u64, &str)> = threads.iter().map(|(c, p)| (*c, p.as_str())).collect();
+        let population = snapshot(&["claude_tui"], &channels, Vec::new());
+        let outcome = judge_stored(&records, &[], &population, t(120), t(131));
+        assert_eq!(outcome.failures, ["later_run_present"]);
+        assert!(!outcome.pass);
+        // Bound only before t0 or only after t1: no evidence for this window.
+        let outside = [
+            bind(8, t(-9), true),
+            bind(8, t(-1), false),
+            bind(9, t(121), true),
+        ];
+        let mut unbound = vec![bind(7, t(-2), true), bind(7, t(60), false)];
+        unbound.extend(outside);
+        assert_eq!(bound_channels(&unbound, t(0), t(120)), threads);
+    }
+
+    #[test]
+    fn a_restart_before_a_delayed_window_start_line_still_fails_the_window() {
+        // The CLI fixes t0 before reading sources, so its line can land after a restart past t0.
+        let judge_restart = |seconds: i64, skew: i64| {
+            let restarted = t(0) + Duration::seconds(seconds);
+            let started = |started_at| ShadowRecord::Header {
+                schema_version: SCHEMA_VERSION,
+                identity_version: IDENTITY_VERSION,
+                build: String::new(),
+                started_at,
+            };
+            let opened = t(0) + Duration::seconds(25);
+            let late_clock = started(restarted - Duration::seconds(skew));
+            let rows = [(t(-5), started(t(-5))), (restarted, late_clock)];
+            let mut records: Vec<StoredRecord> = (rows.into_iter())
+                .chain([(opened, window_start(100))])
+                .chain(passing().into_iter().skip(2).map(|record| (t(10), record)))
+                .map(|(at, record)| StoredRecord { at, record })
+                .collect();
+            let collected = [-40, -20].into_iter().chain((1..=390).map(|n| n * 20));
+            records.extend(collected.map(|seconds| StoredRecord {
+                at: t(0) + Duration::seconds(seconds),
+                record: ShadowRecord::TapGap { dropped: 0 },
+            }));
+            records.sort_by_key(|line| line.at);
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
+        };
+        assert_eq!(judge_restart(-1, 0), Vec::<String>::new());
+        // Stored after t0, whether or not its own clock claims a start before t0.
+        for skew in [0, 11] {
+            let failures = judge_restart(10, skew);
+            let late_start = failures
+                .iter()
+                .any(|f| f.starts_with("observer run that read"));
+            assert!(late_start, "{skew}: {failures:?}");
+        }
+    }
+
+    #[test]
+    fn untimed_evidence_counts_wherever_the_window_could_have_stored_it() {
+        let range = SourceRange {
+            source: src(1),
+            start: 900,
+            end: 1000,
+        };
+        let reason = "split piece 0 exceeds the Discord limit".to_string();
+        let (channel_id, unit_key, legacy_msg_ids) = (7, None, Vec::new());
+        let diff = DiffRecord {
+            channel_id,
+            unit_key,
+            class: DiffClass::OSchemaBlocked,
+            legacy_msg_ids,
+            cause: DiffCause::Unknown,
+        };
+        let blocked = [
+            ShadowRecord::Derived {
+                output: DeriveOutput::SchemaBlocked {
+                    channel_id,
+                    source_range: range,
+                    reason,
+                },
+            },
+            ShadowRecord::Diff { diff },
+        ];
+        let judge_blocked_at = |at| {
+            let records = inserted(stored(&passing()), at, &blocked);
+            judge_stored(&records, &[], &claude(), t(120), t(131))
+        };
+        // Read in the window but stored later: held for a late window line, or the next pass.
+        let near = [
+            t(119),
+            t(121),
+            t(120) + Duration::seconds(10),
+            t(-4),
+            t(130),
+        ];
+        for at in near {
+            let outcome = judge_blocked_at(at);
+            assert_eq!(outcome.metrics.split_over_limit_total, 1, "{at}");
+            assert!(!outcome.pass, "{at}");
+        }
+        for at in [t(-6), t(131)] {
+            let outcome = judge_blocked_at(at);
+            assert!(outcome.pass, "{at}: {:?}", outcome.failures);
+        }
+    }
+
+    /// Real capture and derive: `line` is read at `read_at` s, the window line lands at `start_at` s.
+    fn observed_window(line: &[u8], read_at: i64, start_at: i64) -> ReportOutcome {
+        use crate::services::tui_o::shadow::binding_reader::source_id_for;
+        use crate::services::tui_o::shadow::capture::SourceCapture;
+        use crate::services::tui_o::shadow::derive::TranscriptDerive;
+        use crate::services::tui_o::shadow::tap::{CaptureOpener, Observer, observed_at};
+        use crate::services::tui_o::shadow::{
+            BindingChange, CaptureSource, ShadowSink, SourceBinding,
+        };
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        type Rows = Arc<Mutex<(DateTime<Utc>, Vec<StoredRecord>)>>;
+        #[derive(Clone, Default)]
+        struct Sink(Rows);
+        impl ShadowSink for Sink {
+            fn append(&mut self, record: &ShadowRecord) -> std::io::Result<()> {
+                let mut rows = self.0.lock().unwrap();
+                let (at, record) = (rows.0, record.clone());
+                rows.1.push(StoredRecord { at, record });
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(&path, []).unwrap();
+        let (provider, source) = (ShadowProvider::Claude, source_id_for("s", &path).unwrap());
+        let binding = SourceBinding {
+            channel_id: 7,
+            provider,
+            source,
+        };
+        let mut sink = Sink::default();
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(observed_at));
+        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
+        sink.0.lock().unwrap().0 = t(-1);
+        observer.start(t(-1));
+        // One pass every 10 s, bound mid-window so the source needs no window extent.
+        for seconds in (-60..=131 * 60).step_by(10) {
+            let now = t(0) + Duration::seconds(seconds);
+            sink.0.lock().unwrap().0 = now;
+            if seconds == start_at {
+                sink.append(&window_start(100)).unwrap();
+                observer.window_start(t(0), &[]);
+            }
+            if seconds == read_at {
+                let file = std::fs::OpenOptions::new().append(true).open(&path);
+                file.unwrap().write_all(&[line, b"\n"].concat()).unwrap();
+            }
+            let bound = (seconds == 118 * 60).then(|| BindingChange {
+                channel_id: 7,
+                old: None,
+                new: Some(binding.clone()),
+                at: now,
+            });
+            observer.tick(now, bound.into_iter().collect(), Vec::new(), 0);
+        }
+        let mut records = sink.0.lock().unwrap().1.clone();
+        let sample = passing()
+            .into_iter()
+            .skip(2)
+            .map(|record| StoredRecord { at: t(130), record });
+        records.extend(sample);
+        judge_stored(&records, &[], &claude(), t(120), t(131))
+    }
+
+    #[test]
+    fn a_schema_block_read_in_the_window_fails_it_however_late_it_is_derived() {
+        let malformed = b"malformed";
+        // On time; held for a window line stored at t121; read at t1 and derived next pass.
+        for (read_at, start_at) in [(119 * 60, 0), (119 * 60, 121 * 60), (120 * 60, 0)] {
+            let outcome = observed_window(malformed, read_at, start_at);
+            let blocked = outcome.metrics.schema_blocked_total;
+            assert_eq!(blocked, 1, "{read_at} {start_at}: {:?}", outcome.failures);
+            assert!(!outcome.pass, "{read_at} {start_at}");
+        }
+    }
+
+    #[test]
+    fn an_excluded_unit_keeps_its_window_census_when_the_window_line_is_late() {
+        let line = br#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"excluded-live","is_error":false,"content":"ok"}]}}"#;
+        let on_time = observed_window(line, 119 * 60, 0);
+        let late = observed_window(line, 119 * 60, 121 * 60);
+        assert!(on_time.pass, "{:?}", on_time.failures);
+        assert!(late.pass, "{:?}", late.failures);
+        let census = &on_time.metrics.diff_total;
+        assert_eq!(census.get("o_excluded/Expected"), Some(&1), "{census:?}");
+        assert_eq!(&late.metrics.diff_total, census);
+    }
+
+    #[test]
+    fn a_window_line_stored_out_of_reach_or_a_second_window_in_the_run_fails() {
+        let judge_rows = |records: &[StoredRecord]| {
+            judge_stored(records, &[], &claude(), t(120), t(131)).failures
+        };
+        let recorded = |at| {
+            let mut records = stored(&passing());
+            records[1].at = at;
+            judge_rows(&records)
+        };
+        let out_of_reach = |failures: Vec<String>| {
+            let hit = failures
+                .iter()
+                .any(|f| f.starts_with("window_start recorded"));
+            assert!(hit, "{failures:?}");
+        };
+        // Captures held for a line stored by late - 60 s are derived and stored before `late`.
+        assert_eq!(recorded(t(129)), Vec::<String>::new());
+        out_of_reach(recorded(t(129) + Duration::seconds(1)));
+        out_of_reach(recorded(t(0) - Duration::seconds(1)));
+        // The derive keeps the first window it applies and takes extents from later ones.
+        let other = ShadowRecord::WindowStart {
+            t0: t(-200),
+            sources: Vec::new(),
+        };
+        let mut before = stored(&passing());
+        let (at, record) = (t(-3), other.clone());
+        before.insert(1, StoredRecord { at, record });
+        let failures = judge_rows(&before);
+        let hit = failures.iter().any(|f| f.contains("other window_start"));
+        assert!(hit, "{failures:?}");
+        let after = inserted(stored(&passing()), t(131), &[other]);
+        assert_eq!(judge_rows(&after), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_later_run_resealing_an_unknown_unit_fails_with_later_run_present() {
+        let mut records = stored(&passing());
+        let k = key(90, UnitKind::Body);
+        let mut unknown = matched(k.clone());
+        if let ShadowRecord::Diff { diff } = &mut unknown {
+            diff.class = DiffClass::LegacyMissing;
+            diff.cause = DiffCause::Unknown;
+        }
+        records = inserted(records, t(10), &[sealed(k.clone(), 1)]);
+        records = inserted(records, t(15), &[unknown]);
+        let before = judge_stored(&records, &[], &claude(), t(120), t(130));
+        assert!(!before.pass);
+        assert_eq!(before.failures, ["1 diffs still Unknown"]);
+        let mut restart = header(IDENTITY_VERSION);
+        if let ShadowRecord::Header { started_at, .. } = &mut restart {
+            *started_at = t(131);
+        }
+        records = inserted(records, t(131), &[restart]);
+        let next = ShadowRecord::WindowStart {
+            t0: t(132),
+            sources: Vec::new(),
+        };
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 100,
+            capture_start: 100,
+            attached_at: t(132),
+        };
+        records = inserted(records, t(132), &[next, attach]);
+        let mut resealed = sealed(k, 1);
+        if let ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } = &mut resealed
+        {
+            unit.sealed_at = t(133);
+            unit.source_range.source = src(2);
+        }
+        records = inserted(records, t(133), &[resealed]);
+        let after = judge_stored(&records, &[], &claude(), t(120), t(131));
+        assert_eq!(after.failures, ["later_run_present"]);
+        assert!(!after.pass);
+    }
+
+    #[test]
+    fn a_duplicate_seal_in_the_run_fails_even_outside_the_window() {
+        for at in [t(5), t(133)] {
+            let mut duplicate = sealed(key(0, UnitKind::Body), 1);
+            if let ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } = &mut duplicate
+            {
+                unit.sealed_at = at;
+            }
+            let records = inserted(stored(&passing()), at, &[duplicate]);
+            let outcome = judge_stored(&records, &[], &claude(), t(120), t(131));
+            assert_eq!(outcome.failures, ["duplicate_seal_in_run"], "{at}");
+            assert!(!outcome.pass);
+        }
+    }
+
+    #[test]
+    fn a_feed_lost_six_minutes_before_the_window_fails_despite_other_feed_samples() {
+        let mut records = passing();
+        if let ShadowRecord::Header { started_at, .. } = &mut records[0] {
+            *started_at = t(-10);
+        }
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 100,
+            capture_start: 100,
+            attached_at: t(-8),
+        };
+        let anomaly = ShadowRecord::Anomaly {
+            anomaly: SourceAnomaly {
+                source: src(2),
+                kind: SourceAnomalyKind::Shrunk,
+                captured_through: 500,
+                detail: String::new(),
+            },
+        };
+        records.splice(1..1, [attach, anomaly]);
+        assert!(attached_sources(records[..3].iter()).is_empty());
+        let mut records = stored(&records);
+        records[1].at = t(-8);
+        records[2].at = t(-6);
+        let outcome = evaluate(&ReportInput {
+            records: &records,
+            manifest: &[],
+            population: &snapshot(&["claude_tui"], &[(7, "claude"), (8, "claude")], Vec::new()),
+            allowlist: &[7, 8],
+            from: t(-1),
+            to: t(120),
+            reported_at: t(130),
+            classify: &ClassifyInput::Absent,
+        });
+        assert_eq!(outcome.total_turns, 30);
+        assert_eq!(outcome.failures, ["capture_anomaly_in_run"]);
+        assert!(!outcome.pass);
+    }
+
+    #[test]
+    fn a_capture_anomaly_even_six_minutes_before_the_window_fails_with_capture_anomaly_in_run() {
+        let anomaly = SourceAnomaly {
+            source: src(1),
+            kind: SourceAnomalyKind::Shrunk,
+            captured_through: 500,
+            detail: String::new(),
+        };
+        let judge_anomaly_at = |at| {
+            let halted = [ShadowRecord::Anomaly {
+                anomaly: anomaly.clone(),
+            }];
+            let records = inserted(stored(&passing()), at, &halted);
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
+        };
+        let halted = [
+            "capture_anomaly_in_run",
+            "1 capture anomalies that halted a source",
+        ];
+        assert_eq!(judge_anomaly_at(t(60)), halted);
+        assert_eq!(judge_anomaly_at(t(-4)), halted);
+        assert_eq!(judge_anomaly_at(t(-6)), ["capture_anomaly_in_run"]);
+        assert_eq!(judge_anomaly_at(t(130)), halted);
+        assert_eq!(judge_anomaly_at(t(131)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_window_legacy_message_needs_a_terminal_diff_before_the_window_passes() {
+        let msg = |msg_id, minutes, deleted| ShadowRecord::Legacy {
+            msg: LegacyMsg {
+                msg_id,
+                channel_id: 7,
+                created_at: t(minutes),
+                edits: Vec::new(),
+                deleted,
+                content_sha256: String::new(),
+            },
+        };
+        let judge_legacy = |rows: &[ShadowRecord]| {
+            let records = inserted(stored(&passing()), t(119), rows);
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
+        };
+        // Seen when created but still open at the report: its extra or duplicate row may follow.
+        let open = ["1 window Legacy messages without a terminal diff"];
+        assert_eq!(judge_legacy(&[msg(5, 119, false)]), open);
+        // Named by a unit diff (the sample matches message 1), retired deleted, or outside.
+        assert_eq!(judge_legacy(&[msg(1, 60, false)]), Vec::<String>::new());
+        let deleted = [msg(5, 119, false), msg(5, 119, true)];
+        assert_eq!(judge_legacy(&deleted), Vec::<String>::new());
+        assert_eq!(judge_legacy(&[msg(5, 121, false)]), Vec::<String>::new());
+    }
+
+    fn open_legacy() -> ShadowRecord {
+        ShadowRecord::Legacy {
+            msg: LegacyMsg {
+                msg_id: 5,
+                channel_id: 7,
+                created_at: t(119),
+                edits: Vec::new(),
+                deleted: false,
+                content_sha256: String::new(),
+            },
+        }
+    }
+
+    fn legacy_settlement(deleted: bool) -> ShadowRecord {
+        let mut record = open_legacy();
+        if deleted {
+            if let ShadowRecord::Legacy { msg } = &mut record {
+                msg.deleted = true;
+            }
+            record
+        } else {
+            ShadowRecord::Diff {
+                diff: DiffRecord {
+                    channel_id: 7,
+                    unit_key: None,
+                    class: DiffClass::Match,
+                    legacy_msg_ids: vec![5],
+                    cause: DiffCause::Expected,
+                },
+            }
+        }
+    }
+
+    fn attempt(
+        root: &ShadowRoot,
+        records: &[StoredRecord],
+        classify: &ClassifyInput,
+    ) -> ReportOutcome {
+        evaluate_once(
+            root,
+            &ReportInput {
+                records,
+                manifest: &[],
+                population: &claude(),
+                allowlist: &[7],
+                from: t(-1),
+                to: t(120),
+                reported_at: t(131),
+                classify,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn report_time_is_limited_to_late_through_sixty_seconds_after_late() {
+        for (offset, pass) in [(-1, false), (0, true), (60, true), (61, false)] {
+            let outcome = judge_at(
+                &passing(),
+                &[],
+                &claude(),
+                t(120),
+                t(130) + Duration::seconds(offset),
+            );
+            assert_eq!(outcome.pass, pass, "{offset}: {:?}", outcome.failures);
+            if offset == 61 {
+                assert_eq!(outcome.failures, ["report_grace_exceeded"]);
+            }
+        }
+    }
+
+    #[test]
+    fn post_late_deleted_or_terminal_evidence_cannot_settle_a_legacy_message() {
+        for deleted in [true, false] {
+            for seconds in [0, 1, 60] {
+                let records = inserted(stored(&passing()), t(119), &[open_legacy()]);
+                let records = inserted(
+                    records,
+                    t(130) + Duration::seconds(seconds),
+                    &[legacy_settlement(deleted)],
+                );
+                let outcome = judge_stored(&records, &[], &claude(), t(120), t(131));
+                let expected = if seconds == 0 {
+                    vec![]
+                } else {
+                    vec!["1 window Legacy messages without a terminal diff"]
+                };
+                assert_eq!(
+                    outcome.failures, expected,
+                    "deleted={deleted}, seconds={seconds}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn post_late_terminal_evidence_cannot_decide_a_window_unit() {
+        let unit = key(99, UnitKind::Body);
+        for seconds in [0, 1, 60] {
+            let records = inserted(stored(&passing()), t(119), &[sealed(unit.clone(), 1)]);
+            let records = inserted(
+                records,
+                t(130) + Duration::seconds(seconds),
+                &[matched(unit.clone())],
+            );
+            let outcome = judge_stored(&records, &[], &claude(), t(120), t(131));
+            let expected = if seconds == 0 {
+                vec![]
+            } else {
+                vec!["1 window units without a terminal diff"]
+            };
+            assert_eq!(outcome.failures, expected, "seconds={seconds}");
+        }
+    }
+
+    #[test]
+    fn repeated_report_fails_even_after_deleted_terminal_or_classification_improves() {
+        for deleted in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = ShadowRoot::under(dir.path()).unwrap();
+            let records = inserted(stored(&passing()), t(119), &[open_legacy()]);
+            let first = evaluate_once(
+                &root,
+                &ReportInput {
+                    records: &records,
+                    manifest: &[],
+                    population: &claude(),
+                    allowlist: &[7],
+                    from: t(-1),
+                    to: t(120),
+                    reported_at: t(130),
+                    classify: &ClassifyInput::Absent,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                first.failures,
+                ["1 window Legacy messages without a terminal diff"]
+            );
+            let improved = inserted(records, t(131), &[legacy_settlement(deleted)]);
+            let reopened = ShadowRoot::under(dir.path()).unwrap();
+            let second = attempt(&reopened, &improved, &ClassifyInput::Absent);
+            assert!(!second.pass);
+            assert!(
+                second
+                    .failures
+                    .iter()
+                    .any(|f| f == "report_attempt_already_recorded"),
+                "{:?}",
+                second.failures
+            );
+            let json = serde_json::json!({"report": second});
+            assert_eq!(
+                json["report"]["failures"],
+                serde_json::json!(second.failures)
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(dir.path()).unwrap();
+        let records = stored(&passing());
+        assert!(
+            !attempt(
+                &root,
+                &records,
+                &ClassifyInput::Unreadable("missing".into())
+            )
+            .pass
+        );
+        assert!(judge_stored(&records, &[], &claude(), t(120), t(131)).pass);
+        let improved = attempt(&root, &records, &ClassifyInput::Absent);
+        assert_eq!(improved.failures, ["report_attempt_already_recorded"]);
+        assert!(!improved.pass);
+    }
+
+    #[test]
+    fn concurrent_report_attempts_allow_exactly_one_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(dir.path()).unwrap();
+        let records = stored(&passing());
+        let barrier = std::sync::Barrier::new(8);
+        let passed = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        attempt(&root, &records, &ClassifyInput::Absent).pass
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(passed, 1);
+    }
+}

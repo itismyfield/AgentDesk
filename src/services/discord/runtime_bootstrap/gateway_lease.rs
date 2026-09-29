@@ -9,6 +9,7 @@ use super::gateway_lease_recovery::{
     gateway_lease_application_name, reap_orphaned_gateway_lease_once, restart_file_nonce,
     try_create_restart_marker,
 };
+use crate::services::tui_o::ownership::release_gateway;
 
 /// #4351: resolved view of `cluster.gateway_preferred_instance_id` for this node.
 struct GatewayPreference {
@@ -87,18 +88,8 @@ async fn gateway_preference() -> Option<GatewayPreference> {
     resolve_gateway_preference(&config.cluster, self_instance_id)
 }
 
-/// May we hand the gateway over to the preferred node?
-///
-/// Being `online` in `worker_nodes` is **not** sufficient. A node whose dcserver
-/// is up and heartbeating may have no token for this provider, may have failed
-/// before gateway startup, or may simply not be contending for the lease. Yielding
-/// to such a node hands the gateway to nobody: we release, self-fence, restart,
-/// re-acquire, and yield again — a gateway outage loop.
-///
-/// So the preferred node must also *advertise* that it wants this gateway, via the
-/// `discord_gateway.waiting_providers` capability that `register_gateway_waiter`
-/// publishes on every heartbeat. That signal only exists while a `run_bot` on that
-/// node is actually waiting for, or holding, the lease for this provider.
+/// Only yield to an online node advertising a live gateway waiter; a heartbeat
+/// alone does not mean the node can take over the gateway.
 fn should_yield_to_preferred(
     nodes: &[serde_json::Value],
     preferred_instance_id: &str,
@@ -187,24 +178,16 @@ async fn yield_to_preferred_gateway(
     );
 }
 
-/// The preferred node is an **unbounded** waiter.
-///
-/// It must not give up: a non-preferred holder only learns it has to yield on its
-/// next keepalive tick, and it yields *because* this node advertises that it is
-/// waiting. If this loop bailed after a grace period and stopped advertising, the
-/// holder would keep the gateway (correct) — but if it bailed while still
-/// advertising, the holder would yield to a node that is no longer acquiring, and
-/// the gateway would be lost. Waiting forever keeps the two sides consistent.
-///
-/// The waiter signal is registered before the first attempt and cleared only on a
-/// DB error or shutdown, so a peer never yields to a node that is not acquiring.
+/// Wait indefinitely while advertising intent, then pass the guard to the backend.
+/// Cancellation, acquisition failure, and backend exit all clear the same intent.
 async fn acquire_as_preferred_gateway(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
-) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    crate::services::cluster::node_registry::register_gateway_waiter(provider.as_str());
+    handback_breaker: &mut GatewayHandbackBreaker,
+) -> Result<Option<GatewayLeaseAcquisition>, String> {
+    let waiter = GatewayWaiterGuard::new(provider.as_str());
     // Publish the intent immediately rather than waiting for the next heartbeat,
     // so a peer holding the lease can start yielding right away.
     if let Err(error) =
@@ -220,23 +203,25 @@ async fn acquire_as_preferred_gateway(
     let mut attempts: u64 = 0;
     loop {
         let acquired = if attempts == 0 {
-            try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await
+            try_acquire_with_startup_orphan_reap(pool, token_hash, provider, handback_breaker).await
         } else {
-            try_acquire_discord_gateway_lease(pool, token_hash, provider).await
+            try_acquire_observing_handback(pool, token_hash, provider, handback_breaker).await
         };
         match acquired {
             // Keep the waiter signal registered: we now hold the gateway, and a
             // peer that sees it will not try to take it from us anyway.
-            Ok(Some(lease)) => return Ok(Some(lease)),
+            Ok(Some(lease)) => {
+                return Ok(Some(GatewayLeaseAcquisition {
+                    lease,
+                    waiter: Some(waiter),
+                }));
+            }
             Ok(None) => {
                 if shared
                     .restart
                     .shutting_down
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    crate::services::cluster::node_registry::deregister_gateway_waiter(
-                        provider.as_str(),
-                    );
                     return Ok(None);
                 }
                 // ~1 log/minute at a 5s poll: enough to see a stuck hand-off,
@@ -251,13 +236,7 @@ async fn acquire_as_preferred_gateway(
                 attempts += 1;
                 tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
             }
-            Err(error) => {
-                // We cannot acquire and must not keep peers yielding to us.
-                crate::services::cluster::node_registry::deregister_gateway_waiter(
-                    provider.as_str(),
-                );
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -291,28 +270,46 @@ pub(super) async fn try_acquire_discord_gateway_lease(
     .await
 }
 
+pub(super) async fn try_acquire_observing_handback(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+    provider: &ProviderKind,
+    handback_breaker: &mut GatewayHandbackBreaker,
+) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
+    let acquired = try_acquire_discord_gateway_lease(pool, token_hash, provider).await;
+    handback_breaker.observe(acquired.as_ref().map(Option::is_some).map_err(|_| ()));
+    acquired
+}
+
 async fn try_acquire_with_startup_orphan_reap(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
+    handback_breaker: &mut GatewayHandbackBreaker,
 ) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    let first = try_acquire_discord_gateway_lease(pool, token_hash, provider).await?;
+    let first =
+        try_acquire_observing_handback(pool, token_hash, provider, handback_breaker).await?;
     if first.is_some() {
         return Ok(first);
     }
     if reap_orphaned_gateway_lease_once(pool, discord_gateway_lock_id(token_hash), provider).await?
     {
-        try_acquire_discord_gateway_lease(pool, token_hash, provider).await
+        try_acquire_observing_handback(pool, token_hash, provider, handback_breaker).await
     } else {
         Ok(None)
     }
+}
+
+pub(super) struct GatewayLeaseAcquisition {
+    pub(super) lease: crate::db::postgres::AdvisoryLockLease,
+    pub(super) waiter: Option<GatewayWaiterGuard>,
 }
 
 /// Outcome of the gateway singleton-lease acquisition phase.
 pub(super) enum GatewayLeaseOutcome {
     /// Either the lease was acquired (`Some`) or there is no PG pool (`None`,
     /// the standalone/no-DB path). Either way, startup proceeds.
-    Proceed(Option<crate::db::postgres::AdvisoryLockLease>),
+    Proceed(Option<GatewayLeaseAcquisition>),
     /// Another node owns the lease, so this provider is a confirmed standby.
     /// The startup diagnostic has already run; run_bot must expose the standby
     /// runtime and leave its shutdown-barrier slot for the marker poller.
@@ -344,6 +341,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     startup_doctor_started: &Arc<std::sync::atomic::AtomicBool>,
     health_registry: &Arc<health::HealthRegistry>,
     api_port: u16,
+    handback_breaker: &mut GatewayHandbackBreaker,
 ) -> GatewayLeaseOutcome {
     match shared.pg_pool.as_ref() {
         Some(pool) => {
@@ -351,13 +349,46 @@ pub(super) async fn run_bot_acquire_gateway_lease(
             let preference = gateway_preference().await;
             let acquired = match preference.as_ref() {
                 Some(pref) if pref.self_is_preferred() => {
-                    acquire_as_preferred_gateway(pool, token_hash, provider, shared).await
+                    acquire_as_preferred_gateway(
+                        pool,
+                        token_hash,
+                        provider,
+                        shared,
+                        handback_breaker,
+                    )
+                    .await
                 }
                 Some(pref) => {
-                    yield_to_preferred_gateway(pool, pref, provider, shared).await;
-                    try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await
+                    if !handback_breaker.suppressed() {
+                        yield_to_preferred_gateway(pool, pref, provider, shared).await;
+                    }
+                    try_acquire_with_startup_orphan_reap(
+                        pool,
+                        token_hash,
+                        provider,
+                        handback_breaker,
+                    )
+                    .await
+                    .map(|lease| {
+                        lease.map(|lease| GatewayLeaseAcquisition {
+                            lease,
+                            waiter: None,
+                        })
+                    })
                 }
-                None => try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await,
+                None => try_acquire_with_startup_orphan_reap(
+                    pool,
+                    token_hash,
+                    provider,
+                    handback_breaker,
+                )
+                .await
+                .map(|lease| {
+                    lease.map(|lease| GatewayLeaseAcquisition {
+                        lease,
+                        waiter: None,
+                    })
+                }),
             };
             match acquired {
                 Ok(Some(lease)) => {
@@ -503,41 +534,22 @@ async fn self_fence_gateway(
     }
 }
 
-/// Spawn the gateway singleton-lease keepalive loop.
-///
-/// Every tick it keepalives the held advisory lock. A keepalive error means the
-/// underlying Postgres connection died, which releases the advisory lock
-/// server-side (it is session-scoped) — but that is almost always a TRANSIENT
-/// blip (DB restart, brief network drop), not a genuine hand-off to another
-/// instance. Fencing on the very first error previously left the process alive
-/// forever with a dead, never-reacquired gateway (#3620: a startup DB blip took
-/// the Discord relay down for ~2h until a manual restart).
-///
-/// So instead of fencing on the first error, it re-acquires the lock on a fresh
-/// connection — mirroring the cluster-leader lease
-/// (`node_registry::spawn_heartbeat_loop`), which auto-recovered from the same
-/// blip while this loop did not:
-///   * re-acquired (`Ok(Some)`)  → the gateway never went down; keep serving.
-///   * held elsewhere (`Ok(None)`) → another instance owns the singleton now,
-///     so self-fence to avoid a split-brain (two live gateways).
-///   * db unreachable (`Err`)    → nobody can hold the lock while the DB is
-///     down, so keep the gateway up and retry on the next tick.
-///
-/// The self-fence path flips shutdown flags, cancels tmux watchers, drains
-/// pending queues, persists last_message_ids, and shuts down all shards.
-/// Spawned after the client is built (needs `shard_manager`) and before the
-/// gateway backend run. Returns the JoinHandle so run_bot can abort it on
-/// backend exit.
+/// Keep the lease alive while serving, and self-fence when another node holds it.
+/// Voluntary handback suppression never bypasses lease recovery or fencing.
 pub(super) fn run_bot_spawn_gateway_lease_keepalive(
     lease: crate::db::postgres::AdvisoryLockLease,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     token_hash: String,
     shard_manager: Arc<serenity::gateway::ShardManager>,
+    mut handback_breaker: GatewayHandbackBreaker,
 ) -> tokio::task::JoinHandle<()> {
     let shared_for_lease = shared.clone();
     let provider_for_lease = provider.clone();
     let mut current_lease = Some(lease);
+    // O admission follows this gate; each transition below lands before its lease effect.
+    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
+    gate.acquired();
     tokio::spawn(async move {
         // Resolved once, inside the task because it may await bootstrap (#4356):
         // the self-id is stable for the life of the process, and a hot config
@@ -555,7 +567,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
                 if let Some(lease) = current_lease.take() {
-                    let _ = lease.unlock().await;
+                    let _ = release_gateway(&gate, lease.unlock()).await;
                 }
                 return;
             }
@@ -566,7 +578,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
             // `deploy-release.sh` restarts the local node first, so a
             // non-preferred node routinely wins the initial race.
             if let Some(pref) = preference.as_ref().filter(|p| !p.self_is_preferred()) {
-                if current_lease.is_some() {
+                if current_lease.is_some() && !handback_breaker.suppressed() {
                     if let Some(pool) = shared_for_lease.pg_pool.as_ref() {
                         if preferred_gateway_is_waiting(
                             pool,
@@ -574,6 +586,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             &provider_for_lease,
                         )
                         .await
+                            && handback_breaker.record_yield()
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
@@ -584,7 +597,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             // Release first: the preferred node is an unbounded
                             // waiter and can only win once the lock is free.
                             if let Some(lease) = current_lease.take() {
-                                let _ = lease.unlock().await;
+                                let _ = release_gateway(&gate, lease.unlock()).await;
                             }
                             self_fence_gateway(
                                 &shared_for_lease,
@@ -611,6 +624,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             provider_for_lease.display_name(),
                             error
                         );
+                        gate.uncertain();
                         current_lease = None;
                     }
                 }
@@ -621,13 +635,21 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 // No PG pool (standalone/no-DB path): nothing to keepalive.
                 return;
             };
-            match try_acquire_discord_gateway_lease(pool, &token_hash, &provider_for_lease).await {
+            match try_acquire_observing_handback(
+                pool,
+                &token_hash,
+                &provider_for_lease,
+                &mut handback_breaker,
+            )
+            .await
+            {
                 Ok(Some(new_lease)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 🔐 GATEWAY-LEASE: {} re-acquired singleton lease after transient loss",
                         provider_for_lease.display_name()
                     );
+                    gate.reacquired();
                     current_lease = Some(new_lease);
                 }
                 Err(error) => {
@@ -648,6 +670,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] ⛔ GATEWAY-LEASE: {} singleton lease taken by another instance — self-fencing",
                         provider_for_lease.display_name()
                     );
+                    gate.lost();
                     self_fence_gateway(&shared_for_lease, &provider_for_lease, &shard_manager)
                         .await;
                     return;

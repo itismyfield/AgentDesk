@@ -111,6 +111,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_dispatch::tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+  --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
@@ -144,6 +145,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
   --skip services::pipeline_override::pipeline_override_pg_tests
   --skip services::pipeline_routes::tests
+  --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
   --skip services::session_forwarding::tests
@@ -466,6 +468,14 @@ NON_PG_FILTER_REPLAY=(
   services::pipeline_routes::tests::persistence_sql_includes_backoff_column
   services::pipeline_routes::tests::stage_json_absent_backoff_is_null
   services::pipeline_routes::tests::stage_json_emits_backoff_field
+  services::routines::session_control::tests::fallback_tmux_channel_name_preserves_thread_suffix
+  services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label
+  services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel
+  services::routines::session_control::tests::fresh_teardown_rejects_persistent_routine
+  services::routines::session_control::tests::provider_clear_behavior_documents_supported_reset_paths
+  services::routines::session_control::tests::session_key_remote_owned_gates_local_tmux_kill
+  services::routines::session_control::tests::target_channel_prefers_session_thread_then_routine_thread_then_primary
+  services::routines::session_control::tests::tmux_name_from_session_key_uses_suffix_after_host
   services::scheduled_messages::postgres_tests::postgres_precision_normalizes_linux_nanosecond_timestamps
   services::session_forwarding::tests::cancel_retry_accepts_ack_and_authenticated_structured_not_found
   services::session_forwarding::tests::cancel_retry_reloads_owner_only_for_conflict

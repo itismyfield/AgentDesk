@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use super::foreign_terminal_handoff::cancelled_terminal_response;
 use super::*;
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
@@ -184,14 +185,26 @@ pub(super) async fn handle_cancel_prompt_replace(
         // channel the WATCHER uses (a reused watcher can own a channel != this
         // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
         // B2) instead of both delivering = duplicate.
-        let stop_lease_acquire = bridge_delivery_lease_for_inflight(
-            shared_owned.as_ref(),
-            watcher_owner_channel_id,
-            shared_owned.restart.current_generation,
-            &inflight_state,
-            tmux_last_offset,
+        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
+            inflight_state.runtime_kind,
+            gateway.can_deliver_directly(),
         );
-        if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
+        let stop_lease_acquire = if o_body_cut {
+            BridgeLeaseAcquire::NoRange
+        } else {
+            bridge_delivery_lease_for_inflight(
+                shared_owned.as_ref(),
+                watcher_owner_channel_id,
+                shared_owned.restart.current_generation,
+                &inflight_state,
+                tmux_last_offset,
+            )
+        };
+        if o_body_cut {
+            // O posts the partial body; only the Legacy placeholder goes, the /stop lifecycle stays.
+            let _ = gateway.delete_message(channel_id, current_msg_id).await;
+            status_panel_terminal_committed = true;
+        } else if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 channel_id = channel_id.get(),
@@ -416,26 +429,4 @@ pub(super) async fn settle_cancelled_episode_work(
         return true;
     }
     !children.is_empty()
-}
-
-/// Render the existing cancellation/restart terminal body independently of its
-/// transport, so a detached episode can POST it without touching a foreign card.
-pub(super) fn cancelled_terminal_response(
-    full_response: &str,
-    response_sent_offset: usize,
-    restart_mode: Option<crate::services::discord::restart_mode::InflightRestartMode>,
-    banner: &DiscordTurnSessionBanner<'_>,
-) -> String {
-    let remaining_response = response_portion_after_offset(full_response, response_sent_offset);
-    let response = if let Some(restart_mode) = restart_mode {
-        handoff_interrupted_message(restart_mode, remaining_response)
-    } else if remaining_response.trim().is_empty() {
-        "[Stopped]".to_string()
-    } else {
-        format!(
-            "{}\n\n[Stopped]",
-            banner.format_discord_body(remaining_response)
-        )
-    };
-    banner.prefix(response_sent_offset == 0, response)
 }

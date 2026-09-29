@@ -667,7 +667,7 @@ mod cancellation_observability_tests {
                 false,
                 false,
                 Some(2),
-                true,
+                Some(true),
                 false,
             ),
         );

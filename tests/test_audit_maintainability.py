@@ -164,14 +164,19 @@ class GiantFilesCheck(unittest.TestCase):
 
 class GiantFileRatchetCheck(unittest.TestCase):
     _BASELINE = "scripts/audit_maintainability_giant_baseline.toml"
+    # The admission audit reads this; without it every run adds a metadata error.
+    _HISTORY = {"scripts/ratchet_admission_history.toml": "schema_version = 1\nadmission = []\n"}
+    _SLACK = giant_file_ratchet.WIRING_SLACK_LINES
 
     def test_real_pin_overrun_and_threshold_controls_reach_check_exit_code(self) -> None:
         path = "src/pinned.rs"
-        for loc, cap, expected_rc in ((1000, 1000, 0), (1001, 1000, 1), (999, 500, 0)):
+        cases = ((1000, 1000, 0), (1000 + self._SLACK, 1000, 0),
+                 (1001 + self._SLACK, 1000, 1), (999, 500, 0))
+        for loc, cap, expected_rc in cases:
             with self.subTest(loc=loc, cap=cap), _FakeSrcTree({
                 path: "fn production() {}\n" * loc,
                 self._BASELINE: f'[giant_file_ratchet]\n"{path}" = {cap}\n',
-                "scripts/ratchet_admission_history.toml": "schema_version = 1\nadmission = []\n",
+                **self._HISTORY,
                 "empty-allowlist.toml": "",
             }) as root:
                 allowlist = root / "empty-allowlist.toml"
@@ -185,7 +190,8 @@ class GiantFileRatchetCheck(unittest.TestCase):
                     self.assertEqual(len(hits), 1)
                     self.assertEqual((hits[0].rule, hits[0].file, hits[0].severity),
                                      ("giant_file_ratchet", path, "warn"))
-                    self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"]), ("1001", "1000"))
+                    self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"]),
+                                     (str(1001 + self._SLACK), "1000"))
                 else:
                     self.assertEqual(hits, [])
                 self.assertFalse(any("admission metadata invalid" in hit.message for hit in hits))
@@ -201,6 +207,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
             {
                 "src/services/discord/tmux_watcher.rs": over,
                 "src/other_giant.rs": over,  # no baseline entry -> not ratcheted
+                **self._HISTORY,
             }
         ) as root:
             _write(
@@ -216,7 +223,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
 
     def test_at_or_under_baseline_passes(self) -> None:
         content = "fn x() {}\n" * (giant_files.THRESHOLD + 5)  # 1005 prod LoC
-        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": content}) as root:
+        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": content, **self._HISTORY}) as root:
             _write(
                 root,
                 self._BASELINE,
@@ -228,9 +235,33 @@ class GiantFileRatchetCheck(unittest.TestCase):
             hits = list(giant_file_ratchet.CHECK.runner(set()))
         self.assertEqual(hits, [])
 
+    def _slack_hits(self, loc: int) -> list:
+        path = "src/services/discord/tmux_watcher.rs"
+        with _FakeSrcTree({
+            path: "fn x() {}\n" * loc,
+            self._BASELINE: f'[giant_file_ratchet]\n"{path}" = 1200\n',
+            **self._HISTORY,
+        }):
+            return list(giant_file_ratchet.CHECK.runner(set()))
+
+    def test_growth_within_wiring_slack_passes(self) -> None:
+        self.assertEqual(self._SLACK, 30)
+        for loc in (1201, 1200 + self._SLACK):
+            with self.subTest(loc=loc):
+                self.assertEqual(self._slack_hits(loc), [])
+
+    def test_growth_past_wiring_slack_fails_naming_baseline_and_slack(self) -> None:
+        loc = 1201 + self._SLACK
+        hits = self._slack_hits(loc)
+        self.assertEqual(len(hits), 1)
+        self.assertIn(f"grew to {loc} production LoC > baseline 1200 + slack {self._SLACK}",
+                      hits[0].message)
+        self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"], hits[0].extra["slack"]),
+                         (str(loc), "1200", str(self._SLACK)))
+
     def test_file_dropped_below_threshold_is_not_a_regression(self) -> None:
         small = "fn y() {}\n" * 10  # below giant threshold -> not in giant map
-        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": small}) as root:
+        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": small, **self._HISTORY}) as root:
             _write(
                 root,
                 self._BASELINE,
@@ -244,7 +275,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
 
     def test_allowlist_suppresses(self) -> None:
         over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)
-        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": over}) as root:
+        with _FakeSrcTree({"src/services/discord/tmux_watcher.rs": over, **self._HISTORY}) as root:
             _write(
                 root,
                 self._BASELINE,
