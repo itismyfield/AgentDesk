@@ -258,7 +258,7 @@ export function readStoredSettingsPanel(): SettingsPanel {
 }
 
 export function readStoredRuntimeCategory(): string {
-  return readLocalStorageValue<string>(STORAGE_KEYS.settingsRuntimeCategory, CATEGORIES[0]?.id ?? "polling", {
+  return readLocalStorageValue<string>(STORAGE_KEYS.settingsRuntimeCategory, CATEGORIES[0]?.id ?? "dispatch", {
     validate: (value): value is string => typeof value === "string" && isRuntimeCategoryId(value),
     legacy: (raw) => (isRuntimeCategoryId(raw) ? raw : null),
   });

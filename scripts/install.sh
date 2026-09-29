@@ -419,7 +419,7 @@ memory:
 # review:
 #   enabled: true
 # runtime:
-#   dispatch_poll_sec: 30
+#   max_retries: 3
 #   reset_overrides_on_restart: false
 # automation:
 #   strategy: "squash"

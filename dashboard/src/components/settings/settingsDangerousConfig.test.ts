@@ -10,7 +10,7 @@ describe("settingsDangerousConfig", () => {
     expect(
       getDangerousConfigKeys({
         review_enabled: true,
-        githubRepoCacheSec: "300",
+        rateLimitStaleSec: "300",
         context_clear_percent: "95",
       }),
     ).toEqual(["review_enabled", "context_clear_percent"]);
