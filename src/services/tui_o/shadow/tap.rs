@@ -32,9 +32,15 @@ use super::{
 #[serde(default)]
 pub struct TuiOConfig {
     pub shadow: ShadowConfig,
-    pub writer: super::super::channel_policy::WriterChannelsConfig,
+    pub writer: WriterChannelsConfig,
     /// Operator channel for writer alarms; absent keeps them to health and logs.
     pub alert_channel_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WriterChannelsConfig {
+    pub channels: std::collections::BTreeSet<u64>,
 }
 
 /// Bounded copy of bot-authored message events for allowlisted channels.

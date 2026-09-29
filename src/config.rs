@@ -3468,3 +3468,6 @@ mod shared_test_env_lock_tests {
         handle.join().expect("reentry proof thread should finish");
     }
 }
+
+#[cfg(test)]
+mod writer_channels_tests;

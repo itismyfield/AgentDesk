@@ -4,17 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use anyhow::{Result, ensure};
-use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider_hosting::RuntimeMode;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct WriterChannelsConfig {
-    pub channels: BTreeSet<u64>,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BootChannels {
@@ -59,7 +52,15 @@ impl BootChannels {
                         "tui_o.writer.channels: channel {id} has non-TUI provider {provider}"
                     ),
                 };
-                let provider_config = config.providers.get(&provider);
+                let mut provider_configs = config
+                    .providers
+                    .iter()
+                    .filter(|(key, _)| key.trim().eq_ignore_ascii_case(&provider));
+                let provider_config = provider_configs.next().map(|(_, value)| value);
+                ensure!(
+                    provider_configs.next().is_none(),
+                    "tui_o.writer.channels: channel {id} has ambiguous provider settings"
+                );
                 let channel_runtime = channel.runtime_mode_raw();
                 let raw_runtime = channel_runtime
                     .as_deref()
@@ -75,7 +76,8 @@ impl BootChannels {
                     }
                     None => channel
                         .tui_hosting()
-                        .unwrap_or_else(|| config.provider_tui_hosting_enabled(&provider)),
+                        .or_else(|| provider_config.and_then(|config| config.tui_hosting))
+                        .unwrap_or_else(|| crate::config::default_provider_tui_hosting(&provider)),
                 };
                 ensure!(tui, "tui_o.writer.channels: channel {id} is not TUI");
                 if let Some(previous) = kinds.insert(id, kind) {
@@ -131,3 +133,6 @@ pub(crate) fn owns_output(
             Some(RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui)
         )
 }
+
+#[cfg(test)]
+mod tests;
