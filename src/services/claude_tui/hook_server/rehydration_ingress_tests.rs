@@ -7,6 +7,8 @@ struct View {
     tmux: String,
     channel: u64,
     home: PathBuf,
+    // Other live panes; the pass's dead-orphan sweep would otherwise evict their mappings.
+    peers: Vec<String>,
 }
 thread_local! { static VIEW: RefCell<Option<View>> = const { RefCell::new(None) }; }
 struct Reset;
@@ -19,13 +21,19 @@ impl Drop for Reset {
 }
 
 pub(super) fn claude_session_names() -> Result<Vec<String>, String> {
-    if let Some(names) = VIEW.with_borrow(|v| v.as_ref().map(|v| vec![v.tmux.clone()])) {
+    if let Some(names) = VIEW.with_borrow(|v| {
+        v.as_ref()
+            .map(|v| std::iter::once(&v.tmux).chain(&v.peers).cloned().collect())
+    }) {
         return Ok(names);
     }
     crate::services::platform::tmux::list_session_names()
 }
 pub(super) fn claude_pane_live(tmux: &str) -> bool {
-    if let Some(live) = VIEW.with_borrow(|v| v.as_ref().map(|v| v.tmux == tmux)) {
+    if let Some(live) = VIEW.with_borrow(|v| {
+        v.as_ref()
+            .map(|v| v.tmux == tmux || v.peers.iter().any(|p| p == tmux))
+    }) {
         return live;
     }
     crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux)
@@ -121,6 +129,7 @@ fn outer_failure(alias: bool, header: bool) {
             tmux: tmux.clone(),
             channel,
             home,
+            peers: Vec::new(),
         })
     });
     let _reset = Reset;
@@ -319,6 +328,7 @@ impl RegistrationRace {
                 tmux: tmux.clone(),
                 channel,
                 home,
+                peers: Vec::new(),
             })
         });
         Self {
@@ -551,6 +561,9 @@ fn registration_alias_conflict_keeps_original_pane_unready() {
     rehydrate_existing_claude_tui_bindings(&shared);
     let other = format!("reused-command-{}", uuid());
     ingress.pane(&other, 7_494, &race.h);
+    let set_peers =
+        |peers: Vec<String>| VIEW.with_borrow_mut(|v| v.as_mut().unwrap().peers = peers);
+    set_peers(vec![other.clone()]);
     pr::BLOCK_ALIAS.set(false);
     rehydrate_existing_claude_tui_bindings(&shared);
     let encoded = race.envelope().encode().unwrap();
@@ -582,6 +595,7 @@ fn registration_alias_conflict_keeps_original_pane_unready() {
         dedupe::resolve_tmux_session_name("claude", &race.h).as_deref(),
         Some(other.as_str())
     );
+    set_peers(Vec::new());
     dedupe::register_provider_session("claude", &race.h, &race.tmux);
     rehydrate_existing_claude_tui_bindings(&shared);
     assert_eq!(
