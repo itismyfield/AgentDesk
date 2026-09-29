@@ -433,6 +433,21 @@ fn resolved_pending_restores_exactly_that_session_on_the_next_restart() {
             exact_wait: None
         }
     );
+    fs::remove_file(lane.path(&b)).unwrap();
+    let waiting = self::exact(lane.judge(channel, tmux, &a)).outcome(REGISTERED);
+    let wait = ExactPathWait {
+        session_id: b.clone(),
+        transcript: lane.path(&b),
+    };
+    let expected = PendingRestore::BoundFromLedger {
+        pending_seq: 2,
+        exact_wait: Some(wait),
+    };
+    assert_eq!(waiting, expected, "a missing Resolved B waits for B");
+    assert!(!waiting.memo(), "and is judged again");
+    lane.touch(&b);
+    let back = self::exact(lane.judge(channel, tmux, &a)).outcome(REGISTERED);
+    assert_eq!(back, bound, "B comes back without a new log record");
 
     let (channel, tmux) = (7_509, "p2b-resolved-respawn");
     let (a, _) = resolve(channel, tmux, true);
@@ -466,6 +481,80 @@ fn pending_without_a_current_execution_is_never_restored() {
     assert_eq!(
         lane.judge(channel, tmux, &a),
         RestoreStep::Finished(unmarked)
+    );
+
+    let launch = LaunchTranscript {
+        session_id: a.clone(),
+        transcript: lane.path(&a),
+    };
+    let unreadable = SpawnNonceMarker::Unreadable;
+    let judged = |records| judge_restore(tmux, records, &unreadable, Some(&launch), |_| true);
+    let down = |why| RestoreStep::Finished(PendingRestore::Unavailable(why));
+    let log_error = judged(Err(io::Error::other("log read")));
+    assert_eq!(log_error, down(Unavailable::LogRead(io::ErrorKind::Other)));
+    let marker_error = judged(records_strict(channel));
+    assert_eq!(marker_error, down(Unavailable::NonceMarkerUnreadable));
+    for step in [log_error, marker_error] {
+        let RestoreStep::Finished(outcome) = step else {
+            unreachable!()
+        };
+        assert!(!outcome.memo(), "a read error is judged again");
+    }
+}
+
+#[test]
+fn a_pending_refused_before_the_restart_stays_refused_until_it_resolves() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_512, "p2b-refused");
+    stamp(tmux);
+    let (a, b, c) = (uuid(), uuid(), uuid());
+    lane.touch(&a);
+    register_tmux_channel(tmux, channel);
+    register_provider_session("claude", &a, tmux);
+    register_launched_tmux_runtime_binding(tmux, claude(&lane.path(&a), &a));
+    let c_path = lane.touch(&c);
+    let adopted = adopt_claude_continuation_session(&a, &c, &clear(&c_path));
+    assert!(adopted.unwrap().is_some(), "C is bound");
+    let pending = adopt_claude_continuation_session(&a, &b, &clear(&lane.path(&b)));
+    assert!(pending.unwrap().is_none(), "B waits for its transcript");
+    lane.touch(&b);
+    let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let c_file = fs::File::options().write(true).open(&c_path).unwrap();
+    c_file.set_modified(newer).unwrap();
+    let refused = adopt_claude_continuation_session(&a, &b, &clear(&lane.path(&b)));
+    assert!(refused.unwrap().is_none(), "B is older than bound C");
+    let records = records_strict(channel).unwrap().unwrap();
+    let pending_seq = records[records.len() - 2].seq;
+    assert!(matches!(
+        records[records.len() - 2].new,
+        BindingTarget::Pending { .. }
+    ));
+    assert!(matches!(
+        records.last().unwrap().new,
+        BindingTarget::Rejected { .. }
+    ));
+    restart(channel);
+    let skip = PendingRestore::NotEligible(NotEligible::Rejected);
+    assert_eq!(
+        lane.judge(channel, tmux, &a),
+        RestoreStep::Finished(skip),
+        "a refused B is not seeded behind launch A"
+    );
+
+    let b_path = lane.path(&b);
+    let rebound =
+        register_rehydrated_tmux_runtime_binding("claude", tmux, channel, claude(&b_path, &b));
+    assert!(rebound);
+    let records = records_strict(channel).unwrap().unwrap();
+    assert!(matches!(
+        records.last().unwrap().new,
+        BindingTarget::Resolved { pending_seq: seq, .. } if seq == pending_seq
+    ));
+    restart(channel);
+    let exact = exact(lane.judge(channel, tmux, &a));
+    assert_eq!(
+        exact.session_id, b,
+        "a Resolved after the refusal restores B"
     );
 }
 

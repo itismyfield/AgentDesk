@@ -16,7 +16,8 @@ pub(crate) enum NotEligible {
     LegacyNonceNone,
     NonceMismatch,
     Superseded,
-    ResolvedTranscriptMissing,
+    /// The live system refused this Pending after it was recorded; a restart must not undo that.
+    Rejected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +141,7 @@ struct Candidate<'a> {
     session: &'a str,
     path: Option<&'a str>,
     resolved: Option<(&'a BindingEvent, &'a SourceId)>,
+    rejected: bool,
 }
 
 enum Fold<'a> {
@@ -148,7 +150,8 @@ enum Fold<'a> {
     Live(Candidate<'a>),
 }
 
-/// The pane's latest Pending, or the Resolved that completed it, unless a later record moved on.
+/// The pane's latest Pending (marked when later refused), or the Resolved that completed it,
+/// unless a later record moved on.
 fn fold<'a>(tmux_session: &str, records: &'a [BindingEvent]) -> Fold<'a> {
     let pane = records
         .iter()
@@ -167,6 +170,7 @@ fn fold<'a>(tmux_session: &str, records: &'a [BindingEvent]) -> Fold<'a> {
                 session: payload_session_id,
                 path: payload_transcript_path.as_deref(),
                 resolved: None,
+                rejected: false,
             }),
             (
                 BindingTarget::Resolved {
@@ -182,6 +186,17 @@ fn fold<'a>(tmux_session: &str, records: &'a [BindingEvent]) -> Fold<'a> {
                 Fold::Live(Candidate { resolved, ..live })
             }
             (BindingTarget::Resolved { .. }, _) => Fold::Superseded,
+            (
+                BindingTarget::Rejected {
+                    payload_session_id, ..
+                },
+                Fold::Live(live),
+            ) if live.resolved.is_none() && *payload_session_id == live.session => {
+                Fold::Live(Candidate {
+                    rejected: true,
+                    ..live
+                })
+            }
             (BindingTarget::Source(source), Fold::Live(live))
                 if moved_on(record, source, &live) =>
             {
@@ -240,6 +255,9 @@ pub(crate) fn judge_restore(
         Fold::Superseded => return done(Skip(NotEligible::Superseded)),
         Fold::Live(live) => live,
     };
+    if live.rejected && live.resolved.is_none() {
+        return done(Skip(NotEligible::Rejected));
+    }
     let resolved = live.resolved.map(|(record, _)| record);
     let nonces: Vec<_> = std::iter::once(live.pending)
         .chain(resolved)
@@ -283,10 +301,7 @@ pub(crate) fn judge_restore(
         if source.path != transcript {
             return mismatch(record.seq);
         }
-        if !exists(&transcript) {
-            return done(Skip(NotEligible::ResolvedTranscriptMissing));
-        }
-        return RestoreStep::PublishExact(exact(true));
+        return RestoreStep::PublishExact(exact(exists(&transcript)));
     }
     if live.session != launch.session_id && exists(&launch.transcript) {
         return RestoreStep::SeedAfterLaunch(LaunchSeed {
