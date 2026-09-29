@@ -8,6 +8,16 @@ pub(super) fn observe(kind: &str, path: &std::path::Path) -> std::io::Result<()>
     }
 }
 
+pub(super) fn partial_blob_write(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    return supported::partial_blob_write(file, bytes);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (file, bytes);
+        Ok(())
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod supported {
     use std::cell::RefCell;
@@ -118,6 +128,7 @@ mod supported {
         projection: Projection,
         events: Vec<String>,
         fail_at: Option<usize>,
+        fail_kind: Option<String>,
     }
 
     thread_local! {
@@ -134,6 +145,7 @@ mod supported {
                     projection: Projection::new(root),
                     events: Vec::new(),
                     fail_at: None,
+                    fail_kind: None,
                 });
             });
             Self
@@ -145,7 +157,13 @@ mod supported {
                 let trace = slot.as_mut().unwrap();
                 trace.events.clear();
                 trace.fail_at = fail_at;
+                trace.fail_kind = None;
             });
+        }
+
+        fn fail_on(&self, kind: &str) {
+            self.arm(None);
+            TRACE.with(|slot| slot.borrow_mut().as_mut().unwrap().fail_kind = Some(kind.into()));
         }
 
         fn finish(self) -> (Projection, Vec<String>) {
@@ -171,7 +189,8 @@ mod supported {
             }
             trace.projection.record(kind, path);
             trace.events.push(format!("{kind}:{}", path.display()));
-            if trace.fail_at == Some(trace.events.len()) {
+            if trace.fail_at == Some(trace.events.len()) || trace.fail_kind.as_deref() == Some(kind)
+            {
                 return Err(io::Error::other("simulated power cut after syscall"));
             }
             Ok(())
@@ -197,6 +216,121 @@ mod supported {
 
     fn channel(runtime: &Path) -> PathBuf {
         runtime.join("input_ledger/7")
+    }
+
+    #[test]
+    fn reopen_adopted_unsynced_prefix_survives_power_loss_without_more_writes() {
+        let root = sandbox();
+        let recording = Recording::start(root.path());
+        let runtime = root.path().join("runtime");
+        let mut ledger = Ledger::open(&runtime, 7).unwrap();
+        ledger.append("transition", json!("A"), &[]).unwrap();
+        recording.arm(Some(1));
+        assert!(ledger.append("transition", json!("B"), &[]).is_err());
+        drop(ledger);
+        recording.arm(None);
+        let recovered = Ledger::open(&runtime, 7).unwrap();
+        assert_eq!(fold(&recovered), vec![json!("A"), json!("B")]);
+        drop(recovered);
+        let (projection, _) = recording.finish();
+        let (_restored, runtime) = projection.restore(&runtime);
+        assert_eq!(
+            fold(&Ledger::open(&runtime, 7).unwrap()),
+            vec![json!("A"), json!("B")]
+        );
+    }
+
+    #[test]
+    fn reopen_refuses_handle_when_adopted_prefix_sync_fails() {
+        let root = sandbox();
+        let runtime = root.path().join("runtime");
+        let mut ledger = Ledger::open(&runtime, 7).unwrap();
+        ledger.append("transition", json!("A"), &[]).unwrap();
+        drop(ledger);
+        let recording = Recording::start(root.path());
+        recording.fail_on("file_sync");
+        let error = Ledger::open(&runtime, 7)
+            .err()
+            .expect("recovery must not return a handle after a sync error");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    fn nested_array(depth: usize) -> Value {
+        (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
+    }
+
+    #[test]
+    fn append_rejects_unreplayable_json_before_writing_and_remains_usable() {
+        let root = sandbox();
+        let runtime = root.path().join("runtime");
+        let mut ledger = Ledger::open(&runtime, 7).unwrap();
+        ledger.append("transition", json!("A"), &[]).unwrap();
+        let wal = channel(&runtime).join("wal.0.jsonl");
+        let before = fs::read(&wal).unwrap();
+        for (payload, reason) in [
+            (nested_array(130), "recursion limit"),
+            (json!(51.24817837550540_4_f64), "round-trip"),
+        ] {
+            let error = ledger.append("transition", payload, &[]).unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+            assert_eq!(fs::read(&wal).unwrap(), before);
+        }
+        ledger.append("transition", json!("B"), &[]).unwrap();
+        drop(ledger);
+        assert_eq!(
+            fold(&Ledger::open(&runtime, 7).unwrap()),
+            vec![json!("A"), json!("B")]
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejects_unreadable_json_before_replacing_snapshot() {
+        let root = sandbox();
+        let runtime = root.path().join("runtime");
+        let mut ledger = Ledger::open(&runtime, 7).unwrap();
+        ledger.append("transition", json!("A"), &[]).unwrap();
+        ledger.checkpoint(json!(["A"])).unwrap();
+        ledger.append("transition", json!("B"), &[]).unwrap();
+        let snapshot = channel(&runtime).join("snapshot.json");
+        let wal = channel(&runtime).join("wal.1.jsonl");
+        let before = (fs::read(&snapshot).unwrap(), fs::read(&wal).unwrap());
+        for (state, reason) in [
+            (nested_array(130), "recursion limit"),
+            (json!(51.24817837550540_4_f64), "round-trip"),
+        ] {
+            let error = ledger.checkpoint(state).unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+            assert_eq!(
+                (fs::read(&snapshot).unwrap(), fs::read(&wal).unwrap()),
+                before
+            );
+        }
+        ledger.append("transition", json!("C"), &[]).unwrap();
+        drop(ledger);
+        assert_eq!(
+            fold(&Ledger::open(&runtime, 7).unwrap()),
+            vec![json!("A"), json!("B"), json!("C")]
+        );
+    }
+
+    #[test]
+    fn accepted_json_round_trips_through_wal_and_snapshot() {
+        let root = sandbox();
+        let runtime = root.path().join("runtime");
+        let expected = vec![
+            json!({"null":null, "bool":true, "string":"한글/é/\n", "numbers":[0, -42, 0.125, u64::MAX]}),
+            nested_array(120),
+        ];
+        let mut ledger = Ledger::open(&runtime, 7).unwrap();
+        for value in &expected {
+            ledger.append("transition", value.clone(), &[]).unwrap();
+        }
+        drop(ledger);
+        let mut ledger = Ledger::open(&runtime, 7).unwrap();
+        assert_eq!(fold(&ledger), expected);
+        ledger.checkpoint(json!(expected)).unwrap();
+        drop(ledger);
+        assert_eq!(fold(&Ledger::open(&runtime, 7).unwrap()), expected);
     }
 
     fn prepare(root: &Path, previous_checkpoint: bool) -> (Ledger, PathBuf, Vec<Value>) {
@@ -261,6 +395,78 @@ mod supported {
                 checkpoint_case(previous_checkpoint, Some(cut));
             }
         }
+    }
+
+    thread_local! {
+        static PARTIAL_BLOB_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    struct PartialBlobWrite;
+
+    impl PartialBlobWrite {
+        fn arm() -> Self {
+            PARTIAL_BLOB_WRITE.with(|armed| assert!(!armed.replace(true)));
+            Self
+        }
+    }
+
+    impl Drop for PartialBlobWrite {
+        fn drop(&mut self) {
+            PARTIAL_BLOB_WRITE.with(|armed| armed.set(false));
+        }
+    }
+
+    pub(super) fn partial_blob_write(file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+
+        if PARTIAL_BLOB_WRITE.with(|armed| armed.replace(false)) {
+            file.write_all(&bytes[..bytes.len() / 2])?;
+            return Err(io::Error::other("simulated partial blob write"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn partial_blob_write_retries_without_occupying_final_name() {
+        let root = sandbox();
+        let runtime = root.path().join("runtime");
+        let ledger = Ledger::open(&runtime, 7).unwrap();
+        let partial_write = PartialBlobWrite::arm();
+        let error = ledger
+            .pin_blob("row", 0, "payload.txt", b"attachment bytes")
+            .unwrap_err();
+        assert!(error.to_string().contains("simulated partial blob write"));
+        drop(partial_write);
+        let parent = channel(&runtime).join("blobs/att/row");
+        assert!(!parent.join("0_payload.txt").exists());
+        let abandoned = parent.join(".blob-abandoned.tmp");
+        fs::write(&abandoned, b"incomplete staging file").unwrap();
+        let pin = ledger
+            .pin_blob("row", 0, "payload.txt", b"attachment bytes")
+            .unwrap();
+        assert_eq!(ledger.read_blob(&pin).unwrap(), b"attachment bytes");
+        assert_eq!(fs::read(abandoned).unwrap(), b"incomplete staging file");
+        drop(ledger);
+        assert_eq!(
+            Ledger::open(&runtime, 7).unwrap().read_blob(&pin).unwrap(),
+            b"attachment bytes"
+        );
+    }
+
+    #[test]
+    fn incomplete_final_blob_is_rejected_without_overwrite() {
+        let root = sandbox();
+        let runtime = root.path().join("runtime");
+        let ledger = Ledger::open(&runtime, 7).unwrap();
+        let path = channel(&runtime).join("blobs/att/row/0_payload.txt");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"attach").unwrap();
+        let error = ledger
+            .pin_blob("row", 0, "payload.txt", b"attachment bytes")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("blob checksum mismatch"));
+        assert_eq!(fs::read(path).unwrap(), b"attach");
     }
 
     fn blob_case(cut: Option<usize>) -> Vec<String> {

@@ -43,36 +43,39 @@ impl Ledger {
             .join(row_id)
             .join(format!("{index}_{filename}"));
         let path = self.dir.join(&relative);
-        durable::ensure_dir(
-            path.parent()
-                .ok_or_else(|| invalid("missing blob parent"))?,
-        )?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("missing blob parent"))?;
+        durable::ensure_dir(parent)?;
         let pin = BlobPin {
             local_path: relative,
             sha256: hex::encode(Sha256::digest(bytes)),
             pinned: true,
         };
-        match durable::open_file(&path, true) {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                durable::step("write", &path)?;
-                durable::sync_file(&file, &path)?;
-                durable::sync_dir(
-                    path.parent()
-                        .ok_or_else(|| invalid("missing blob parent"))?,
-                )?;
+        let tmp = parent.join(format!(".blob-{}.tmp", uuid::Uuid::new_v4()));
+        let mut file = durable::open_file(&tmp, true)?;
+        let result = (|| -> io::Result<()> {
+            #[cfg(test)]
+            super::durability_tests::partial_blob_write(&mut file, bytes)?;
+            file.write_all(bytes)?;
+            durable::step("write", &tmp)?;
+            durable::sync_file(&file, &tmp)?;
+            match fs::hard_link(&tmp, &path) {
+                Ok(()) => durable::step("link", &path)?,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    self.read_blob(&pin)?;
+                    let file = durable::open_file(&path, false)?;
+                    durable::sync_file(&file, &path)?;
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                self.read_blob(&pin)?;
-                let file = durable::open_file(&path, false)?;
-                durable::sync_file(&file, &path)?;
-                durable::sync_dir(
-                    path.parent()
-                        .ok_or_else(|| invalid("missing blob parent"))?,
-                )?;
-            }
-            Err(error) => return Err(error),
-        }
+            Ok(())
+        })();
+        // Own staging files are removed best-effort; pin retries ignore crash leftovers.
+        // Leftovers are never adopted by pin_blob and remain for later garbage collection.
+        let _ = fs::remove_file(&tmp);
+        result?;
+        durable::sync_dir(parent)?;
         Ok(pin)
     }
 

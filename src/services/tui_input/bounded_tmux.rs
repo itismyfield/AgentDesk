@@ -2,6 +2,7 @@ use std::io;
 use std::process::{Command, Output};
 use std::time::Duration;
 
+/// `killed`/`reaped` describe cleanup only; the command may already have had an effect.
 #[derive(Debug, thiserror::Error)]
 pub enum BoundedTmuxError {
     #[error("could not spawn tmux: {0}")]
@@ -17,6 +18,13 @@ pub enum BoundedTmuxError {
     },
     #[error("bounded tmux requires macOS or Linux")]
     UnsupportedPlatform,
+}
+
+impl BoundedTmuxError {
+    /// Whether this failure can follow execution with an externally visible effect.
+    pub fn may_have_effect(&self) -> bool {
+        matches!(self, Self::Timeout { .. } | Self::Io { .. })
+    }
 }
 
 /// Run a caller-selected tmux command for at most five seconds, plus two to reap.

@@ -78,6 +78,7 @@ async fn bounded_tmux_timeout_kills_descendants_before_reaping_live_or_exited_le
         let result = run_with_budget(&mut command, Duration::from_millis(75)).await;
         let elapsed = started.elapsed();
         tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(result.as_ref().unwrap_err().may_have_effect());
         assert!(
             matches!(
                 result,
@@ -131,10 +132,13 @@ async fn bounded_tmux_excess_output_fails_with_cleanup_for_both_streams() {
     for redirect in ["", ">&2"] {
         let fixture = Fixture::new();
         let mut command = fixture.command(&format!(
-            "chunk=x; i=0; while [ \"$i\" -lt 13 ]; do chunk=\"$chunk$chunk\"; i=$((i+1)); done; \
+            "printf applied > \"$2\"; \
+             chunk=x; i=0; while [ \"$i\" -lt 13 ]; do chunk=\"$chunk$chunk\"; i=$((i+1)); done; \
              i=0; while [ \"$i\" -lt 129 ]; do printf '%s' \"$chunk\"; i=$((i+1)); done {redirect}; sleep 0.3"
         ));
         let result = run_bounded_tmux(&mut command).await;
+        assert_eq!(fs::read(fixture.path("effect")).unwrap(), b"applied");
+        assert!(result.as_ref().unwrap_err().may_have_effect());
         match result {
             Err(BoundedTmuxError::Io {
                 source,
@@ -156,4 +160,23 @@ async fn bounded_tmux_excess_output_fails_with_cleanup_for_both_streams() {
         }
         fixture.assert_reaped();
     }
+}
+
+#[test]
+fn bounded_tmux_effect_uncertainty_is_independent_of_cleanup() {
+    for killed in [false, true] {
+        for reaped in [false, true] {
+            assert!(BoundedTmuxError::Timeout { killed, reaped }.may_have_effect());
+            assert!(
+                BoundedTmuxError::Io {
+                    source: std::io::Error::other("post-spawn failure"),
+                    killed,
+                    reaped,
+                }
+                .may_have_effect()
+            );
+        }
+    }
+    assert!(!BoundedTmuxError::Spawn(std::io::Error::other("spawn failed")).may_have_effect());
+    assert!(!BoundedTmuxError::UnsupportedPlatform.may_have_effect());
 }

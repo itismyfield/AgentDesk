@@ -28,7 +28,7 @@ impl Record {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub generation: u64,
     pub seq: u64,
@@ -137,8 +137,8 @@ impl Ledger {
         if self.wal.metadata()?.len() != valid_len {
             self.wal.set_len(valid_len)?;
             durable::step("truncate", &self.wal_path())?;
-            durable::sync_wal(&self.wal, &self.wal_path())?;
         }
+        durable::sync_wal(&self.wal, &self.wal_path())?;
         self.wal.seek(SeekFrom::End(0))?;
         Ok(())
     }
@@ -169,6 +169,10 @@ impl Ledger {
         };
         record.crc = record.checksum()?;
         let mut bytes = serde_json::to_vec(&record)?;
+        let decoded: Record = serde_json::from_slice(&bytes)?;
+        if decoded != record || decoded.checksum()? != record.crc {
+            return Err(invalid("record JSON does not round-trip through replay"));
+        }
         bytes.push(b'\n');
         self.usable = false;
         self.wal.write_all(&bytes)?;
@@ -199,11 +203,13 @@ impl Ledger {
             crc: 0,
         };
         snapshot.crc = snapshot.checksum()?;
+        let bytes = serde_json::to_vec(&snapshot)?;
+        let decoded: Snapshot = serde_json::from_reader(bytes.as_slice())?;
+        if decoded != snapshot || decoded.checksum()? != snapshot.crc {
+            return Err(invalid("snapshot JSON does not round-trip through open"));
+        }
         self.usable = false;
-        durable::atomic_write(
-            &self.dir.join("snapshot.json"),
-            &serde_json::to_vec(&snapshot)?,
-        )?;
+        durable::atomic_write(&self.dir.join("snapshot.json"), &bytes)?;
         let old = self.wal_path();
         let next = self.dir.join(format!("wal.{}.jsonl", snapshot.generation));
         self.wal = Self::open_wal(&next)?;
