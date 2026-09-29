@@ -692,6 +692,12 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
     }
     assert_eq!(deferred_adoption_count(), 2, "B and C stay separate");
     APPEND_FAULT.with(|fault| fault.set(None));
+    assert_eq!(
+        send("Stop", &c, None),
+        "deferred",
+        "a C hook after recovery still waits behind B"
+    );
+    assert_eq!(deferred_adoption_count(), 2);
 
     retry_deferred_claude_adoptions();
     let binding = runtime_binding_for_tmux_session(tmux).unwrap();
