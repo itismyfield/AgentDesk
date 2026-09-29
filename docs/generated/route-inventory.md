@@ -114,9 +114,9 @@
 | `POST` | `/api/dispatches/{id}/cancel` | `queue_api::cancel_dispatch` | `src/server/routes/queue_api.rs:105` | `src/server/routes/domains/ops.rs:260` |
 | `GET` | `/api/dispatches/{id}/events` | `dispatches::get_dispatch_delivery_events` | `src/server/routes/dispatches/crud.rs:99` | `src/server/routes/domains/ops.rs:101` |
 | `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:23` | `src/server/routes/domains/runtime.rs:150` |
-| `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:64` | `src/server/routes/domains/ops.rs:266` |
-| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:319` | `src/server/routes/domains/ops.rs:268` |
-| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:296` | `src/server/routes/domains/ops.rs:267` |
+| `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:62` | `src/server/routes/domains/ops.rs:266` |
+| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:317` | `src/server/routes/domains/ops.rs:268` |
+| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:294` | `src/server/routes/domains/ops.rs:267` |
 | `POST` | `/api/doctor/stale-mailbox/repair` | `health_api::stale_mailbox_repair_handler` | `src/server/routes/health_api.rs:894` | `src/server/routes/domains/runtime.rs:40` |
 | `GET` | `/api/doctor/startup/latest` | `health_api::startup_doctor_latest_handler` | `src/server/routes/health_api.rs:877` | `src/server/routes/domains/runtime.rs:22` |
 | `DELETE` | `/api/e2e/discord/channels/{channel_id}/messages/{message_id}` | `e2e_control::delete_discord_message` | `src/server/routes/e2e_control.rs:59` | `src/server/routes/domains/ops.rs:284` |
@@ -134,7 +134,7 @@
 | `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:864` | `src/server/routes/domains/integrations.rs:79` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:763` | `src/server/routes/domains/access.rs:15` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:768` | `src/server/routes/domains/runtime.rs:21` |
-| `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:38` | `src/server/routes/domains/ops.rs:265` |
+| `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:36` | `src/server/routes/domains/ops.rs:265` |
 | `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:33` | `src/server/routes/domains/admin.rs:74` |
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:36` | `src/server/routes/domains/runtime.rs:151` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:72` | `src/server/routes/domains/runtime.rs:153` |

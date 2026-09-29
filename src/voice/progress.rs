@@ -324,13 +324,6 @@ pub(crate) fn parse_verbose_progress_command(transcript: &str) -> Option<Verbose
     None
 }
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) fn is_turn_start_event(label: &str) -> bool {
-    label.trim().eq_ignore_ascii_case("agent:start")
-}
-
 pub(crate) fn is_turn_done_event(label: &str) -> bool {
     label.trim().eq_ignore_ascii_case("agent:done")
 }

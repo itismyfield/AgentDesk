@@ -286,11 +286,6 @@ pub fn shared_agent_knowledge_path(root: &Path) -> PathBuf {
     resolve_memory_path(root, &load_memory_backend(root).file.sak_path)
 }
 
-#[allow(dead_code)]
-pub fn shared_agent_memory_root(root: &Path) -> PathBuf {
-    resolve_memory_path(root, &load_memory_backend(root).file.sam_path)
-}
-
 pub fn long_term_memory_root(root: &Path) -> PathBuf {
     resolve_memory_path(root, &load_memory_backend(root).file.ltm_root)
 }

@@ -102,16 +102,6 @@ pub fn finish_agent_start(channel_id: u64) -> Option<u64> {
     Some(ms)
 }
 
-/// Drop a pending [`mark_agent_start`] without recording agent_ms, so a turn that
-/// fails before its answer does not leave a stale instant behind.
-// reason: nothing calls this yet. See #3034.
-#[allow(dead_code)]
-pub fn discard_agent_start(channel_id: u64) {
-    if let Ok(mut map) = agent_start_registry().lock() {
-        map.remove(&channel_id);
-    }
-}
-
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

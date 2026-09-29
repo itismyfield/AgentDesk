@@ -664,17 +664,6 @@ pub async fn applied_migration_checksum_mismatch_details(
     Ok(mismatches)
 }
 
-// reason: public migration-diagnostics wrapper surfaced by maintenance paths,
-// not by every compile target. See #3034.
-#[allow(dead_code)]
-pub async fn applied_migration_checksum_mismatches(pool: &PgPool) -> Result<Vec<i64>, String> {
-    Ok(applied_migration_checksum_mismatch_details(pool)
-        .await?
-        .into_iter()
-        .map(|mismatch| mismatch.version)
-        .collect())
-}
-
 fn checksum_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);

@@ -289,29 +289,6 @@ pub(crate) fn chronological_channel_pairs_from_desc(
     pairs
 }
 
-// reason: public transcript record for the read/fetch route; the pg-side load
-// path that builds it is wired only on selected API paths. See #3034.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct SessionTranscriptRecord {
-    pub id: i64,
-    pub turn_id: String,
-    pub session_key: Option<String>,
-    pub channel_id: Option<String>,
-    pub agent_id: Option<String>,
-    pub provider: Option<String>,
-    pub dispatch_id: Option<String>,
-    pub kanban_card_id: Option<String>,
-    pub dispatch_title: Option<String>,
-    pub card_title: Option<String>,
-    pub github_issue_number: Option<i64>,
-    pub user_message: String,
-    pub assistant_message: String,
-    pub events: Vec<SessionTranscriptEvent>,
-    pub duration_ms: Option<i64>,
-    pub created_at: String,
-}
-
 #[derive(Debug, Clone)]
 struct PreparedSessionTranscript {
     turn_id: String,
@@ -790,22 +767,6 @@ where
     crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| {
         anyhow!("build runtime for postgres transcript query failed: {error}")
     })
-}
-
-// reason: transcript read-side helper that feeds SessionTranscriptRecord; wired
-// only on the selected transcript-fetch path. See #3034.
-#[allow(dead_code)]
-fn parse_events_json(raw: Option<&str>) -> Vec<SessionTranscriptEvent> {
-    raw.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            serde_json::from_str::<Vec<SessionTranscriptEvent>>(trimmed).ok()
-        }
-    })
-    .map(|events| normalize_events(&events))
-    .unwrap_or_default()
 }
 
 fn normalize_events(events: &[SessionTranscriptEvent]) -> Vec<SessionTranscriptEvent> {
