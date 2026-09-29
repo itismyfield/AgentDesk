@@ -1814,33 +1814,6 @@
     {
       "root": "policies",
       "kind": "POLICY",
-      "path": "policies/phase_gate.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:8c5d74ad0f5000b18cf3dbebe1d5d17f5b1b78e655ca8fd308889a4b1470ed69"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/phase_gate.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:c6d2ea68eb1bc43e0c0b6b7eaba1163c2e0b254be52935d8f1a3fcf55a479d58"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/phase_gate.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:c95e55c32b2030596409e0589f94b5348a44340727bab522eafad1159c086f4e"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
       "path": "policies/pipeline.js",
       "api": "agentdesk.db.execute",
       "symbol": "execute",
@@ -2196,24 +2169,6 @@
       "api": "agentdesk.db.execute",
       "symbol": "execute",
       "classification": "STATIC",
-      "fingerprint": "sha256:2481e8b9bf89d9d6159e60e226d23f7cd99342581bd8096ca28bd802b6269f16"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/dispatch-maintenance.js",
-      "api": "agentdesk.db.execute",
-      "symbol": "execute",
-      "classification": "STATIC",
-      "fingerprint": "sha256:6238106b3ba2005dd039ea4e84b7e18461a9e4945a28dc7ea57abd970fc2e5e1"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/dispatch-maintenance.js",
-      "api": "agentdesk.db.execute",
-      "symbol": "execute",
-      "classification": "STATIC",
       "fingerprint": "sha256:88b2fff9127f51986e81fde7ca78cfaf89a3bb44d0cb045ef643e171a46b9a28"
     },
     {
@@ -2233,15 +2188,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:68a398be2e8e115469e040faee12f029f0e3867141737ef38511b1f7029a8a76"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/dispatch-maintenance.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:976bd475e0d60677bff3fa4d2468d9f8ab27a83dc4d9bdd28aa24627eb58fb43"
     },
     {
       "root": "policies",
@@ -10809,15 +10755,6 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:a3125c36145daa9c23f02955c47be6bb927be4a5596304346c4a4e71ab2e8d82"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/postgres.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
       "fingerprint": "sha256:af107bc10fd90299db9ac47bf20febfa8aef490bb45f69f826bc1f69304a5f23"
     },
     {
@@ -10837,15 +10774,6 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:ceae4a7db43b5f85d2e0b312b575d5e9d319e013a37c42981a9eac08ec54c31d"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/postgres.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:db52c9893a13e4e27fed6ac7f6a7e9ac6f03db36d5bb71f64ff58cd6e3f937b6"
     },
     {
       "root": "src",
@@ -10917,7 +10845,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:3eb2d22f1890aa2596379c2e60a6d46be9cbee67d509d0b68c466d6000a13be4"
+      "fingerprint": "sha256:3e77d1a3c180877dd1a9d7499fb0bad5b6051f16fef6b563737cf09a0310c2c0"
     },
     {
       "root": "src",
@@ -12556,42 +12484,6 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e27089c0e5ae82320c0fcebdb4127f304688879f10b8214e457010a4e10e11ca"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/table_metadata.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:89f76701e6ebce34ea16c0bb14ef22c985fc0dcafd5417cc9fc3b415316e66a3"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/table_metadata.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:f0d3392f47d2b1fd5603eaf31e17a7fd093fa8f38304773f5713dc50b039e1da"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/table_metadata.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:ffb32062851adb3d2d3e6d39a077a55d1680336422d1a28b17441adb9a41b28e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/table_metadata.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:ea01ca461110969e34198f48dbfb2ae8bde7ec214195e3f74112735bec1d1454"
     },
     {
       "root": "src",
@@ -17920,6 +17812,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:f92d4ae8d7b2e1e5c1ac173b42a846cf4cab21940572acc759c778bbddfa0985"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/pipeline_stage_save_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b53e8ca3b78596fbe1bc5f444287c526712fa655dbb399576f89b00f5057e3a4"
     },
     {
       "root": "src",
@@ -30960,15 +30861,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:64bfdfbffb986b1a38402274fde03e70b1945319402f9d0f709137b5f68d0759"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/pipeline_routes.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:75cb4bd413b67d3951b052863388b4462bab35041b4e74a76eb71e91045d334c"
     },
     {
@@ -31104,7 +30996,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:165978026dde5875d13daa1484b8b658c6a027af195abc3823dc07b3ac22bf61"
+      "fingerprint": "sha256:20595f7401b6a472734c42125ee185f1690474ce84a24907362815e8fd87465b"
     },
     {
       "root": "src",
@@ -31113,7 +31005,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:20595f7401b6a472734c42125ee185f1690474ce84a24907362815e8fd87465b"
+      "fingerprint": "sha256:350512053017e9c872cb5334dc2b3422c2010d342a9c53cd95a3a5bbf9fb8ff4"
     },
     {
       "root": "src",

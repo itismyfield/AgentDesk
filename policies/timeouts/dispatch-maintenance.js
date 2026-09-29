@@ -24,13 +24,6 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 
-  timeouts._section_F = function() {
-      // ─── [F] 디스패치 큐 타임아웃 (100분) ──────────────────
-      agentdesk.db.execute(
-        "DELETE FROM dispatch_queue WHERE queued_at < datetime('now', '-100 minutes')"
-      );
-    };
-
   timeouts._section_G = function() {
       // ─── [G] 스테일 디스패치 정리 (24시간) ──────────────────
       var gCfg = agentdesk.pipeline.getConfig();
@@ -54,25 +47,6 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
           }
         }
         agentdesk.log.warn("[timeout] Dispatch " + staleDispatches[sd].id + " stale 24h → failed");
-      }
-    };
-
-  timeouts._section_H = function() {
-      // ─── [H] Stale dispatched 큐 엔트리 진행 ───────────────
-      var hCfg = agentdesk.pipeline.getConfig();
-      var hInitial = agentdesk.pipeline.kickoffState(hCfg);
-      var hInProgress = agentdesk.pipeline.nextGatedTarget(hInitial, hCfg);
-      var staleQueueEntries = agentdesk.db.query(
-        "SELECT dq.id FROM dispatch_queue dq " +
-        "JOIN kanban_cards kc ON kc.id = dq.kanban_card_id " +
-        "WHERE dq.status = 'dispatched' AND kc.status NOT IN (?, ?)",
-        [hInitial, hInProgress]
-      );
-      for (var se = 0; se < staleQueueEntries.length; se++) {
-        agentdesk.db.execute(
-          "DELETE FROM dispatch_queue WHERE id = ?",
-          [staleQueueEntries[se].id]
-        );
       }
     };
 

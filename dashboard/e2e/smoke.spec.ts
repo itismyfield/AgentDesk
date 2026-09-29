@@ -886,8 +886,6 @@ const MOCK_SETTINGS_FSM_PIPELINE = {
   phase_gate: {
     dispatch_to: "project-agentdesk",
     dispatch_type: "review",
-    pass_verdict: "approved",
-    checks: ["artifact_attached"],
   },
 };
 
