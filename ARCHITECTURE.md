@@ -546,6 +546,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   └── queue_retention.rs
 │   │   ├── hook_server/
+│   │   │   ├── adoption_retry.rs
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
@@ -1944,7 +1945,10 @@ src/
 │   │   ├── shadow_host.rs
 │   │   └── topology.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_events/
+│   │   │   └── lane_tests.rs
 │   │   ├── binding_context.rs
+│   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
