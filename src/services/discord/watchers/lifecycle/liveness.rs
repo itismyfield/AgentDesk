@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::session_host::legacy_collapse::tmux_live_pane_bool;
 
 pub(crate) fn evaluate_liveness_probe(
     marker_present: bool,
@@ -19,7 +20,7 @@ pub(crate) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({
             let name = tmux_session_name.to_string();
-            move || tmux_session_has_live_pane(&name)
+            move || tmux_live_pane_bool(&name)
         }),
     )
     .await
