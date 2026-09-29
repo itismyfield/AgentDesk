@@ -4,6 +4,7 @@ use crate::services::provider::cancel_token_cleanup::executor::{
     CleanupRequest, TmuxCleanupIntent,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::session_host::{HostKind, HostSessionRef, host_for};
 use std::time::Duration;
 
 // #3479: behavior-preserving decomposition of this giant module. The pure
@@ -553,7 +554,10 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     let provider_for_probe = provider.clone();
     let session_for_probe = tmux_session_name.clone();
     let probe = tokio::task::spawn_blocking(move || {
-        let pane_pid = crate::services::platform::tmux::pane_pid(&session_for_probe);
+        let pane_pid = host_for(HostKind::Tmux)
+            .execution_pid(HostSessionRef::tmux(&session_for_probe))
+            .ok()
+            .flatten();
         let session_alive = pane_pid.is_some();
         let ready_for_input =
             tmux_ready_for_input_without_tui_pane(&session_for_probe, &provider_for_probe);
