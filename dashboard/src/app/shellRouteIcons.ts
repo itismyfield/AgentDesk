@@ -1,6 +1,5 @@
 import {
   Bell,
-  Building2,
   CalendarClock,
   GitBranch,
   FolderKanban,
@@ -21,8 +20,6 @@ export function iconForRoute(routeId: AppRouteId) {
       return Mic;
     case "home":
       return Home;
-    case "office":
-      return Building2;
     case "agents":
       return Users;
     case "kanban":

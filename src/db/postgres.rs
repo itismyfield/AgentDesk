@@ -961,26 +961,6 @@ async fn move_legacy_agent_references_pg(
     }
 
     sqlx::query(
-        "INSERT INTO office_agents (office_id, agent_id, department_id, joined_at)
-         SELECT office_id, $1, department_id, joined_at
-           FROM office_agents
-          WHERE agent_id = $2
-         ON CONFLICT (office_id, agent_id) DO NOTHING",
-    )
-    .bind(canonical_id)
-    .bind(legacy_id)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        format!("upsert postgres office_agents {legacy_id} -> {canonical_id}: {error}")
-    })?;
-    sqlx::query("DELETE FROM office_agents WHERE agent_id = $1")
-        .bind(legacy_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("delete postgres office_agents {legacy_id}: {error}"))?;
-
-    sqlx::query(
         "INSERT INTO auto_queue_slots (
             agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at
          )
@@ -3273,16 +3253,6 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert session");
-        sqlx::query(
-            "INSERT INTO office_agents (office_id, agent_id, department_id) VALUES ($1, $2, $3)",
-        )
-        .bind("office-1")
-        .bind("openclaw-maker")
-        .bind("engineering")
-        .execute(&pool)
-        .await
-        .expect("insert office agent");
-
         startup_reseed(&pool, &config)
             .await
             .expect("startup reseed postgres");
@@ -3337,14 +3307,6 @@ mod tests {
                 .await
                 .expect("load session agent");
         assert_eq!(session_agent.as_deref(), Some("maker"));
-
-        let office_agent: String =
-            sqlx::query_scalar("SELECT agent_id FROM office_agents WHERE office_id = $1")
-                .bind("office-1")
-                .fetch_one(&pool)
-                .await
-                .expect("load office agent");
-        assert_eq!(office_agent, "maker");
 
         close_test_pool(pool, "db::postgres legacy reseed test pool")
             .await

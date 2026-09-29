@@ -14,12 +14,6 @@ use crate::db::session_status::is_active_status;
 use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Deserialize)]
-pub struct StatsQuery {
-    #[serde(rename = "officeId")]
-    pub office_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct MementoStatsQuery {
     pub hours: Option<usize>,
 }
@@ -38,36 +32,8 @@ struct AgentStatsRow {
     tokens: i64,
 }
 
-async fn load_agent_stats_pg(
-    pool: &PgPool,
-    office_id: Option<&str>,
-) -> Result<Vec<AgentStatsRow>, String> {
-    let sql_with_office = "
-        SELECT a.id,
-               a.name,
-               a.name_ko,
-               a.avatar_emoji,
-               COALESCE(a.xp, 0)::BIGINT AS xp,
-               a.department,
-               a.status,
-               a.sprite_number::BIGINT AS sprite_number,
-               (
-                   SELECT COUNT(DISTINCT kc.id)::BIGINT
-                     FROM kanban_cards kc
-                    WHERE kc.assigned_agent_id = a.id
-                      AND kc.status = 'done'
-               ) AS tasks_done,
-               (
-                   SELECT COALESCE(SUM(s.tokens), 0)::BIGINT
-                     FROM sessions s
-                    WHERE s.agent_id = a.id
-               ) AS total_tokens
-          FROM agents a
-          JOIN office_agents oa
-            ON oa.agent_id = a.id
-         WHERE oa.office_id = $1
-         ORDER BY a.id";
-    let sql_all = "
+async fn load_agent_stats_pg(pool: &PgPool) -> Result<Vec<AgentStatsRow>, String> {
+    let sql = "
         SELECT a.id,
                a.name,
                a.name_ko,
@@ -90,16 +56,10 @@ async fn load_agent_stats_pg(
           FROM agents a
          ORDER BY a.id";
 
-    let rows = match office_id {
-        Some(office_id) => {
-            sqlx::query(sql_with_office)
-                .bind(office_id)
-                .fetch_all(pool)
-                .await
-        }
-        None => sqlx::query(sql_all).fetch_all(pool).await,
-    }
-    .map_err(|error| format!("query postgres stats agents: {error}"))?;
+    let rows = sqlx::query(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("query postgres stats agents: {error}"))?;
 
     Ok(rows
         .into_iter()
@@ -137,7 +97,6 @@ async fn load_agent_stats_pg(
 
 async fn load_working_session_rows_pg(
     pool: &PgPool,
-    office_id: Option<&str>,
 ) -> Result<
     Vec<(
         Option<String>,
@@ -148,19 +107,7 @@ async fn load_working_session_rows_pg(
     )>,
     String,
 > {
-    let sql_with_office = "
-        SELECT s.session_key,
-               s.agent_id,
-               s.status,
-               s.active_dispatch_id,
-               TO_CHAR(s.last_heartbeat AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_heartbeat
-          FROM sessions s
-          JOIN office_agents oa
-            ON oa.agent_id = s.agent_id
-         WHERE oa.office_id = $1
-           AND s.agent_id IS NOT NULL
-           AND s.status != 'disconnected'";
-    let sql_all = "
+    let sql = "
         SELECT session_key,
                agent_id,
                status,
@@ -170,16 +117,10 @@ async fn load_working_session_rows_pg(
          WHERE agent_id IS NOT NULL
            AND status != 'disconnected'";
 
-    let rows = match office_id {
-        Some(office_id) => {
-            sqlx::query(sql_with_office)
-                .bind(office_id)
-                .fetch_all(pool)
-                .await
-        }
-        None => sqlx::query(sql_all).fetch_all(pool).await,
-    }
-    .map_err(|error| format!("query postgres stats sessions: {error}"))?;
+    let rows = sqlx::query(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("query postgres stats sessions: {error}"))?;
 
     Ok(rows
         .into_iter()
@@ -203,7 +144,6 @@ async fn load_working_session_rows_pg(
 
 async fn load_departments_pg(
     pool: &PgPool,
-    office_id: Option<&str>,
     agent_rows: &[AgentStatsRow],
     working_session_agents: &HashSet<String>,
 ) -> Result<Vec<serde_json::Value>, String> {
@@ -222,31 +162,15 @@ async fn load_departments_pg(
         }
     }
 
-    let sql_with_office = "
-        SELECT id, name, name_ko, icon, color
-          FROM departments
-         WHERE id IN (
-               SELECT DISTINCT department_id
-                 FROM office_agents
-                WHERE office_id = $1
-                  AND department_id IS NOT NULL
-         )
-         ORDER BY sort_order, id";
-    let sql_all = "
+    let sql = "
         SELECT id, name, name_ko, icon, color
           FROM departments
          ORDER BY sort_order, id";
 
-    let rows = match office_id {
-        Some(office_id) => {
-            sqlx::query(sql_with_office)
-                .bind(office_id)
-                .fetch_all(pool)
-                .await
-        }
-        None => sqlx::query(sql_all).fetch_all(pool).await,
-    }
-    .map_err(|error| format!("query postgres stats departments: {error}"))?;
+    let rows = sqlx::query(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("query postgres stats departments: {error}"))?;
 
     Ok(rows
         .into_iter()
@@ -418,9 +342,9 @@ async fn load_github_closed_today_pg(pool: &PgPool) -> Result<i64, String> {
     .map_err(|error| format!("query postgres github_closed_today: {error}"))
 }
 
-async fn get_stats_pg(pool: &PgPool, office_id: Option<&str>) -> Result<serde_json::Value, String> {
-    let agent_rows = load_agent_stats_pg(pool, office_id).await?;
-    let session_rows = load_working_session_rows_pg(pool, office_id).await?;
+async fn get_stats_pg(pool: &PgPool) -> Result<serde_json::Value, String> {
+    let agent_rows = load_agent_stats_pg(pool).await?;
+    let session_rows = load_working_session_rows_pg(pool).await?;
 
     let mut resolver = SessionActivityResolver::new();
     let mut working_session_agents: HashSet<String> = HashSet::new();
@@ -476,8 +400,7 @@ async fn get_stats_pg(pool: &PgPool, office_id: Option<&str>) -> Result<serde_js
         })
         .collect::<Vec<_>>();
 
-    let departments =
-        load_departments_pg(pool, office_id, &agent_rows, &working_session_agents).await?;
+    let departments = load_departments_pg(pool, &agent_rows, &working_session_agents).await?;
     let kanban = load_kanban_stats_pg(pool).await?;
     let github_closed_today = load_github_closed_today_pg(pool).await?;
 
@@ -500,7 +423,6 @@ async fn get_stats_pg(pool: &PgPool, office_id: Option<&str>) -> Result<serde_js
 /// GET /api/stats
 pub async fn get_stats(
     State(state): State<AppState>,
-    Query(params): Query<StatsQuery>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let pool = state.pg_pool_ref().ok_or_else(|| {
         AppError::new(
@@ -509,7 +431,7 @@ pub async fn get_stats(
             "postgres pool unavailable",
         )
     })?;
-    let body = get_stats_pg(pool, params.office_id.as_deref())
+    let body = get_stats_pg(pool)
         .await
         .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
     Ok((StatusCode::OK, Json(body)))

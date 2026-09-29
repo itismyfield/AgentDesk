@@ -3,7 +3,6 @@ export type AppSectionId = "workspace" | "extensions" | "me";
 export type AppRouteId =
   | "voice"
   | "home"
-  | "office"
   | "agents"
   | "kanban"
   | "campaigns"
@@ -25,7 +24,6 @@ export interface AppRouteEntry {
   descriptionEn: string;
   paletteIcon: string;
   shortcutKey: string;
-  showOfficeSelector?: boolean;
 }
 
 export interface AppRouteSection {
@@ -63,18 +61,6 @@ export const APP_ROUTES: AppRouteEntry[] = [
     descriptionEn: "See today's overview and quick entry points.",
     paletteIcon: "🏠",
     shortcutKey: "1",
-  },
-  {
-    id: "office",
-    path: "/office",
-    section: "workspace",
-    labelKo: "오피스",
-    labelEn: "Office",
-    descriptionKo: "실시간 오피스 씬과 배치를 확인합니다.",
-    descriptionEn: "Inspect the live office scene and assignments.",
-    paletteIcon: "🏢",
-    shortcutKey: "2",
-    showOfficeSelector: true,
   },
   {
     id: "stats",
@@ -143,7 +129,6 @@ export const APP_ROUTES: AppRouteEntry[] = [
     descriptionEn: "Manage agents, departments, and dispatched sessions.",
     paletteIcon: "👥",
     shortcutKey: "6",
-    showOfficeSelector: true,
   },
   {
     id: "meetings",

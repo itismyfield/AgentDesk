@@ -6,7 +6,7 @@ import {
   transformRLProviders,
 } from "./MiniRateLimitBarModel";
 
-describe("OfficeInsightPanel mini rate-limit helpers", () => {
+describe("MiniRateLimitBar model helpers", () => {
   it("normalizes provider labels for compact cards", () => {
     expect(normalizeMiniRateLimitProviderLabel("gemini")).toBe("Gemini");
     expect(normalizeMiniRateLimitProviderLabel("qwen")).toBe("Qwen");

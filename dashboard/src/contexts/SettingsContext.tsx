@@ -2,7 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import type { CompanySettings, DashboardStats, WSEvent } from "../types";
 import type { UiLanguage } from "../i18n";
 import * as api from "../api/client";
-import { useOffice } from "./OfficeContext";
 
 // ── Context value ──
 
@@ -20,7 +19,7 @@ interface SettingsContextValue {
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
 
-// ── Provider (must be nested inside OfficeProvider) ──
+// ── Provider ──
 
 interface SettingsProviderProps {
   initialSettings: CompanySettings;
@@ -29,29 +28,17 @@ interface SettingsProviderProps {
 }
 
 export function SettingsProvider({ initialSettings, initialStats, children }: SettingsProviderProps) {
-  const { selectedOfficeId } = useOffice();
-
   const [settings, setSettings] = useState<CompanySettings>(initialSettings);
   const [stats, setStats] = useState<DashboardStats | null>(initialStats);
 
   const [refreshingStats, setRefreshingStats] = useState(false);
   const refreshStats = useCallback(() => {
     setRefreshingStats(true);
-    api.getStats(selectedOfficeId ?? undefined)
+    api.getStats()
       .then(setStats)
       .catch(() => {})
       .finally(() => setRefreshingStats(false));
-  }, [selectedOfficeId]);
-
-  // Reload stats when office selection changes (skip mount — bootstrap data is fresh)
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true;
-      return;
-    }
-    refreshStats();
-  }, [refreshStats]);
+  }, []);
 
   // #2050 P2 finding 6 — debounce kanban_card_* refresh.
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

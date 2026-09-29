@@ -393,7 +393,6 @@ src/
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
-│   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_stage_save_tests.rs

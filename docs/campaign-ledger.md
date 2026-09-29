@@ -20,7 +20,7 @@ the durability boundary; no dashboard cache is authoritative.
 ## API
 
 All routes are under `/api` and use the same protected admin middleware as
-`/offices` and `/settings`, including the configured server Bearer token.
+`/departments` and `/settings`, including the configured server Bearer token.
 
 | Method | Route | Result |
 | --- | --- | --- |

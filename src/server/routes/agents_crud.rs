@@ -6,7 +6,7 @@ use agent_read::{list_agents_pg, load_agent_pg};
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -24,12 +24,6 @@ use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverride
 // ── Query / Body structs ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub(super) struct ListAgentsQuery {
-    #[serde(rename = "officeId")]
-    office_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub(super) struct CreateAgentBody {
     id: String,
     name: String,
@@ -41,7 +35,6 @@ pub(super) struct CreateAgentBody {
     discord_channel_alt: Option<String>,
     discord_channel_cc: Option<String>,
     discord_channel_cdx: Option<String>,
-    office_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,12 +381,9 @@ async fn write_prompt_if_changed(
 
 pub(super) async fn list_agents(
     State(state): State<AppState>,
-    Query(params): Query<ListAgentsQuery>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
-        let agents = list_agents_pg(pool, params.office_id.as_deref())
-            .await
-            .unwrap_or_default();
+        let agents = list_agents_pg(pool).await.unwrap_or_default();
         return Ok((StatusCode::OK, Json(json!({ "agents": agents }))));
     }
 
@@ -460,21 +450,6 @@ pub(super) async fn create_agent(
         .await
         {
             return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
-        }
-
-        if let Some(ref office_id) = body.office_id {
-            if let Err(error) = sqlx::query(
-                "INSERT INTO office_agents (office_id, agent_id)
-                 VALUES ($1, $2)
-                 ON CONFLICT (office_id, agent_id) DO NOTHING",
-            )
-            .bind(office_id)
-            .bind(&body.id)
-            .execute(pool)
-            .await
-            {
-                return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
-            }
         }
 
         return match load_agent_pg(pool, &body.id).await {
@@ -933,10 +908,6 @@ pub(super) async fn delete_agent(
                 return Err(AppError::not_found("agent not found"));
             }
             Ok(_) => {
-                let _ = sqlx::query("DELETE FROM office_agents WHERE agent_id = $1")
-                    .bind(&id)
-                    .execute(pool)
-                    .await;
                 // #2050 P1 finding 1 — broadcast agent_deleted to other dashboards.
                 crate::server::ws::emit_event(
                     &state.broadcast_tx,
