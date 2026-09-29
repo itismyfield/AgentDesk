@@ -33,16 +33,6 @@ pub const CANCEL_TOMBSTONE_FALLBACK_TTL_SECS: i64 = 60;
 /// plus this teardown slack belongs to a follow-up turn, not to the cancel.
 pub const CANCEL_TEARDOWN_GRACE_BYTES: i64 = 4 * 1024;
 
-// reason: read-path DTO with no consumer yet. See #3034.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CancelTombstone {
-    pub channel_id: i64,
-    pub tmux_session_name: Option<String>,
-    pub stop_output_offset: Option<i64>,
-    pub reason: String,
-}
-
 /// Insert a tombstone. `client_id` is the in-memory entry's UUID, so an in-process
 /// hit can later delete exactly this row.
 pub async fn insert_cancel_tombstone(

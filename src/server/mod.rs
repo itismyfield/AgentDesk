@@ -34,7 +34,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row};
 
 use crate::db::postgres::AdvisoryLockLease;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::config::Config;
@@ -56,13 +56,6 @@ const CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT: Duration = Duration::from_secs(8
 /// Set after the first WARN about absent Gemini OAuth credentials, so an unconfigured Gemini
 /// logs later misses at DEBUG instead of every 2 minutes. Transient errors still WARN.
 static GEMINI_CREDS_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
-
-/// Count of policy tick hooks that hit `POLICY_TICK_HOOK_TIMEOUT`.
-static POLICY_TICK_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Count of tick hooks that finished only after their call had already timed out, i.e. the
-/// tick actor held work well past the deadline.
-static POLICY_TICK_POST_TIMEOUT_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
 
 fn claude_rate_limit_refresh_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -708,7 +701,6 @@ async fn fire_tick_hook_by_name_with_timeout(
         let result = engine_for_task.try_fire_hook_by_name(&hook_name_owned, serde_json::json!({}));
         let elapsed = start.elapsed();
         if timed_out_for_task.load(Ordering::Acquire) {
-            POLICY_TICK_POST_TIMEOUT_COMPLETIONS.fetch_add(1, Ordering::AcqRel);
             tracing::warn!(
                 engine_label = engine_for_task.actor_label(),
                 queue_depth = engine_for_task.actor_queue_depth(),
@@ -742,7 +734,6 @@ async fn fire_tick_hook_by_name_with_timeout(
         },
         _ = tokio::time::sleep(hook_timeout) => {
             timed_out.store(true, Ordering::Release);
-            POLICY_TICK_TIMEOUT_COUNT.fetch_add(1, Ordering::AcqRel);
             tracing::warn!(
                 engine_label = engine.actor_label(),
                 queue_depth = engine.actor_queue_depth(),

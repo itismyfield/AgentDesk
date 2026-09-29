@@ -9,7 +9,6 @@
 
 use serde_json::{Value as JsonValue, json};
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
 
 // ── Transcript helpers ──────────────────────────────────────────────────────
 
@@ -615,7 +614,3 @@ pub async fn persist_meeting_query_hashes_pg(
     }
     Ok(())
 }
-
-// reason: HashMap used by callers that need to batch-look up issue URL/discarded state.
-#[allow(dead_code)]
-pub(crate) type IssueStateMap = HashMap<String, String>;

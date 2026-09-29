@@ -27,10 +27,6 @@ pub(crate) fn internal_error(error: impl Display) -> ApiJsonResponse {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, error)
 }
 
-pub(crate) fn not_found(message: &'static str) -> ApiJsonResponse {
-    error_response(StatusCode::NOT_FOUND, message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

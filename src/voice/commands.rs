@@ -2,21 +2,15 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::config::{AgentDef, Config};
 use crate::voice::barge_in::{BargeInSensitivity, parse_sensitivity_command};
-use crate::voice::config::DEFAULT_ACTIVE_AGENT_TTL_SECS;
 use crate::voice::progress;
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) const VOICE_ACTIVE_AGENT_CONTEXT_TTL: Duration =
-    Duration::from_secs(DEFAULT_ACTIVE_AGENT_TTL_SECS);
 pub(crate) const DEFAULT_WAKE_WORD: &str = "agentdesk";
 
 static LANGUAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -544,6 +538,7 @@ fn trim_spoken_address_separator(value: &str) -> &str {
 mod tests {
     use super::*;
     use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef};
+    use std::time::Duration;
 
     fn agent(id: &str, name: &str, name_ko: Option<&str>, channel_id: &str) -> AgentDef {
         AgentDef {
