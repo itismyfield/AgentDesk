@@ -2749,15 +2749,7 @@ The documentation example ends with:
 
     #[test]
     fn current_codex_idle_pane_uses_dim_evidence_to_override_plain_draft() {
-        let pane = concat!(
-            "╭─────────────────────────────────────────╮\n",
-            "│ >_ OpenAI Codex (v0.144.4)              │\n",
-            "╰─────────────────────────────────────────╯\n",
-            "\n",
-            "\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n",
-            "\n",
-            "  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left",
-        );
+        let pane = include_str!("../../../tests/fixtures/tui_input/codex-idle-dim.ansi");
         let plain = strip_ansi_escape_sequences(pane);
         let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
 
@@ -2859,16 +2851,8 @@ The documentation example ends with:
 
     #[test]
     fn canonical_ansi_snapshot_draft_and_busy_state_block_reuse() {
-        let draft = "\
-› Use /skills to list available skills\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
-        let busy = "\
-• Working (0s • esc to interrupt)\n\
-\n\
-\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+        let draft = include_str!("../../../tests/fixtures/tui_input/codex-draft.ansi");
+        let busy = include_str!("../../../tests/fixtures/tui_input/codex-busy-dim.ansi");
 
         let (draft_marker, draft_detected, _) = prompt_readiness_from_ansi_pane(draft);
         let (busy_marker, busy_detected, _) = prompt_readiness_from_ansi_pane(busy);

@@ -1,0 +1,50 @@
+{
+  "schema": "agentdesk-tui-input-fixtures/v1",
+  "redaction": "Body replaced with <redacted>; existing token bytes retained; identifiers consistently replaced; cwd and branch replaced. Static-schema token and values are synthetic.",
+  "limitations": [
+    "No live CLI, tmux, filesystem config, or trust state was changed.",
+    "Claude 2.1.284 records describe a statically inspected queue logger and are not captured events.",
+    "Codex pre-spawn workspace trust rejection is not implemented or proven by these fixtures.",
+    "Provider witness parsing and input admission are later slices."
+  ],
+  "provider_files": [
+    {
+      "file": "claude-2.1.281.jsonl",
+      "provider": "claude",
+      "version": "2.1.281",
+      "provenance": "captured-redacted",
+      "source": "i6325-design-v3-I-r6.md TX:115,116,119,321",
+      "records": 4
+    },
+    {
+      "file": "claude-2.1.283.jsonl",
+      "provider": "claude",
+      "version": "2.1.283",
+      "provenance": "captured-excerpt-redacted",
+      "source": "i6325-spike-CE.md:355,361; original transcript unavailable at capture time",
+      "records": 2
+    },
+    {
+      "file": "claude-2.1.284-static.jsonl",
+      "provider": "claude",
+      "version": "2.1.284",
+      "provenance": "synthetic-static-schema",
+      "source": "i6325-design-v3-I-r6.md BIN:185010630,185015809,185017450; binary queue logger at 185005775 and dequeue at 185014079 read directly; values synthetic, not live observations",
+      "records": 4
+    },
+    {
+      "file": "codex-0.157.1.jsonl",
+      "provider": "codex",
+      "version": "0.157.1",
+      "provenance": "captured-redacted",
+      "source": "i6325-design-v3-I-r6.md RX:209",
+      "records": 1
+    }
+  ],
+  "pane_files": [
+    "codex-idle-dim.ansi",
+    "codex-busy-dim.ansi",
+    "codex-draft.ansi"
+  ],
+  "pane_source": "src/services/codex_tui/input.rs existing current_codex_idle_pane_uses_dim_evidence_to_override_plain_draft and canonical_ansi_snapshot_draft_and_busy_state_block_reuse; workspace display replaced with /fixture/workspace"
+}
