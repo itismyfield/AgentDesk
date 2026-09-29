@@ -424,3 +424,81 @@ async fn an_old_tail_the_full_spool_refuses_still_goes_before_the_new_source() {
     );
     halt(stop, task).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_source_bound_back_waits_for_the_tail_of_the_source_it_replaces() {
+    for retire_first in [false, true] {
+        let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        let (b_path, b) = transcript(&a_path, "b.jsonl", "s2", &row("n1", "b first"));
+        bindings.commit(rotate(2, &a, &b, BindingCause::Clear));
+        polls(if retire_first { 15 } else { 3 }).await;
+        assert_eq!(retired(&harness, &a), retire_first);
+        append(&b_path, &row("n2", "b tail"));
+        append(&a_path, &row("m1", "a resumed"));
+        bindings.commit(rotate(3, &b, &a, BindingCause::Resume));
+        polls(3).await;
+        let posts = harness.port.posts();
+        assert_eq!(
+            posts,
+            ["b first", "b tail", "a resumed"],
+            "retired={retire_first}"
+        );
+        assert_eq!(harness.alarms.taken(), [], "retired={retire_first}");
+        halt(stop, task).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_channel_intact() {
+    let message = |id: &str, text: &str| {
+        codex_line(serde_json::json!({"type": "response_item",
+            "timestamp": Utc::now().to_rfc3339(), "payload": {
+            "type": "message", "role": "assistant", "id": id,
+            "content": [{"type": "output_text", "text": text}]}}))
+    };
+    let announced = codex_line(serde_json::json!({"type": "event_msg", "payload": {
+        "type": "item_completed", "item": {"type": "AgentMessage", "id": "msg_k"}}}));
+    let (harness, a_path, a) = switched_over(b"");
+    let bindings = Arc::new(FakeBindings::new());
+    let target = BindingTarget::Source(a.clone());
+    bindings.commit(bound(1, None, target, BindingCause::Startup, None));
+    let settled = "x".repeat(1800);
+    append(
+        &a_path,
+        &[message("msg_s", &settled), announced.clone()].concat(),
+    );
+    let mut store = harness.channel();
+    let mut capture = SourceCapture::open(a.clone(), 0).unwrap();
+    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+        panic!("capture failed");
+    };
+    store.append_spool(&batch, &capture.prefix_hash()).unwrap();
+    let spooled = capture.captured_through();
+    store.set_limits_for_test(1, store.spool_bytes() + 1024);
+    let tail = "y".repeat(1500);
+    append(&a_path, &message("msg_t", &tail));
+    harness.gate.acquired();
+    let writer = writer_over(&harness, store);
+    let (_stop, task) = spawn_with(writer, ShadowProvider::Codex, bindings.clone());
+    polls(2).await;
+    let body = message("msg_k", "the answer");
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &[announced, body].concat());
+    bindings.commit(rotate(2, &a, &b, BindingCause::Resume));
+    polls(2).await;
+    assert!(task.is_finished(), "a stalled rotation stops the channel");
+    assert_eq!(harness.port.posts(), [settled.as_str()]);
+    let stalled = WriterAlarm::RotationStalled { source: a.clone() };
+    assert_eq!(harness.alarms.taken(), [WriterAlarm::SpoolFull, stalled]);
+    let store = harness.channel();
+    assert_eq!(store.cursor(&a).unwrap().captured_through, spooled);
+    assert_eq!(store.cursor(&b).unwrap().captured_through, 0);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Codex, bindings);
+    polls(3).await;
+    let posts = harness.port.posts();
+    assert_eq!(posts, [settled.as_str(), tail.as_str(), "the answer"]);
+    halt(stop, task).await;
+}
+
+#[path = "switch_tests.rs"]
+mod switch_tests;

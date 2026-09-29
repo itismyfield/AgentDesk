@@ -1946,6 +1946,7 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── switch.rs
+│   │   │   ├── switch_tests.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
 │   │   ├── ownership.rs
