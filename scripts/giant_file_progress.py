@@ -552,8 +552,56 @@ def ledger_repair_errors(base: dict[str, object], candidate: dict[str, object],
             errors.append(f"E8: new giant pin differs from measured production LoC: {path}")
     return errors
 
+def registered_deletions(base: dict[str, object], facts: dict[str, object]) -> set[str]:
+    return {path for path in base["registrations"]
+            if facts.get("statuses", {}).get(path) == "D"}
+
+def without_baseline_path(text: str, path: str) -> str:
+    lines = text.splitlines(keepends=True)
+    start = next((index for index, line in enumerate(lines)
+                  if line.strip() == "grandfathered_baseline_paths = ["), len(lines))
+    for index in range(start + 1, len(lines)):
+        if lines[index].strip() == "]":
+            break
+        if lines[index].strip() == f'"{path}",':
+            return "".join(lines[:index] + lines[index + 1:])
+    return text
+
+def giant_deletion_errors(base: dict[str, object], candidate: dict[str, object],
+                          facts: dict[str, object], deleted: set[str]) -> list[str]:
+    errors: list[str] = []
+    registry, candidate_registry = facts["deletion_ledgers"][REGISTRY]
+    transition, candidate_transition = facts["deletion_ledgers"][TRANSITION]
+    expected: str | None = registry
+    for path in sorted(deleted):
+        expected = without_entry(expected, path)
+        if expected is None:
+            errors.append(f"registry entry not found for deleted giant: {path}")
+            break
+        expected = without_baseline_path(expected, path)
+    if expected is not None and expected != candidate_registry:
+        errors.append("registry is not the exact deleted-entry removal")
+    if "".join(line for line in transition.splitlines(keepends=True)
+               if line.strip() not in deleted) != candidate_transition:
+        errors.append("transition list is not the exact deleted-path removal")
+    if not facts["pin_equal"]:
+        errors.append("giant pin blob changed")
+    if set(candidate["overdue"]) != set(base["overdue"]) - deleted:
+        errors.append("overdue debt is not base debt minus deleted giants")
+    base_meta, candidate_meta = base["registrations"], candidate["registrations"]
+    for path in sorted(set(base_meta) - deleted):
+        if candidate_meta.get(path) != base_meta[path]:
+            errors.append(f"retained metadata changed: {path}")
+    errors.extend(f"unexpected registration in deletion PR: {path}"
+                  for path in sorted(set(candidate_meta) - (set(base_meta) - deleted)))
+    errors.extend(new_or_growing_errors(base, candidate))
+    return errors
+
 def pr_evaluation(base: dict[str, object], candidate: dict[str, object],
                   facts: dict[str, object]) -> tuple[str, list[str]]:
+    deleted = registered_deletions(base, facts)
+    if deleted:
+        return "pr_giant_deletion", giant_deletion_errors(base, candidate, facts, deleted)
     moved = ledger_repair_moves(base, candidate, facts)
     if moved is not None:
         return "pr_ledger_repair", ledger_repair_errors(base, candidate, facts, moved)
@@ -652,11 +700,21 @@ def main() -> int:
                 for path in sorted(retired):
                     expected = without_entry(expected, path) or ""
                 facts["registry_exact"] = expected == (candidate_root / REGISTRY).read_text(encoding="utf-8")
+                deleted = registered_deletions(base, facts)
+                if deleted:
+                    selector, payload["deleted"] = "pr_giant_deletion", sorted(deleted)
+                    facts["deletion_ledgers"] = {name: tuple(
+                        (root / name).read_text(encoding="utf-8") for root in (base_root, candidate_root))
+                        for name in (REGISTRY, TRANSITION)}
+                    facts["pin_equal"] = oid(f"{base_sha}:{GIANT_PIN}", "") == oid(
+                        f"{candidate_sha}:{GIANT_PIN}", "")
                 selector, errors = pr_evaluation(base, candidate, facts)
                 if errors:
                     raise RuntimeError("; ".join(errors))
                 if selector == "pr_ledger_repair":
                     retired = set()  # Deadline movement does not retire a source entry.
+                elif selector == "pr_giant_deletion":
+                    retired = set()  # A deleted path has no candidate LoC to record.
                 payload.update({"event_base_sha": event_base_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
@@ -670,6 +728,7 @@ def main() -> int:
                     "pr_ordinary_no_regression": "ordinary PR preserves giant-file debt",
                     "pr_strict_progress": "retirement or 200-line partial progress",
                     "pr_ledger_repair": "bounded deadline and monotone ledger repair; production unchanged",
+                    "pr_giant_deletion": "registered giant deleted with exact ledger removal",
                 }[selector]
             elif event == "push" and repository == "itismyfield/AgentDesk":
                 selector = "main_no_regression_record"
