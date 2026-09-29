@@ -51,8 +51,6 @@ function makePipeline(): PipelineConfigFull {
     phase_gate: {
       dispatch_to: "self",
       dispatch_type: "phase-gate",
-      pass_verdict: "phase_gate_passed",
-      checks: ["merge_verified", "issue_closed"],
     },
   };
 }
