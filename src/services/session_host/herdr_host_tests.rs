@@ -297,8 +297,8 @@ fn herdr_execution_pid_is_the_shell_pid_not_a_foreground_pid() {
     ));
 }
 
+// catch_unwind rather than #[should_panic]: the test-lane parser does not read "- should panic" result lines.
 #[test]
-#[should_panic(expected = "fake transport request mismatch")]
 fn herdr_fake_transport_rejects_an_unscripted_request() {
     let herdr = host(vec![(
         HerdrRequest::PaneGet {
@@ -306,7 +306,19 @@ fn herdr_fake_transport_rejects_an_unscripted_request() {
         },
         process_info(PANE, json!(4242)),
     )]);
-    let _ = herdr.execution_pid(pane());
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = herdr.execution_pid(pane());
+    }))
+    .expect_err("an unscripted request must fail the fake transport");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("fake transport request mismatch"),
+        "{message}"
+    );
 }
 
 #[test]
