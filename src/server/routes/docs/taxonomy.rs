@@ -38,11 +38,10 @@ pub(super) fn canonical_category(category: &str) -> &'static str {
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
         "auto-queue" | "campaigns" | "cron" | "queue" => "queue",
         "routines" => "routines",
-        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
+        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats"
         | "provider-cli" | "claude-accounts" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" | "kakao-calendar" => "integrations",
-        "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
-        | "skills" => "admin",
+        "departments" | "memory" | "onboarding" | "policies" | "settings" | "skills" => "admin",
         _ => "ops",
     }
 }
@@ -97,8 +96,8 @@ pub(super) fn category_to_group(category: &str) -> &'static str {
         | "policies"
         | "routines" => "automation",
         // config — settings, onboarding, knowledge, source-of-truth, skills,
-        // offices, departments, memory (#1066 /api/memory dual-mode)
-        "settings" | "onboarding" | "skills" | "offices" | "departments" | "memory" => "config",
+        // departments, memory (#1066 /api/memory dual-mode)
+        "settings" | "onboarding" | "skills" | "departments" | "memory" => "config",
         // observability — analytics, metrics, events, slo, diagnostics,
         // monitoring, stats, health, auth
         "analytics" | "cluster" | "monitoring" | "stats" | "health" | "auth" => "observability",
@@ -170,7 +169,7 @@ pub(super) fn category_description(category: &str) -> &'static str {
         }
         "ops" => "Health, auth, docs, analytics, stats, and monitoring surfaces.",
         "integrations" => "Discord, GitHub, and round-table meeting integration entrypoints.",
-        "admin" => "Onboarding, settings, policies, skills, offices, and departments.",
+        "admin" => "Onboarding, settings, policies, skills, and departments.",
         "api-friction" => {
             "Structured API-friction events, repeated-pattern aggregation, and auto issue creation."
         }
@@ -199,7 +198,6 @@ pub(super) fn category_description(category: &str) -> &'static str {
         }
         "messages" => "Message log read/write APIs.",
         "monitoring" => "Channel monitoring status entries and rendered status updates.",
-        "offices" => "Office CRUD, ordering, and agent membership.",
         "onboarding" => "Initial setup, provider validation, and prompt generation.",
         "pipeline" => "Pipeline stages, config overrides, graphs, and card history.",
         "pm" => "PM decision workflow for force-only pipeline states.",
@@ -216,7 +214,6 @@ pub(super) fn category_description(category: &str) -> &'static str {
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
         "skills" => "Skill catalog and usage ranking.",
         "stats" => "Aggregate system counters.",
-        "v1" => "Versioned dashboard read models and compatibility settings endpoints.",
         _ => "Miscellaneous API endpoints.",
     }
 }

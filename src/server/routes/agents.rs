@@ -11,13 +11,13 @@ use std::path::Path as FsPath;
 use super::AppState;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::server::dto::agents::{
-    AgentDispatchedSessionsResponse, AgentOfficesResponse, AgentSkillsResponse,
-    AgentTimelineResponse, AgentTranscriptsResponse,
+    AgentDispatchedSessionsResponse, AgentSkillsResponse, AgentTimelineResponse,
+    AgentTranscriptsResponse,
 };
 use crate::services::agents::query::{
     AgentQueryLookupError, agent_exists_pg, block_active_card_for_agent_pg, find_diag_session_pg,
-    list_agent_offices_pg_json, list_agent_skills_pg_json, load_agent_dispatched_sessions_pg_json,
-    load_agent_timeline_pg_json, mark_session_disconnected_pg,
+    list_agent_skills_pg_json, load_agent_dispatched_sessions_pg_json, load_agent_timeline_pg_json,
+    mark_session_disconnected_pg,
 };
 use crate::services::agents::turn::{
     AgentTurnLookupError, capture_recent_tmux_output, collect_turn_tool_events, extract_tmux_name,
@@ -629,31 +629,6 @@ fn claude_transcript_turn_state_for_diag(
     )
     .ok()?;
     Some(crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(&path))
-}
-
-/// GET /api/agents/:id/offices
-pub async fn agent_offices(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
-    match agent_exists_pg(pool, &id).await {
-        Ok(true) => {}
-        Ok(false) => return Err(AppError::not_found("agent not found")),
-        Err(e) => {
-            return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database));
-        }
-    }
-
-    list_agent_offices_pg_json(pool, &id)
-        .await
-        .map(|offices| {
-            (
-                StatusCode::OK,
-                Json(json!(AgentOfficesResponse { offices })),
-            )
-        })
-        .map_err(|e| AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
 }
 
 /// GET /api/agents/:id/skills

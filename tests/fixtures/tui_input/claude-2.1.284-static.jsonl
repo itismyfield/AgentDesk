@@ -1,0 +1,4 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-29T00:00:00.000Z","sessionId":"00000000-0000-4000-8000-000000000009","content":"<redacted> [adk:tok=fixture-static]"}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-09-29T00:00:00.000Z","sessionId":"00000000-0000-4000-8000-000000000009","content":"<redacted> [adk:tok=fixture-static]","reason":"cleared_on_cancel"}
+{"type":"queue-operation","operation":"dequeue","timestamp":"2026-09-29T00:00:00.000Z","sessionId":"00000000-0000-4000-8000-000000000009"}
+{"type":"queue-operation","operation":"popAll","timestamp":"2026-09-29T00:00:00.000Z","sessionId":"00000000-0000-4000-8000-000000000009","content":"<redacted> [adk:tok=fixture-static]"}

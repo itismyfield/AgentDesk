@@ -233,69 +233,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "github-dashboard",
             "List issues closed today",
         ),
-        ep("GET", "/api/offices", "offices", "List offices"),
-        ep("POST", "/api/offices", "offices", "Create office").with_example(
-            json!({"body": {"name": "Engineering", "layout": "kanban"}}),
-            json!({"office": {"id": "office-1", "name": "Engineering", "layout": "kanban"}}),
-        ),
-        ep(
-            "PATCH",
-            "/api/offices/reorder",
-            "offices",
-            "Reorder offices",
-        )
-        .with_example(
-            json!({"body": [{"id": "office-1", "sort_order": 1}]}),
-            json!({"ok": true, "updated": 1}),
-        ),
-        ep("PATCH", "/api/offices/{id}", "offices", "Update office").with_example(
-            json!({"path": {"id": "office-1"}, "body": {"name": "Platform", "layout": "matrix"}}),
-            json!({"office": {"id": "office-1", "name": "Platform", "layout": "matrix"}}),
-        ),
-        ep("DELETE", "/api/offices/{id}", "offices", "Delete office").with_example(
-            json!({"path": {"id": "office-1"}}),
-            json!({"ok": true}),
-        ),
-        ep(
-            "POST",
-            "/api/offices/{id}/agents",
-            "offices",
-            "Add agent to office",
-        )
-        .with_example(
-            json!({"path": {"id": "office-1"}, "body": {"agent_id": "project-agentdesk", "department_id": "dept-platform"}}),
-            json!({"ok": true}),
-        ),
-        ep(
-            "POST",
-            "/api/offices/{id}/agents/batch",
-            "offices",
-            "Batch add agents to office",
-        )
-        .with_example(
-            json!({"path": {"id": "office-1"}, "body": {"agent_ids": ["project-agentdesk", "adk-dashboard"]}}),
-            json!({"ok": true}),
-        ),
-        ep(
-            "DELETE",
-            "/api/offices/{id}/agents/{agentId}",
-            "offices",
-            "Remove agent from office",
-        )
-        .with_example(
-            json!({"path": {"id": "office-1", "agentId": "project-agentdesk"}}),
-            json!({"ok": true}),
-        ),
-        ep(
-            "PATCH",
-            "/api/offices/{id}/agents/{agentId}",
-            "offices",
-            "Update office agent",
-        )
-        .with_example(
-            json!({"path": {"id": "office-1", "agentId": "project-agentdesk"}, "body": {"department_id": "dept-platform"}}),
-            json!({"ok": true}),
-        ),
         ep(
             "GET",
             "/api/departments",
@@ -309,8 +246,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Create department",
         )
         .with_example(
-            json!({"body": {"name": "Platform", "office_id": "office-1"}}),
-            json!({"department": {"id": "dept-platform", "name": "Platform", "office_id": "office-1"}}),
+            json!({"body": {"name": "Platform"}}),
+            json!({"department": {"id": "dept-platform", "name": "Platform"}}),
         ),
         ep(
             "PATCH",
@@ -329,8 +266,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Update department",
         )
         .with_example(
-            json!({"path": {"id": "dept-platform"}, "body": {"name": "Runtime", "office_id": "office-1"}}),
-            json!({"department": {"id": "dept-platform", "name": "Runtime", "office_id": "office-1"}}),
+            json!({"path": {"id": "dept-platform"}, "body": {"name": "Runtime"}}),
+            json!({"department": {"id": "dept-platform", "name": "Runtime"}}),
         ),
         ep(
             "DELETE",

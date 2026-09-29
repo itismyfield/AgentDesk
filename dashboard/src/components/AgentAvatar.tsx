@@ -6,7 +6,7 @@ const SPRITE_FALLBACK_NUMBER = 1;
 const SPRITE_DEFAULT_DIRECTION = "D";
 const SPRITE_DEFAULT_VARIATION = "1";
 
-/** Map agent IDs to sprite numbers (stable order, same as OfficeView) */
+/** Map agent IDs to sprite numbers (stable order) */
 export function buildSpriteMap(agents: Agent[]): Map<string, number> {
   const map = new Map<string, number>();
   // 1) sprite_number가 DB에 지정된 에이전트 우선
@@ -51,8 +51,7 @@ function resolveSpriteNumber(
   // Codex 4th-pass concern: hash fallback could disagree with
   // buildSpriteMap so the same agent showed different sprites on
   // different pages. Resolution: every avatar call site this PR adds
-  // now passes agents/spriteMap (StatsPageView, OfficeManagerModal,
-  // OfficeManagerView, AppShell home leaderboard, OfficeView overlay),
+  // now passes agents/spriteMap (StatsPageView, AppShell home leaderboard),
   // so buildSpriteMap is the canonical source whenever it can be.
   // Codex 5th-pass concern: the all-1 fallback collapsed every
   // sprite-context-less agent into the same portrait, so list call

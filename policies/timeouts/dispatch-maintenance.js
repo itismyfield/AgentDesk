@@ -24,13 +24,6 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 
-  timeouts._section_F = function() {
-      // ─── [F] 디스패치 큐 타임아웃 (100분) ──────────────────
-      agentdesk.db.execute(
-        "DELETE FROM dispatch_queue WHERE queued_at < datetime('now', '-100 minutes')"
-      );
-    };
-
   timeouts._section_G = function() {
       // ─── [G] 스테일 디스패치 정리 (24시간) ──────────────────
       var gCfg = agentdesk.pipeline.getConfig();
@@ -57,25 +50,6 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
       }
     };
 
-  timeouts._section_H = function() {
-      // ─── [H] Stale dispatched 큐 엔트리 진행 ───────────────
-      var hCfg = agentdesk.pipeline.getConfig();
-      var hInitial = agentdesk.pipeline.kickoffState(hCfg);
-      var hInProgress = agentdesk.pipeline.nextGatedTarget(hInitial, hCfg);
-      var staleQueueEntries = agentdesk.db.query(
-        "SELECT dq.id FROM dispatch_queue dq " +
-        "JOIN kanban_cards kc ON kc.id = dq.kanban_card_id " +
-        "WHERE dq.status = 'dispatched' AND kc.status NOT IN (?, ?)",
-        [hInitial, hInProgress]
-      );
-      for (var se = 0; se < staleQueueEntries.length; se++) {
-        agentdesk.db.execute(
-          "DELETE FROM dispatch_queue WHERE id = ?",
-          [staleQueueEntries[se].id]
-        );
-      }
-    };
-
   timeouts._section_I0 = function() {
       // ─── [I-0] 미전송 디스패치 알림 복구 ──────────────────────
       // pending dispatch가 2분 이상 됐는데 알림이 안 갔을 수 있음 → 재전송
@@ -97,7 +71,7 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
         // Do NOT send directly via message.queue — that bypasses the delivery guarantee.
         agentdesk.db.execute(
           "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) " +
-          "VALUES (?1, 'notify', ?2, ?3, ?4, 'pending')",
+          "VALUES (?1, 'notify', ?2, ?3, ?4, 'pending') ON CONFLICT DO NOTHING",
           [ud.id, ud.to_agent_id, ud.kanban_card_id || "", ud.title]
         );
         agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " re-enqueued to dispatch_outbox");

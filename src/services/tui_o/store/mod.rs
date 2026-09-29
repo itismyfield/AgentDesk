@@ -142,6 +142,12 @@ impl OStore {
         Ok(Some(Self { root }))
     }
 
+    /// The store as an operator tool reads it: nothing is created or swept.
+    pub fn existing(runtime_root: &Path) -> Option<Self> {
+        let root = runtime_root.join(STORE_DIR_NAME);
+        root.is_dir().then_some(Self { root })
+    }
+
     fn channel_dir(&self, channel: u64) -> PathBuf {
         self.root.join(channel.to_string())
     }

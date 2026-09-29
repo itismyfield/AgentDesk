@@ -3,6 +3,7 @@ import {
   clonePipelineConfig,
   extractOverrideExtras,
   hasRawOverride,
+  stageDraftFromApi,
   type Selection,
   type StageDraft,
 } from "./pipeline-visual-editor-model";
@@ -117,7 +118,8 @@ export function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDra
       agentId: typeof parsed.agentId === "string" ? parsed.agentId : null,
       updatedAtMs: typeof parsed.updatedAtMs === "number" ? parsed.updatedAtMs : 0,
       pipeline: clonePipelineConfig(parsed.pipeline as PipelineConfigFull),
-      stageDrafts: cloneStageDrafts(parsed.stageDrafts as StageDraft[]),
+      // Drafts saved before the stage fields were trimmed still carry the dropped keys.
+      stageDrafts: (parsed.stageDrafts as PipelineStage[]).map(stageDraftFromApi),
       selection: normalizeSelection(parsed.selection),
       overrideExtras:
         parsed.overrideExtras && typeof parsed.overrideExtras === "object"

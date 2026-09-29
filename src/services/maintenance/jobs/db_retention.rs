@@ -1,10 +1,9 @@
 //! DB retention job (#1093 / 909-4; extended in #3865).
 //!
-//! Ten retention policies across the AgentDesk postgres backbone:
+//! Nine retention policies across the AgentDesk postgres backbone:
 //!
 //! | Table                                   | Retention | Strategy                          |
 //! |-----------------------------------------|-----------|-----------------------------------|
-//! | `agent_quality_event`                   | 90 days   | Monthly aggregate, then DELETE    |
 //! | `session_transcripts`                   | 90 days   | Archive-table copy, then DELETE   |
 //! | `message_outbox` (sent)                 | 7 days    | DELETE (durable sentinels exempt) |
 //! | `auto_queue_entries`                    | 30 days   | DELETE (status='completed')       |
@@ -87,7 +86,6 @@ impl RetentionReport {
     }
 }
 
-const TURN_RETENTION_DAYS: i32 = 90;
 const TRANSCRIPT_RETENTION_DAYS: i32 = 90;
 const OUTBOX_RETENTION_DAYS: i32 = 7;
 const AUTO_QUEUE_RETENTION_DAYS: i32 = 30;
@@ -117,8 +115,7 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
         tables: Vec::with_capacity(12),
     };
 
-    // 1. turn analytics (agent_quality_event).
-    retain_turn_analytics(pool, dry_run, &mut report).await?;
+    // `agent_quality_event` is owned by the hourly observability retention sweep.
     // 2. session_transcripts archive.
     retain_session_transcripts(pool, dry_run, &mut report).await?;
     // 3. message_outbox (sent rows).
@@ -151,75 +148,6 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
         "[db_retention] pass complete"
     );
     Ok(report)
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 1. agent_quality_event (turn_analytics): monthly aggregate then DELETE.
-// ─────────────────────────────────────────────────────────────────────────
-async fn retain_turn_analytics(
-    pool: &PgPool,
-    dry_run: bool,
-    report: &mut RetentionReport,
-) -> Result<()> {
-    if dry_run {
-        let would = sqlx::query(
-            "SELECT COUNT(*)::BIGINT AS n FROM agent_quality_event \
-             WHERE created_at < NOW() - ($1::INT || ' days')::INTERVAL \
-               AND event_type IN ('turn_start','turn_complete','turn_error')",
-        )
-        .bind(TURN_RETENTION_DAYS)
-        .fetch_one(pool)
-        .await?;
-        let n: i64 = would.try_get("n").unwrap_or(0);
-        report.push(TableReport {
-            table_name: "agent_quality_event",
-            action: "delete_would",
-            rows_affected: n,
-        });
-        return Ok(());
-    }
-
-    // Aggregate-into first. ON CONFLICT DO NOTHING keeps prior months stable
-    // (we only backfill *new* month buckets; the most recent month is still
-    // inside the 90d window so its row is never written here).
-    let agg = sqlx::query(
-        "INSERT INTO turn_analytics_monthly_aggregate \
-             (month, total_turns, success_count, error_count, start_count, aggregated_at) \
-         SELECT date_trunc('month', created_at)::DATE AS month, \
-                COUNT(*) FILTER (WHERE event_type IN ('turn_start','turn_complete','turn_error'))::BIGINT, \
-                COUNT(*) FILTER (WHERE event_type = 'turn_complete')::BIGINT, \
-                COUNT(*) FILTER (WHERE event_type = 'turn_error')::BIGINT, \
-                COUNT(*) FILTER (WHERE event_type = 'turn_start')::BIGINT, \
-                NOW() \
-         FROM agent_quality_event \
-         WHERE created_at < NOW() - ($1::INT || ' days')::INTERVAL \
-           AND event_type IN ('turn_start','turn_complete','turn_error') \
-         GROUP BY date_trunc('month', created_at) \
-         ON CONFLICT (month) DO NOTHING",
-    )
-    .bind(TURN_RETENTION_DAYS)
-    .execute(pool)
-    .await?;
-    report.push(TableReport {
-        table_name: "turn_analytics_monthly_aggregate",
-        action: "insert",
-        rows_affected: agg.rows_affected() as i64,
-    });
-
-    let del = sqlx::query(
-        "DELETE FROM agent_quality_event \
-         WHERE created_at < NOW() - ($1::INT || ' days')::INTERVAL \
-           AND event_type IN ('turn_start','turn_complete','turn_error')",
-    )
-    .bind(TURN_RETENTION_DAYS)
-    .execute(pool)
-    .await?;
-    report.push(TableReport {
-        table_name: "agent_quality_event",
-        action: "delete",
-        rows_affected: del.rows_affected() as i64,
-    });
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────

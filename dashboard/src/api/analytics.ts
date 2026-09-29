@@ -197,7 +197,7 @@ export async function getAchievements(
   const data = await request<{
     achievements?: unknown[];
     daily_missions?: unknown[];
-  }>(`/api/v1/achievements${q}`);
+  }>(`/api/achievements${q}`);
   return {
     achievements: Array.isArray(data.achievements)
       ? data.achievements.map(normalizeAchievement)

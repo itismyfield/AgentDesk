@@ -24,7 +24,6 @@ export interface AppShellRoutesContext {
   [key: string]: any;
 }
 
-const OfficeView = lazy(() => import("../components/OfficeView"));
 const AchievementsPage = lazy(() => import("../components/AchievementsPage"));
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
 const OpsPageView = lazy(() => import("../components/OpsPageView"));
@@ -43,7 +42,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     agentsWithDispatched,
     allAgents,
     allDepartments,
-    auditLogs,
     departments,
     handleSettingsSave,
     isKo,
@@ -53,11 +51,8 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     navigateToRoute,
     notifications,
     openDefaultAgentInfo,
-    openOfficeAgentInfo,
     pushNotification,
-    resolvedTheme,
     roundTableMeetings,
-    selectedOfficeId,
     setAgentsPageTab,
     setKanbanCards,
     setKanbanSignalFocus,
@@ -65,19 +60,16 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     setSessions,
     settings,
     stats,
-    subAgents,
     taskDispatches,
     updateNotification,
     upsertKanbanCard,
     visibleDispatchedSessions,
     wsConnected,
     wsLastEventTs,
-    currentOfficeName,
     refreshAgents,
     refreshAllAgents,
     refreshAllDepartments,
     refreshDepartments,
-    refreshOffices,
   } = ctx;
 
   return (
@@ -91,38 +83,11 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
                     isKo={isKo}
                     wsConnected={wsConnected}
                     wsLastEventTs={wsLastEventTs}
-                    currentOfficeLabel={currentOfficeName}
                     stats={stats}
                     agents={agentsWithDispatched}
                     meetings={roundTableMeetings}
                     notifications={notifications}
                     kanbanCards={kanbanCards}
-                  />
-                }
-              />
-              <Route
-                path="/office"
-                element={
-                  <OfficeView
-                    agents={agentsWithDispatched}
-                    departments={departments}
-                    language={settings.language}
-                    theme={resolvedTheme}
-                    subAgents={subAgents}
-                    notifications={notifications}
-                    auditLogs={auditLogs}
-                    activeMeeting={
-                      roundTableMeetings.find(
-                        (meeting: any) => meeting.status === "in_progress",
-                      ) ?? null
-                    }
-                    kanbanCards={kanbanCards}
-                    onNavigateToKanban={() => navigateToRoute("/kanban")}
-                    onSelectAgent={openOfficeAgentInfo}
-                    onSelectDepartment={() =>
-                      navigateToRoute("/agents", { agentsTab: "departments" })
-                    }
-                    customDeptThemes={settings.roomThemes}
                   />
                 }
               />
@@ -134,16 +99,13 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
                     departments={departments}
                     kanbanCards={kanbanCards}
                     language={settings.language}
-                    officeId={selectedOfficeId}
                     onAgentsChange={() => {
                       refreshAgents();
                       refreshAllAgents();
-                      refreshOffices();
                     }}
                     onDepartmentsChange={() => {
                       refreshDepartments();
                       refreshAllDepartments();
-                      refreshOffices();
                     }}
                     sessions={visibleDispatchedSessions}
                     onAssign={async (id, patch) => {
@@ -168,16 +130,13 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
                     departments={departments}
                     kanbanCards={kanbanCards}
                     language={settings.language}
-                    officeId={selectedOfficeId}
                     onAgentsChange={() => {
                       refreshAgents();
                       refreshAllAgents();
-                      refreshOffices();
                     }}
                     onDepartmentsChange={() => {
                       refreshDepartments();
                       refreshAllDepartments();
-                      refreshOffices();
                     }}
                     sessions={visibleDispatchedSessions}
                     onAssign={async (id, patch) => {

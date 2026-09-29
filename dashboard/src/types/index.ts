@@ -2,20 +2,6 @@ import type { UiLanguage } from "../i18n";
 
 export type { UiLanguage };
 
-// Office
-export interface Office {
-  id: string;
-  name: string;
-  name_ko: string;
-  icon: string;
-  color: string;
-  description: string | null;
-  sort_order: number;
-  created_at: number;
-  agent_count?: number;
-  department_count?: number;
-}
-
 // Department
 export interface Department {
   id: string;
@@ -27,7 +13,6 @@ export interface Department {
   color: string;
   description: string | null;
   prompt: string | null;
-  office_id?: string | null;
   sort_order: number;
   created_at: number;
   agent_count?: number;
@@ -43,7 +28,6 @@ export type CliProvider =
   | "copilot"
   | "antigravity"
   | "api";
-export type MeetingReviewDecision = "reviewing" | "approved" | "hold";
 
 export type ActivitySource = "idle" | "agentdesk";
 
@@ -137,39 +121,11 @@ export interface Agent {
   created_at: number;
 }
 
-export interface MeetingPresence {
-  agent_id: string;
-  seat_index: number;
-  phase: "kickoff" | "review";
-  task_id: string | null;
-  decision?: MeetingReviewDecision | null;
-  until: number;
-}
-
 export interface SubAgent {
   id: string;
   parentAgentId: string;
   task: string;
   status: "working" | "done";
-}
-
-export interface CrossDeptDelivery {
-  id: string;
-  fromAgentId: string;
-  toAgentId: string;
-}
-
-export interface CeoOfficeCall {
-  id: string;
-  fromAgentId: string;
-  seatIndex: number;
-  phase: "kickoff" | "review";
-  action?: "arrive" | "speak" | "dismiss";
-  line?: string;
-  decision?: MeetingReviewDecision;
-  taskId?: string;
-  instant?: boolean;
-  holdUntil?: number;
 }
 
 // Task
@@ -458,13 +414,6 @@ export interface ProviderModelConfig {
   subModelReasoningLevel?: string; // 알바생 추론 레벨 (codex만 해당)
 }
 
-export interface RoomTheme {
-  floor1: number;
-  floor2: number;
-  wall: number;
-  accent: number;
-}
-
 export const MESSENGER_CHANNELS = [
   "telegram",
   "whatsapp",
@@ -498,22 +447,11 @@ export type MessengerChannelsConfig = Record<
   MessengerChannelConfig
 >;
 
-export interface OfficePackProfile {
-  departments: Department[];
-  agents: Agent[];
-  updated_at: number;
-}
-
-export type OfficePackProfiles = Partial<
-  Record<WorkflowPackKey, OfficePackProfile>
->;
-
 export interface CompanySettings {
   companyName: string;
   ceoName: string;
   theme: "dark" | "light" | "auto";
   language: UiLanguage;
-  roomThemes?: Record<string, RoomTheme>;
 }
 
 export const DEFAULT_SETTINGS: CompanySettings = {

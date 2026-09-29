@@ -2,11 +2,11 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware::map_response,
-    routing::{delete, get, patch, post},
+    routing::{get, patch, post},
 };
 
 use super::super::{
-    ApiRouter, AppState, analytics, campaigns, departments, escalation, home_metrics, offices,
+    ApiRouter, AppState, analytics, campaigns, departments, escalation, home_metrics,
     protected_api_domain, settings, stats, voice_config,
 };
 
@@ -29,24 +29,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
             .merge(campaign_router())
-            .route(
-                "/offices",
-                get(offices::list_offices).post(offices::create_office),
-            )
-            .route("/offices/reorder", patch(offices::reorder_offices))
-            .route(
-                "/offices/{id}",
-                patch(offices::update_office).delete(offices::delete_office),
-            )
-            .route("/offices/{id}/agents", post(offices::add_agent))
-            .route(
-                "/offices/{id}/agents/batch",
-                post(offices::batch_add_agents),
-            )
-            .route(
-                "/offices/{id}/agents/{agentId}",
-                delete(offices::remove_agent).patch(offices::update_office_agent),
-            )
             .route(
                 "/departments",
                 get(departments::list_departments).post(departments::create_department),

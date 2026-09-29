@@ -67,6 +67,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::escalation::manual_decision_gate_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
+  --skip server::routes::pipeline::stage_save_tests
   --skip server::routes::queue_api::cancel_queue_preserve_pg_tests
   --skip server::routes::scheduled_messages::postgres_tests
   --skip server::routes::stats::memento_feedback_stats_pg_tests

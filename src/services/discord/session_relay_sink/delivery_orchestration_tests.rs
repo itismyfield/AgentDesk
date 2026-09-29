@@ -2,6 +2,9 @@ use super::tests::{inflight_with_identity_offset, matched, terminal_frame_offset
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
 
+#[path = "o_delivery_e2e_tests.rs"]
+mod o_delivery_e2e_tests;
+
 // Kills M6: removing the fenced-terminal disjunct must lose this terminal outcome.
 #[tokio::test]
 async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {

@@ -36,7 +36,6 @@ pub mod memory_api;
 pub mod message_outbox;
 pub mod messages;
 pub mod monitoring;
-pub mod offices;
 pub mod onboarding;
 pub mod pipeline;
 pub mod pr_summary;
@@ -62,7 +61,6 @@ pub mod state;
 pub mod stats;
 pub mod termination_events;
 mod turn_lease;
-pub mod v1;
 pub(crate) mod voice_audio;
 pub(crate) mod voice_conductor;
 pub mod voice_config;
@@ -740,7 +738,6 @@ fn compose_api_router(state: AppState) -> ApiRouter {
         .merge(domains::reviews::router(state.clone()))
         .merge(domains::ops::router(state.clone()))
         .merge(domains::integrations::router(state.clone()))
-        .merge(v1::router(state.clone()))
         .merge(domains::admin::router(state))
 }
 
