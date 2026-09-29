@@ -1,5 +1,6 @@
 pub(crate) mod binding_context;
 pub(crate) mod binding_events;
+pub(crate) mod pending;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;

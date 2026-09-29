@@ -735,7 +735,7 @@ fn herdr_items_have_no_production_caller() {
         "HerdrSocketTransport::<",
     ];
     // Nothing writes a host locator or `.host_kind` marker; only their owners and the
-    // dormant guard adapter read one.
+    // dormant guard adapter read one. The termination owner holds a locator only as a warrant's target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
     const MARKER: &str = "src/services/tmux_common/host_marker.rs";
     const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
@@ -750,6 +750,7 @@ fn herdr_items_have_no_production_caller() {
                 LOCATOR,
                 "src/services/session_host.rs",
                 "src/services/session_host/model.rs",
+                "src/services/termination_audit/host_terminate.rs",
             ],
         ),
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),

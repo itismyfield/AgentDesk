@@ -135,6 +135,10 @@ class RatchetDiscriminationTests(unittest.TestCase):
             "src/services/discord/t3a4_probe.rs",
             "destructive_warrant_bind(candidate);\n",
         ),
+        "host_terminate": (
+            "src/services/session_host/herdr/probe.rs",
+            'let method = "pane.close";\n',
+        ),
     }
 
     def test_fake_callsite_mutations_are_unlisted(self) -> None:
@@ -236,6 +240,111 @@ class RatchetDiscriminationTests(unittest.TestCase):
             write(root, outside, body)
             actual, _subcounts = ratchet.scan(root)
         self.assertEqual(actual["inflight_row_clear_call"], {outside: 1})
+
+    HOST_TERMINATE_SPELLINGS = {
+        "pane_close_literal": ('send("pane.close");\n', 1),
+        "server_stop_literal": ('send("server.stop");\n', 1),
+        "raw_json_frame": ('let frame = r#"{"method":"server.stop"}"#;\n', 1),
+        "concat_split": ('const M: &str = concat!("pane", ".close");\n', 1),
+        "hex_escape": ('send("pane\\x2eclose");\n', 1),
+        "line_continuation": ('send("server.\\\n    stop");\n', 1),
+        "serde_variant": (
+            '#[serde(rename = "pane.close")]\nPaneClose { pane_id: String },\n',
+            2,
+        ),
+        "use_alias": ("use HerdrRequest::ServerStop as Halt;\n", 1),
+        "wrapper_definition": ("fn close_pane(pane: &str) {}\n", 1),
+        "screaming_constant": ("const PANE_CLOSE: u8 = 1;\n", 1),
+        "prefixed_wrapper": ("fn herdr_pane_close() {}\n", 1),
+        "camel_affixes": ("HerdrPaneClose::new(); ServerStopRequest {};\n", 2),
+        "concat_split_inside_close": ('const M: &str = concat!("pane.cl", "ose");\n', 1),
+        "concat_split_inside_stop": ('const M: &str = concat!("server.st", "op");\n', 1),
+        "continuation_inside_close": ('const M: &str = "pane.cl\\\n    ose";\n', 1),
+        "nested_concat": ('const M: &str = concat!(concat!("pa", "ne"), ".close");\n', 1),
+        "char_unicode_in_concat": ("const M: &str = concat!('\\u{0000_70}', \"ane.close\");\n", 1),
+        "literal_array": ('const METHODS: [&str; 2] = ["pane.close", "server.stop"];\n', 2),
+        "literal_beside_argument": ('send("pane.close", "target");\n', 1),
+        "array_concat": ('let m = ["pane", ".close"].concat();\n', 1),
+        "string_plus": ('let m = String::from("server") + ".stop";\n', 1),
+        "format_positional": ('let m = format!("{}.close", "pane");\n', 1),
+        "stringify_tokens": ("let m = stringify!(server.stop);\n", 1),
+        "unicode_escape_underscores": ('const M: &str = "\\u{0000_70}ane.close";\n', 1),
+        "acronym_prefix_pane": ("use api::RPCPaneClose as Halt;\n", 1),
+        "acronym_prefix_server": ("use api::HTTPServerStop as Halt;\n", 1),
+        "screaming_suffix": ("const PANE_CLOSE_TIMEOUT: u8 = 1;\n", 1),
+    }
+
+    # Each body is scanned alone: one unrelated token can change what another sees.
+    HOST_TERMINATE_NON_SPELLINGS = {
+        "tuple_of_pieces": 'let labels = ("pane", ".close");\n',
+        "call_with_pieces": 'send("pane.cl", "ose");\n',
+        "pane_closed_constant": "const PANE_CLOSED: u8 = 1;\n",
+        "server_stopped_constant": "const SERVER_STOPPED: u8 = 1;\n",
+    }
+
+    def test_host_terminate_catches_close_rpc_spellings_and_aliases(self) -> None:
+        rel = "src/services/session_host/herdr/close_probe.rs"
+        for name, (body, found) in self.HOST_TERMINATE_SPELLINGS.items():
+            with self.subTest(spelling=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                write(root, rel, body)
+                actual, _subcounts = ratchet.scan(root)
+                self.assertEqual(actual["host_terminate"], {rel: found})
+                errors = ratchet.owner_only_errors(actual, empty_counts())
+                self.assertEqual(len(errors), 1)
+                self.assertIn("close RPC spelled outside", errors[0])
+                self.assertIn(rel, errors[0])
+
+    def test_host_terminate_ignores_comments_and_unrelated_close_stop(self) -> None:
+        body = (
+            "// pane.close is refused here\n"
+            "/// server.stop\n"
+            "/* PaneClose */\n"
+            'server.stop(); pane.close_all(); let s = "stop"; let c = "close";\n'
+            'f("pane"); g(".close");\n'
+            "on_pane_closed(); server_stopped = true;\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "src/services/probe.rs", body)
+            actual, _subcounts = ratchet.scan(root)
+        self.assertEqual(actual["host_terminate"], {})
+
+    def test_host_terminate_ignores_pieces_and_completed_states_one_file_each(self) -> None:
+        for name, body in self.HOST_TERMINATE_NON_SPELLINGS.items():
+            with self.subTest(source=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                write(root, "src/services/probe.rs", body)
+                actual, _subcounts = ratchet.scan(root)
+                self.assertEqual(actual["host_terminate"], {})
+
+    def test_host_terminate_is_owner_only_whatever_the_baseline_lists(self) -> None:
+        owner = ratchet.HOST_TERMINATE_OWNER
+        outside = "src/services/session_host/herdr_host.rs"
+        body = 'fn close(w: HostTerminateWarrant) { send("pane.close"); }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, owner, body)
+            write(root, outside, body)
+            actual, _subcounts = ratchet.scan(root)
+        self.assertEqual(actual["host_terminate"], {owner: 1, outside: 1})
+        pinned = empty_counts()
+        pinned["host_terminate"] = {owner: 1, outside: 1}
+        self.assertEqual(ratchet.growth_errors(actual, pinned), [])
+        errors = ratchet.owner_only_errors(actual, pinned)
+        self.assertEqual(len(errors), 2)
+        self.assertIn(f"outside {owner} in {outside}", errors[0])
+        self.assertIn(f"baseline lists non-owner file {outside}", errors[1])
+
+        del actual["host_terminate"][outside]
+        owner_pinned = empty_counts()
+        owner_pinned["host_terminate"] = {owner: 1}
+        self.assertEqual(ratchet.owner_only_errors(actual, owner_pinned), [])
+        self.assertEqual(ratchet.growth_errors(actual, owner_pinned), [])
+        # The owner still needs a reviewed baseline diff to gain a close call.
+        errors = ratchet.growth_errors(actual, empty_counts())
+        self.assertEqual(len(errors), 1)
+        self.assertIn(f"host_terminate: UNLISTED call site in {owner}", errors[0])
 
     def test_pairing_is_two_sided(self) -> None:
         actual = empty_counts()

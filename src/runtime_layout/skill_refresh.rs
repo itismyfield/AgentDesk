@@ -66,7 +66,7 @@ impl Drop for SkillRefreshLock {
 /// `.skill-refresh` that is renamed into place, so a failed copy is never discoverable.
 ///
 /// An exclusive per-skill lockfile serializes the delete+copy+rename swap across processes,
-/// bar the brief overlaps noted in the body.
+/// bar the overlaps noted in the body.
 pub(super) fn refresh_managed_skill_dir(
     root: &Path,
     skill_name: &str,
@@ -77,12 +77,13 @@ pub(super) fn refresh_managed_skill_dir(
     fs::create_dir_all(&refresh_dir)
         .map_err(|e| format!("Failed to create '{}': {e}", refresh_dir.display()))?;
 
-    // Another process holds a lock that is not stale; skip and let it finish.
+    // Skip this refresh: the lock was not judged stale (a live PID, or unknown liveness inside the
+    // TTL, as with an orphan whose token write failed), or a peer re-took it during recovery.
     let Some(lock) = acquire_skill_refresh_lock(&refresh_dir, skill_name)? else {
         return Ok(());
     };
 
-    // Two refreshers can briefly overlap here (unknown liveness, or the recovery race below).
+    // Two refreshers can overlap here (unknown liveness, or the recovery race below).
     // Each stages a complete copy; at worst `managed` is briefly absent or one swap fails.
     let staging = refresh_dir.join(format!(
         "{skill_name}.{}.{}",
@@ -152,7 +153,7 @@ fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
 }
 
 /// Stale when the holder PID is dead, or liveness is indeterminate and the lock is older than
-/// [`STALE_LOCK_TTL`]. A live PID is never stolen, whatever its age.
+/// [`STALE_LOCK_TTL`]. A PID seen alive is never judged stale, whatever the lock's age.
 fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
     match read_lock_pid(lock_path).and_then(pid_liveness) {
         Some(alive) => !alive,

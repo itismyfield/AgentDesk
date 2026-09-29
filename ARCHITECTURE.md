@@ -1940,6 +1940,8 @@ src/
 │   │   ├── request.rs
 │   │   ├── runner.rs
 │   │   └── session.rs
+│   ├── termination_audit/
+│   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
@@ -2012,6 +2014,8 @@ src/
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
+│   │   ├── pending.rs
+│   │   ├── pending_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs
