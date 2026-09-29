@@ -128,6 +128,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
         "src/services/discord/prompt_builder/dispatch_contract_tests.rs",
+        "src/services/discord/recovery_engine/o_recovery_cut_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/coordinate_adoption_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/post_adoption_guard_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs",
@@ -252,6 +253,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/discord/runtime_bootstrap/gateway_handback_mock.rs",
         "src/services/kakao/test_support.rs",
         "src/config/test_env.rs",

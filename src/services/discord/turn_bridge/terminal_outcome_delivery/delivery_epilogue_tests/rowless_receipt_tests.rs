@@ -1118,3 +1118,34 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
         assert_eq!(driver.completed_publications(), 1);
     }
 }
+
+/// Custody parked before O owned the channel settles on resume without posting its body.
+#[tokio::test]
+async fn o_delegated_foreign_custody_settles_without_post_or_evidence() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+    let held = bridge_delivery_lease_for_inflight(
+        &driver.shared,
+        ctx.watcher_owner_channel_id,
+        driver.shared.restart.current_generation,
+        &state.inflight_state,
+        ctx.tmux_last_offset,
+    );
+    assert!(matches!(held, BridgeLeaseAcquire::Held(_)));
+    let mut successor = state.inflight_state.clone();
+    successor.turn_nonce = Some("successor".into());
+    inflight::save_inflight_state(&successor).unwrap();
+    ctx.bridge_output_owner = None;
+    let output = run(ctx, state).await;
+    assert!(matches!(
+        output.outcome,
+        TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+    ));
+    run_postlude(&driver, output, false, false).await;
+    drop(held);
+    let _on = crate::services::tui_o::cutover::test_override::force_on();
+    assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+    assert_eq!(driver.completed_publications(), 0, "O posts this body");
+    assert!(driver.observations().is_empty());
+    assert!(custody_records(&driver).is_empty(), "custody still settles");
+}

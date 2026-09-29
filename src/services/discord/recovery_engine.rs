@@ -106,6 +106,12 @@ mod completion_delivery;
 // #3834 r2: behavior-preserving extraction of the restart-path inflight recovery
 // scan (`restore_inflight_turns`) plus its tmux retry/output-path helpers into a
 // leaf module. Entry points are re-exported below so external paths stay stable.
+#[cfg(test)]
+#[path = "recovery_engine/o_cut_recorder.rs"]
+pub(in crate::services::discord) mod o_cut_recorder;
+#[cfg(test)]
+#[path = "recovery_engine/o_recovery_cut_tests.rs"]
+mod o_recovery_cut_tests;
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
@@ -197,7 +203,8 @@ pub(in crate::services::discord) use self::completion_delivery::relay_recovered_
 use self::completion_delivery::{
     CapturedRecoveryDelivery, RecoveryCompletionOutcome, complete_recovery_visible_turn,
     relay_captured_recovery_terminal_notice, relay_captured_recovery_terminal_notice_with_gateway,
-    relay_recovery_terminal_notice, should_advance_recovery_dispatch_after_relay,
+    relay_recovery_body_notice, relay_recovery_body_to_placeholder, relay_recovery_terminal_notice,
+    should_advance_recovery_dispatch_after_relay,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
 // a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.
