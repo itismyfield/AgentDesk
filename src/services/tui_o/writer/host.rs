@@ -1,0 +1,208 @@
+//! Starts the O writer on the gateway runtime: one actor per channel the boot snapshot hands to
+//! O. A channel reads as ready only while its actor has resumed and the gateway is Owned.
+
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use super::actor;
+use super::binding::BindingEvents;
+use super::deliver::ChannelWriter;
+use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::tui_o::cutover;
+use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::store::{ChannelStore, OStore, StoreConfig};
+
+/// What the gateway runtime supplies; asked only for channels O owns.
+pub trait HostIo: Send + Sync + 'static {
+    type Port: DiscordPort;
+    type Lease: DeliveryLease + 'static;
+    type Alarms: AlarmSink + Clone + 'static;
+    type Bindings: BindingEvents;
+    /// Resolves once the gateway's HTTP client and the bot's own id are known.
+    fn port(&self) -> impl Future<Output = Arc<Self::Port>> + Send;
+    fn lease(&self) -> Self::Lease;
+    fn alarms(&self) -> Self::Alarms;
+    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings>;
+}
+
+/// Channels with a hosted actor and those ready to take work.
+#[derive(Default)]
+pub struct Readiness {
+    hosted: Mutex<BTreeSet<u64>>,
+    ready: Mutex<BTreeSet<u64>>,
+}
+
+fn locked(set: &Mutex<BTreeSet<u64>>) -> MutexGuard<'_, BTreeSet<u64>> {
+    set.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Readiness {
+    pub fn is_ready(&self, channel: u64) -> bool {
+        locked(&self.ready).contains(&channel)
+    }
+
+    fn set(&self, channel: u64, ready: bool) {
+        let mut set = locked(&self.ready);
+        if ready {
+            set.insert(channel);
+        } else {
+            set.remove(&channel);
+        }
+    }
+
+    /// Only the first claim of a channel hosts it, so a channel never has two actors.
+    fn claim(&self, channel: u64) -> bool {
+        locked(&self.hosted).insert(channel)
+    }
+}
+
+static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
+
+pub(crate) fn process_readiness() -> Arc<Readiness> {
+    Arc::clone(&PROCESS)
+}
+
+/// Whether this process's writer can take work for `channel`; false for any channel O does not own.
+pub(crate) fn channel_ready(channel: u64) -> bool {
+    PROCESS.is_ready(channel)
+}
+
+/// What hosting needs once a channel is owned; built only then, so an off or empty writer takes nothing.
+pub struct HostParts<I> {
+    pub io: Arc<I>,
+    pub runtime_root: Option<PathBuf>,
+    pub gate: Arc<OwnershipGate>,
+    pub readiness: Arc<Readiness>,
+}
+
+/// Spawns one host task per channel this provider's bot owns. Without a PG gateway lease the gate
+/// never becomes Owned, so those channels are held with an alarm and get no actor.
+pub fn start<I: HostIo>(
+    provider: ShadowProvider,
+    pg_gateway: bool,
+    prepare: impl FnOnce() -> HostParts<I>,
+) -> Vec<JoinHandle<()>> {
+    let kind = match provider {
+        ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
+        ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
+    };
+    let ours = |&(_, channel_kind, owned): &(u64, _, bool)| owned && channel_kind == Some(kind);
+    let channels: Vec<_> = cutover::boot_ownership().into_iter().filter(ours).collect();
+    if channels.is_empty() {
+        return Vec::new();
+    }
+    let HostParts {
+        io,
+        runtime_root,
+        gate,
+        readiness,
+    } = prepare();
+    let mut tasks = Vec::new();
+    for (channel, _, owned) in channels {
+        if !readiness.claim(channel) {
+            continue;
+        }
+        let root = match (pg_gateway, &runtime_root) {
+            (false, _) => Err("no PG gateway lease"),
+            (true, None) => Err("runtime root unresolved"),
+            (true, Some(root)) => Ok(root.clone()),
+        };
+        let root = match root {
+            Ok(root) => root,
+            Err(detail) => {
+                hold(&io.alarms(), channel, detail);
+                continue;
+            }
+        };
+        let (gate, readiness) = (Arc::clone(&gate), Arc::clone(&readiness));
+        let host = host_channel(
+            Arc::clone(&io),
+            channel,
+            owned,
+            provider,
+            root,
+            gate,
+            readiness,
+        );
+        tasks.push(tokio::spawn(host));
+    }
+    tasks
+}
+
+fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
+    tracing::error!(channel, detail, "[tui_o] writer host held the channel");
+    let detail = format!("writer host: {detail}");
+    alarms.raise(channel, WriterAlarm::Halted { detail });
+}
+
+async fn host_channel<I: HostIo>(
+    io: Arc<I>,
+    channel: u64,
+    owned: bool,
+    provider: ShadowProvider,
+    runtime_root: PathBuf,
+    gate: Arc<OwnershipGate>,
+    readiness: Arc<Readiness>,
+) {
+    let alarms = io.alarms();
+    let store = match recover(&runtime_root, channel, owned) {
+        Ok(store) => store,
+        Err(detail) => return hold(&alarms, channel, &detail),
+    };
+    let port = io.port().await;
+    let writer = ChannelWriter::new(store, Arc::clone(&gate), port, io.lease(), alarms);
+    let (stop_tx, stop) = watch::channel(false);
+    let (resumed_tx, resumed) = watch::channel(false);
+    let config = WriterConfig { enabled: owned };
+    let bindings = io.bindings(channel, provider);
+    let spawned = actor::spawn_if_enabled(&config, writer, provider, bindings, stop, resumed_tx);
+    let Some(actor) = spawned else { return };
+    publish(channel, &readiness, gate.subscribe(), resumed, actor).await;
+    drop(stop_tx);
+}
+
+/// Recovers the store the switch left; a missing era or init, damage or a foreign init holds it.
+fn recover(runtime_root: &Path, channel: u64, owned: bool) -> Result<ChannelStore, String> {
+    let config = StoreConfig { enabled: owned };
+    let store = OStore::open_if_enabled(&config, runtime_root)
+        .map_err(|error| format!("store: {error}"))?
+        .ok_or_else(|| "store disabled".to_string())?;
+    let era = store
+        .read_era()
+        .map_err(|error| format!("era: {error:?}"))?;
+    let era = era.ok_or_else(|| "no writer era".to_string())?;
+    let opened = store.open_channel(&era, channel);
+    let opened = opened.map_err(|halt| format!("recovery: {halt:?}"))?;
+    let opened = opened.ok_or_else(|| "channel has no init".to_string())?;
+    match opened.init().channel {
+        stored if stored != channel => Err(format!("store names channel {stored}")),
+        _ => Ok(opened),
+    }
+}
+
+/// Ready only while the actor has resumed and the gate is Owned; cleared once the actor ends.
+async fn publish(
+    channel: u64,
+    readiness: &Readiness,
+    mut gate: watch::Receiver<GatewayOwnership>,
+    mut resumed: watch::Receiver<bool>,
+    mut actor: JoinHandle<()>,
+) {
+    loop {
+        let owned = matches!(*gate.borrow_and_update(), GatewayOwnership::Owned { .. });
+        readiness.set(channel, owned && *resumed.borrow_and_update());
+        tokio::select! {
+            changed = gate.changed() => if changed.is_err() { break },
+            changed = resumed.changed() => if changed.is_err() { break },
+            _ = &mut actor => break,
+        }
+    }
+    readiness.set(channel, false);
+}

@@ -5,6 +5,9 @@
 /// While false every ownership guard is a no-op.
 pub(crate) use super::topology::O_TUI_WRITER;
 
+use super::channel_policy;
+use crate::services::agent_protocol::RuntimeHandoffKind;
+
 mod channel_gate;
 pub(crate) use channel_gate::{
     IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
@@ -13,10 +16,35 @@ pub(crate) use channel_gate::{
 // Enabling the writer is a later activation step; this build must stay off.
 const _: () = assert!(!O_TUI_WRITER);
 
+/// Each boot-snapshot channel with its boot kind and whether O owns its output; the writer host
+/// derives its store and actor switches from this, never from a reloaded config.
+pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, bool)> {
+    let enabled = O_TUI_WRITER || test_override::forced();
+    let evaluate = |snapshot: Option<&channel_policy::BootChannels>| {
+        let Some(snapshot) = snapshot else {
+            return Vec::new();
+        };
+        let channels = snapshot.channels();
+        let judged = |&channel: &u64| {
+            let kind = snapshot.kind(channel);
+            let owned = channel_policy::owns_output(enabled, channels, channel, kind);
+            (channel, kind, owned)
+        };
+        channels.iter().map(judged).collect()
+    };
+    test_override::with_channels(evaluate)
+}
+
 #[cfg(not(test))]
 mod test_override {
+    use super::channel_policy::{self, BootChannels};
+
     pub(super) fn forced() -> bool {
         false
+    }
+
+    pub(super) fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
+        evaluate(channel_policy::boot())
     }
 }
 

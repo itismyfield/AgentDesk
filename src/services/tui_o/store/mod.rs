@@ -24,7 +24,8 @@ pub const LEDGER_FILE: &str = "ledger.jsonl";
 pub const SPOOL_DIR: &str = "spool";
 pub const CURSOR_DIR: &str = "cursor";
 
-/// `tui_o.store` settings; no store is created unless explicitly enabled.
+/// Derived per channel from its boot ownership, never read from config; no store is created unless
+/// enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StoreConfig {

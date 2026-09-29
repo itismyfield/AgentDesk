@@ -17,13 +17,14 @@ use crate::services::tui_o::shadow::ShadowProvider;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Runs the channel's actor only when `tui_o.writer.enabled` is set.
+/// Runs the channel's actor only when the channel's boot ownership enabled `config`.
 pub fn spawn_if_enabled<P, L, A, B>(
     config: &WriterConfig,
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
     stop: watch::Receiver<bool>,
+    resumed: watch::Sender<bool>,
 ) -> Option<JoinHandle<()>>
 where
     P: DiscordPort,
@@ -31,7 +32,7 @@ where
     A: AlarmSink + 'static,
     B: BindingEvents,
 {
-    let run = || tokio::spawn(run_channel(writer, provider, bindings, stop));
+    let run = || tokio::spawn(run_channel(writer, provider, bindings, stop, resumed));
     config.enabled.then(run)
 }
 
@@ -42,12 +43,14 @@ struct Actor<P, L, A, B> {
     sources: Sources<B>,
 }
 
-/// Returns when the channel stops or `stop` turns true or closes.
+/// Returns when the channel stops or `stop` turns true or closes. `resumed` turns true once the
+/// spool and sources are recovered, and closes when the actor returns.
 pub async fn run_channel<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
     mut stop: watch::Receiver<bool>,
+    resumed: watch::Sender<bool>,
 ) where
     P: DiscordPort,
     L: DeliveryLease,
@@ -66,6 +69,9 @@ pub async fn run_channel<P, L, A, B>(
     let (writer, deriver, owed) = (&mut actor.writer, &mut actor.deriver, &mut actor.owed);
     if let Err(alarm) = actor.sources.resume(writer, deriver, owed) {
         actor.writer.stop(alarm);
+    }
+    if !actor.writer.is_stopped() {
+        resumed.send_replace(true);
     }
     while !actor.writer.is_stopped() && !*stop.borrow() {
         actor.deliver_owed().await;
