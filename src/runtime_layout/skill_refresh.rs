@@ -77,8 +77,8 @@ pub(super) fn refresh_managed_skill_dir(
     fs::create_dir_all(&refresh_dir)
         .map_err(|e| format!("Failed to create '{}': {e}", refresh_dir.display()))?;
 
-    // The lock exists and was not judged stale (a live PID, or unknown liveness inside the
-    // TTL, which includes an orphan whose token write failed); skip this refresh.
+    // Skip this refresh: the lock was not judged stale (a live PID, or unknown liveness inside the
+    // TTL, as with an orphan whose token write failed), or a peer re-took it during recovery.
     let Some(lock) = acquire_skill_refresh_lock(&refresh_dir, skill_name)? else {
         return Ok(());
     };
