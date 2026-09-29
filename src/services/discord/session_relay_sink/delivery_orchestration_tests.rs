@@ -614,6 +614,13 @@ async fn relay_deliver_observes_landed_unrecorded_proof() {
 // An O-delegated idle range is consumed once: no transport, no delivery record, frontier committed.
 #[tokio::test]
 async fn o_delegated_idle_range_is_consumed_once_without_transport_or_evidence() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::o_delegated_idle_range_is_consumed_once_without_transport_or_evidence"
+    )) {
+        return;
+    }
+
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let channel_id = 44_010;

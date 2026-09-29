@@ -919,6 +919,15 @@ mod tests {
     // O posts a delegated task response, so the confirmed card must not open a Legacy claim.
     #[tokio::test]
     async fn o_delegated_task_response_leaves_no_legacy_claim() {
+        if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+            module_path!(),
+            "::o_delegated_task_response_leaves_no_legacy_claim"
+        )) {
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
         let context = context("o-delegated");
         let delivery = super::super::SessionRelayDelivery {
             provider: ProviderKind::Claude,
@@ -938,7 +947,7 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let _tui = crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
             &delivery.session_name,
-            "/tmp/adk-o-delegated-claim.jsonl",
+            &temp.path().join("claim.jsonl").to_string_lossy(),
         );
         let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
             delivery.channel_id,

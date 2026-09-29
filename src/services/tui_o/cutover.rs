@@ -171,6 +171,27 @@ pub(crate) mod test_override {
     pub(crate) fn force_off() -> ForceGuard {
         ForceGuard(FORCED.with(|cell| cell.replace(false)))
     }
+    // Registry-reset tests run concurrently, so binding-dependent fixtures use their own process.
+    pub(crate) fn isolated_binding_case(name: &str) -> bool {
+        const CHILD: &str = "ADK_TEST_O_BINDING_CASE";
+        if std::env::var(CHILD).as_deref() == Ok(name) {
+            return true;
+        }
+        let qualified = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", qualified, "--nocapture"])
+            .env(CHILD, name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored;"));
+        false
+    }
 }
 
 #[cfg(test)]
