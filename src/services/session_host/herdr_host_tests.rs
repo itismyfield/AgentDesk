@@ -695,8 +695,10 @@ fn herdr_items_have_no_production_caller() {
     let mut files = BTreeMap::new();
     let mut test_files = BTreeSet::new();
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-            let path = entry.path();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry
+                .expect("source scan: unreadable directory entry")
+                .path();
             if path.is_dir() {
                 stack.push(path);
                 continue;
@@ -704,7 +706,9 @@ fn herdr_items_have_no_production_caller() {
             if path.extension().is_none_or(|ext| ext != "rs") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!("source scan: unreadable {}: {error}", path.display())
+            });
             let (prod, test_mods) = production_text(&text);
             let stem = path.file_stem().unwrap().to_string_lossy().to_string();
             let base = match stem.as_str() {

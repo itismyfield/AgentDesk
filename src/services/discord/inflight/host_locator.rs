@@ -31,6 +31,10 @@ fn non_blank(value: &Option<String>) -> bool {
 
 impl PersistedHostLocator {
     fn from_raw(raw: serde_json::Value) -> Self {
+        // serde reads a positional array into a struct; only an object can be a locator.
+        if !raw.is_object() {
+            return Self::Unknown(raw);
+        }
         let known = serde_json::from_value::<LocatorWire>(raw.clone())
             .ok()
             .and_then(|wire| {
@@ -63,6 +67,13 @@ impl Serialize for PersistedHostLocator {
             Self::Unknown(raw) => raw.serialize(serializer),
         }
     }
+}
+
+/// Field hook: a present key (even `null`) is a locator, so only an absent key is `None`.
+pub(in crate::services::discord) fn deserialize_present<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PersistedHostLocator>, D::Error> {
+    PersistedHostLocator::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for PersistedHostLocator {
@@ -127,9 +138,23 @@ mod tests {
             RuntimeHandoffKind::ProcessBackend,
             RuntimeHandoffKind::ClaudeEAdapter,
         ];
-        for kind in kinds {
-            let written = serde_json::to_string_pretty(&row(Some(kind))).unwrap();
-            assert!(written.contains(&format!("\"runtime_kind\": \"{}\"", kind.as_str())));
+        let literals = [
+            "legacy_tmux_wrapper",
+            "claude_tui",
+            "codex_tui",
+            "process_backend",
+            "claude_e_adapter",
+        ];
+        for (kind, literal) in kinds
+            .into_iter()
+            .map(Some)
+            .zip(literals.map(Some))
+            .chain([(None, None)])
+        {
+            let written = serde_json::to_string_pretty(&row(kind)).unwrap();
+            if let Some(literal) = literal {
+                assert!(written.contains(&format!("\"runtime_kind\": \"{literal}\"")));
+            }
             assert!(
                 !written.contains("host_locator"),
                 "{kind:?}: a row without a locator must not gain the key"
@@ -223,6 +248,10 @@ mod tests {
             ),
             ("not an object", json!("herdr")),
             ("array", json!(["herdr", "h-1"])),
+            ("tmux array", json!(["tmux", "t-1", null, null])),
+            ("process array", json!(["process", "p-1", null, null])),
+            ("herdr array", json!(["herdr", "h-1", "pane-1", null])),
+            ("explicit null", Value::Null),
         ];
         for (label, raw) in cases {
             let temp = TempDir::new().unwrap();

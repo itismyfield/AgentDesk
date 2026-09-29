@@ -229,7 +229,11 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub runtime_kind_unknown_on_disk: bool,
     /// Where the session is hosted. Nothing writes it yet; `None` is skipped so
     /// rows without a locator serialize exactly as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::host_locator::deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub host_locator: Option<super::host_locator::PersistedHostLocator>,
     #[serde(default)]
     pub worktree_path: Option<String>,
