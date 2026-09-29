@@ -281,6 +281,58 @@ pub(crate) fn binding_events_since(
     Ok(records.filter(|record| record.seq > after_seq).collect())
 }
 
+/// Why a strict read refused a log; `line` counts complete non-empty lines from 1.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Corrupt {
+    pub line: u64,
+    pub kind: CorruptKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CorruptKind {
+    Unparseable,
+    SeqGap {
+        expected: u64,
+        found: u64,
+    },
+    /// A Pending names a transcript other than the one its session would have next to the launch.
+    PathMismatch,
+}
+
+/// Every record of `channel_id`, or the first line that is unreadable or out of `seq` order.
+/// A torn tail is not corruption: it was never published and the writer cuts it off on load.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
+    let Some(path) = log_path(channel_id)? else {
+        return Ok(Ok(Vec::new()));
+    };
+    let _logs = lock_logs();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let complete = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1);
+    let lines = bytes[..complete].split(|b| *b == b'\n');
+    let mut records = Vec::new();
+    for (line, text) in (1..).zip(lines.filter(|l| !l.is_empty())) {
+        let Ok(record) = serde_json::from_slice::<BindingEvent>(text) else {
+            let kind = CorruptKind::Unparseable;
+            return Ok(Err(Corrupt { line, kind }));
+        };
+        if record.seq != line {
+            let (expected, found) = (line, record.seq);
+            let kind = CorruptKind::SeqGap { expected, found };
+            return Ok(Err(Corrupt { line, kind }));
+        }
+        records.push(record);
+    }
+    Ok(Ok(records))
+}
+
 /// The latest committed `seq` of `channel_id`, updated after every append. Read-only.
 pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Receiver<u64>> {
     let Some(path) = log_path(channel_id)? else {

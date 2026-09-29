@@ -2005,6 +2005,8 @@ src/
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
+│   │   ├── pending.rs
+│   │   ├── pending_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs
