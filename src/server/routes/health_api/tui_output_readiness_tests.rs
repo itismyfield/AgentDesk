@@ -48,8 +48,8 @@ fn path_without_jq(farm: &Path) -> std::ffi::OsString {
     farm.as_os_str().to_owned()
 }
 
-/// Whether the deploy-release and deploy.sh readiness calls both accept `body`; they must agree.
-fn ready(body: &Value, jq: bool) -> bool {
+/// Whether the deploy-release and deploy.sh readiness calls both accept the raw `body`; they must agree.
+fn ready(body: &str, jq: bool) -> bool {
     let farm = tempfile::tempdir().unwrap();
     let mut command = Command::new("bash");
     if !jq {
@@ -69,7 +69,7 @@ fn ready(body: &Value, jq: bool) -> bool {
             "DEFAULTS",
             Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/_defaults.sh"),
         )
-        .env("BODY", body.to_string())
+        .env("BODY", body)
         .status()
         .unwrap();
     match status.code() {
@@ -79,7 +79,7 @@ fn ready(body: &Value, jq: bool) -> bool {
     }
 }
 
-fn assert_ready(label: &str, body: &Value, expected: bool) {
+fn assert_ready(label: &str, body: &str, expected: bool) {
     for jq in [true, false] {
         assert_eq!(ready(body, jq), expected, "{label} (jq={jq}): {body}");
     }
@@ -113,18 +113,38 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
         refused.get("tui_output_gateway_channels").is_none(),
         "{refused}"
     );
-    assert_ready("intake refused without writer channels", &refused, false);
+    assert_ready(
+        "intake refused without writer channels",
+        &refused.to_string(),
+        false,
+    );
 
+    // Writer channels prove nothing while the intake gate still refuses the provider.
+    for standby in [false, true] {
+        let refused = public_body(standby, Some(CHANNELS)).await;
+        assert!(reasons(&refused).contains(&reason), "{refused}");
+        assert!(
+            refused.get("tui_output_gateway_channels").is_none(),
+            "{refused}"
+        );
+        let label = format!("intake refused with writer channels (standby={standby})");
+        assert_ready(&label, &refused.to_string(), false);
+    }
+
+    let _admitted = test_override::admit_intake();
     let worker = public_body(false, Some(CHANNELS)).await;
     assert!(reasons(&worker).contains(&reason), "{worker}");
     assert_eq!(
         worker["tui_output_gateway_channels"],
         json!(["claude:worker:complete:1"])
     );
-    assert_ready("verified worker", &worker, true);
+    assert_ready("verified worker", &worker.to_string(), true);
+    // Served bytes need not be compact: whitespace between array tokens must not change the verdict.
+    let pretty = serde_json::to_string_pretty(&worker).unwrap();
+    assert_ready("verified worker, pretty-printed", &pretty, true);
     assert_ready(
         "verified standby",
-        &public_body(true, Some(CHANNELS)).await,
+        &public_body(true, Some(CHANNELS)).await.to_string(),
         true,
     );
 
@@ -139,7 +159,7 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
     ] {
         let mut body = worker.clone();
         body["tui_output_gateway_channels"] = evidence.clone();
-        assert_ready(&format!("unverified {evidence}"), &body, false);
+        assert_ready(&format!("unverified {evidence}"), &body.to_string(), false);
     }
 
     let router = AlarmRouter::for_process(None, None);
@@ -150,13 +170,13 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
     );
     assert_ready(
         "paused writer",
-        &public_body(false, Some(CHANNELS)).await,
+        &public_body(false, Some(CHANNELS)).await.to_string(),
         false,
     );
     alarm::gateway_resumed(WRITER_CHANNEL);
     assert_ready(
         "resumed writer",
-        &public_body(false, Some(CHANNELS)).await,
+        &public_body(false, Some(CHANNELS)).await.to_string(),
         true,
     );
     let blocked = WriterAlarm::Blocked { status: 403 };
@@ -164,7 +184,7 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
     alarm::gateway_resumed(WRITER_CHANNEL);
     assert_ready(
         "blocked writer",
-        &public_body(false, Some(CHANNELS)).await,
+        &public_body(false, Some(CHANNELS)).await.to_string(),
         false,
     );
 }

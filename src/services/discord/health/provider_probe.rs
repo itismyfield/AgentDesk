@@ -22,7 +22,8 @@ pub(super) struct ProviderHealthSnapshot {
     /// #5951 — per-channel re-mint fence cells; never pruned, so this only
     /// grows with the distinct channels the runtime has served.
     remint_fence_cells: usize,
-    /// Boot writer channels this node leaves to the gateway; present only when there are some.
+    /// Boot writer channels this node leaves to the gateway; present only when there are some and
+    /// the provider's intake is not refused, since readiness reads it as proof the restriction is all.
     #[serde(skip_serializing_if = "Option::is_none")]
     tui_output_gateway_channels: Option<usize>,
 }
@@ -143,7 +144,8 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
             restart_pending,
             last_turn_at,
             remint_fence_cells: entry.shared.mailboxes.remint_fence_cells(),
-            tui_output_gateway_channels: gateway_channels.filter(|count| *count > 0),
+            tui_output_gateway_channels: gateway_channels
+                .filter(|count| *count > 0 && !intake_refused),
         },
         status: classification.status,
         fully_recovered: classification.fully_recovered,
@@ -249,7 +251,8 @@ fn tui_output_gateway(provider_name: &str, role: ProviderRuntimeRole) -> (Option
     {
         use crate::services::tui_o::cutover::test_override;
         let enabled = topology::O_TUI_WRITER || test_override::forced();
-        test_override::with_channels(|boot| facts(enabled, boot))
+        let (channels, refused) = test_override::with_channels(|boot| facts(enabled, boot));
+        (channels, refused && !test_override::intake_admitted())
     }
     #[cfg(not(test))]
     facts(

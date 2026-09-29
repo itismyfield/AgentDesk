@@ -218,6 +218,8 @@ _health_json_get_string_field() {
 }
 
 _health_json_get_string_array_csv() {
+  # Joins a top-level string array with commas after reading every element whole: an element
+  # outside printable ASCII, holding a comma, or an unparseable array yields nothing at all.
   local health_json="$1"
   local key="$2"
   local raw
@@ -225,7 +227,11 @@ _health_json_get_string_array_csv() {
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
-    printf '%s' "$health_json" | jq -r "(.${key} // []) | join(\",\")" 2>/dev/null
+    printf '%s' "$health_json" | jq -r --arg key "$key" '
+      (.[$key] // []) as $a
+      | if ($a | type) == "array"
+          and all($a[]; type == "string" and all(explode[]; . >= 32 and . < 127 and . != 44))
+        then $a | join(",") else "" end' 2>/dev/null
     return
   fi
 
@@ -235,17 +241,67 @@ _health_json_get_string_array_csv() {
   # accepting reconcile-only reasons that jq — reading the ABSENT top-level array
   # as `[]` — correctly rejects.
   raw=$(_health_json_top_level_field_raw "$key" "$(_health_json_compact "$health_json")")
-  # Only a genuine top-level ARRAY value contributes reasons; anything else
-  # (absent key, null, scalar, object) is treated as an empty list, matching
-  # jq's `(.key // []) | join(",")` for our reason-list callers.
-  case "$raw" in
-    *\[*\]*) ;;
-    *) return 0 ;;
-  esac
-
-  printf '%s' "$raw" \
-    | sed -E 's/^[^[]*\[//; s/\]$//; s/"[[:space:]]*,[[:space:]]*"/,/g; s/^"//; s/"$//'
+  _health_json_string_array_csv "$raw"
 }
+
+_health_json_string_array_csv() (
+  # Pure-bash reader for one raw JSON array token with the same element rule as the jq path;
+  # anything but an array of such strings (absent, null, scalar, object) prints nothing.
+  export LC_ALL=C
+  local raw="$1" n i ch hex code expect=first in_string=0 elem="" out="" count=0
+  case "$raw" in \[*\]) ;; *) exit 0 ;; esac
+  raw="${raw:1:${#raw}-2}"
+  n=${#raw}
+  for (( i = 0; i < n; i++ )); do
+    ch="${raw:i:1}"
+    if [ "$in_string" -eq 1 ]; then
+      if [ "$ch" = '"' ]; then
+        in_string=0
+        expect=comma
+        [ "$count" -gt 0 ] && out+=","
+        out+="$elem"
+        count=$((count + 1))
+        continue
+      fi
+      if [ "$ch" = '\' ]; then
+        i=$((i + 1))
+        ch="${raw:i:1}"
+        case "$ch" in
+          '"'|'\'|/) ;;
+          u)
+            hex="${raw:i+1:4}"
+            case "$hex" in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;; *) exit 0 ;; esac
+            i=$((i + 4))
+            code=$((16#$hex))
+            { [ "$code" -ge 32 ] && [ "$code" -lt 127 ]; } || exit 0
+            printf -v ch "\\$(printf '%03o' "$code")"
+            ;;
+          *) exit 0 ;;
+        esac
+      else
+        case "$ch" in [[:print:]]) ;; *) exit 0 ;; esac
+      fi
+      [ "$ch" = ',' ] && exit 0
+      elem+="$ch"
+      continue
+    fi
+    case "$ch" in
+      ' '|$'\t'|$'\r') ;;
+      '"')
+        [ "$expect" = comma ] && exit 0
+        in_string=1
+        elem=""
+        ;;
+      ',')
+        [ "$expect" = comma ] || exit 0
+        expect=value
+        ;;
+      *) exit 0 ;;
+    esac
+  done
+  { [ "$in_string" -eq 0 ] && [ "$expect" != value ]; } || exit 0
+  printf '%s' "$out"
+)
 
 _health_json_top_level_only() {
   # #4348 review finding #2: the jq-less field checks below must interrogate the
