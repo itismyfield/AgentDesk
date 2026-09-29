@@ -1153,6 +1153,8 @@ server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_id
 server::routes::message_outbox::tests::monitor_alert_routing_separates_actionable_and_informational_kinds
 server::routes::message_outbox::tests::protected_message_outbox_routes_are_registered_contract
 server::routes::message_outbox::tests::redrive_contract_defaults_to_dry_run_and_denies_mass_field
+server::routes::pipeline::stage_save_tests::stage_save_routes_preserve_legacy_settings_only_for_the_same_stage_pg
+server::routes::pipeline::stage_save_tests::stage_save_routes_reject_unsupported_settings_without_writes_pg
 server::routes::pr_summary::tests::ensure_valid_query_accepts_good_input
 server::routes::pr_summary::tests::ensure_valid_query_bad_repo_preserves_400_and_message
 server::routes::pr_summary::tests::ensure_valid_query_nonpositive_pr_preserves_400_and_message
@@ -8483,6 +8485,11 @@ services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_sta
 services::pipeline_override::pipeline_override_pg_tests::repo_write_accepts_unassigned_repo_card_without_default_agent_fallback
 services::pipeline_override::pipeline_override_pg_tests::repo_write_rejects_state_id_that_would_fail_kanban_status_check
 services::pipeline_override::pipeline_override_pg_tests::repo_write_repairs_the_pair_when_the_existing_agent_override_is_unreadable
+services::pipeline_routes::stage_validation::tests::duplicate_effective_stage_order_is_bad_request
+services::pipeline_routes::stage_validation::tests::existing_unsupported_values_can_be_saved_but_not_copied_or_changed
+services::pipeline_routes::stage_validation::tests::new_counter_stage_is_bad_request
+services::pipeline_routes::stage_validation::tests::new_stage_skip_condition_is_bad_request
+services::pipeline_routes::stage_validation::tests::supported_stages_with_distinct_orders_remain_valid
 services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_pg
 services::pipeline_routes::tests::invalid_backoff_is_bad_request
 services::pipeline_routes::tests::normalize_optional_blanks_to_none

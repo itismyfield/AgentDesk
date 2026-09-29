@@ -35,5 +35,4 @@ pub(crate) mod session_agent_resolution;
 pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;
-pub mod table_metadata;
 pub mod turns;
