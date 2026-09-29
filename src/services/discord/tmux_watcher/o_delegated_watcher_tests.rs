@@ -262,7 +262,9 @@ async fn streamed_then_delegated_turn(case: u64) -> Harness {
     h.append(format!("{}{}", user("T1"), said(PARTIAL)).as_bytes());
     h.until("streamed partial", |h| h.showing(PARTIAL)).await;
     // The writer list is fixed per process, so this child lists the channel only from the cutover.
-    let _env = crate::config::shared_test_env_lock().lock().unwrap();
+    let _env = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let listed = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
         std::ffi::OsStr::new(&format!("[[{},\"claude_tui\"]]", h.channel.get())),
