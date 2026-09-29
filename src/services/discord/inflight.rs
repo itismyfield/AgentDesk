@@ -9,6 +9,7 @@ pub(in crate::services::discord) mod anchor_repost;
 pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
+mod host_locator;
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;

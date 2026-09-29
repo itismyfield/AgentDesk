@@ -847,6 +847,7 @@ src/
 │   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── host_locator.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1937,6 +1938,7 @@ src/
 │   │   ├── runner.rs
 │   │   └── session.rs
 │   ├── tmux_common/
+│   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs

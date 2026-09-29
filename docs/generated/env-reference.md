@@ -118,7 +118,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
 | `COKACDIR_DEBUG` | `src/services/claude.rs:264` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
-| `COMPUTERNAME` | `src/services/tmux_common.rs:1142` |  |
+| `COMPUTERNAME` | `src/services/tmux_common.rs:1143` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:989` |  |
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs:1383` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1384` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
