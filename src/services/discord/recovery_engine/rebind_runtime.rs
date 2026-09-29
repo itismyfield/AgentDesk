@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::session_host::legacy_collapse::tmux_live_pane_bool;
 
 #[path = "rebind_runtime/codex_relay_generation.rs"]
 mod codex_relay_generation;
@@ -479,7 +480,7 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
                         || {
                             !watcher_cancel_for_alive
                                 .load(std::sync::atomic::Ordering::Relaxed)
-                                && crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+                                && tmux_live_pane_bool(
                                     &tail_tmux_session_name,
                                 )
                         },

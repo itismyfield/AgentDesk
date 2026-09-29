@@ -21,6 +21,7 @@ async fn rest_worker_terminal_edits_once_without_a_headless_duplicate() {
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     driver.gateway = Arc::new(DriverGateway {
         chain_locally: false,
+        direct: true,
         marker: driver.marker.clone(),
         observations: driver.observations.clone(),
         completed_publications: driver.completed_publications.clone(),

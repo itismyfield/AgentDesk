@@ -9,14 +9,12 @@ const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
 
 #[path = "tui_turn_state/completion_scan.rs"]
 mod completion_scan;
-#[cfg(test)]
-use self::completion_scan::{
-    envelope_is_turn_end_terminator, is_interactive_mode_housekeeping_type,
-    is_torn_trailing_fragment,
-};
 pub(crate) use self::completion_scan::{
-    jsonl_completion_scan_idle, jsonl_strict_terminator_idle, jsonl_turn_end_terminator_idle,
+    envelope_is_turn_end_terminator, jsonl_completion_scan_idle, jsonl_strict_terminator_idle,
+    jsonl_turn_end_terminator_idle,
 };
+#[cfg(test)]
+use self::completion_scan::{is_interactive_mode_housekeeping_type, is_torn_trailing_fragment};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TuiTurnState {

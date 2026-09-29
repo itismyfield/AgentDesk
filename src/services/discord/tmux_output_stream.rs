@@ -684,6 +684,7 @@ fn watcher_user_event_is_prompt_boundary(value: &serde_json::Value) -> bool {
         .get("isMeta")
         .and_then(serde_json::Value::as_bool)
         .is_some_and(|is_meta| is_meta)
+        || crate::services::tui_prompt_dedupe::is_claude_compact_summary(value)
     {
         return false;
     }
@@ -728,6 +729,10 @@ fn strip_leading_tui_response_chrome_in_place(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tmux_output_stream/tests/compact_summary_tests.rs"]
+mod compact_summary_tests;
 
 #[cfg(test)]
 mod tests {

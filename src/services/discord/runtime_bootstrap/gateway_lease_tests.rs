@@ -218,3 +218,40 @@ fn never_yields_to_an_offline_or_malformed_preferred_node() {
         "claude"
     ));
 }
+
+/// Static check: every gateway lease unlock goes through `release_gateway` (Lost first), and the
+/// keepalive-failure drop closes admission first. The runtime paths need a live PG lock.
+#[test]
+fn every_gateway_lease_release_path_closes_o_admission_first() {
+    let source = include_str!("gateway_lease.rs");
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    let unlocks: Vec<&&str> = lines
+        .iter()
+        .filter(|line| line.contains(".unlock()"))
+        .collect();
+    assert_eq!(unlocks.len(), 2, "unexpected unlock sites: {unlocks:?}");
+    assert!(
+        unlocks
+            .iter()
+            .all(|line| line.contains("release_gateway(&gate, lease.unlock())"))
+    );
+    let dropped: Vec<usize> = (0..lines.len())
+        .filter(|&at| lines[at] == "current_lease = None;")
+        .collect();
+    assert_eq!(dropped.len(), 1);
+    assert!(
+        dropped
+            .iter()
+            .all(|&at| lines[at - 1] == "gate.uncertain();")
+    );
+    let handoff = lines
+        .iter()
+        .position(|line| line.contains("singleton lease taken by another instance"));
+    let fence = handoff.and_then(|at| {
+        lines[at..]
+            .iter()
+            .position(|line| line.starts_with("self_fence_gateway"))
+            .map(|off| at + off)
+    });
+    assert!(fence.is_some_and(|at| lines[at - 1] == "gate.lost();"));
+}

@@ -11,7 +11,7 @@ pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_channels;
 pub use agent_channels::AgentChannels;
-mod runtime_profile;
+pub(crate) mod runtime_profile;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;
@@ -68,6 +68,8 @@ pub struct Config {
         skip_serializing_if = "PromptManifestRetentionConfig::is_default"
     )]
     pub prompt_manifest_retention: PromptManifestRetentionConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tui_o: Option<crate::services::tui_o::shadow::tap::TuiOConfig>,
     /// When true (default), the server watches the on-disk config file and
     /// hot-reloads the hot-swappable settings (routine tunables, thresholds)
     /// without a restart, mirroring the policies watcher: the candidate file is
@@ -2716,7 +2718,6 @@ impl Config {
         let Some(root) = runtime_root else {
             return self;
         };
-
         self.policies.dir = resolve_runtime_path(root, &self.policies.dir);
         self.data.dir = resolve_runtime_path(root, &self.data.dir);
         self.routines.dir = resolve_runtime_path(root, &self.routines.dir);
@@ -2747,12 +2748,10 @@ fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
             return Some(PathBuf::from(trimmed));
         }
     }
-
     let file_name = path.file_name()?;
     if file_name != OsStr::new("agentdesk.yaml") {
         return None;
     }
-
     let parent = path.parent()?;
     if parent.file_name() == Some(OsStr::new("config")) {
         return parent.parent().map(Path::to_path_buf);
@@ -2787,6 +2786,7 @@ impl Default for Config {
             memory: None,
             mcp: McpConfig::default(),
             prompt_manifest_retention: PromptManifestRetentionConfig::default(),
+            tui_o: None,
             config_hot_reload: default_true(),
         }
         .apply_runtime_defaults()

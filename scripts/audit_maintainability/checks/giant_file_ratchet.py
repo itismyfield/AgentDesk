@@ -6,8 +6,11 @@ silently re-inflated (``tmux_watcher.rs`` regrew 7160 -> 9608 production LoC).
 
 This ratchet freezes each listed giant at a baseline production LoC
 (``scripts/audit_maintainability_giant_baseline.toml``) and fails ``--check``
-when a file exceeds it. Lower a baseline as a file shrinks; raising one is a
-deliberate, reviewable admission that a giant grew (prefer splitting instead).
+when a file exceeds it by more than ``WIRING_SLACK_LINES`` (shared with the
+hot-file ratchet). The slack is measured from the frozen baseline, so it admits
+a few wiring lines once, never cumulative growth. Lower a baseline as a file
+shrinks; raising one is a deliberate, reviewable admission that a giant grew
+(prefer splitting instead).
 
 Production LoC (test code excluded) is shared with ``giant_files`` via
 ``giant_production_loc()`` so every giant surface agrees on the split (#3036).
@@ -24,7 +27,7 @@ from .. import common
 from ..common import Finding
 from . import CheckSpec
 from .giant_files import giant_production_loc
-from ratchet_admission import audit_repository_admissions
+from ratchet_admission import WIRING_SLACK_LINES, audit_repository_admissions
 
 CONFIG_REL_PATH = "scripts/audit_maintainability_giant_baseline.toml"
 
@@ -96,7 +99,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
         loc = current.get(rel)
         # `loc is None` means the file dropped below the giant threshold, was
         # split, or was removed — all wins, never a regression.
-        if loc is None or loc <= frozen:
+        if loc is None or loc <= frozen + WIRING_SLACK_LINES:
             continue
         findings.append(
             Finding(
@@ -105,13 +108,14 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
                 file=rel,
                 line=None,
                 message=(
-                    f"{loc} production LoC > {frozen} frozen baseline "
-                    f"(re-inflation); split the file or lower it back. "
-                    f"Baseline: {CONFIG_REL_PATH}"
+                    f"grew to {loc} production LoC > baseline {frozen} + slack "
+                    f"{WIRING_SLACK_LINES} (re-inflation); split the file or "
+                    f"shrink it back. Baseline: {CONFIG_REL_PATH}"
                 ),
                 extra={
                     "loc": str(loc),
                     "baseline": str(frozen),
+                    "slack": str(WIRING_SLACK_LINES),
                     "config": CONFIG_REL_PATH,
                 },
             )
@@ -126,7 +130,7 @@ CHECK = CheckSpec(
     description=(
         "Production giants listed in "
         f"{CONFIG_REL_PATH} must not exceed their frozen production-LoC "
-        "baseline."
+        f"baseline plus a {WIRING_SLACK_LINES}-line wiring slack."
     ),
     hard_gate=True,
     runner=_run,

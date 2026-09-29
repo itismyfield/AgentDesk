@@ -12,7 +12,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 import generate_inventory_docs as inventory
-from ratchet_admission import parse_cap_table
+from ratchet_admission import WIRING_SLACK_LINES, parse_cap_table
 ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = ROOT / "target/giant-file-progress/evidence.json"
 REGISTRY = "scripts/giant_file_registry.toml"
@@ -297,12 +297,32 @@ def without_entry(text: str, path: str) -> str | None:
     except (StopIteration, ValueError):
         return None
     return "".join(lines[:start] + lines[end + 1:])
+def base_pins(root: Path) -> dict[str, int]:
+    """Frozen giant pins at ``root``; missing or unreadable pins grant no slack."""
+    try:
+        return parse_cap_table((root / GIANT_PIN).read_text(encoding="utf-8"),
+                               "giant_file_ratchet")
+    except (OSError, ValueError):
+        return {}
 def new_or_growing_errors(base: dict[str, object],
                           candidate: dict[str, object]) -> list[str]:
     base_loc, candidate_loc = base["modules"], candidate["modules"]
-    return [f"new or growing giant: {path}" for path, loc in candidate_loc.items()
-            if loc >= 1000 and (base_loc.get(path, 0) < 1000
-                                or loc > base_loc.get(path, 0))]
+    # Wiring slack only for giants pinned at base: the frozen pin caps the total
+    # across PRs, while an unpinned giant would gain the slack again every PR.
+    pins = base.get("pins", {})
+    errors = []
+    for path, loc in candidate_loc.items():
+        old = base_loc.get(path, 0)
+        if loc < 1000:
+            continue
+        if old < 1000:
+            errors.append(f"new or growing giant: {path}")
+        elif path in pins and loc > old + WIRING_SLACK_LINES:
+            errors.append(f"new or growing giant: {path} grew to {loc} > base {old} "
+                          f"+ slack {WIRING_SLACK_LINES}")
+        elif path not in pins and loc > old:
+            errors.append(f"new or growing giant: {path}")
+    return errors
 def ordinary_no_regression_errors(base: dict[str, object], candidate: dict[str, object],
                                   facts: dict[str, object]) -> list[str]:
     errors: list[str] = []
@@ -552,8 +572,56 @@ def ledger_repair_errors(base: dict[str, object], candidate: dict[str, object],
             errors.append(f"E8: new giant pin differs from measured production LoC: {path}")
     return errors
 
+def registered_deletions(base: dict[str, object], facts: dict[str, object]) -> set[str]:
+    return {path for path in base["registrations"]
+            if facts.get("statuses", {}).get(path) == "D"}
+
+def without_baseline_path(text: str, path: str) -> str:
+    lines = text.splitlines(keepends=True)
+    start = next((index for index, line in enumerate(lines)
+                  if line.strip() == "grandfathered_baseline_paths = ["), len(lines))
+    for index in range(start + 1, len(lines)):
+        if lines[index].strip() == "]":
+            break
+        if lines[index].strip() == f'"{path}",':
+            return "".join(lines[:index] + lines[index + 1:])
+    return text
+
+def giant_deletion_errors(base: dict[str, object], candidate: dict[str, object],
+                          facts: dict[str, object], deleted: set[str]) -> list[str]:
+    errors: list[str] = []
+    registry, candidate_registry = facts["deletion_ledgers"][REGISTRY]
+    transition, candidate_transition = facts["deletion_ledgers"][TRANSITION]
+    expected: str | None = registry
+    for path in sorted(deleted):
+        expected = without_entry(expected, path)
+        if expected is None:
+            errors.append(f"registry entry not found for deleted giant: {path}")
+            break
+        expected = without_baseline_path(expected, path)
+    if expected is not None and expected != candidate_registry:
+        errors.append("registry is not the exact deleted-entry removal")
+    if "".join(line for line in transition.splitlines(keepends=True)
+               if line.strip() not in deleted) != candidate_transition:
+        errors.append("transition list is not the exact deleted-path removal")
+    if not facts["pin_equal"]:
+        errors.append("giant pin blob changed")
+    if set(candidate["overdue"]) != set(base["overdue"]) - deleted:
+        errors.append("overdue debt is not base debt minus deleted giants")
+    base_meta, candidate_meta = base["registrations"], candidate["registrations"]
+    for path in sorted(set(base_meta) - deleted):
+        if candidate_meta.get(path) != base_meta[path]:
+            errors.append(f"retained metadata changed: {path}")
+    errors.extend(f"unexpected registration in deletion PR: {path}"
+                  for path in sorted(set(candidate_meta) - (set(base_meta) - deleted)))
+    errors.extend(new_or_growing_errors(base, candidate))
+    return errors
+
 def pr_evaluation(base: dict[str, object], candidate: dict[str, object],
                   facts: dict[str, object]) -> tuple[str, list[str]]:
+    deleted = registered_deletions(base, facts)
+    if deleted:
+        return "pr_giant_deletion", giant_deletion_errors(base, candidate, facts, deleted)
     moved = ledger_repair_moves(base, candidate, facts)
     if moved is not None:
         return "pr_ledger_repair", ledger_repair_errors(base, candidate, facts, moved)
@@ -622,6 +690,7 @@ def main() -> int:
                 base_root = Path(temporary) / "base"
                 base_root.mkdir(); archive(base_sha, base_root)
                 base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
+                base["pins"] = base_pins(base_root)
                 facts = diff_facts(base_sha, candidate_sha)
                 if facts["changed"] and facts["changed"] <= LEDGER:
                     facts.update(ledger_base=load_ledger(base_root, snapshot="base"),
@@ -652,11 +721,21 @@ def main() -> int:
                 for path in sorted(retired):
                     expected = without_entry(expected, path) or ""
                 facts["registry_exact"] = expected == (candidate_root / REGISTRY).read_text(encoding="utf-8")
+                deleted = registered_deletions(base, facts)
+                if deleted:
+                    selector, payload["deleted"] = "pr_giant_deletion", sorted(deleted)
+                    facts["deletion_ledgers"] = {name: tuple(
+                        (root / name).read_text(encoding="utf-8") for root in (base_root, candidate_root))
+                        for name in (REGISTRY, TRANSITION)}
+                    facts["pin_equal"] = oid(f"{base_sha}:{GIANT_PIN}", "") == oid(
+                        f"{candidate_sha}:{GIANT_PIN}", "")
                 selector, errors = pr_evaluation(base, candidate, facts)
                 if errors:
                     raise RuntimeError("; ".join(errors))
                 if selector == "pr_ledger_repair":
                     retired = set()  # Deadline movement does not retire a source entry.
+                elif selector == "pr_giant_deletion":
+                    retired = set()  # A deleted path has no candidate LoC to record.
                 payload.update({"event_base_sha": event_base_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
@@ -670,6 +749,7 @@ def main() -> int:
                     "pr_ordinary_no_regression": "ordinary PR preserves giant-file debt",
                     "pr_strict_progress": "retirement or 200-line partial progress",
                     "pr_ledger_repair": "bounded deadline and monotone ledger repair; production unchanged",
+                    "pr_giant_deletion": "registered giant deleted with exact ledger removal",
                 }[selector]
             elif event == "push" and repository == "itismyfield/AgentDesk":
                 selector = "main_no_regression_record"

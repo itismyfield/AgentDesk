@@ -178,48 +178,66 @@ fn is_rollout_jsonl(path: &Path) -> bool {
 /// the first [`HEADER_SCAN_LINE_LIMIT`] lines (REQ-005). This is the direct
 /// (uncached) read used on the cold path and when the cache is disabled.
 pub fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
-    let file = std::fs::File::open(path).ok()?;
+    session_meta_from_header(std::fs::File::open(path).ok()?)
+}
+
+fn session_meta_from_header(file: std::fs::File) -> Option<RolloutSessionMeta> {
     let reader = std::io::BufReader::new(file);
-    for line in reader
+    reader
         .lines()
         .map_while(Result::ok)
         .take(HEADER_SCAN_LINE_LIMIT)
-    {
-        let Ok(json) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if json.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
+        .find_map(|line| header_line_meta(line.as_bytes()))
+        .flatten()
+}
+
+/// Binding-check header read: an I/O error is returned, never folded into "no session_meta".
+fn strict_session_meta_from_header(
+    file: impl std::io::Read,
+) -> std::io::Result<Option<RolloutSessionMeta>> {
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    for _ in 0..HEADER_SCAN_LINE_LIMIT {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
         }
-        let Some(payload) = json.get("payload") else {
-            continue;
-        };
-        let Some(cwd) = payload.get("cwd").and_then(Value::as_str).map(str::trim) else {
-            continue;
-        };
-        let id = payload
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string);
-        if cwd.is_empty() {
-            return None;
+        if let Some(found) = header_line_meta(&line) {
+            return Ok(found);
         }
-        return Some(RolloutSessionMeta {
-            id,
-            cwd: PathBuf::from(cwd),
-            source: payload
-                .get("source")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            originator: payload
-                .get("originator")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-        });
     }
-    None
+    Ok(None)
+}
+
+/// `None` means keep scanning; `Some(None)` is a `session_meta` whose cwd is blank.
+fn header_line_meta(line: &[u8]) -> Option<Option<RolloutSessionMeta>> {
+    let json = serde_json::from_slice::<Value>(line).ok()?;
+    if json.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = json.get("payload")?;
+    let cwd = payload.get("cwd").and_then(Value::as_str).map(str::trim)?;
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if cwd.is_empty() {
+        return Some(None);
+    }
+    Some(Some(RolloutSessionMeta {
+        id,
+        cwd: PathBuf::from(cwd),
+        source: payload
+            .get("source")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        originator: payload
+            .get("originator")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    }))
 }
 
 /// A rollout candidate surfaced by the index: its path plus the file/length
@@ -541,6 +559,90 @@ where
             })
         })
         .collect()
+}
+
+/// Uncached walk for binding checks: any unreadable directory, entry or rollout fails the
+/// whole lookup. Every header is re-read; a cached negative cannot tell absent from unreadable.
+pub(crate) fn complete_indexed_rollouts(root: &Path) -> std::io::Result<Vec<IndexedRollout>> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut results = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let metadata = std::fs::metadata(&path)?;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !is_rollout_jsonl(&path) {
+                continue;
+            }
+            let modified = metadata.modified()?;
+            let len = metadata.len();
+            let file = std::fs::File::open(&path)?;
+            let meta = strict_session_meta_from_header(strict_header_reader(file, &path))?;
+            results.push(IndexedRollout {
+                path,
+                modified,
+                len,
+                meta,
+            });
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(not(test))]
+fn strict_header_reader(file: std::fs::File, _path: &Path) -> std::fs::File {
+    file
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAILING_HEADER_READ: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: strict header reads of `path` still open the file, then every read fails.
+#[cfg(test)]
+pub(crate) fn fail_header_reads_for_tests(path: Option<PathBuf>) {
+    FAILING_HEADER_READ.with(|slot| *slot.borrow_mut() = path);
+}
+
+#[cfg(test)]
+fn strict_header_reader(file: std::fs::File, path: &Path) -> Box<dyn std::io::Read> {
+    struct FailingRead;
+    impl std::io::Read for FailingRead {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected header read failure"))
+        }
+    }
+    if FAILING_HEADER_READ.with(|slot| slot.borrow().as_deref() == Some(path)) {
+        Box::new(FailingRead)
+    } else {
+        Box::new(file)
+    }
+}
+
+/// Test seam: fills the discovery cache for `root` as an enabled lookup would.
+#[cfg(test)]
+pub(crate) fn warm_cache_for_tests(root: &Path) -> Vec<IndexedRollout> {
+    cached_indexed_rollouts_inner(root, true)
+}
+
+/// Test seam: the cached header for `path` under `root`; `Some(None)` is a cached negative.
+#[cfg(test)]
+pub(crate) fn cached_meta_for_tests(
+    root: &Path,
+    path: &Path,
+) -> Option<Option<RolloutSessionMeta>> {
+    let canonical = std::fs::canonicalize(root).ok()?;
+    lock_cache()
+        .roots
+        .get(&canonical)?
+        .files
+        .get(path)
+        .map(|cached| cached.meta.clone())
 }
 
 fn lock_cache() -> std::sync::MutexGuard<'static, IndexState> {
