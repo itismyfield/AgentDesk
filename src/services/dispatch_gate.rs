@@ -806,11 +806,11 @@ pub fn persisted_runtime_overrides(
     )
 }
 
-/// The gate's effective danger threshold for an async caller holding a pool: persisted
-/// runtime-config first (same `kv_meta` row, same [`persisted_runtime_overrides`] parser the
-/// activation path uses), then YAML, then the default. `None` is the read failing; the enable
-/// flag and stale window come back from the same parser, unused (see [`is_deferring`]).
-pub async fn effective_danger_pct_pg(pg_pool: &sqlx::PgPool) -> Option<u64> {
+/// Persisted runtime-config overrides (same `kv_meta` row and parser as activation);
+/// `None` means the read failed.
+async fn persisted_runtime_overrides_pg(
+    pg_pool: &sqlx::PgPool,
+) -> Option<(Option<bool>, Option<u64>, Option<i64>)> {
     let raw = sqlx::query_scalar::<_, String>(
         "SELECT value FROM kv_meta WHERE key = 'runtime-config' \
          AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
@@ -820,8 +820,19 @@ pub async fn effective_danger_pct_pg(pg_pool: &sqlx::PgPool) -> Option<u64> {
     .inspect_err(|error| tracing::warn!(%error, "[dispatch-gate] runtime-config unreadable"))
     .ok()?;
     let parsed = raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let (_enabled, danger, _stale) = persisted_runtime_overrides(parsed.as_ref());
+    Some(persisted_runtime_overrides(parsed.as_ref()))
+}
+
+/// Effective danger threshold: persisted runtime-config, then YAML, then the default.
+pub async fn effective_danger_pct_pg(pg_pool: &sqlx::PgPool) -> Option<u64> {
+    let (_enabled, danger, _stale) = persisted_runtime_overrides_pg(pg_pool).await?;
     Some(danger.unwrap_or_else(danger_pct))
+}
+
+/// Effective rate-limit staleness window, resolved like [`effective_danger_pct_pg`].
+pub async fn effective_stale_sec_pg(pg_pool: &sqlx::PgPool) -> Option<i64> {
+    let (_enabled, _danger, stale) = persisted_runtime_overrides_pg(pg_pool).await?;
+    Some(stale.unwrap_or_else(stale_sec))
 }
 
 fn persisted_runtime_overrides_with_fallbacks(

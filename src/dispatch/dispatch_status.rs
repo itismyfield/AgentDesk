@@ -143,7 +143,7 @@ async fn auto_queue_review_disabled_for_dispatch_on_pg(
     })
 }
 
-async fn auto_queue_review_disabled_for_dispatch_pg(
+pub(super) async fn auto_queue_review_disabled_for_dispatch_pg(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<bool> {
@@ -282,7 +282,7 @@ fn should_skip_auto_queue_terminal_sync(
     }
 }
 
-fn block_on_dispatch_pg<F, T>(
+pub(super) fn block_on_dispatch_pg<F, T>(
     pool: &PgPool,
     future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
 ) -> Result<T>
@@ -295,7 +295,7 @@ where
     })
 }
 
-async fn dispatch_exists_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
+pub(super) async fn dispatch_exists_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
     sqlx::query_scalar::<_, bool>("SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = $1")
         .bind(dispatch_id)
         .fetch_one(pool)
@@ -1114,7 +1114,7 @@ async fn set_dispatch_status_on_pg_with_external_phase_gate(
     .await
 }
 
-async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<bool> {
+pub(super) async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<bool> {
     let row = sqlx::query(
         "SELECT status, repo_id, assigned_agent_id
          FROM kanban_cards
@@ -1170,7 +1170,7 @@ async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<b
     Ok(!has_blocking_dispatch)
 }
 
-async fn maybe_inject_phase_gate_verdict_pg(
+pub(super) async fn maybe_inject_phase_gate_verdict_pg(
     pool: &PgPool,
     dispatch_id: &str,
     result: &serde_json::Value,
@@ -1461,29 +1461,13 @@ fn complete_dispatch_inner_with_backends(
         return Ok(dispatch);
     }
 
-    crate::kanban::fire_event_hooks_with_backends(
+    super::completion_hooks::fire_dispatch_completed_hooks(
         engine,
-        "on_dispatch_completed",
-        "OnDispatchCompleted",
-        json!({
-            "dispatch_id": dispatch_id,
-            "kanban_card_id": kanban_card_id,
-            "result": effective_result,
-        }),
+        dispatch_id,
+        kanban_card_id.as_deref(),
+        effective_result,
+        needs_review_dispatch,
     );
-
-    crate::kanban::drain_hook_side_effects_with_backends(engine);
-
-    if needs_review_dispatch {
-        let cid = kanban_card_id.as_deref().unwrap_or("unknown");
-        tracing::warn!(
-            "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
-            cid
-        );
-        let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));
-        crate::kanban::drain_hook_side_effects_with_backends(engine);
-    }
-
     Ok(dispatch)
 }
 

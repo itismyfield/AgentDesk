@@ -254,7 +254,8 @@ impl ProviderKind {
             Self::Claude => LegacyDispatchKind::Claude,
             Self::Codex => LegacyDispatchKind::Codex,
             Self::Gemini => LegacyDispatchKind::Gemini,
-            Self::OpenCode | Self::Grok => LegacyDispatchKind::OpenCode,
+            Self::OpenCode => LegacyDispatchKind::OpenCode,
+            Self::Grok => LegacyDispatchKind::StreamJsonCli(StreamJsonDialectId::Grok),
             Self::Qwen => LegacyDispatchKind::Qwen,
             Self::Antigravity => LegacyDispatchKind::StreamJsonCli(StreamJsonDialectId::Agy),
             Self::Unsupported(name) => LegacyDispatchKind::Unsupported(name.clone()),
@@ -496,9 +497,6 @@ pub fn should_omit_repeated_system_prompt(
 /// 1. Empty system prompts (always omitted — nothing to send).
 /// 2. The legacy Codex+resumed-session rule
 ///    ([`should_omit_repeated_system_prompt`]).
-///
-/// Issue #3744 retired the unused generalized envelope/dev-role dedup
-/// infrastructure rather than wiring it unsafely across provider resets.
 pub fn system_prompt_for_provider_turn<'a>(
     provider: &ProviderKind,
     session_id: Option<&str>,
