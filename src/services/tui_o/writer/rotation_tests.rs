@@ -295,9 +295,13 @@ async fn a_compact_that_keeps_the_same_source_reposts_nothing() {
     polls(3).await;
     bindings.commit(rotate(2, &a, &a, BindingCause::Compact));
     append(&a_path, &row("m2", "second"));
-    polls(3).await;
+    polls(12).await;
     assert_eq!(harness.port.posts(), ["first", "second"]);
     assert_eq!(harness.channel().cursors().count(), 1);
+    assert!(
+        !retired(&harness, &a),
+        "a source is never its own successor"
+    );
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(2));
     assert_eq!(harness.alarms.taken(), []);
     halt(stop, task).await;
