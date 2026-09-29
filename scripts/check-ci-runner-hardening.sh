@@ -848,19 +848,56 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    # #5670 adds one bounded Windows owner runner; broad runtime remains nightly.
-    "job_sha256" => "58d905a59149419525d3dcc7fece3019ed652ff7d758c236f1cc10fbc307f94d",
+    "job_sha256" => "79745b96e7fc4d02c7744ac9141e4da962ea56c603b5926401294c1af8a56cee",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
         "timeout_minutes" => nil,
       },
+    },
+  },
+  "check_fast_cross_os_targets" => {
+    "label" => "cross-OS exact targets job",
+    "name" => 'Windows exact targets (${{ matrix.os }})',
+    "needs" => "changes",
+    "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
+    "runs_on" => '${{ matrix.os }}',
+    # The bounded Windows owner runner; broad runtime remains nightly.
+    "job_sha256" => "c8f9edc04ab62774a5c79006def01569c603c90286b2b903f9be728c0532434d",
+    "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
         "timeout_minutes" => 30,
         "if_condition" => "runner.os == 'Windows'",
       },
     },
+  },
+  # Publishes the required cross-OS context from both runner results.
+  "check_fast_cross_os_required_context" => {
+    "label" => "cross-OS required-context mirror",
+    "name" => "Fast check cross OS required context (ubuntu-latest)",
+    "needs" => %w[changes check_fast_cross_os check_fast_cross_os_targets],
+    "if" => "always()",
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "b3f62e36af947ceaede19310676c24f3eb09e33ee2bbbda186df545443bd2390",
+    "require_debug_env" => false,
+    "cargo_steps" => %w[check_fast_cross_os check_fast_cross_os_targets].to_h do |runner|
+      [
+        "Mirror #{runner} result for branch protection",
+        {
+          "commands" => ["./scripts/required-check-mirror.sh"],
+          "timeout_minutes" => nil,
+          "env" => {
+            "BASH_ENV" => "/dev/null",
+            "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
+            "FILTER_NAME" => "cross_os_rust",
+            "FILTER_OUTPUT" => "${{ needs.changes.outputs.cross_os_rust }}",
+            "UPSTREAM_JOB_NAME" => runner,
+            "UPSTREAM_RESULT" => "${{ needs.#{runner}.result }}",
+          },
+        },
+      ]
+    end,
   },
   "test_fast" => {
     "label" => "PostgreSQL job",
@@ -1156,7 +1193,7 @@ targets.each do |job_id, spec|
       (!raw_job.is_a?(Hash) || raw_job["timeout-minutes"] != spec["job_timeout_minutes"].to_s)
     errors << "#{label} must retain exact raw timeout-minutes"
   end
-  if job_id == "check_fast_cross_os"
+  if %w[check_fast_cross_os check_fast_cross_os_targets].include?(job_id)
     strategy = job["strategy"]
     unless strategy.is_a?(Hash)
       errors << "#{label} must retain its matrix strategy"
