@@ -5474,6 +5474,7 @@ services::discord::session_identity::tests::parses_legacy_session_key
 services::discord::session_identity::tests::parses_namespaced_session_key
 services::discord::session_identity::tests::rejects_missing_or_empty_parts
 services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delegated_idle_range_is_consumed_once_without_transport_or_evidence
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_observes_landed_stale_proof
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_observes_landed_unrecorded_proof
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof
@@ -5536,6 +5537,7 @@ services::discord::session_relay_sink::relay_state_contract_refs::relay_state_co
 services::discord::session_relay_sink::task_notification_context::tests::card_is_confirmed_before_referenced_answer_is_allowed
 services::discord::session_relay_sink::task_notification_context::tests::coordinate_less_task_response_defers_until_watcher_has_a_consumed_end
 services::discord::session_relay_sink::task_notification_context::tests::giant_sink_wires_card_gate_before_reference_send
+services::discord::session_relay_sink::task_notification_context::tests::o_delegated_task_response_leaves_no_legacy_claim
 services::discord::session_relay_sink::task_notification_context::tests::task_notification_fallback_gate_releases_only_after_referenced_answer_delivery
 services::discord::session_relay_sink::task_notification_context::tests::transient_card_failure_blocks_answer_and_frontier
 services::discord::session_relay_sink::tests::a0_characterization_tests::a0_session_bound_predicate_boundary_is_strictly_greater_than_2000
@@ -6240,6 +6242,7 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::rowless_cancelled_native_split_utf8_preserves_original_decoder
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::rowless_cancelled_native_terminal_preserves_exact_ack_at_eof
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::watcher_direct_idle_commit_passes_mailbox_gate_only_when_idle
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::o_delegated_rollover_tick_writes_no_body
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::recovered_session_bound_codex_stream_tick_reaches_http
@@ -6376,6 +6379,7 @@ services::discord::tmux::tmux_watcher::tests::restored_response_seed_is_kept_for
 services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_watcher_turn_shows_no_body_and_records_no_frontier
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rewound_read_below_a_live_row_baseline
@@ -7516,6 +7520,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_5191
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rest_delivery_tests::rest_worker_terminal_edits_once_without_a_headless_duplicate
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rest_delivery_tests::worker_rest_transport_delivers_without_gateway_queue_chaining
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::resume_pin_delivery_epilogue_stamps_only_current_incarnation
@@ -9314,6 +9319,8 @@ services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
+services::tui_o::cutover::tests::o_owns_tui_output_truth_table
+services::tui_o::cutover::tests::o_tui_writer_is_off_until_flip
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
