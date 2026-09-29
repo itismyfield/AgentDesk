@@ -71,7 +71,7 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
         // Do NOT send directly via message.queue — that bypasses the delivery guarantee.
         agentdesk.db.execute(
           "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) " +
-          "VALUES (?1, 'notify', ?2, ?3, ?4, 'pending')",
+          "VALUES (?1, 'notify', ?2, ?3, ?4, 'pending') ON CONFLICT DO NOTHING",
           [ud.id, ud.to_agent_id, ud.kanban_card_id || "", ud.title]
         );
         agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " re-enqueued to dispatch_outbox");

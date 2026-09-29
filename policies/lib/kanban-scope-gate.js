@@ -22,9 +22,8 @@
  *
  * The dispatch-creation helpers encapsulate the consultation-resume pattern
  * (#256: `_findAutoQueueEntriesByDispatch` + `agentdesk.dispatch.create` +
- * `agentdesk.autoQueue.updateEntryStatus(entry, "dispatched", ...)`) so the
- * scope-gate and the missed-hook fallback (timeouts/reconciliation.js) create
- * identical follow-up dispatches. On any creation failure they leave the linked
+ * `agentdesk.autoQueue.updateEntryStatus(entry, "dispatched", ...)`) so every
+ * scope-gate arm creates identical follow-up dispatches. On any creation failure they leave the linked
  * auto-queue entry untouched (pending) and warn, so the queue can retry rather
  * than stranding the entry in `dispatched`.
  *

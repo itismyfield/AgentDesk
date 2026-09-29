@@ -436,7 +436,7 @@ pub(crate) async fn run(
 /// 3 tiers to prevent slow sections from blocking time-critical recovery:
 /// - OnTick30s (30s): retry, unsent notification recovery, deadlock detection [I], orphan recovery [K]
 /// - OnTick1min (1m): non-critical timeouts [A][C][D][E][L], stale detection
-/// - OnTick5min (5m): non-critical reconciliation [R][B][F][G][H][M][O], idle session cleanup
+/// - OnTick5min (5m): non-critical reconciliation [B][F][G][H][M][O], missed completion-hook replay
 /// - OnTick (legacy, 5m): backward compat for policies that only register onTick
 async fn policy_tick_loop(
     engine: PolicyEngine,
@@ -629,10 +629,9 @@ async fn policy_tick_loop(
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
             cleanup_stale_pending_queue_tmp_files_for_five_min_tick().await;
-            // #2257 concern 5: sweep expired idempotency_keys rows so the
-            // table stays bounded. The endpoint defaults are 24h TTL; one
-            // 5-min sweep is plenty even under heavy use.
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
+                crate::dispatch::replay_marked_dispatch_completions_pg(&engine, pool).await;
+                // Keep idempotency_keys bounded (24h TTL).
                 match crate::db::idempotency::gc_expired(pool).await {
                     Ok(0) => {}
                     Ok(deleted) => {

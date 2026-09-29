@@ -45,17 +45,13 @@ var _autoRefreshInventoryDocs = _inventory._autoRefreshInventoryDocs;
 var _preflight = require("./lib/kanban-preflight");
 var _runPreflight = _preflight._runPreflight;
 
-// #3605 (T2): scope-assessment result recorder is shared with
-// timeouts/reconciliation.js (missed-hook fallback) so both paths record
-// scope_depth + fall back to "full" identically.
+// #3605 (T2): scope-assessment result recorder (falls back to "full").
 var _scopeAssessment = require("./lib/kanban-scope-assessment");
 var _recordScopeAssessment = _scopeAssessment._recordScopeAssessment;
 
 // #3594 (T3): depth → flow resolver + next-dispatch helpers. The scope-assessment
 // completion handler reads the recorded scope_depth and branches:
 // direct → impl now, plan_only → plan (→impl), full → plan (→plan-review→impl).
-// Shared with timeouts/reconciliation.js so the missed-hook fallback gates the
-// flow identically instead of stranding the card after recording depth.
 var _scopeGate = require("./lib/kanban-scope-gate");
 var _resolveScopeFlow = _scopeGate._resolveScopeFlow;
 var _claimPendingEntryForDispatch = _scopeGate._claimPendingEntryForDispatch;
@@ -284,8 +280,6 @@ var rules = {
     //   plan_only → create a "plan" dispatch (plan-completion arm creates impl).
     //   full      → create a "plan" dispatch (plan → plan-review → impl).
     //   unknown   → "full" (most cautious) via _resolveScopeFlow.
-    // The depth is read back from metadata after recording so a missed-hook
-    // replay (reconciliation.js) and the live hook branch identically.
     if (dispatch.dispatch_type === "scope-assessment") {
       _recordScopeAssessment(dispatch.kanban_card_id, dispatch);
       var scopeMeta = _loadCardMetadata(dispatch.kanban_card_id);

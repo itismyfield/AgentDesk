@@ -14,7 +14,6 @@ var timeouts = {
   priority: 100
 };
 
-require("./timeouts/reconciliation")(timeouts, helpers);
 require("./timeouts/card-timeouts")(timeouts, helpers);
 require("./timeouts/review-timeouts")(timeouts, helpers);
 require("./timeouts/review-auto-accept")(timeouts, helpers);
@@ -63,7 +62,7 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");
 };
 
-// 5min tier: [R] [B] [G] [M] [O] + TTL cleanup (non-critical reconciliation)
+// 5min tier: [B] [G] [M] [O] + TTL cleanup (non-critical reconciliation)
 // [I] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick5min = function(ev) {
   var start = Date.now();
@@ -74,8 +73,6 @@ timeouts.onTick5min = function(ev) {
     agentdesk.db.execute("DELETE FROM kv_meta WHERE expires_at IS NOT NULL AND expires_at < datetime('now')");
   } catch(e) { agentdesk.log.warn("[tick5min] kv_ttl error: " + e); }
   agentdesk.log.debug("[tick5min][kv_ttl] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_R(); } catch(e) { agentdesk.log.warn("[tick5min] R error: " + e); }
-  agentdesk.log.debug("[tick5min][R] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_B(); } catch(e) { agentdesk.log.warn("[tick5min] B error: " + e); }
   agentdesk.log.debug("[tick5min][B] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_G(); } catch(e) { agentdesk.log.warn("[tick5min] G error: " + e); }
