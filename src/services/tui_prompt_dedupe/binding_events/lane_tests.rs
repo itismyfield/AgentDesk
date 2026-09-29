@@ -3,8 +3,9 @@ use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests;
 use crate::services::tui_prompt_dedupe::{
     TEST_LOCK, adopt_claude_continuation_session, lock_claude_session_rotations_for_tests,
-    register_provider_session, register_rehydrated_tmux_runtime_binding, register_tmux_channel,
-    register_tmux_runtime_binding, reset_state_for_tests, runtime_binding_for_tmux_session,
+    register_launched_tmux_runtime_binding, register_provider_session,
+    register_rehydrated_tmux_runtime_binding, register_tmux_channel, register_tmux_runtime_binding,
+    reset_state_for_tests, runtime_binding_for_tmux_session,
 };
 
 /// Serialises the dedupe state and points the log at a scratch root for one test.
@@ -397,7 +398,7 @@ fn judgment_trace(dir: &Path, tmux: &str, channel: u64) -> Vec<String> {
     note("progress", None);
     register_rehydrated_tmux_runtime_binding("claude", tmux, channel, claude(&path(a), a));
     note("rehydrate a", None);
-    register_tmux_runtime_binding(tmux, claude(&path(c), c));
+    register_launched_tmux_runtime_binding(tmux, claude(&path(c), c));
     note("launch c", None);
     trace
 }
@@ -429,6 +430,53 @@ fn binding_judgment_is_the_same_with_and_without_the_log() {
         .map(|e| std::mem::discriminant(&e.new))
         .collect();
     assert_eq!(kinds.len(), 7, "{:#?}", events(7_041));
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_cause_comes_from_the_execution_context_only_once() {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        BindingContext, PreparedIncarnation, tests::fixture,
+    };
+    let (context_root, _env) = fixture();
+    let lane = Lane::new();
+    let (channel, tmux) = (7_050, "p5-launch");
+    let launch = |mode: &str| {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let context = BindingContext {
+            schema: 1,
+            provider: "claude".into(),
+            created_at: Utc::now(),
+            execution_nonce: nonce.clone(),
+            tmux_session: tmux.into(),
+            channel_id: Some(channel),
+            owner_runtime_root: context_root.path().display().to_string(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: mode.into(),
+            provider_root: None,
+        };
+        PreparedIncarnation::create(context).unwrap();
+        fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();
+        nonce
+    };
+    register_tmux_channel(tmux, channel);
+    let fresh = launch("fresh");
+    let (a, b, c, d) = (uuid(), uuid(), uuid(), uuid());
+    register_launched_tmux_runtime_binding(tmux, claude(&lane.transcript(&a), &a));
+    register_launched_tmux_runtime_binding(tmux, claude(&lane.transcript(&b), &b));
+    launch("resume");
+    register_launched_tmux_runtime_binding(tmux, claude(&lane.transcript(&c), &c));
+    register_tmux_runtime_binding(tmux, claude(&lane.transcript(&d), &d));
+
+    let log = events(channel);
+    let causes: Vec<_> = log.iter().map(|e| e.cause).collect();
+    use BindingCause::{Resume, Startup, Unknown};
+    assert_eq!(causes, [Startup, Unknown, Resume, Unknown]);
+    assert_eq!(log[0].execution_nonce.as_deref(), Some(fresh.as_str()));
+    assert!(log.iter().all(|e| e.parent_hint.is_none()));
+    let _ = fs::remove_file(tc::session_temp_path(tmux, "spawn_nonce"));
 }
 
 #[test]

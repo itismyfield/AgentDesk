@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::TuiRuntimeBinding;
-use super::binding_context::{SpawnNonceMarker, observe_spawn_nonce_marker};
+use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
@@ -117,10 +117,11 @@ impl HookSignal {
     }
 }
 
-/// Only a hook names a cause; other registrations are recorded as `Unknown`.
+/// Launch reads the execution's context, but only for the first record of that execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CauseSource {
     Hook(BindingCause),
+    Launch,
     Observed,
 }
 
@@ -178,6 +179,7 @@ struct PaneState {
     current: Option<SourceId>,
     pending: Option<BindingEvent>,
     rejected: Option<String>,
+    nonce: Option<String>,
 }
 
 struct Writer {
@@ -405,6 +407,9 @@ impl Writer {
     fn apply(&mut self, record: &BindingEvent) {
         self.last_seq = self.last_seq.max(record.seq);
         let pane = self.panes.entry(record.tmux_session.clone()).or_default();
+        if record.execution_nonce.is_some() {
+            pane.nonce = record.execution_nonce.clone();
+        }
         match &record.new {
             BindingTarget::Source(source) => pane.current = Some(source.clone()),
             BindingTarget::Pending { .. } => pane.pending = Some(record.clone()),
@@ -493,6 +498,17 @@ impl Writer {
                 let cause = match p.cause {
                     CauseSource::Hook(cause) => cause,
                     CauseSource::Observed => BindingCause::Unknown,
+                    // A later record of an execution already in the log is not its launch.
+                    CauseSource::Launch if nonce.is_none() || pane.nonce == nonce => {
+                        BindingCause::Unknown
+                    }
+                    CauseSource::Launch => {
+                        match nonce.as_deref().and_then(|n| launch_mode(p.provider, n)) {
+                            Some(mode) if mode == "fresh" => BindingCause::Startup,
+                            Some(mode) if mode == "resume" => BindingCause::Resume,
+                            _ => BindingCause::Unknown,
+                        }
+                    }
                 };
                 let derived = matches!(
                     cause,

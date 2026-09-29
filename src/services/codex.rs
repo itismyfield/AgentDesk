@@ -588,7 +588,7 @@ fn register_codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
 ) {
-    crate::services::codex_tui::session::install_codex_tui_runtime_binding(
+    crate::services::codex_tui::session::install_launched_codex_tui_runtime_binding(
         tmux_session_name,
         None,
         codex_tui_idle_relay_binding(tmux_session_name, tail_result),

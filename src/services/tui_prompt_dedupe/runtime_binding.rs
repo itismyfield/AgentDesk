@@ -127,6 +127,23 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
     publish_runtime_binding(authority, binding, None, CauseSource::Observed)
 }
 
+/// Launch paths let the execution's context name the cause of a new source.
+pub(crate) fn register_launched_tmux_runtime_binding(
+    tmux_session_name: &str,
+    binding: TuiRuntimeBinding,
+) {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
+    });
+}
+
+pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    binding: TuiRuntimeBinding,
+) -> bool {
+    publish_runtime_binding(authority, binding, None, CauseSource::Launch)
+}
+
 /// Persists the binding event first; if that fails the binding is not published.
 fn publish_runtime_binding(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
