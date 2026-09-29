@@ -75,7 +75,7 @@
 .campaign-group-heading .campaign-group-blocked { color: #d97706; }
 .campaign-mini-progress { width: 40px; height: 4px; border-radius: 4px; background: var(--th-border); overflow: hidden; }
 .campaign-mini-progress i { display: block; height: 100%; background: #16a34a; }
-.campaign-task-columns, .campaigns-panel .campaign-task-row { display: grid; grid-template-columns: minmax(130px, 1fr) 62px 74px 36px 72px; gap: 8px; align-items: center; padding: 0 10px; }
+.campaign-task-columns, .campaigns-panel .campaign-task-row { display: grid; grid-template-columns: minmax(130px, 1fr) 96px 74px 36px 72px; gap: 8px; align-items: center; padding: 0 10px; }
 .campaign-task-columns { height: 26px; font-size: 10px; color: var(--th-text-muted); background: var(--th-bg-surface); }
 .campaigns-panel .campaign-task-row { width: 100%; min-height: 40px; border: 0; border-radius: 0; border-top: 1px solid color-mix(in srgb, var(--th-border) 50%, transparent); text-align: left; font-size: 11px; background: transparent; }
 .campaigns-panel .campaign-task-row:hover { background: color-mix(in srgb, var(--th-accent-info) 5%, var(--th-card-bg)); }
@@ -87,6 +87,11 @@
 .campaign-task-stage, .campaign-task-owner { color: var(--th-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-task-round { color: var(--th-text-muted); font-size: 10px; }
 .campaign-inspector { min-width: 0; max-height: 76vh; overflow-y: auto; border: 1px solid var(--th-border); border-radius: 10px; padding: 14px; background: var(--th-bg-surface); scroll-margin-top: 12px; }
+.campaign-task-status { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
+.campaign-live { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 5px; border: 1px dashed color-mix(in srgb, var(--th-text-muted) 45%, transparent); color: var(--th-text-muted); font-size: 10px; }
+.campaign-live.is-working { border-style: solid; border-color: #3b82f660; color: #60a5fa; }
+.campaign-glance-blocked-count { color: #f59e0b; }
+.campaign-live-detail h4 { margin-bottom: 6px; }
 .campaign-inspector-header { color: var(--th-text-muted); font-size: 10px; margin-bottom: 10px; overflow-wrap: anywhere; }
 .campaign-inspector-header button { min-width: 30px; height: 30px; padding: 0; font-size: 20px; }
 .campaign-filter-note { color: #d97706; margin-bottom: 10px; }
@@ -113,7 +118,7 @@
 .campaign-connections button { display: flex; align-items: center; gap: 8px; text-align: left; }
 .campaign-connections button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-connections button :is(span, small) { flex-shrink: 0; font-size: 10px; color: var(--th-text-muted); }
-@media (max-width: 1200px) { .campaign-workbench.has-inspector .campaign-task-columns, .campaign-workbench.has-inspector .campaign-task-row { grid-template-columns: minmax(130px, 1fr) 60px 42px; } .campaign-workbench.has-inspector .campaign-task-stage, .campaign-workbench.has-inspector .campaign-task-owner, .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(3), .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(5) { display: none; } }
+@media (max-width: 1200px) { .campaign-workbench.has-inspector .campaign-task-columns, .campaign-workbench.has-inspector .campaign-task-row { grid-template-columns: minmax(130px, 1fr) 96px 42px; } .campaign-workbench.has-inspector .campaign-task-stage, .campaign-workbench.has-inspector .campaign-task-owner, .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(3), .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(5) { display: none; } }
 @media (max-width: 900px) { .campaign-workbench.has-inspector { grid-template-columns: minmax(0, 1fr); } .campaign-inspector { max-height: none; } .campaign-toolbar { grid-template-columns: 1fr 1fr; } .campaign-search { grid-column: 1 / -1; } .campaign-group-list { max-height: 60vh; } .campaign-main { padding: 12px; } .campaign-selector { width: 100%; } .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaigns-panel .campaign-task-row { min-height: 48px; } .campaign-graph .react-flow__controls-button { min-height: 26px; } }
 @media (max-width: 600px) {
   .campaigns-panel { gap: 10px; }

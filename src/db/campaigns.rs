@@ -6,6 +6,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, types::Json};
 
+use crate::services::stale_turn_reconciler::STALE_TURN_GRACE;
+use crate::utils::github_links::{normalize_github_issue_url, normalize_github_repo_id};
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CampaignStatus {
@@ -273,6 +276,120 @@ pub async fn get(pool: &PgPool, id: &str) -> Result<Campaign, CampaignError> {
         .await?
         .map(|v| v.0)
         .ok_or(CampaignError::NotFound)
+}
+
+/// What the card behind a node's `issue_url` is doing now, read per request and never
+/// stored. A dispatch row can outlive its session, so only `running` claims live work.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct NodeLiveStatus {
+    pub card_id: String,
+    pub card_status: String,
+    /// Latest dispatch and its session, independently of any older work still running.
+    pub dispatch_id: Option<String>,
+    pub dispatch_type: Option<String>,
+    pub dispatch_status: Option<String>,
+    /// The session holding that dispatch, if any, and its last heartbeat.
+    pub session_status: Option<String>,
+    pub session_seen_at: Option<DateTime<Utc>>,
+    /// A dispatched task has a mid-turn session inside the stale-turn grace window.
+    pub running: bool,
+    /// A currently working dispatch/session pair; newer sidecars cannot hide it.
+    pub working_dispatch_id: Option<String>,
+    pub working_dispatch_type: Option<String>,
+    pub working_session_id: Option<String>,
+    pub working_session_status: Option<String>,
+    pub working_session_seen_at: Option<DateTime<Utc>>,
+    pub queue_status: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct LiveRow {
+    repo_id: String,
+    issue_number: i64,
+    #[sqlx(flatten)]
+    status: NodeLiveStatus,
+}
+
+/// `(owner/repo, issue number)` for a GitHub issue link.
+fn issue_ref(raw: &str) -> Option<(String, i64)> {
+    let url = normalize_github_issue_url(raw)?;
+    let number = url.rsplit('/').next()?.parse().ok()?;
+    Some((normalize_github_repo_id(&url)?, number))
+}
+
+/// Campaign id -> node id -> live status. Nodes without a GitHub issue link, or
+/// whose issue has no card, are absent.
+pub async fn live_status(
+    pool: &PgPool,
+    campaigns: &[Campaign],
+) -> Result<HashMap<String, HashMap<String, NodeLiveStatus>>, CampaignError> {
+    let mut nodes_by_issue: HashMap<(String, i64), Vec<(&str, &str)>> = HashMap::new();
+    for campaign in campaigns {
+        for node in &campaign.nodes {
+            if let Some((repo, number)) = node.input.issue_url.as_deref().and_then(issue_ref) {
+                nodes_by_issue
+                    .entry((repo.to_lowercase(), number))
+                    .or_default()
+                    .push((&campaign.id, &node.input.id));
+            }
+        }
+    }
+    let mut live: HashMap<String, HashMap<String, NodeLiveStatus>> = HashMap::new();
+    if nodes_by_issue.is_empty() {
+        return Ok(live);
+    }
+    let (repos, numbers): (Vec<String>, Vec<i64>) = nodes_by_issue.keys().cloned().unzip();
+    let rows: Vec<LiveRow> = sqlx::query_as(
+        "SELECT k.repo_id, k.issue_number, c.id AS card_id,
+                COALESCE(c.status, 'backlog') AS card_status,
+                d.id AS dispatch_id, d.dispatch_type, d.status AS dispatch_status,
+                s.status AS session_status, s.last_heartbeat AS session_seen_at,
+                w.dispatch_id IS NOT NULL AS running,
+                w.dispatch_id AS working_dispatch_id, w.dispatch_type AS working_dispatch_type,
+                w.session_id AS working_session_id, w.session_status AS working_session_status,
+                w.session_seen_at AS working_session_seen_at,
+                q.status AS queue_status
+         FROM UNNEST($1::TEXT[], $2::BIGINT[]) AS k(repo_id, issue_number)
+         JOIN kanban_cards c
+           ON LOWER(c.repo_id) = k.repo_id AND c.github_issue_number = k.issue_number
+         LEFT JOIN LATERAL (
+             SELECT id, dispatch_type, status FROM task_dispatches
+             WHERE kanban_card_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1
+         ) d ON TRUE
+         LEFT JOIN LATERAL (
+             SELECT status, last_heartbeat FROM sessions
+             WHERE active_dispatch_id = d.id ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1
+         ) s ON TRUE
+         LEFT JOIN LATERAL (
+             SELECT wd.id AS dispatch_id, wd.dispatch_type, ws.id::TEXT AS session_id,
+                    ws.status AS session_status, ws.last_heartbeat AS session_seen_at
+             FROM task_dispatches wd
+             JOIN sessions ws ON ws.active_dispatch_id = wd.id
+             WHERE wd.kanban_card_id = c.id AND wd.status = 'dispatched'
+               AND ws.status IN ('turn_active', 'awaiting_bg')
+               AND ws.last_heartbeat >= NOW() - ($3::BIGINT * INTERVAL '1 second')
+             ORDER BY ws.last_heartbeat DESC, wd.created_at DESC, wd.id DESC, ws.id DESC
+             LIMIT 1
+         ) w ON TRUE
+         LEFT JOIN LATERAL (
+             SELECT status FROM auto_queue_entries
+             WHERE kanban_card_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1
+         ) q ON TRUE",
+    )
+    .bind(&repos)
+    .bind(&numbers)
+    .bind(STALE_TURN_GRACE.as_secs() as i64)
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        let key = (row.repo_id, row.issue_number);
+        for (campaign_id, node_id) in nodes_by_issue.get(&key).into_iter().flatten() {
+            live.entry((*campaign_id).to_owned())
+                .or_default()
+                .insert((*node_id).to_owned(), row.status.clone());
+        }
+    }
+    Ok(live)
 }
 
 /// Every revision snapshots the whole DAG, so long campaigns keep only the newest ones.

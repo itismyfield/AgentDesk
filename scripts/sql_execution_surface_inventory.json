@@ -6036,6 +6036,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/db/campaigns.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bbb7c00dd871d382c0e9db651bda4a7e239c871524db59e18da04d064aacad5f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -6075,6 +6084,42 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:19b1ae2e675667efbd0721d5574fe167a31bb82e96a1ad6b1e92c893853b7c63"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c644494b9ee316012af442cc9db8ee93dc3a3cedf564fede51e5b78a71c303a8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d4b54bd1cb402c74770c34ea4d48265ac3088946e4b04d7929e9e044a8b976b7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e586a7aed809ff9c44b54c910a8b8a7b3e53012d30967db32954514b7d2b30dc"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:f0449e6f2eb2358e5eab6dffb5a4c3a3e7290d58496db4121b5311984c76d168"
     },
     {
@@ -6085,6 +6130,24 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:f780b747f06468566e9a85501d9f486e35445359b6e6bb9cca0c3ab45f5a7f02"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:714a20f51d374091718331eb6f81efdb810e7401ea58689697f52a4c252445ce"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:72962783930ed64518b8141fe385417257e86551b0fe731c8101a8c3760901ff"
     },
     {
       "root": "src",
@@ -6103,6 +6166,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:54bbae576be48f91a39858e7c3300fe449cd095f267f1f2b5f0cf362df12c80d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9bdb85053949b0bf3e44f5a91c03beb681e461107a58325e6951df3ded34f95d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e1969681ec8658d7c37e6ebcf0e905bbe58577a651f51f65619ea1dabae9f8b5"
     },
     {
       "root": "src",
