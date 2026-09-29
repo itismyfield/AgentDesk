@@ -178,7 +178,10 @@ fn is_rollout_jsonl(path: &Path) -> bool {
 /// the first [`HEADER_SCAN_LINE_LIMIT`] lines (REQ-005). This is the direct
 /// (uncached) read used on the cold path and when the cache is disabled.
 pub fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
-    let file = std::fs::File::open(path).ok()?;
+    session_meta_from_header(std::fs::File::open(path).ok()?)
+}
+
+fn session_meta_from_header(file: std::fs::File) -> Option<RolloutSessionMeta> {
     let reader = std::io::BufReader::new(file);
     for line in reader
         .lines()
@@ -541,6 +544,47 @@ where
             })
         })
         .collect()
+}
+
+/// Uncached-walk variant for binding checks: any unreadable directory, entry or rollout fails
+/// the whole lookup instead of silently shrinking the candidate set. The cache is read, not filled.
+pub(crate) fn complete_indexed_rollouts(root: &Path) -> std::io::Result<Vec<IndexedRollout>> {
+    let previous = std::fs::canonicalize(root).ok().and_then(|canonical| {
+        lock_cache()
+            .roots
+            .get(&canonical)
+            .map(|index| index.files.clone())
+    });
+    let mut stack = vec![root.to_path_buf()];
+    let mut results = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let metadata = std::fs::metadata(&path)?;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !is_rollout_jsonl(&path) {
+                continue;
+            }
+            let modified = metadata.modified()?;
+            let len = metadata.len();
+            let meta = match previous.as_ref().and_then(|files| files.get(&path)) {
+                Some(cached) if cached.modified == modified && cached.len == len => {
+                    cached.meta.clone()
+                }
+                _ => session_meta_from_header(std::fs::File::open(&path)?),
+            };
+            results.push(IndexedRollout {
+                path,
+                modified,
+                len,
+                meta,
+            });
+        }
+    }
+    Ok(results)
 }
 
 fn lock_cache() -> std::sync::MutexGuard<'static, IndexState> {
