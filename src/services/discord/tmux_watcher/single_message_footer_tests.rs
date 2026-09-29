@@ -115,7 +115,10 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
     use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
     use crate::services::discord::recovery_engine::o_cut_recorder::start;
     const BODY: &str = "ADK-A14B-footer-body";
-    let _on = crate::services::tui_o::cutover::test_override::force_on();
+    let _on = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        4_047_122,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
     for (delegated, channel_raw) in [(false, 4_047_121u64), (true, 4_047_122)] {
         let recorder = start(channel_raw).await;
         let shared = crate::services::discord::make_shared_data_for_tests();

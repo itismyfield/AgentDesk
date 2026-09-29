@@ -134,7 +134,13 @@ async fn o_delegated_task_notification_turn_promotes_card_without_body_or_claim(
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_task_notification_turn_promotes_card_without_body_or_claim",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[[6284124,\"claude_tui\"]]",
+            ),
+        ],
     ) {
         return;
     }
@@ -165,7 +171,13 @@ async fn o_delegated_task_card_post_failure_retries_before_consuming_turn() {
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_task_card_post_failure_retries_before_consuming_turn",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[[6284126,\"claude_tui\"]]",
+            ),
+        ],
     ) {
         return;
     }
@@ -249,11 +261,18 @@ async fn streamed_then_delegated_turn(case: u64) -> Harness {
     h.spawn(f);
     h.append(format!("{}{}", user("T1"), said(PARTIAL)).as_bytes());
     h.until("streamed partial", |h| h.showing(PARTIAL)).await;
+    // The writer list is fixed per process, so this child lists the channel only from the cutover.
+    let _env = crate::config::shared_test_env_lock().lock().unwrap();
+    let listed = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+        std::ffi::OsStr::new(&format!("[[{},\"claude_tui\"]]", h.channel.get())),
+    );
     let bound =
         crate::services::tui_o::cutover::test_override::bind_claude_tui_session(&h.tmux, &h.path);
     h.append(format!("{}{}", said(BODY), stop()).as_bytes());
     h.drained("terminal frame").await;
     drop(bound);
+    drop(listed);
     h
 }
 
@@ -263,7 +282,13 @@ async fn o_delegated_mid_turn_cutover_shows_no_post_cutover_body() {
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_mid_turn_cutover_shows_no_post_cutover_body",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[]",
+            ),
+        ],
     ) {
         return;
     }

@@ -1431,7 +1431,12 @@ async fn o_delegated_cancelled_partial_body_is_not_replaced() {
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         crate::services::discord::inflight::save_inflight_state(&driver.inflight)
             .expect("seed the TUI-kind row");
-        let _forced = delegated.then(crate::services::tui_o::cutover::test_override::force_on);
+        let _forced = delegated.then(|| {
+            crate::services::tui_o::cutover::test_override::force_channels(&[(
+                DRIVER_CHANNEL_ID,
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            )])
+        });
         let (mut ctx, state) = driver.parts();
         ctx.cancelled = true;
         let output =
