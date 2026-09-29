@@ -397,3 +397,24 @@ async fn foreign_terminal_custody_aborted_attempt_deactivates_escaped_handle() {
         assert!(escaped.persist(&payload()).is_err());
     }
 }
+
+#[tokio::test]
+async fn a_record_naming_the_channel_or_one_that_does_not_parse_is_custody_of_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(DIRECTORY);
+    assert!(!retains_channel_at(&root, 41).unwrap());
+    let payload = |delivery, owner, local| {
+        serde_json::json!({"channel_id": delivery, "watcher_owner_channel_id": owner,
+            "local": {"channel_id": local, "logical_channel_id": 9}})
+    };
+    persist_at(&root, "a", &payload(41, 1, 1)).await.unwrap();
+    persist_at(&root, "b", &payload(2, 42, 2)).await.unwrap();
+    persist_at(&root, "c", &payload(3, 3, 43)).await.unwrap();
+    let retained: Vec<_> = [41, 42, 43, 9, 44]
+        .into_iter()
+        .map(|channel| retains_channel_at(&root, channel).unwrap())
+        .collect();
+    assert_eq!(retained, [true, true, true, true, false]);
+    fs::write(root.join("torn.json"), "{\"version\":").unwrap();
+    assert!(retains_channel_at(&root, 44).unwrap());
+}

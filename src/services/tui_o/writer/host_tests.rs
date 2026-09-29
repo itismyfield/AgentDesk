@@ -1,5 +1,6 @@
 use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::tui_o::cutover::{self, test_override};
+use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{HostIo, HostParts, Readiness, start};
 
@@ -41,6 +42,7 @@ struct TestIo {
     lease: Arc<FakeLease>,
     alarms: Raised,
     calls: Mutex<Vec<(&'static str, u64)>>,
+    facts: Mutex<Result<ActivationFacts, String>>,
 }
 
 impl TestIo {
@@ -50,6 +52,7 @@ impl TestIo {
             lease: Arc::clone(&harness.lease),
             alarms: Raised::default(),
             calls: Mutex::default(),
+            facts: Mutex::new(Ok(ActivationFacts::default())),
         })
     }
 
@@ -82,6 +85,16 @@ impl HostIo for TestIo {
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<ChannelBindingLog> {
         self.calls.lock().unwrap().push(("bindings", channel));
         Arc::new(ChannelBindingLog::new(channel, provider))
+    }
+
+    fn activation_facts(
+        &self,
+        channel: u64,
+        _provider: ShadowProvider,
+    ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
+        self.calls.lock().unwrap().push(("facts", channel));
+        let facts = self.facts.lock().unwrap().clone();
+        async move { facts }
     }
 }
 
@@ -185,27 +198,23 @@ async fn a_channel_without_its_own_recovered_store_is_held_without_an_actor() {
     let (harness, _, _) = switched_over(&row("m0", "before the switch"));
     harness.gate.acquired();
     let store_dir = harness._runtime.path().join("o_store");
-    let (foreign, missing) = (10, 11);
+    let foreign = 10;
     copy_dir(
         &store_dir.join(CHANNEL.to_string()),
         &store_dir.join(foreign.to_string()),
     );
-    let _selected = test_override::force_channels(&[(foreign, ClaudeTui), (missing, ClaudeTui)]);
+    let _selected = test_override::force_channels(&[(foreign, ClaudeTui)]);
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-    assert_eq!(host(&harness, &io, true, &ready), 2);
+    assert_eq!(host(&harness, &io, true, &ready), 1);
     polls(3).await;
     assert_eq!(io.calls(), [], "no gateway, lease or binding is taken");
     assert!(harness.port.posts().is_empty());
     let halted = io.alarms.halted();
-    assert_eq!(halted.len(), 2, "{halted:?}");
-    let held = |channel: u64, why: &str| {
-        halted
-            .iter()
-            .any(|(c, detail)| *c == channel && detail.contains(why))
-    };
-    assert!(held(foreign, "init names another channel"), "{halted:?}");
-    assert!(held(missing, "channel has no init"), "{halted:?}");
-    assert!(!ready.is_ready(foreign) && !ready.is_ready(missing));
+    assert!(
+        matches!(halted.as_slice(), [(c, detail)] if *c == foreign && detail.contains("init names another channel")),
+        "{halted:?}"
+    );
+    assert!(!ready.is_ready(foreign));
 
     let bare = Harness::new();
     std::fs::remove_file(bare._runtime.path().join("o_store").join("o_era")).unwrap();
@@ -299,4 +308,238 @@ fn a_channel_binding_log_carries_each_production_event_of_its_channel_and_provid
     let codex = ChannelBindingLog::new(9, ShadowProvider::Claude);
     assert!(codex.binding_events_since(9, 0).is_err());
     p5::set_test_root(None);
+}
+
+/// A selected channel before its first activation: no era or init, and a binding log holding
+/// `event` for an empty transcript.
+fn fresh(event: impl FnOnce(SourceId) -> Vec<u8>) -> (Harness, PathBuf) {
+    let harness = Harness::new();
+    let store_dir = harness._runtime.path().join("o_store");
+    std::fs::remove_dir_all(store_dir.join(CHANNEL.to_string())).unwrap();
+    std::fs::remove_file(store_dir.join("o_era")).unwrap();
+    let path = harness._runtime.path().join("t.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let source = source_id_for("s1", &path).unwrap();
+    p5_log(harness._runtime.path(), CHANNEL, &event(source));
+    (harness, path)
+}
+
+fn startup(source: SourceId) -> Vec<u8> {
+    p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source))
+}
+
+fn init_path(harness: &Harness, channel: u64) -> PathBuf {
+    let dir = harness
+        ._runtime
+        .path()
+        .join("o_store")
+        .join(channel.to_string());
+    dir.join("init")
+}
+
+fn abort(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    tasks.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+fn start_host(
+    harness: &Harness,
+    io: &Arc<TestIo>,
+    ready: &Arc<Readiness>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    p5::set_test_root(Some(harness._runtime.path()));
+    let parts = || HostParts {
+        io: Arc::clone(io),
+        runtime_root: Some(root(harness)),
+        gate: Arc::clone(&harness.gate),
+        readiness: Arc::clone(ready),
+    };
+    start(ShadowProvider::Claude, true, parts)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses() {
+    let (harness, path) = fresh(startup);
+    harness.gate.acquired();
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(io.alarms.halted(), []);
+    let era = harness.store.read_era().unwrap().unwrap();
+    assert_eq!(era.initial_channels, [CHANNEL]);
+    let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
+    let source = source_id_for("s1", &path).unwrap();
+    let attached: Vec<_> = init
+        .sources
+        .iter()
+        .map(|s| (&s.source_id, s.delivery_start))
+        .collect();
+    assert_eq!(attached, [(&source, 0)]);
+    assert!(
+        ready.is_ready(CHANNEL),
+        "the actor resumed over the new init"
+    );
+    append(&path, &row("m1", "first"));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first"]);
+
+    abort(tasks);
+    polls(2).await;
+    let written = std::fs::read(init_path(&harness, CHANNEL)).unwrap();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let _tasks = start_host(&harness, &io, &ready);
+    append(&path, &row("m2", "second"));
+    polls(3).await;
+    assert!(
+        !io.calls().contains(&("facts", CHANNEL)),
+        "a restart recovers, it does not activate"
+    );
+    assert_eq!(
+        std::fs::read(init_path(&harness, CHANNEL)).unwrap(),
+        written
+    );
+    assert_eq!(harness.store.read_era().unwrap().unwrap(), era);
+    assert!(ready.is_ready(CHANNEL));
+    assert_eq!(harness.port.posts(), ["first", "second"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
+    let facts = |edit: fn(&mut ActivationFacts)| {
+        let mut facts = ActivationFacts::default();
+        edit(&mut facts);
+        Ok(facts)
+    };
+    let pending = |source| {
+        let pending = p5::BindingTarget::Pending {
+            payload_session_id: "s2".into(),
+            payload_transcript_path: None,
+        };
+        let mut later: serde_json::Value =
+            serde_json::from_slice(&p5_event(CHANNEL, "claude", pending)).unwrap();
+        later["seq"] = 2.into();
+        [
+            startup(source),
+            serde_json::to_vec(&later).unwrap(),
+            b"\n".to_vec(),
+        ]
+        .concat()
+    };
+    let codex = |source| p5_event(CHANNEL, "codex", p5::BindingTarget::Source(source));
+    let unbound = |_: SourceId| Vec::new();
+    type Case = (
+        &'static str,
+        Result<ActivationFacts, String>,
+        fn(SourceId) -> Vec<u8>,
+        &'static [u8],
+        bool,
+    );
+    let cases: [Case; 10] = [
+        (
+            "open intake rows",
+            facts(|f| f.open_intake = 1),
+            startup,
+            b"",
+            true,
+        ),
+        (
+            "sessions on another node",
+            facts(|f| f.runner_sessions = 1),
+            startup,
+            b"",
+            true,
+        ),
+        (
+            "node override to runner",
+            facts(|f| f.node_override = Some("runner".into())),
+            startup,
+            b"",
+            true,
+        ),
+        (
+            "Legacy retains delivery custody",
+            facts(|f| f.legacy_custody = true),
+            startup,
+            b"",
+            true,
+        ),
+        ("no PG pool", Err("no PG pool".into()), startup, b"", true),
+        ("no PG gateway lease", facts(|_| ()), startup, b"", false),
+        ("no source is bound", facts(|_| ()), unbound, b"", true),
+        (
+            "already holds",
+            facts(|_| ()),
+            startup,
+            b"legacy answer\n",
+            true,
+        ),
+        ("still pending", facts(|_| ()), pending, b"", true),
+        ("Codex", facts(|_| ()), codex, b"", true),
+    ];
+    for (why, facts, event, body, pg) in cases {
+        let (harness, path) = fresh(event);
+        append(&path, body);
+        harness.gate.acquired();
+        let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+        let io = TestIo::over(&harness);
+        *io.facts.lock().unwrap() = facts;
+        let ready = Arc::new(Readiness::default());
+        host(&harness, &io, pg, &ready);
+        polls(3).await;
+        let halted = io.alarms.halted();
+        assert!(
+            matches!(halted.as_slice(), [(CHANNEL, detail)] if detail.contains(why)),
+            "{why}: {halted:?}"
+        );
+        assert_eq!(harness.store.read_era().unwrap(), None, "{why}");
+        assert!(!harness.store.has_channel_dir(CHANNEL), "{why}");
+        assert!(!io.calls().iter().any(|(call, _)| *call == "port"), "{why}");
+        assert!(
+            !ready.is_ready(CHANNEL) && harness.port.posts().is_empty(),
+            "{why}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_or_damaged_store_state_holds_instead_of_a_first_init() {
+    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    std::fs::remove_file(init_path(&harness, CHANNEL)).unwrap();
+    let orphan = init_path(&harness, OTHER);
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    let empty = |source| p5_event(OTHER, "claude", p5::BindingTarget::Source(source));
+    let path = harness._runtime.path().join("other.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    p5_log(
+        harness._runtime.path(),
+        OTHER,
+        &empty(source_id_for("s2", &path).unwrap()),
+    );
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui), (OTHER, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    assert_eq!(host(&harness, &io, true, &ready), 2);
+    polls(3).await;
+    let halted = io.alarms.halted();
+    let held = |channel, why: &str| halted.iter().any(|(c, d)| *c == channel && d.contains(why));
+    assert!(held(CHANNEL, "era channel has no init"), "{halted:?}");
+    assert!(held(OTHER, "store files but no init"), "{halted:?}");
+    assert!(!init_path(&harness, CHANNEL).exists() && !orphan.exists());
+    assert!(
+        !io.calls().contains(&("facts", CHANNEL)),
+        "an era channel is never activated again"
+    );
+
+    let (damaged, _, _) = switched_over(&row("m0", "before the switch"));
+    std::fs::write(init_path(&damaged, CHANNEL), b"{\"channel\":").unwrap();
+    let (io, ready) = (TestIo::over(&damaged), Arc::new(Readiness::default()));
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    host(&damaged, &io, true, &ready);
+    polls(3).await;
+    assert!(matches!(io.alarms.halted().as_slice(), [(CHANNEL, d)] if d.contains("StoreDamage")));
+    assert_eq!(
+        std::fs::read(init_path(&damaged, CHANNEL)).unwrap(),
+        b"{\"channel\":"
+    );
+    assert_eq!(io.calls(), []);
 }

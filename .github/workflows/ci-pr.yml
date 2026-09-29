@@ -224,6 +224,7 @@ jobs:
               - 'src/db/intake_outbox_delivery_proof.rs'
               - 'src/db/intake_outbox_dispatch_stamp/tests.rs'
               - 'src/db/intake_outbox_dispatched_audit.rs'
+              - 'src/db/o_channel_activation.rs'
               - 'src/db/postgres.rs'
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'

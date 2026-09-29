@@ -1,5 +1,6 @@
 //! Starts the O writer on the gateway runtime: one actor per channel the boot snapshot hands to
-//! O. A channel reads as ready only while its actor has resumed and the gateway is Owned.
+//! O, creating a new channel's first store. A channel is ready only while its actor has resumed
+//! and the gateway is Owned.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -9,6 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::activation::{self, ActivationFacts};
 use super::actor;
 use super::binding::BindingEvents;
 use super::deliver::ChannelWriter;
@@ -30,6 +32,12 @@ pub trait HostIo: Send + Sync + 'static {
     fn lease(&self) -> Self::Lease;
     fn alarms(&self) -> Self::Alarms;
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings>;
+    /// Asked only for a channel with no store yet, before its first `init`.
+    fn activation_facts(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl Future<Output = Result<ActivationFacts, String>> + Send;
 }
 
 /// Channels with a hosted actor and those ready to take work.
@@ -152,8 +160,25 @@ async fn host_channel<I: HostIo>(
     readiness: Arc<Readiness>,
 ) {
     let alarms = io.alarms();
+    let mut bindings = None;
     let store = match recover(&runtime_root, channel, owned) {
-        Ok(store) => store,
+        Ok(Recovered::Store(store)) => store,
+        Ok(Recovered::Fresh(fresh)) => {
+            let facts = io.activation_facts(channel, provider).await;
+            let log = bindings.insert(io.bindings(channel, provider));
+            let created =
+                facts.and_then(|facts| activation::activate(&fresh, channel, &facts, &**log));
+            if let Err(detail) = created {
+                return hold(&alarms, channel, &format!("first activation: {detail}"));
+            }
+            match recover(&runtime_root, channel, owned) {
+                Ok(Recovered::Store(store)) => store,
+                Ok(Recovered::Fresh(_)) => {
+                    return hold(&alarms, channel, "init missing after activation");
+                }
+                Err(detail) => return hold(&alarms, channel, &detail),
+            }
+        }
         Err(detail) => return hold(&alarms, channel, &detail),
     };
     let port = io.port().await;
@@ -161,15 +186,22 @@ async fn host_channel<I: HostIo>(
     let (stop_tx, stop) = watch::channel(false);
     let (resumed_tx, resumed) = watch::channel(false);
     let config = WriterConfig { enabled: owned };
-    let bindings = io.bindings(channel, provider);
+    let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let spawned = actor::spawn_if_enabled(&config, writer, provider, bindings, stop, resumed_tx);
     let Some(actor) = spawned else { return };
     publish(channel, &readiness, gate.subscribe(), resumed, actor).await;
     drop(stop_tx);
 }
 
-/// Recovers the store the switch left; a missing era or init, damage or a foreign init holds it.
-fn recover(runtime_root: &Path, channel: u64, owned: bool) -> Result<ChannelStore, String> {
+enum Recovered {
+    Store(ChannelStore),
+    /// Neither the era nor an `init` names the channel: only a first activation may create it.
+    Fresh(OStore),
+}
+
+/// Recovers the channel's store. Damage, a foreign init, an era channel without init or an init
+/// without era holds it.
+fn recover(runtime_root: &Path, channel: u64, owned: bool) -> Result<Recovered, String> {
     let config = StoreConfig { enabled: owned };
     let store = OStore::open_if_enabled(&config, runtime_root)
         .map_err(|error| format!("store: {error}"))?
@@ -177,13 +209,21 @@ fn recover(runtime_root: &Path, channel: u64, owned: bool) -> Result<ChannelStor
     let era = store
         .read_era()
         .map_err(|error| format!("era: {error:?}"))?;
-    let era = era.ok_or_else(|| "no writer era".to_string())?;
+    let Some(era) = era else {
+        return match store.read_init(channel) {
+            Ok(None) => Ok(Recovered::Fresh(store)),
+            Ok(Some(_)) => Err("no writer era".into()),
+            Err(error) => Err(format!("init: {error:?}")),
+        };
+    };
     let opened = store.open_channel(&era, channel);
     let opened = opened.map_err(|halt| format!("recovery: {halt:?}"))?;
-    let opened = opened.ok_or_else(|| "channel has no init".to_string())?;
+    let Some(opened) = opened else {
+        return Ok(Recovered::Fresh(store));
+    };
     match opened.init().channel {
         stored if stored != channel => Err(format!("store names channel {stored}")),
-        _ => Ok(opened),
+        _ => Ok(Recovered::Store(opened)),
     }
 }
 

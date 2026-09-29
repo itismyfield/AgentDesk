@@ -18,6 +18,7 @@ src/db/intake_outbox.rs
 src/db/intake_outbox_delivery_proof.rs
 src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
+src/db/o_channel_activation.rs
 src/db/postgres.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
@@ -154,6 +155,7 @@ db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
+db::o_channel_activation::postgres_tests
 db::postgres::test_db_reclaim::tests
 db::postgres::tests
 db::prompt_manifests::tests
@@ -489,6 +491,7 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includ
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
+db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_drops_old_database_created_but_never_marked
 db::postgres::test_db_reclaim::tests::pg_reclaim_drops_orphaned_fixture_database
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
