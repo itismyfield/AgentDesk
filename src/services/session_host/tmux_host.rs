@@ -27,7 +27,10 @@ impl TmuxHost {
         session: HostSessionRef<'_>,
         budget: std::time::Duration,
     ) -> HostLiveness {
-        tmux::pane_liveness_within(session.name, budget).into()
+        let probe = |name| tmux::pane_liveness_within(name, budget).into();
+        session
+            .legacy_name()
+            .map_or(HostLiveness::ProbeError, probe)
     }
 }
 
@@ -48,12 +51,18 @@ impl InteractiveSessionHost for TmuxHost {
     }
 
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence {
-        tmux::session_presence(session.name).into()
+        let probe = |name| tmux::session_presence(name).into();
+        session
+            .legacy_name()
+            .map_or(HostPresence::ProbeFailed, probe)
     }
 
     // Same probe as the sync `tmux_diagnostics::tmux_session_pane_liveness`.
     fn liveness(&self, session: HostSessionRef<'_>) -> HostLiveness {
-        tmux::pane_liveness(session.name).into()
+        let probe = |name| tmux::pane_liveness(name).into();
+        session
+            .legacy_name()
+            .map_or(HostLiveness::ProbeError, probe)
     }
 
     fn send_text(
@@ -61,7 +70,7 @@ impl InteractiveSessionHost for TmuxHost {
         session: HostSessionRef<'_>,
         text: &str,
     ) -> Result<HostMutation, HostError> {
-        map_output(tmux::send_literal(session.name, text))
+        map_output(tmux::send_literal(session.legacy_name()?, text))
     }
 
     fn send_keys(
@@ -69,7 +78,7 @@ impl InteractiveSessionHost for TmuxHost {
         session: HostSessionRef<'_>,
         keys: &[&str],
     ) -> Result<HostMutation, HostError> {
-        map_output(tmux::send_keys(session.name, keys))
+        map_output(tmux::send_keys(session.legacy_name()?, keys))
     }
 
     fn interrupt(&self, session: HostSessionRef<'_>) -> Result<HostMutation, HostError> {
@@ -81,7 +90,7 @@ impl InteractiveSessionHost for TmuxHost {
         session: HostSessionRef<'_>,
         scroll_back: i32,
     ) -> Result<String, HostError> {
-        tmux::capture_pane(session.name, scroll_back)
+        tmux::capture_pane(session.legacy_name()?, scroll_back)
             .ok_or_else(|| HostError::Transport("tmux capture-pane failed".to_string()))
     }
 
@@ -89,11 +98,11 @@ impl InteractiveSessionHost for TmuxHost {
         &self,
         session: HostSessionRef<'_>,
     ) -> Result<Option<PathBuf>, HostError> {
-        Ok(tmux::pane_current_path(session.name).map(PathBuf::from))
+        Ok(tmux::pane_current_path(session.legacy_name()?).map(PathBuf::from))
     }
 
     fn execution_pid(&self, session: HostSessionRef<'_>) -> Result<Option<u32>, HostError> {
-        Ok(tmux::pane_pid(session.name))
+        Ok(tmux::pane_pid(session.legacy_name()?))
     }
 }
 
@@ -131,6 +140,24 @@ mod tests {
         assert_eq!(
             map_output(Err("spawn failed".to_string())),
             Err(HostError::Transport("spawn failed".to_string()))
+        );
+    }
+
+    #[test]
+    fn herdr_ref_never_reaches_a_tmux_probe() {
+        // A real probe of an absent session would read DeadOrAbsent.
+        let herdr = HostSessionRef::herdr_pane("session-host-herdr-no-such-tmux");
+        assert_eq!(
+            TmuxHost.liveness(herdr),
+            HostLiveness::ProbeError,
+            "a same-named Herdr pane must never reach a tmux probe"
+        );
+        assert_eq!(TmuxHost.presence(herdr), HostPresence::ProbeFailed);
+        let refused = Err(HostError::Unsupported(HostKind::Herdr, "legacy_name"));
+        assert_eq!(TmuxHost.send_text(herdr, "x"), refused);
+        assert_eq!(
+            TmuxHost.execution_pid(herdr),
+            Err(HostError::Unsupported(HostKind::Herdr, "legacy_name"))
         );
     }
 }

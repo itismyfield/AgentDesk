@@ -2,6 +2,11 @@
 //! pane or child process) and the observation/input operations on it. Creation,
 //! destruction, execution identity and cancel routing stay with their owners.
 
+mod herdr {
+    pub(crate) mod contract;
+    pub(crate) mod model;
+}
+mod herdr_host;
 pub(crate) mod legacy_collapse;
 mod model;
 mod process_host;

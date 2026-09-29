@@ -33,16 +33,13 @@ pub(crate) mod discord_custody;
 // tests keep working without churn.
 #[allow(unused_imports)]
 pub(crate) use dispatches::discord_delivery;
+pub(crate) mod calendar_sync;
 pub mod discord_dm_reply_store;
 pub mod disk_monitor;
 pub mod dispatch_gate;
 pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during dispatches_followup dead-code cleanup.
-pub(crate) mod calendar_sync;
-#[allow(dead_code)]
 pub mod dispatches_followup;
 pub mod escalation_settings;
 pub mod explicit_auth_route;
@@ -57,9 +54,6 @@ pub mod kakao;
 pub mod kakao_message;
 pub mod kanban;
 pub mod kanban_cards;
-// #3034: 81 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during maintenance dead-code cleanup.
-#[allow(dead_code)]
 pub mod maintenance;
 pub(crate) mod manual_steer;
 pub mod mcp_config;

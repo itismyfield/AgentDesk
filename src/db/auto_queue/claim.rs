@@ -106,52 +106,6 @@ pub async fn first_pending_entry_for_group_pg(
     }
 }
 
-#[allow(dead_code)]
-pub async fn sync_run_group_metadata_pg(pool: &PgPool, run_id: &str) -> Result<(), String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("begin postgres sync run group metadata {run_id}: {error}"))?;
-    sync_run_group_metadata_pg_tx(&mut tx, run_id).await?;
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres sync run group metadata {run_id}: {error}"))?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub async fn sync_run_group_metadata_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    run_id: &str,
-) -> Result<(), String> {
-    let thread_group_count = sqlx::query_scalar::<_, i64>(
-        "SELECT GREATEST(
-                COALESCE(COUNT(DISTINCT COALESCE(thread_group, 0)), 0),
-                1
-            )::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1",
-    )
-    .bind(run_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("count postgres thread groups for run {run_id}: {error}"))?;
-
-    sqlx::query(
-        "UPDATE auto_queue_runs
-         SET thread_group_count = $1,
-             max_concurrent_threads = $1
-         WHERE id = $2",
-    )
-    .bind(thread_group_count)
-    .bind(run_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| format!("update postgres run group metadata for {run_id}: {error}"))?;
-
-    Ok(())
-}
-
 pub async fn rebind_slot_for_group_agent_pg(
     pool: &PgPool,
     run_id: &str,

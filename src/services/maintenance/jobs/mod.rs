@@ -11,8 +11,8 @@
 //! `adk-`/`agentdesk-` dirs); `storage.hang_dump_cleanup` (weekly);
 //! `storage.db_retention` (weekly, 7/30/90d); `memory.memento_consolidation`
 //! (weekly, #1089); `voice.progress_tts_cache_sweep` (#3909).
-//! `register_maintenance_job` (#1091) has no live caller; `voice.turn_link_gc`
-//! and `storage.cancel_tombstone_prune` live in `server::maintenance` instead.
+//! `voice.turn_link_gc` and `storage.cancel_tombstone_prune` live in
+//! `server::maintenance` instead.
 
 use std::time::Duration;
 
