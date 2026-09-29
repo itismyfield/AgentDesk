@@ -2214,7 +2214,7 @@
       "api": "agentdesk.db.execute",
       "symbol": "execute",
       "classification": "STATIC",
-      "fingerprint": "sha256:b9224958aa5426dee2a110eea66648116c56fe09eb722ccda3d377cd47204e5f"
+      "fingerprint": "sha256:88b2fff9127f51986e81fde7ca78cfaf89a3bb44d0cb045ef643e171a46b9a28"
     },
     {
       "root": "policies",
@@ -2296,42 +2296,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:7b033f5d009fab68ae218c2eb8ee0566fccab356547d01839700bbed9e380996"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/reconciliation.js",
-      "api": "agentdesk.db.execute",
-      "symbol": "execute",
-      "classification": "STATIC",
-      "fingerprint": "sha256:48e63363dbbdcbcdbcca9661fa3de1c50a252347395a605f81e9ff15c4313e09"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/reconciliation.js",
-      "api": "agentdesk.db.execute",
-      "symbol": "execute",
-      "classification": "STATIC",
-      "fingerprint": "sha256:e9c44e188464deffd6fde662812b97ea62dfa81f98bee222b81083840f8e334c"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/reconciliation.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:4635a035964c1d5f8e8ebc9ab2c82ee3280d7f3b19e9734c557c25ce5546a522"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/reconciliation.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:e7b5d732429cbeb10825c1da05cb41d30302bc510cbded9e7e6dce73efff0560"
     },
     {
       "root": "policies",
@@ -12659,6 +12623,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/dispatch/completion_hooks.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd1f3c9928941eca561653ebde9317b8f82ab6f89e790c8d09199081022a6924"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/dispatch/completion_hooks.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3001286b7b2780487dbcbed584650e3e7c8642531e74d869121ab2e463f95501"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/dispatch/dispatch_cancel.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -19729,15 +19711,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:06d60919beb49de79508c27751cc6a95a2ddff93be438651005173a649f5fdf5"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/analytics/api_usage.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:108c7ca218af0381a83ae441458dbe1c2a56d301a5a3801e49d036c8a1183580"
     },
     {
       "root": "src",
@@ -29493,15 +29466,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:197dd63976184a4a10231a8152ec0017652b9ac2719186e1c25ec1c46e12add5"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/maintenance/jobs/db_retention.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:1a3698f2ce0f126932c911e21e83ec58578cec062a1bb250201a112151bfb4a6"
     },
     {
@@ -29700,15 +29664,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:ac72901321ef9a33458acc2d46fd11cee56adf3ad05959a1cb2f14d2b6ba14b7"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/maintenance/jobs/db_retention.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:af19e58ab7c544ee478bc3df8907880cc8b81059801e72aaf2eecb2c8f638d36"
     },
     {
@@ -29764,15 +29719,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:ebc03bce4d9a98cdf57688dc419e7149afc7cd94317e3e8ffb1af833f5ff2444"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/maintenance/jobs/db_retention.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:ef592a8cb0f68a68d6b683027a11978c4d23a151d15406d76023df226060a38a"
     },
     {
       "root": "src",

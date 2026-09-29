@@ -56,16 +56,14 @@ export interface ProviderSuffixDetection {
   source: "channelName" | "agentId" | null;
 }
 
-/** Map of well-known suffixes to the provider they imply. */
+/** Channel suffixes the server routes by (provider/registry.rs `channel_suffix`). */
 export const PROVIDER_SUFFIX_MAP: Record<string, CliProvider> = {
   "-cc": "claude",
   "-cdx": "codex",
-  "-gem": "gemini",
+  "-gm": "gemini",
   "-qw": "qwen",
   "-oc": "opencode",
-  "-cop": "copilot",
   "-ag": "antigravity",
-  "-api": "api",
 };
 
 /**
@@ -74,7 +72,7 @@ export const PROVIDER_SUFFIX_MAP: Record<string, CliProvider> = {
  * Rules (case-insensitive):
  *   channel `adk-cc`      → claude
  *   channel `agentdesk-cdx` → codex
- *   channel `my-bot-gem`  → gemini
+ *   channel `my-bot-gm`   → gemini
  *   agent_id `research-cc` → claude (fallback)
  *
  * Returns `{ provider: null, suffix: null, source: null }` when nothing matches.
