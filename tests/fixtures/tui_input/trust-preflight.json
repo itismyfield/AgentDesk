@@ -1,0 +1,55 @@
+{
+  "schema": "agentdesk-tui-input-trust-fixtures/v1",
+  "scope": "Offline project-config merge preflight only; no production spawn gate asserted.",
+  "cases": [
+    {
+      "name": "unregistered_workspace",
+      "cwd": "/fixture/workspace",
+      "projects": {},
+      "expected": "profile"
+    },
+    {
+      "name": "trusted_exact_workspace",
+      "cwd": "/fixture/workspace",
+      "projects": {
+        "/fixture/workspace": {
+          "trust_level": "trusted"
+        }
+      },
+      "expected": "project"
+    },
+    {
+      "name": "trusted_parent_workspace",
+      "cwd": "/fixture/workspace/child",
+      "projects": {
+        "/fixture/workspace": {
+          "trust_level": "trusted"
+        }
+      },
+      "expected": "project"
+    },
+    {
+      "name": "untrusted_child_overrides_trusted_parent",
+      "cwd": "/fixture/workspace/child",
+      "projects": {
+        "/fixture/workspace": {
+          "trust_level": "trusted"
+        },
+        "/fixture/workspace/child": {
+          "trust_level": "untrusted"
+        }
+      },
+      "expected": "profile"
+    },
+    {
+      "name": "text_prefix_is_not_a_trusted_ancestor",
+      "cwd": "/fixture/workspace-other",
+      "projects": {
+        "/fixture/workspace": {
+          "trust_level": "trusted"
+        }
+      },
+      "expected": "profile"
+    }
+  ]
+}

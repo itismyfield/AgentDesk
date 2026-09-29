@@ -717,44 +717,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "session_key",
             path_param("Dispatched session key to reconcile"),
         )]),
-        ep(
-            "GET",
-            "/api/v1/overview",
-            "v1",
-            "Versioned dashboard overview combining health, agents, kanban, dispatch, token, and sparkline summaries.",
-        ),
-        ep(
-            "GET",
-            "/api/v1/agents",
-            "v1",
-            "Versioned dashboard agent list, optionally filtered by officeId.",
-        )
-        .with_params([(
-            "officeId",
-            query_param("string", false, "Optional office id filter"),
-        )]),
-        ep(
-            "GET",
-            "/api/v1/tokens",
-            "v1",
-            "Versioned token usage summary for range or period query windows.",
-        )
-        .with_params([
-            ("range", query_param("string", false, "Usage window such as 7d or 30d")),
-            ("period", query_param("string", false, "Legacy alias for range")),
-        ]),
-        ep(
-            "GET",
-            "/api/v1/kanban",
-            "v1",
-            "Versioned dashboard kanban summary.",
-        ),
-        ep(
-            "GET",
-            "/api/v1/ops/health",
-            "v1",
-            "Versioned operational health payload with bottleneck annotations.",
-        )
     ]
 }
 

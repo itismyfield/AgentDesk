@@ -1521,11 +1521,8 @@ mod tests {
         db.drop().await;
     }
 
-    /// ★ in_progress → requested with force=false is BLOCKED — there is no
-    /// transition rule for it, and the reducer fails closed (#3603 R3). The OLD
-    /// body issued a direct UPDATE regardless of rule existence. (Reconciliation
-    /// now calls this transition with force=true, so this block is not exposed
-    /// on the live recovery path — see reconciliation.js:195.)
+    /// in_progress → requested with force=false is blocked: there is no
+    /// transition rule for it, and the reducer fails closed (#3603 R3).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_status_raw_pg_blocks_no_rule_in_progress_to_requested_unforced() {
         let db = pg_test_db().await;
@@ -1545,9 +1542,7 @@ mod tests {
         db.drop().await;
     }
 
-    /// ★ in_progress → requested with force=true is ALLOWED — the reducer's
-    /// no-rule bypass arm carries forced transitions through. This is the
-    /// behaviour reconciliation.js:195 relies on after #3603 (force=true).
+    /// in_progress → requested with force=true passes the reducer's no-rule bypass arm.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_status_raw_pg_allows_no_rule_in_progress_to_requested_forced() {
         let db = pg_test_db().await;

@@ -67,8 +67,8 @@ describe("detectProviderSuffix", () => {
   });
 
   it("handles gemini suffix", () => {
-    const result = detectProviderSuffix("news-gem", null);
-    expect(result.provider).toBe("gemini");
+    expect(detectProviderSuffix("news-gm", null).provider).toBe("gemini");
+    expect(detectProviderSuffix("news-gem", null).provider).toBeNull();
   });
 });
 

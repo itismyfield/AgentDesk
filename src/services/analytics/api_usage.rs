@@ -22,15 +22,9 @@ pub async fn rate_limits_pg(pool: &PgPool, now: i64) -> RateLimitsResponse {
 }
 
 pub async fn build_rate_limit_provider_payloads_pg(pool: &PgPool, now: i64) -> Vec<Value> {
-    let stale_sec =
-        sqlx::query("SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec' LIMIT 1")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|row| row.try_get::<String, _>("value").ok())
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(600);
+    let stale_sec = crate::services::dispatch_gate::effective_stale_sec_pg(pool)
+        .await
+        .unwrap_or_else(crate::services::dispatch_gate::stale_sec);
 
     let rows = match sqlx::query(
         "SELECT provider, COALESCE(profile_id, 'default') AS profile_id, data, fetched_at

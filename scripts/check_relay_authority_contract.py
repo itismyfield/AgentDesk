@@ -18,13 +18,12 @@ import yaml
 DEFAULT_MANIFEST = Path("scripts/relay_authority_contract_targets.json")
 PR_WORKFLOW = Path(".github/workflows/ci-pr.yml")
 RELAY_AUTHORITY_JOB = "relay-authority-contract"
+RELAY_AUTHORITY_TARGETS_JOB = "relay_authority_targets"
+RELAY_AUTHORITY_MUTATIONS_JOB = "relay_authority_mutations"
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
 RELAY_TARGET_STEP = "Run named relay-authority contract targets"
-# #5997: the mutation step is the one step in this job gated on a path filter --
-# the one selecting the mutated sources plus the files that own their judging
-# tests. Pinning the exact expression keeps "conditional" from widening into any
-# other condition; scripts/check-ci-runner-hardening.sh pins the same string.
+# An absent filter output must run mutations; only an explicit false skips them.
 CONDITION3_MUTATION_IF = "steps.mutation_paths.outputs.mutation_sources != 'false'"
 TEST_ID_SUFFIX = ": test"
 
@@ -51,17 +50,20 @@ class LaneResult:
     output: str
 
 
-def load_relay_authority_job(repo_root: Path) -> dict[str, object]:
+def load_relay_authority_job(
+    repo_root: Path,
+    job_id: str = RELAY_AUTHORITY_TARGETS_JOB,
+) -> dict[str, object]:
     workflow = repo_root / PR_WORKFLOW
     try:
         payload = yaml.safe_load(workflow.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as error:
         raise ManifestError(f"cannot read workflow {PR_WORKFLOW}: {error}") from error
     jobs = payload.get("jobs") if isinstance(payload, dict) else None
-    job = jobs.get(RELAY_AUTHORITY_JOB) if isinstance(jobs, dict) else None
+    job = jobs.get(job_id) if isinstance(jobs, dict) else None
     if not isinstance(job, dict):
         raise ManifestError(
-            f"workflow {PR_WORKFLOW} must contain jobs.{RELAY_AUTHORITY_JOB}"
+            f"workflow {PR_WORKFLOW} must contain jobs.{job_id}"
         )
     return job
 
@@ -75,11 +77,25 @@ def validate_workflow_contract(
     lanes: Sequence[Lane],
     mutations_present: bool,
 ) -> None:
+    publisher = load_relay_authority_job(repo_root, RELAY_AUTHORITY_JOB)
+    if (
+        publisher.get("if") != "always()"
+        or publisher.get("needs") != [RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB]
+        or "continue-on-error" in publisher
+    ):
+        raise ManifestError(
+            f"workflow jobs.{RELAY_AUTHORITY_JOB} must always publish both execution results"
+        )
+    for job_id in (RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB):
+        execution = load_relay_authority_job(repo_root, job_id)
+        if any(key in execution for key in ("if", "needs", "continue-on-error")):
+            raise ManifestError(f"workflow jobs.{job_id} must execute unconditionally without needs")
+
     job = load_relay_authority_job(repo_root)
     steps = job.get("steps")
     if not isinstance(steps, list):
         raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_JOB}.steps must be an array"
+            f"workflow jobs.{RELAY_AUTHORITY_TARGETS_JOB}.steps must be an array"
         )
 
     target_steps = [
@@ -88,9 +104,11 @@ def validate_workflow_contract(
     ]
     if len(target_steps) != 1:
         raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_JOB} must contain exactly one "
+            f"workflow jobs.{RELAY_AUTHORITY_TARGETS_JOB} must contain exactly one "
             f"{RELAY_TARGET_STEP!r} step"
         )
+    if any(key in target_steps[0] for key in ("if", "continue-on-error")):
+        raise ManifestError(f"workflow {RELAY_TARGET_STEP!r} step must be unconditional and fail closed")
     run = target_steps[0].get("run")
     actual_commands = (
         [line.strip() for line in run.splitlines() if line.strip()]
@@ -100,11 +118,22 @@ def validate_workflow_contract(
     expected_commands = [expected_workflow_command(lane) for lane in lanes]
     if actual_commands != expected_commands:
         raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_JOB} target commands must exactly match "
+            f"workflow jobs.{RELAY_AUTHORITY_TARGETS_JOB} target commands must exactly match "
             "the manifest argv with AGENTDESK_ROOT_DIR unset and "
             "-- --test-threads=1 appended"
         )
 
+    if not mutations_present:
+        return
+    mutation_job = load_relay_authority_job(repo_root, RELAY_AUTHORITY_MUTATIONS_JOB)
+    strategy = mutation_job.get("strategy")
+    if strategy != {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}}:
+        raise ManifestError(
+            f"workflow jobs.{RELAY_AUTHORITY_MUTATIONS_JOB} must execute all three mutation shards"
+        )
+    steps = mutation_job.get("steps")
+    if not isinstance(steps, list):
+        raise ManifestError(f"workflow jobs.{RELAY_AUTHORITY_MUTATIONS_JOB}.steps must be an array")
     mutation_steps = [
         step for step in steps
         if isinstance(step, dict)
@@ -112,13 +141,20 @@ def validate_workflow_contract(
         and step.get("if", CONDITION3_MUTATION_IF) == CONDITION3_MUTATION_IF
         and not step.get("continue-on-error")
     ]
-    if mutations_present and len(mutation_steps) != 1:
+    if len(mutation_steps) != 1:
         raise ManifestError(
             f"condition3_mutations_present is true but workflow "
-            f"jobs.{RELAY_AUTHORITY_JOB} must contain exactly one unconditional "
+            f"jobs.{RELAY_AUTHORITY_MUTATIONS_JOB} must contain exactly one unconditional "
             f"run step invoking {CONDITION3_MUTATION_COMMAND}, or one guarded by "
             f"exactly {CONDITION3_MUTATION_IF!r}"
         )
+    env = mutation_job.get("env")
+    if (
+        not isinstance(env, dict)
+        or env.get("RELAY_AUTHORITY_MUTATION_SHARD_INDEX") != "${{ matrix.shard }}"
+        or str(env.get("RELAY_AUTHORITY_MUTATION_SHARD_TOTAL")) != "3"
+    ):
+        raise ManifestError("workflow mutation job must pass its shard index and total")
 
 
 def validate_condition3_script(mutation_script: Path) -> None:
