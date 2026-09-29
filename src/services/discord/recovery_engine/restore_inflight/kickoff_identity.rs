@@ -71,7 +71,7 @@ pub(super) async fn dispose_ownerless_row(
         return;
     };
     let outcome =
-        relay_recovery_terminal_notice(http, shared, provider, state, &plan.notice_text).await;
+        relay_recovery_body_notice(http, shared, provider, state, &plan.notice_text).await;
     apply_ownerless_dead_pane_outcome(shared, provider, state, &plan, outcome).await;
 }
 

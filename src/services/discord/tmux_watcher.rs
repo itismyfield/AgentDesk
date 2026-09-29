@@ -1144,6 +1144,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 last_edit_text: &last_edit_text,
                 turn_data_start_offset,
                 observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
+                task_card: task_notification_kind.and(task_notification_context.as_ref()),
             })
             .await;
             true

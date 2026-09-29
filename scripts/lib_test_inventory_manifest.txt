@@ -3381,6 +3381,7 @@ services::discord::idle_recap::tests::extract_transcript_tail_text_returns_none_
 services::discord::idle_recap::tests::idle_recap_delete_guard_requires_recap_content_marker
 services::discord::idle_recap::tests::intake_capture_clear_targets_captured_id_and_cas_is_noop_when_pointer_advanced
 services::discord::idle_recap::tests::intake_clear_runs_after_claim_bump_before_clear_only_when_started
+services::discord::idle_recap::tests::o_delegated_idle_recap_probe_reports_unknown
 services::discord::idle_recap::tests::parse_transcript_line_text_extracts_assistant_concatenated_text
 services::discord::idle_recap::tests::parse_transcript_line_text_extracts_user_text_block
 services::discord::idle_recap::tests::parse_transcript_line_text_skips_non_conversational_envelopes
@@ -4709,6 +4710,8 @@ services::discord::recovery_engine::manual_rebind_override::tests::health_rebind
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_missing_and_non_regular_paths
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_non_uuid_session_id
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_symlink_escape_from_allowed_root
+services::discord::recovery_engine::o_recovery_cut_tests::o_delegated_captured_recovery_range_is_consumed_without_send
+services::discord::recovery_engine::o_recovery_cut_tests::o_delegated_recovery_body_posts_only_the_marker_without_evidence
 services::discord::recovery_engine::phase_policy::tests::adoption_quadrants_restores_absent_root
 services::discord::recovery_engine::phase_policy::tests::adoption_quadrants_restores_present_root
 services::discord::recovery_engine::phase_policy::tests::orphaned_synthetic_watcher_row_adoption_quadrants
@@ -6224,6 +6227,7 @@ services::discord::tmux::tmux_watcher::single_message_footer::tests::single_mess
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_footer_status_block_keeps_spinner_first
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_pathological_panel_stays_within_discord_limit
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_terminal_footer_strips_panel_block
+services::discord::tmux::tmux_watcher::single_message_footer_tests::o_delegated_single_message_footer_completion_sends_no_body
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_emits_background_agent_pending_payload
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
@@ -6380,6 +6384,8 @@ services::discord::tmux::tmux_watcher::tests::restored_response_seed_is_kept_for
 services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_mid_turn_cutover_shows_no_post_cutover_body
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_watcher_turn_shows_no_body_and_records_no_frontier
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
@@ -6591,6 +6597,7 @@ services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_no
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_notice_skips_rebind_origin
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_notice_targets_existing_message
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_takeover_forgets_registered_completion_footer_target
+services::discord::tmux_restart_handoff::o_cut_tests::o_delegated_restart_handoff_keeps_only_the_marker
 services::discord::tmux_watcher_registry_restore_tests::base_and_thread_suffixed_names_resolve_independently
 services::discord::tmux_watcher_registry_restore_tests::cancel_and_remove_channel_if_current_only_rolls_back_matching_claim
 services::discord::tmux_watcher_registry_restore_tests::channel_binding_exposes_the_live_watcher_output_path
@@ -7521,6 +7528,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_5191
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::o_delegated_cancelled_partial_body_is_not_replaced
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rest_delivery_tests::rest_worker_terminal_edits_once_without_a_headless_duplicate
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rest_delivery_tests::worker_rest_transport_delivers_without_gateway_queue_chaining
@@ -7540,6 +7548,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_survives_newer_frontier_at_another_anchor_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_short_fallback_settles_original_actor_and_preserves_successor_5521
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_delegated_foreign_custody_settles_without_post_or_evidence
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
@@ -7803,6 +7812,7 @@ services::discord::turn_finalizer::watcher_backstop::tests::done_with_zero_infli
 services::discord::turn_finalizer::watcher_backstop::tests::done_without_inflight_or_lease_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
+services::discord::turn_finalizer::watcher_backstop::tests::o_delegated_done_turn_needs_no_legacy_delivery_confirmation
 services::discord::turn_lease::registry::tests::turn_lease_registry_inspect_returns_rowless_lease_identity
 services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owner_and_refuses_ambiguity
 services::discord::turn_lease::tests::claim_refuses_unbound_message_id_without_panic

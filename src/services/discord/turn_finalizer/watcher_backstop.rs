@@ -44,7 +44,8 @@ pub(super) const WATCHER_BACKSTOP_TERMINAL_STREAK: u8 = 2;
 ///   * live-but-`paused` (a Discord turn took the session over) → defer.
 ///   * else `watcher_backstop_signal_is_terminal` on the transcript: `Done`
 ///     terminal only once the relay-space produced frontier is delivery-confirmed
-///     (or the natural far-backstop escape fires); `PausedLive` defers; `Unknown`
+///     (or the natural far-backstop escape fires, or O owns the channel's TUI body);
+///     `PausedLive` defers; `Unknown`
 ///     (non-JSONL runtime) consults the pane-ready fallback ONLY at the natural
 ///     deadline.
 pub(super) fn watcher_backstop_turn_is_terminal(
@@ -116,8 +117,12 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     // bounds a dead relay to one full WATCHER_REGISTER_BACKSTOP horizon while
     // still preventing the seconds-long fast path from clearing an undelivered
     // produced tail.
-    let delivery_confirmed_or_natural_deadline_escape = delivery_confirmed || at_deadline;
-    if matches!(signal, CompletionSignal::Done) && !delivery_confirmed {
+    // O posts this channel's TUI body from the transcript itself, so a Done turn needs no
+    // Legacy delivery confirmation; the live/paused guards above still apply.
+    let o_owns_body = crate::services::tui_o::cutover::o_owns_tui_output(runtime_kind);
+    let delivery_confirmed_or_natural_deadline_escape =
+        o_owns_body || delivery_confirmed || at_deadline;
+    if matches!(signal, CompletionSignal::Done) && !delivery_confirmed && !o_owns_body {
         tracing::warn!(
             channel_id = channel_id.get(),
             provider = %provider.as_str(),
@@ -419,5 +424,80 @@ mod tests {
                 || unreachable!("PausedLive must not consult the pane")
             ));
         }
+    }
+
+    /// A Done turn whose TUI body O posts may finalize on the fast path with no Legacy delivery
+    /// proof; busy transcripts, paused handles and a flag-off build keep deferring.
+    #[tokio::test(flavor = "current_thread")]
+    async fn o_delegated_done_turn_needs_no_legacy_delivery_confirmation() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_220_025u64.saturating_add(entropy % 1_000_000));
+            let session = format!("backstop-o-delegated-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session.clone(),
+                    output_path: transcript_str.clone(),
+                    paused: paused.clone(),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+            let mut state = crate::services::discord::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                channel.get(),
+                None,
+                7,
+                212,
+                213,
+                "O-delegated done turn".to_string(),
+                None,
+                Some(session.clone()),
+                Some(transcript_str.clone()),
+                None,
+                0,
+            );
+            state.turn_start_offset = Some(0);
+            crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            let _tui = crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
+                &session,
+                &transcript_str,
+            );
+            let done = "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n";
+            let busy = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"still going\"}]}}\n";
+            let terminal = || {
+                watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Claude, false)
+            };
+
+            std::fs::write(&transcript, done).unwrap();
+            assert!(!terminal(), "flag off: a TUI channel still waits for Legacy delivery proof");
+            {
+                let _on = crate::services::tui_o::cutover::test_override::force_on();
+                assert!(
+                    terminal(),
+                    "O owns the body: Done with no produced frontier or lease still finalizes"
+                );
+                paused.store(true, std::sync::atomic::Ordering::Release);
+                assert!(!terminal(), "a paused handle defers even when O owns the body");
+                paused.store(false, std::sync::atomic::Ordering::Release);
+                std::fs::write(&transcript, busy).unwrap();
+                assert!(!terminal(), "an unterminated transcript never finalizes");
+            }
+            let _ = std::fs::remove_file(transcript);
+        })
+        .await;
     }
 }

@@ -108,3 +108,52 @@ async fn watcher_single_message_completion_footer_producer_threads_sniffed_backg
         assert_eq!(block_has_background_agents, pending);
     }
 }
+
+/// O owns the TUI body message, so the footer completion writes nothing onto it.
+#[tokio::test(flavor = "current_thread")]
+async fn o_delegated_single_message_footer_completion_sends_no_body() {
+    use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
+    use crate::services::discord::recovery_engine::o_cut_recorder::start;
+    const BODY: &str = "ADK-A14B-footer-body";
+    let _on = crate::services::tui_o::cutover::test_override::force_on();
+    for (delegated, channel_raw) in [(false, 4_047_121u64), (true, 4_047_122)] {
+        let recorder = start(channel_raw).await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let tmux = format!("AgentDesk-claude-o-footer-{channel_raw}");
+        let _bound = delegated.then(|| {
+            crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
+                &tmux,
+                "/tmp/adk-o-footer.jsonl",
+            )
+        });
+        let target = WatcherCompletionFooterTerminalTarget {
+            msg_id: serenity::all::MessageId::new(9_425_931),
+            text: BODY.to_string(),
+        };
+        let mut last_status_panel_text = String::new();
+        complete_watcher_terminal_footer_or_status_panel_with_sniffer(
+            &recorder.http,
+            &shared,
+            ChannelId::new(channel_raw),
+            &ProviderKind::Claude,
+            1_700_000_000,
+            true,
+            &mut 0,
+            Some(target),
+            Some(serenity::all::MessageId::new(9_425_931)),
+            BODY,
+            None,
+            &mut last_status_panel_text,
+            None,
+            Some(tmux.clone()),
+            |_| async { false },
+            Some(channel_raw + 1),
+            false,
+            false,
+            false,
+        )
+        .await;
+        let shows_body = recorder.contents().iter().any(|c| c.contains(BODY));
+        assert_eq!(shows_body, !delegated, "delegated={delegated}");
+    }
+}

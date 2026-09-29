@@ -136,30 +136,8 @@ async fn prepare_watcher_task_response(
                 .to_string(),
         ));
     }
-    let clients = watcher_card_clients(http, shared, provider, None).await?;
-    let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
-    let card = task_delivery::ensure_card_with_shared(
-        shared.as_ref(),
-        &clients,
-        &transport,
-        &event,
-        task_delivery::EnsureIntent::Promotion,
-    )
-    .await
-    .map_err(|error| match error {
-        task_delivery::CardEnsureError::Permanent(error) => {
-            PrepareWatcherTaskResponseError::Permanent(format!(
-                "confirm watcher task card: {error}"
-            ))
-        }
-        error => PrepareWatcherTaskResponseError::Transient(format!(
-            "confirm watcher task card: {error}"
-        )),
-    })?;
-    shared
-        .ui
-        .placeholder_live_events
-        .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
+    let (card, clients) =
+        ensure_watcher_task_card(http, shared, provider, channel_id, &event).await?;
     let claim = task_delivery::claim_task_response_delivery_with_recovery_key_and_started_at(
         shared.pg_pool.as_ref(),
         channel_id.get(),
@@ -184,6 +162,68 @@ async fn prepare_watcher_task_response(
         event,
         clients,
     })
+}
+
+/// Promotes the turn's task card and claims its terminal slot; no response claim is made.
+async fn ensure_watcher_task_card(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    event: &task_delivery::TaskCardEvent,
+) -> Result<
+    (
+        task_delivery::CardEnsureOutcome,
+        task_delivery::CardDeliveryClients,
+    ),
+    PrepareWatcherTaskResponseError,
+> {
+    let clients = watcher_card_clients(http, shared, provider, None).await?;
+    let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
+    let card = task_delivery::ensure_card_with_shared(
+        shared.as_ref(),
+        &clients,
+        &transport,
+        event,
+        task_delivery::EnsureIntent::Promotion,
+    )
+    .await
+    .map_err(|error| match error {
+        task_delivery::CardEnsureError::Permanent(error) => {
+            PrepareWatcherTaskResponseError::Permanent(format!(
+                "confirm watcher task card: {error}"
+            ))
+        }
+        error => PrepareWatcherTaskResponseError::Transient(format!(
+            "confirm watcher task card: {error}"
+        )),
+    })?;
+    shared
+        .ui
+        .placeholder_live_events
+        .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
+    Ok((card, clients))
+}
+
+/// A turn whose body O posts still promotes its task card; the response itself is O's.
+pub(super) async fn promote_delegated_task_card(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    context: &task_delivery::TaskNotificationContext,
+) {
+    let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
+    if let Err(error) = ensure_watcher_task_card(http, shared, provider, channel_id, &event).await {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            error = %error,
+            "delegated watcher turn could not promote its task card"
+        );
+    }
 }
 
 async fn watcher_card_clients(
