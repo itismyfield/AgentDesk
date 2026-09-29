@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
-"""H2 tmux-boundary measurer: lib-target clippy JSON -> (file, item, callee) rows.
+"""H2 tmux-boundary measurer: one sealed Clippy session's lib diagnostics -> (file, item, callee) rows.
 
 Rows are classified by the `reason = "H2 <SET> <lanes>"` tag of the matching
-clippy.toml entry; W* and SUBPROC_W are derived from the same pass.
+clippy.toml entry; W* and SUBPROC_W are the compiler item paths of the same session's sites.
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import itertools
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import rust_lex  # noqa: E402
+import h2_env  # noqa: E402
 
 CRATE = "agentdesk"
 LANES = ("linux", "macos")
@@ -41,6 +42,9 @@ RO_LINTS = ("clippy::duplicate_mod",)
 # Raised by the activation PR; 0 keeps the measurer inert until then.
 LIVENESS_FLOOR = 0
 MAX_REGEN_ITERATIONS = 20
+# Run, config and Cargo target stay apart: a session seals its config's parent directories.
+SESSIONS, SESSION_TARGET = Path("target/h2/sessions"), Path("target/h2/target")
+MODULE_LEVEL = "<module>"
 # R-D: a literal program in this list plus any non-literal argument seeds SUBPROC_W.
 DISPATCHERS = (
     "bash", "sh", "zsh", "dash", "ksh", "fish",
@@ -53,6 +57,8 @@ DISPATCHERS = (
 )
 
 CALLEE_RE = re.compile(r"`([^`]+)`")
+H2_PATH_RE = re.compile(r"[A-Za-z_]\w*(::[A-Za-z_]\w*)+")
+H2_CRATES = frozenset({"agentdesk", "std", "core", "alloc", "tokio"})
 ITEM_TOKEN_RE = re.compile(
     r"\bfn\s+([A-Za-z_]\w*)|\bimpl\b|\bmod\s+([A-Za-z_]\w*)|\btrait\s+([A-Za-z_]\w*)"
     r"|(?m:^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(const|static)[ \t]+(?:mut[ \t]+)?(?!fn\b)([A-Za-z_]\w*))"
@@ -74,7 +80,7 @@ class SourceFile:
         self.stripped = "\n".join(rust_lex.strip_line(line, state).ljust(len(line)) for line in lines)
         self.line_offsets = [0, *itertools.accumulate(len(line) + 1 for line in lines)]
         self.items = _item_ranges(self.stripped)
-        self.item_names = collections.Counter("::".join(names) for _, _, names, _ in self.items)
+        self.item_names = collections.Counter("::".join(names) for _, _, names in self.items)
 
     def ambiguous(self, item: str) -> bool:
         """H8: `<module>` or a name shared by several items (`const _`, cfg twins) folds sites."""
@@ -83,32 +89,32 @@ class SourceFile:
     def offset(self, line: int, column: int) -> int:
         return self.line_offsets[line - 1] + column - 1
 
-    def enclosing(self, pos: int) -> tuple[str, tuple[str, ...], tuple[int, int]]:
-        """Innermost item containing `pos`: (row name, registrable path parts, range)."""
+    def enclosing(self, pos: int) -> tuple[str, tuple[int, int]]:
+        """Innermost item containing `pos`: (row name, range)."""
         hits = [item for item in self.items if item[0] <= pos <= item[1]]
         if not hits:
-            return "<module>", (), (0, len(self.stripped))
-        start, end, names, registrable = max(hits, key=lambda item: item[0])
-        return "::".join(names), registrable, (start, end)
+            return "<module>", (0, len(self.stripped))
+        start, end, names = max(hits, key=lambda item: item[0])
+        return "::".join(names), (start, end)
 
-def _impl_name(header: str) -> tuple[str, bool]:
-    """`impl<T> Tr for Ty<T> where ..` -> ('<Ty as Tr>', False); inherent -> ('Ty', True)."""
+def _impl_name(header: str) -> str:
+    """`impl<T> Tr for Ty<T> where ..` -> '<Ty as Tr>'; inherent -> 'Ty'."""
     header = re.split(r"\bwhere\b", header)[0].replace("->", " ")
     while re.search(r"<[^<>]*>", header):  # drop generics innermost-first
         header = re.sub(r"<[^<>]*>", "", header)
     names = [re.sub(r"\b(?:dyn|mut)\b|[&!]|'\w+", "", part).strip().split("::")[-1].strip() or "?"
              for part in re.split(r"\bfor\b", header, maxsplit=1)]
-    return (names[0], True) if len(names) == 1 else (f"<{names[1]} as {names[0]}>", False)
+    return names[0] if len(names) == 1 else f"<{names[1]} as {names[0]}>"
 
-def _item_ranges(text: str) -> list[tuple[int, int, tuple[str, ...], tuple[str, ...]]]:
+def _item_ranges(text: str) -> list[tuple[int, int, tuple[str, ...]]]:
     """Ranges of fn / const / static items with qualified names from the brace walk."""
     items = []
-    stack: list[tuple[str, str | None, int, bool]] = []  # kind, name, header start, registrable
+    stack: list[tuple[str, str | None, int]] = []  # kind, name, header start
     pending = None  # (kind, name, start, paren depth)
     const_pending = None  # (name, start, stack depth, paren depth)
     parens = 0
     def scope() -> tuple[str, ...]:
-        return tuple(n for k, n, _, _ in stack if k in ("mod", "impl", "trait", "fn"))
+        return tuple(n for k, n, _ in stack if k in ("mod", "impl", "trait", "fn"))
     for match in ITEM_TOKEN_RE.finditer(text):
         token, pos = match.group(0), match.start()
         if token in "([":
@@ -118,24 +124,23 @@ def _item_ranges(text: str) -> list[tuple[int, int, tuple[str, ...], tuple[str, 
         elif token == "{":
             if pending is not None and pending[3] == parens:
                 kind, name, start, _ = pending
-                registrable = True
                 if kind == "impl":
-                    name, registrable = _impl_name(text[start + 4:pos])
-                stack.append((kind, name, start, registrable))
+                    name = _impl_name(text[start + 4:pos])
+                stack.append((kind, name, start))
                 pending = None
             else:
-                stack.append(("block", None, pos, True))
+                stack.append(("block", None, pos))
         elif token == "}":
             if not stack:
                 continue
-            kind, name, start, _ = stack.pop()
+            kind, name, start = stack.pop()
             if kind == "fn":
-                items.append((start, pos, scope() + (name,), _registrable(stack, name)))
+                items.append((start, pos, scope() + (name,)))
         elif token == ";":
             if pending is not None and pending[3] == parens:
                 pending = None
             if const_pending is not None and const_pending[2] == len(stack) and const_pending[3] == parens:
-                items.append((const_pending[1], pos, scope() + (const_pending[0],), ()))
+                items.append((const_pending[1], pos, scope() + (const_pending[0],)))
                 const_pending = None
         elif match.group(1):
             pending = ("fn", match.group(1), pos, parens)
@@ -146,18 +151,6 @@ def _item_ranges(text: str) -> list[tuple[int, int, tuple[str, ...], tuple[str, 
         elif match.group(5) and const_pending is None and pending is None:
             const_pending = (f"{match.group(4)} {match.group(5)}", pos, len(stack), parens)
     return items
-
-def _registrable(stack, name: str) -> tuple[str, ...]:
-    """Path parts clippy can resolve: nested fns collapse to the outermost fn; trait impls none."""
-    parts: list[str] = []
-    for kind, frame_name, _, registrable in stack:
-        if kind == "fn":
-            return tuple(parts + [frame_name])
-        if kind in ("mod", "impl", "trait"):
-            if not registrable:
-                return ()
-            parts.append(frame_name)
-    return tuple(parts + [name])
 
 _MODULE_TABLES: dict[Path, tuple[dict[str, str], list[Path]]] = {}
 MOD_DECL_RE = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*(;|\{)", re.M)
@@ -230,21 +223,41 @@ def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
         for entry in data.get(key, []):
             if (tag := h2_tag(entry, key)) is None:
                 continue
+            if not H2_PATH_RE.fullmatch(entry["path"]) or entry["path"].split("::", 1)[0] not in H2_CRATES:
+                raise MeasureError(f"invalid H2 path in {clippy_toml}: {entry['path']!r}")
             if entry["path"] in config:  # a later duplicate would silently override the first
                 raise MeasureError(f"duplicate H2 path in {clippy_toml}: {entry['path']}")
             config[entry["path"]] = tag
     return config
 
-def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
-    """Deduped (file, line, col, lint, callee) from cargo `--message-format=json` lines."""
-    seen = set()
+def lane_config(config: dict, lane: str) -> dict:
+    """Only paths registered for this lane are passed to Clippy and measured."""
+    return {path: entry for path, entry in config.items() if lane in entry[1]}
+
+def seed_config(config: dict, lane: str) -> dict:
+    """Start from hand-kept seeds while preserving the other lane's derived registrations."""
+    seeded = {path: (set_name, lanes - {lane} if set_name in DERIVED_SETS else lanes)
+              for path, (set_name, lanes) in config.items()}
+    return {path: entry for path, entry in seeded.items() if entry[1]}
+
+def _events(lines):
     for raw in (line.strip() for line in lines):
-        if not raw.startswith("{"):
-            continue
-        event = json.loads(raw)
-        message = event.get("message") or {}
+        if raw.startswith("{"):
+            yield json.loads(raw)
+
+def _check_config(event: dict) -> None:
+    message = event.get("message") or {}
+    if event.get("reason") == "compiler-message" and any(
+            Path(span.get("file_name", "")).name == "clippy.toml" for span in message.get("spans", [])):
+        raise MeasureError(f"clippy could not use an H2 path: {message.get('message', '')}; "
+                           "run --regen for stale derived paths")
+
+def _sites(messages) -> dict[tuple[str, int, int, str, str], dict]:
+    """{(file, line, col, lint, callee): primary span} per H2 lint site, the outermost macro call site once."""
+    seen = {}
+    for message in messages:
         code = (message.get("code") or {}).get("code")
-        if code not in LINTS or "lib" not in (event.get("target") or {}).get("kind", []):
+        if code not in LINTS:
             continue
         callee = CALLEE_RE.search(message.get("message", ""))
         primary = next((s for s in message.get("spans", []) if s.get("is_primary")), None)
@@ -254,20 +267,63 @@ def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
         while site.get("expansion"):  # attribute macro output to the outermost call site
             site = site["expansion"]["span"]
         if site["file_name"].startswith("src/"):
-            seen.add((site["file_name"], site["line_start"], site["column_start"], code, callee.group(1)))
-    return sorted(seen)
+            seen.setdefault((site["file_name"], site["line_start"], site["column_start"], code, callee.group(1)), primary)
+    return seen
 
-def run_clippy(root: Path, conf_dir: Path | None) -> list[str]:
-    """Lint only the lib target. Touching lib.rs forces a re-lint (and a fresh dep-info) instead of a
-    cache replay; `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
-    (root / "src/lib.rs").touch()
-    env = dict(os.environ, CARGO_INCREMENTAL="0", **({"CLIPPY_CONF_DIR": str(conf_dir)} if conf_dir else {}))
-    command = ["cargo", "clippy", "--lib", "--message-format=json", "--", "--cap-lints", "warn",
-               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS + RO_LINTS)]
-    proc = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise MeasureError(f"cargo clippy failed ({proc.returncode}):\n{proc.stderr[-4000:]}")
-    return proc.stdout.splitlines()
+def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
+    """Deduped (file, line, col, lint, callee) from cargo `--message-format=json` lines."""
+    messages = []
+    for event in _events(lines):
+        _check_config(event)
+        if "lib" in (event.get("target") or {}).get("kind", []):
+            messages.append(event.get("message") or {})
+    return sorted(_sites(messages))
+
+def session_runner(root: Path, lane: str, driver: Path | None = None):
+    """Build the driver once; each call runs one sealed lib Clippy session and loads the items it produced.
+    `--cap-lints warn` and the force-warn lints come from the session's CLIPPY_ARGS."""
+    import h2_items, h2_modmap, h2_session  # they import this module
+    try:
+        driver = driver or h2_modmap.build_driver(root)
+    except h2_modmap.ModmapError as exc:
+        raise MeasureError(f"modmap-driver build: {exc}") from exc
+    def run(conf: Path, run_dir: Path):
+        manifest = h2_session.session(root, root, run_dir, conf, lane, driver=driver,
+                                      extra=("--locked", "--target-dir", str(root / SESSION_TARGET)))
+        return h2_items.load(Path(manifest["manifest"]), crate=root)
+    return run
+
+def bind(items, root: Path, run: Path, lane: str, conf_text: str):
+    """Only this run's session, of this repo and lane, with exactly this lane configuration, is measured."""
+    request = items.manifest["request"]
+    if (items.manifest["run_dir"], request["repo"], request["lane"], request["source"]["config"]) != (
+            str(run), str(root), lane, hashlib.sha256(conf_text.encode()).hexdigest()):
+        raise MeasureError(f"session {items.manifest['run_dir']} is not the {lane} run {run} of {root} "
+                           "with this lane configuration")
+    return items
+
+def load_session(root: Path, run: Path, config: dict, lane: str):
+    """A sealed session produced elsewhere; an unsealed, unfenced or other-lane run is refused."""
+    import h2_items
+    run = run.resolve()
+    return bind(h2_items.load(run / "manifest.json", crate=root), root, run, lane, render_clippy_toml(lane_config(config, lane)))
+
+def write_conf(conf: Path, config: dict, lane: str) -> str:
+    text = render_clippy_toml(lane_config(config, lane))
+    (conf / "clippy.toml").write_text(text, encoding="utf-8")
+    return text
+
+def new_run(root: Path) -> Path:
+    base = root / SESSIONS / uuid.uuid4().hex
+    (base / "conf").mkdir(parents=True)
+    return base
+
+def lane_session(root: Path, config: dict, lane: str, runner=None):
+    """(items, lane clippy.toml) of one session with the lane configuration; the stored union is untouched."""
+    base = new_run(root)
+    text = write_conf(base / "conf", config, lane)
+    items = (runner or session_runner(root, lane))(base / "conf", base / "check")
+    return bind(items, root, base / "check", lane, text), base / "conf/clippy.toml"
 
 def _arg_text(src: SourceFile, open_paren: int) -> str:
     depth = 0
@@ -307,15 +363,18 @@ def subproc_seed(src: SourceFile, pos: int, item_range: tuple[int, int]) -> bool
     calls = ARG_CALL_RE.finditer(src.stripped, item_range[0], item_range[1])
     return any(not _all_scalar_literals(_arg_text(src, call.end() - 1)) for call in calls)
 
-def measure(root: Path, lines, config) -> dict:
-    """Rows per section plus the derived W* / SUBPROC_W sets for one lane."""
+def measure(root: Path, items, config) -> dict:
+    """Rows per section, the derived W* / SUBPROC_W paths and each R-W key's site paths for one lane session."""
+    import h2_items
+    for event in _events(items.lines):
+        _check_config(event)
     sources: dict[str, SourceFile] = {}
     rows = {section: collections.Counter() for section in SECTIONS}
     derived = {"W": set(), "SUBPROC_W": set(), "unregistrable": set()}
     sites = {section: collections.defaultdict(list) for section in SECTIONS}  # H8 aux, key unchanged
+    reg = collections.defaultdict(list)  # R-W: each site's path, None when unregistrable
     total = 0
-    type_names = {p.rsplit("::", 1)[-1] for p, (s, _) in config.items() if s == "TYPES"}
-    for file, line, col, _code, callee in diagnostics(lines):
+    for (file, line, col, code, callee), span in sorted(_sites(items.messages).items()):
         if callee not in config:
             continue
         total += 1
@@ -323,25 +382,28 @@ def measure(root: Path, lines, config) -> dict:
             continue
         src = sources.get(file) or sources.setdefault(file, SourceFile((root / file).read_text(encoding="utf-8")))
         pos = src.offset(line, col)
-        item, parts, item_range = src.enclosing(pos)
+        item, item_range = src.enclosing(pos)
         set_name = config[callee][0]
-        rows[SET_SECTION[set_name]][(file, item, callee)] += 1
+        key = (file, item, callee)
+        rows[SET_SECTION[set_name]][key] += 1
         if src.ambiguous(item):
-            sites[SET_SECTION[set_name]][(file, item, callee)].append(line)
+            sites[SET_SECTION[set_name]][key].append(line)
         target = "W" if set_name in ("EXEC", "W", "TYPES") else None
         if set_name == "SUBPROC" and subproc_seed(src, pos, item_range):
             target = "SUBPROC_W"
-        if target is None or item == "<module>":
+        if target is None:
             continue
-        modpath = _module_table(root).get(file)
-        if parts and modpath:
-            derived[target].add("::".join([modpath, *parts]))
-        elif target == "W" and (set_name == "TYPES" or (m := re.search(r"<(\w+) as ", item)) and m.group(1) in type_names):
-            continue  # a registered Self type already covers its trait-impl bodies
+        path, reason = h2_items.resolve(items, span)
+        if reason == "module-level" and code == "clippy::disallowed_types":
+            reg[key].append(MODULE_LEVEL)  # a type named outside any body, like a field: nothing to register
+            continue
+        reg[key].append(path)
+        if path is not None:
+            derived[target].add(path)
         else:
-            derived["unregistrable"].add(f"{file}::{item}")
+            derived["unregistrable"].add(f"{file}::{item} ({'module-call' if reason == 'module-level' else reason})")
     sites = {section: {key: sorted(v) for key, v in found.items()} for section, found in sites.items()}
-    return {"rows": rows, "derived": derived, "total": total, "sites": sites}
+    return {"rows": rows, "derived": derived, "total": total, "sites": sites, "reg": dict(reg)}
 
 def load_baseline(root: Path) -> dict | None:
     present = [root / rel for rel in BASELINE_FILES if (root / rel).exists()]
@@ -397,35 +459,36 @@ def render_clippy_toml(config: dict[str, tuple[str, frozenset[str]]]) -> str:
         "disallowed-types = [", *entries(True), "]", "",
     ])
 
-def regen(root: Path, lane: str, runner=run_clippy) -> dict:
+def regen(root: Path, lane: str, runner=None) -> dict:
     """Iterate W* / SUBPROC_W for `lane` to a fixpoint, then rewrite clippy.toml and the baseline."""
     clippy_toml = root / "clippy.toml"
     if clippy_toml.exists() and re.search(
             r"^(?!disallowed-(?:methods|types)\b)[A-Za-z]", clippy_toml.read_text(encoding="utf-8"), re.M):
         raise MeasureError("clippy.toml has keys --regen cannot preserve; extend render_clippy_toml")
-    config = load_config(clippy_toml)
+    config = seed_config(load_config(clippy_toml), lane)
     if not any(set_name == "EXEC" for set_name, _ in config.values()):
         raise MeasureError("clippy.toml has no H2 EXEC entries; nothing to regenerate from")
-    with tempfile.TemporaryDirectory() as conf_dir:
-        for _ in range(MAX_REGEN_ITERATIONS):
-            Path(conf_dir, "clippy.toml").write_text(render_clippy_toml(config), encoding="utf-8")
-            result = measure(root, runner(root, Path(conf_dir)), config)
-            if result["derived"]["unregistrable"]:
-                raise MeasureError("items need a disallowed-types entry: " + ", ".join(sorted(result["derived"]["unregistrable"])))
-            updated = {path: (set_name, lanes - {lane} if set_name in DERIVED_SETS else lanes)
-                       for path, (set_name, lanes) in config.items()}
-            updated = {path: entry for path, entry in updated.items() if entry[1]}
-            for set_name in DERIVED_SETS:  # W first: a fn in both sets is tracked as W
-                for path in result["derived"][set_name]:
-                    prev_set, lanes = updated.get(path, (set_name, frozenset()))
-                    if prev_set not in DERIVED_SETS or (prev_set == "W" and set_name != "W"):
-                        continue
-                    updated[path] = (set_name, lanes | {lane})
-            if updated == config:
-                break
-            config = updated
-        else:
-            raise MeasureError(f"W*/SUBPROC_W did not converge in {MAX_REGEN_ITERATIONS} clippy passes")
+    runner, base = runner or session_runner(root, lane), new_run(root)
+    for n in range(1, MAX_REGEN_ITERATIONS + 1):
+        run = base / f"pass-{n}"
+        text = write_conf(base / "conf", config, lane)
+        result = measure(root, bind(runner(base / "conf", run), root, run, lane, text), lane_config(config, lane))
+        (run / "items.jsonl").unlink(missing_ok=True)  # mapped: no later pass may reuse these items
+        if result["derived"]["unregistrable"]:
+            raise MeasureError("cannot register (reason): " + ", ".join(sorted(result["derived"]["unregistrable"]))
+                               + "; restructure the call site")
+        updated = seed_config(config, lane)
+        for set_name in DERIVED_SETS:  # W first: a fn in both sets is tracked as W
+            for path in result["derived"][set_name]:
+                prev_set, lanes = updated.get(path, (set_name, frozenset()))
+                if prev_set not in DERIVED_SETS or (prev_set == "W" and set_name != "W"):
+                    continue
+                updated[path] = (set_name, lanes | {lane})
+        if updated == config:
+            break
+        config = updated
+    else:
+        raise MeasureError(f"W*/SUBPROC_W did not converge in {MAX_REGEN_ITERATIONS} clippy passes")
     clippy_toml.write_text(render_clippy_toml(config), encoding="utf-8")
     baseline = load_baseline(root) or {section: {} for section in SECTIONS}
     for section in SECTIONS:
@@ -440,12 +503,14 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--lane", choices=LANES, required=True)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
-    parser.add_argument("--json", type=Path, help="read clippy JSON from a file instead of running cargo")
+    parser.add_argument("--session", type=Path, help="measure this sealed h2_session run instead of running one")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="compare with the baseline lane column")
     mode.add_argument("--regen", action="store_true", help="fixpoint W*/SUBPROC_W, rewrite clippy.toml + baseline")
     parser.add_argument("--inert", action="store_true", help="no-op without a baseline; report drift without failing")
     args = parser.parse_args(argv)
+    if args.session and args.regen:
+        parser.error("--regen runs its own session per pass; --session is for --check and the report")
     root = args.repo.resolve()
     try:
         if args.regen:
@@ -458,10 +523,9 @@ def main(argv=None) -> int:
                 return 0
             print("h2: baseline missing (scripts/ci/h2_baseline_*.toml); rebase onto a main that has it", file=sys.stderr)
             return 2
-        # Same lookup as clippy itself: CLIPPY_CONF_DIR, else the repo root.
-        config = load_config(Path(os.environ.get("CLIPPY_CONF_DIR", root)) / "clippy.toml")
-        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else run_clippy(root, None)
-        result = measure(root, lines, config)
+        config = load_config(root / "clippy.toml")
+        items = load_session(root, args.session, config, args.lane) if args.session else lane_session(root, config, args.lane)[0]
+        result = measure(root, items, lane_config(config, args.lane))
         if not args.check:
             rows = {s: [dict(zip(("file", "item", "callee"), k), count=v,
                              **({"lines": result["sites"][s][k]} if k in result["sites"][s] else {}))
@@ -483,4 +547,5 @@ def main(argv=None) -> int:
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import h2_measure  # session modules raise the imported module's MeasureError, not __main__'s
+    sys.exit(h2_measure.main())

@@ -90,6 +90,7 @@ src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
+src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
@@ -120,6 +121,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/routines/session_control.rs
 src/services/scheduled_messages/context_snapshot.rs
 src/services/scheduled_messages/postgres_tests.rs
 src/services/session_forwarding.rs
@@ -226,6 +228,7 @@ services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+services::discord::runtime_bootstrap::gateway_handback_integration_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
@@ -259,6 +262,7 @@ services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
+services::routines::session_control::tests
 services::scheduled_messages::context_snapshot::postgres_tests
 services::scheduled_messages::postgres_tests
 services::session_forwarding::tests
@@ -649,6 +653,12 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::a_recorded_removal_wi
 server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_on_a_dead_mailbox_reports_no_loss_verdict_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_cancel_observation_rows_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_cancel_serializes_unknown_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_closed_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_unreachable_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_explicit_target_still_requires_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
@@ -865,6 +875,9 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
@@ -1075,6 +1088,8 @@ services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_p
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
+services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_respects_clear_boundary_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_then_validate_roundtrip_pg

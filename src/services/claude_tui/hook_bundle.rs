@@ -422,6 +422,56 @@ const VERIFIED_CODEX_CLI_VERSIONS: &[&str] = &[
     "codex-cli 0.144.1",
 ];
 
+/// Versions whose captured run fired no AgentDesk hook with session-flag trust hashes alone.
+const CODEX_TRUST_HASH_INACTIVE_VERSIONS: &[&str] = &["codex-cli 0.157.1"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexHookActivation {
+    BypassRequired,
+    Unavailable,
+}
+
+/// There is deliberately no verified state: trust hashes never make hooks available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexTrustHashEvidence {
+    ObservedInactive,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexHookCapability {
+    pub activation: CodexHookActivation,
+    pub trust_hash: CodexTrustHashEvidence,
+}
+
+impl CodexHookCapability {
+    pub fn hooks_available(self) -> bool {
+        self.activation == CodexHookActivation::BypassRequired
+    }
+}
+
+/// Hooks are available only when `codex resume --help` advertises the trust bypass.
+pub fn codex_hook_capability(
+    cli_version: Option<&str>,
+    resume_help_advertises_bypass: bool,
+) -> CodexHookCapability {
+    let trust_hash = match cli_version.map(str::trim) {
+        Some(version) if CODEX_TRUST_HASH_INACTIVE_VERSIONS.contains(&version) => {
+            CodexTrustHashEvidence::ObservedInactive
+        }
+        _ => CodexTrustHashEvidence::Unverified,
+    };
+    let activation = if resume_help_advertises_bypass {
+        CodexHookActivation::BypassRequired
+    } else {
+        CodexHookActivation::Unavailable
+    };
+    CodexHookCapability {
+        activation,
+        trust_hash,
+    }
+}
+
 /// One-shot startup self-check (issue #2210 item 2).
 ///
 /// If the Codex CLI is present on `PATH`, recompute the AgentDesk trust hash

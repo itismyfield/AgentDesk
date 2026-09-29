@@ -8381,14 +8381,8 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
     assert_eq!(adopt.workflows[0].finished, Some(true));
 }
 
-/// Verifies that the corrected inspection-before-next-entry ordering preserves
-/// status state for both channels. It has no deadlock-detection power because
-/// its lexical scope removes the deadlock shape. A future reintroduction would
-/// hang rather than fail an assertion, and no command-level timeout wraps this
-/// lane (`ci-macos-trusted.yml:264` runs it bare); the only backstop is the
-/// 45-minute `macos_self_hosted` job cap at `ci-macos-trusted.yml:169`, which
-/// turns the hang into a red job without identifying the stuck test and holds
-/// the shared production host until that job-level timeout expires. See #4983.
+/// Verifies status preservation when inspection precedes the next channel entry.
+/// Lexically scoped guards avoid the deadlock shape, so this does not detect deadlocks.
 #[test]
 fn issue_4970_inspection_before_next_channel_entry_preserves_status_state() {
     let events = PlaceholderLiveEvents::default();

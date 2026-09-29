@@ -1,0 +1,14 @@
+[
+  {"anchor": "{ «sink()»; }", "expect": ["fixture::inside", null]},
+  {"anchor": "{ «inside()»; }", "expect": ["fixture::outside", null]},
+  {"anchor": "= «sink()»;", "expect": [null, "const-item"]},
+  {"anchor": "«gen_impl!(Z)»;", "expect": ["fixture::Port::go", null]},
+  {"anchor": "«pair!(unrelated, C)»;", "error": "ambiguous:C,unrelated"},
+  {"anchor": "«enumd!(E)»;", "error": "ambiguous:E::A::{constant#0},unrelated2"},
+  {"anchor": "«two_fns!()»;", "error": "ambiguous:a,b"},
+  {"anchor": "«rev!()»;", "error": "ambiguous:K,after_const"},
+  {"anchor": "«foreign_impl!()»;", "error": "ambiguous:unproven-header:Y"},
+  {"anchor": "«global_asm!(\"nop\")»;", "error": "ambiguous:unproven-header:{global_asm#0}"},
+  {"anchor": "«with_struct!()»;", "expect": ["fixture::made_fn", null]},
+  {"anchor": "«only_types!()»;", "expect": [null, "module-level"]}
+]

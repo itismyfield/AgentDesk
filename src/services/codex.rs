@@ -41,9 +41,11 @@ use crate::services::session_backend::{
     send_process_session_input, terminate_process_handle,
 };
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::{
-    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
-    tmux_session_exists, tmux_session_has_live_pane,
+use crate::services::{
+    session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool},
+    tmux_diagnostics::{
+        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+    },
 };
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
@@ -588,7 +590,7 @@ fn register_codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
 ) {
-    crate::services::codex_tui::session::install_codex_tui_runtime_binding(
+    crate::services::codex_tui::session::install_launched_codex_tui_runtime_binding(
         tmux_session_name,
         None,
         codex_tui_idle_relay_binding(tmux_session_name, tail_result),
@@ -1645,7 +1647,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_session_has_live_pane(tmux_session_name),
+            || tmux_live_pane_bool(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1655,7 +1657,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_session_has_live_pane(tmux_session_name),
+            || tmux_live_pane_bool(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1693,7 +1695,7 @@ fn execute_streaming_local_tui_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_session_exists(tmux_session_name);
+    let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -1741,7 +1743,7 @@ fn execute_streaming_local_tui_tmux(
         );
     }
 
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
+    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     let mut warm_fallback_reason = None;
     let mut warm_fallback_pane_stopped = false;
 
@@ -2168,7 +2170,7 @@ fn execute_streaming_local_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_session_exists(tmux_session_name);
+    let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -2186,7 +2188,7 @@ fn execute_streaming_local_tmux(
     // Accept either the new persistent location or the legacy /tmp location
     // so that dcserver restarts that lost /tmp files still re-attach to a
     // live tmux pane owned by an older wrapper. See issue #892.
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
+    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =

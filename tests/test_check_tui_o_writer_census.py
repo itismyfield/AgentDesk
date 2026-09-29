@@ -1,0 +1,129 @@
+"""Discrimination tests for the TUI O writer census gate.
+
+Each negative applies one realistic regression to a synthetic tree whose maps
+match it, and asserts the specific failure reason, so a green run means the
+gate still sees that regression.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/check_tui_o_writer_census.py"
+SPEC = importlib.util.spec_from_file_location("tui_o_writer_census", SCRIPT)
+census = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(census)
+
+CUT_FILE = """pub fn deliver(ch: u64) {
+    if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&s) { return; }
+    send_channel_message(ch, "body");
+}
+"""
+EVID_FILE = """pub fn read_receipt() -> bool { lookup_receipt() }
+"""
+CUTOVER_FILE = """pub const O_TUI_WRITER: bool = false;
+pub fn o_owns_tui_output(kind: Kind) -> bool { O_TUI_WRITER && kind.is_tui() }
+"""
+MAPS = {
+    "EXPECTED_PRIMITIVES": {"sink.rs": {"send_channel_message*": 1}},
+    "CENSUS": {"sink.rs": ("W20", "CUT_D")},
+    "EXPECTED_GATES": {
+        "src/services/discord/sink.rs": 1,
+    },
+    "R_EVID": ("src/services/discord/outbound/delivery_record.rs",),
+}
+
+
+class CensusGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.write("src/services/discord/sink.rs", CUT_FILE)
+        self.write("src/services/discord/outbound/delivery_record.rs", EVID_FILE)
+        self.write("src/services/tui_o/cutover.rs", CUTOVER_FILE)
+        self.maps = {key: _copy(value) for key, value in MAPS.items()}
+
+    def write(self, rel: str, text: str) -> None:
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def run_gate(self) -> tuple[bool, str]:
+        with mock.patch.multiple(census, **self.maps):
+            return census.check(self.root, pinned_test_only_files=[])
+
+    def assert_fails_with(self, reason: str) -> None:
+        ok, message = self.run_gate()
+        self.assertFalse(ok, message)
+        self.assertIn(reason, message)
+
+    def test_matching_fixture_passes(self) -> None:
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+
+    def test_added_send_fails(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn more() { edit_channel_message(1); }\n")
+        self.assert_fails_with("primitive edit_channel_message*: sink.rs has 1x, expected 0x")
+
+    def test_send_in_new_file_needs_a_census_row(self) -> None:
+        self.write("src/services/discord/new_path.rs", "fn f() { ctx.say(\"hi\"); }\n")
+        self.maps["EXPECTED_PRIMITIVES"]["new_path.rs"] = {".say": 1}
+        self.assert_fails_with("census: new_path.rs sends but has no CENSUS row")
+
+    def test_removing_the_gate_from_a_cut_file_fails_even_with_updated_counts(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE.replace(
+            "    if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&s) { return; }\n", ""
+        ))
+        self.maps["EXPECTED_GATES"] = {}
+        self.assert_fails_with("census: CUT_D row W20 has no gate in src/services/discord/sink.rs")
+
+    def test_undecided_target_fails(self) -> None:
+        for target in ("TBD", "?", "COV:TBD"):
+            with self.subTest(target=target):
+                self.maps["CENSUS"]["sink.rs"] = ("W20", target)
+                self.assert_fails_with(f"census: sink.rs has undecided target {target!r}")
+
+    def test_helper_in_r_evid_file_fails_even_with_updated_counts(self) -> None:
+        self.write("src/services/discord/outbound/delivery_record.rs",
+                   "pub fn read_receipt() -> bool { o_owns_tui_output(kind) || lookup_receipt() }\n")
+        self.maps["EXPECTED_GATES"]["src/services/discord/outbound/delivery_record.rs"] = 1
+        self.assert_fails_with("gate: cutover helper in R-EVID file src/services/discord/outbound/delivery_record.rs")
+
+    def test_gate_count_change_needs_the_map_in_the_same_change(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn g() -> bool { bridge_o_body_cut_decision(k, true) }\n")
+        self.assert_fails_with("gate: src/services/discord/sink.rs has 2x, expected 1x")
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = 2
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+
+    def test_flag_token_outside_cutover_fails(self) -> None:
+        self.write("src/services/discord/other.rs", "fn f() -> bool { cutover::O_TUI_WRITER }\n")
+        self.assert_fails_with("flag: O_TUI_WRITER outside")
+
+    def test_cfg_test_sends_and_helper_definitions_are_not_counted(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE + (
+            "#[cfg(test)]\nmod tests { fn t() { send_channel_message(1); } }\n"
+        ))
+        self.write("src/services/tui_o/cutover.rs", CUTOVER_FILE + "pub fn bridge_o_body_cut_decision() {}\n")
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+
+    def test_real_tree_passes(self) -> None:
+        ok, message = census.check(ROOT)
+        self.assertTrue(ok, message)
+
+
+def _copy(value):
+    if isinstance(value, dict):
+        return {key: _copy(inner) for key, inner in value.items()}
+    return value
+
+
+if __name__ == "__main__":
+    unittest.main()

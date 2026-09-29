@@ -218,6 +218,8 @@ fn evict_dead_orphaned_codex_tui_mirrors(shared: &Arc<SharedData>) {
 
 #[cfg(unix)]
 pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
+    // Hook adoptions deferred by a binding event failure go first so this pass sees their binding.
+    crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions();
     // #3105 (codex P1 sub-case B): tombstone stale mirrors for dead/orphaned
     // sessions BEFORE anything else, so the per-poll drift/skip WARN spam stops
     // even when the session is not present in `list_session_names()` at all.

@@ -6,8 +6,16 @@ pub mod capture;
 pub mod root;
 
 // Derive-side modules (identity, seal, derive, unit_plan) are declared below.
+pub mod derive;
+pub mod identity;
+pub mod seal;
+pub mod unit_plan;
 
 // Observe-side modules (tap, diff, report, metrics) are declared below.
+pub mod diff;
+pub mod metrics;
+pub mod report;
+pub mod tap;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,11 +23,18 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Record layout version; like `IDENTITY_VERSION`, a window mixing versions is not a valid sample.
+pub const SCHEMA_VERSION: u32 = 1;
+/// Report counting rules; a bump allows recomputing an old window from the same records.
+pub const REPORT_VERSION: u32 = 3;
+
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 pub const TAP_CAPACITY: usize = 1024;
 pub const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MATCH_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Raised when unit identity, turn extraction or historical rules change; old samples do not mix.
+pub const IDENTITY_VERSION: u32 = 2;
 
 /// `tui_o.shadow` settings; disabled unless explicitly enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +162,8 @@ pub enum DiffCause {
     LegacyDefect,
     Expected,
     Unknown,
+    /// Expected family: a tool unit Legacy never posts, so the A0 comparison cannot judge it.
+    OOnlyTool,
 }
 
 /// `unit_key` is absent for rows with no O unit (Legacy extras, tap gaps).
@@ -214,6 +231,23 @@ pub struct BindingChange {
     pub at: DateTime<Utc>,
 }
 
+/// A native turn delimited by transcript records; measurement only, never turn authority.
+/// `live` covers attach extent, closer timestamp and inheritance; the report checks the window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowTurn {
+    pub channel_id: u64,
+    pub provider: ShadowProvider,
+    pub native_turn_id: String,
+    pub source_range: SourceRange,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: DateTime<Utc>,
+    pub unit_keys: Vec<UnitKey>,
+    pub autonomous: bool,
+    pub synthetic_tokens: Vec<String>,
+    pub live: bool,
+    pub excluded_reason: Option<String>,
+}
+
 /// Result of deriving one unit from captured records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeriveOutput {
@@ -227,18 +261,111 @@ pub enum DeriveOutput {
         source_range: SourceRange,
         reason: String,
     },
+    TurnClosed(ShadowTurn),
 }
 
 /// One persisted line under the shadow root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShadowRecord {
-    Derived { output: DeriveOutput },
-    Legacy { msg: LegacyMsg },
-    Diff { diff: DiffRecord },
-    Anomaly { anomaly: SourceAnomaly },
-    Binding { change: BindingChange },
-    TapGap { dropped: u64 },
+    Derived {
+        output: DeriveOutput,
+    },
+    Legacy {
+        msg: LegacyMsg,
+    },
+    Diff {
+        diff: DiffRecord,
+    },
+    Anomaly {
+        anomaly: SourceAnomaly,
+    },
+    Binding {
+        change: BindingChange,
+    },
+    TapGap {
+        dropped: u64,
+    },
+    Header {
+        schema_version: u32,
+        identity_version: u32,
+        build: String,
+        started_at: DateTime<Utc>,
+    },
+    Population {
+        snapshot: PopulationSnapshot,
+    },
+    Attach {
+        source: SourceId,
+        attach_extent: u64,
+        capture_start: u64,
+        attached_at: DateTime<Utc>,
+    },
+    WindowStart {
+        t0: DateTime<Utc>,
+        sources: Vec<WindowStartSource>,
+    },
+}
+
+/// Size of an attached source at t0; closers at or below it are warm-up backlog, not live.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowStartSource {
+    pub source: SourceId,
+    pub window_start_extent: u64,
+}
+
+/// Profiles that must meet the sample bar, fixed from config; aux sources only cross-check it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PopulationSnapshot {
+    pub taken_at: DateTime<Utc>,
+    pub config_path: String,
+    pub config_sha256: String,
+    pub config_mtime: Option<DateTime<Utc>>,
+    pub providers: Vec<PopulationProvider>,
+    pub channels: Vec<PopulationChannel>,
+    pub profiles: Vec<String>,
+    pub aux: Vec<PopulationSource>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PopulationProvider {
+    pub provider: String,
+    pub tui_hosting: Option<bool>,
+    pub runtime: Option<String>,
+    pub effective_tui: bool,
+    pub basis: String,
+}
+
+/// A configured numeric channel the dispatch resolver runs as TUI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PopulationChannel {
+    pub channel_id: u64,
+    pub provider: String,
+    pub effective_tui: bool,
+    pub basis: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PopulationSource {
+    pub name: String,
+    pub read_at: DateTime<Utc>,
+    pub ok: bool,
+    pub observed_kinds: Vec<String>,
+}
+
+/// Operator-registered synthetic prompt; attributed only by its exact token in a native user row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntheticEntry {
+    pub entry_id: String,
+    pub channel_id: u64,
+    pub expected_runtime_kind: String,
+    pub prompt_id: String,
+    pub token: String,
+    pub intended_tools: u32,
+    pub intended_split: bool,
+    pub operator: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// capture -> derive boundary: yields complete records from one source.

@@ -22,7 +22,7 @@ pub(super) fn execute_streaming_local_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_session_exists(tmux_session_name);
+    let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -45,7 +45,7 @@ pub(super) fn execute_streaming_local_tmux(
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
+    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     let session_usable = has_live_pane && resolved_output.is_some() && resolved_input.is_some();
 
     if force_fresh_provider_session {
