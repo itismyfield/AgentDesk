@@ -23,7 +23,7 @@ const pipeline: PipelineConfigFull = {
   name: "default", version: 1,
   states: [{ id: "ready", label: "Ready" }],
   transitions: [], gates: {}, hooks: {}, events: {}, clocks: {},
-  phase_gate: { dispatch_to: "self", dispatch_type: "phase-gate", pass_verdict: "passed", checks: [] },
+  phase_gate: { dispatch_to: "self", dispatch_type: "phase-gate" },
 };
 
 let root: Root;
