@@ -1,4 +1,3 @@
-use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::platform::tmux::{PaneLiveness, SessionPresence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -6,6 +5,27 @@ pub(crate) enum HostKind {
     Tmux,
     Process,
     Herdr,
+}
+
+impl HostKind {
+    /// Name written to disk (inflight locator, `.host_kind` marker).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::Process => "process",
+            Self::Herdr => "herdr",
+        }
+    }
+
+    /// Exact inverse of `as_str`; any other text is `None`, never a tmux default.
+    pub(crate) fn from_persisted(value: &str) -> Option<Self> {
+        match value {
+            "tmux" => Some(Self::Tmux),
+            "process" => Some(Self::Process),
+            "herdr" => Some(Self::Herdr),
+            _ => None,
+        }
+    }
 }
 
 /// Key a host finds a session by. The tmux name doubles as the process-registry
@@ -144,15 +164,14 @@ pub(crate) enum HostKindResolution {
     },
 }
 
-/// In-memory only; it carries no execution identity (nonce or generation).
+/// Where a session is hosted. It carries no execution or provider-source identity
+/// (nonce, generation, provider session); those stay with their own owners.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostedRuntimeLocator {
     pub execution_node: Option<String>,
     pub host_kind: HostKind,
     pub host_session_id: String,
     pub pane: Option<String>,
-    pub runtime_kind: Option<RuntimeHandoffKind>,
-    pub provider_session_id: Option<String>,
 }
 
 #[cfg(test)]

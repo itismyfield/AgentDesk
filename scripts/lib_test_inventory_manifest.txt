@@ -3522,6 +3522,9 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_foreign_started_at
 services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_foreign_turn_nonce
 services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_foreign_user_msg_id
+services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
+services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
+services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
 services::discord::inflight::model::discord_id_tests::slice_a_transfer_end_boundaries
 services::discord::inflight::model::identity::tests::only_an_id_zero_row_without_a_disambiguator_is_unnameable_5464
@@ -9331,6 +9334,7 @@ services::terminal_status_formatting::tests::renders_usage_reset_fast_tier_and_c
 services::terminal_status_formatting::tests::shared_subtext_block_preserves_sections_and_is_idempotent_4848
 services::terminal_status_formatting::tests::shared_subtext_formatter_is_idempotent_4822
 services::tmux_common::channel_binding_tests::channel_binding_round_trips_for_restart_recovery
+services::tmux_common::host_marker::tests::host_kind_marker_reports_every_on_disk_state_without_a_tmux_default
 services::tmux_common::mcp_auth_required_tests::detects_cold_boot_mcp_auth_welcome_screen
 services::tmux_common::mcp_auth_required_tests::detects_plural_servers_need_authentication
 services::tmux_common::mcp_auth_required_tests::ignores_assistant_prose_with_all_tokens_above_ready_composer

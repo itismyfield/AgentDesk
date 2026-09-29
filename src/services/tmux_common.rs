@@ -1,3 +1,4 @@
+pub(crate) mod host_marker;
 mod session_markers;
 pub(crate) use session_markers::{
     resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,

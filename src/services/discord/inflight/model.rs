@@ -227,6 +227,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// out of the on-disk shape — it is purely an in-memory annotation.
     #[serde(skip)]
     pub runtime_kind_unknown_on_disk: bool,
+    /// Where the session is hosted. Nothing writes it yet; `None` is skipped so
+    /// rows without a locator serialize exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_locator: Option<super::host_locator::PersistedHostLocator>,
     #[serde(default)]
     pub worktree_path: Option<String>,
     #[serde(default)]
@@ -1065,6 +1069,7 @@ impl InflightTurnState {
             claude_e_macos_lstart_hash: None,
             runtime_kind,
             runtime_kind_unknown_on_disk: false,
+            host_locator: None,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,
