@@ -2619,9 +2619,9 @@ mod tests {
             serde_json::from_str(&runtime_config_raw).expect("parse runtime-config json");
         assert_eq!(
             runtime_config
-                .get("dispatchPollSec")
+                .get("maxRetries")
                 .and_then(|value| value.as_u64()),
-            Some(30)
+            Some(3)
         );
 
         let repo_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM github_repos WHERE id = $1")
@@ -2726,7 +2726,7 @@ mod tests {
             .expect("pool");
         startup_reseed(&pool, &leader).await.expect("seed leader");
         for (key, value) in [
-            ("runtime-config", r#"{"dispatchPollSec":83}"#),
+            ("runtime-config", r#"{"maxRetries":8}"#),
             ("escalation-settings-override", r#"{"enabled":false}"#),
             ("workspace_root", "/leader/workspaces"),
         ] {
@@ -2740,7 +2740,7 @@ mod tests {
         worker.policies.dir = std::path::PathBuf::from("missing-worker-local-policy-directory");
         worker.github.repos = vec!["worker/local-only".to_string()];
         worker.agents.clear();
-        worker.runtime.dispatch_poll_sec = Some(7);
+        worker.runtime.max_retries = Some(7);
         worker.runtime.reset_overrides_on_restart = true;
         for role in ["runner", "worker", "auto"] {
             worker.cluster.role = role.parse().unwrap();
@@ -2756,7 +2756,7 @@ mod tests {
 
         // The same reset flag remains effective for the configured owner.
         leader.runtime.reset_overrides_on_restart = true;
-        leader.runtime.dispatch_poll_sec = Some(47);
+        leader.runtime.max_retries = Some(5);
         startup_reseed(&pool, &leader).await.expect("leader reset");
         let raw: String =
             sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'runtime-config'")
@@ -2764,7 +2764,7 @@ mod tests {
                 .await
                 .expect("runtime config");
         let runtime: serde_json::Value = serde_json::from_str(&raw).expect("runtime JSON");
-        assert_eq!(runtime["dispatchPollSec"], 47);
+        assert_eq!(runtime["maxRetries"], 5);
         let overrides: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM kv_meta WHERE key = 'escalation-settings-override'",
         )

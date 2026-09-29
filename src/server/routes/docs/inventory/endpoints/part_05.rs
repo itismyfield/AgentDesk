@@ -377,16 +377,16 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({}),
             json!({
                 "current": {
-                    "dispatchPollSec": 15,
+                    "rateLimitStaleSec": 300,
                     "maxRetries": 7,
                     "maxEntryRetries": 4
                 },
                 "defaults": {
-                    "dispatchPollSec": 30,
+                    "rateLimitStaleSec": 600,
                     "maxRetries": 3,
                     "maxEntryRetries": 3
                 },
-                "explicit_keys": ["dispatchPollSec", "maxRetries", "maxEntryRetries"]
+                "explicit_keys": ["maxEntryRetries", "maxRetries", "rateLimitStaleSec"]
             }),
         ),
         ep(
@@ -435,7 +435,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({
-                "dispatchPollSec": 15,
+                "rateLimitStaleSec": 300,
                 "maxRetries": 7,
                 "maxEntryRetries": 4
             }),

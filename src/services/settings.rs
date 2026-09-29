@@ -37,23 +37,14 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
 ];
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[
-    "dispatchPollSec",
-    "agentSyncSec",
-    "githubIssueSyncSec",
-    "claudeRateLimitPollSec",
-    "codexRateLimitPollSec",
-    "issueTriagePollSec",
-    "ceoWarnDepth",
     "maxRetries",
     "maxEntryRetries",
     "staleDispatchedGraceMin",
     "staleDispatchedTerminalStatuses",
     "staleDispatchedRecoverNullDispatch",
     "staleDispatchedRecoverMissingDispatch",
-    "reviewReminderMin",
     "rateLimitWarningPct",
     "rateLimitDangerPct",
-    "githubRepoCacheSec",
     "rateLimitStaleSec",
     "dispatchRateLimitGateEnabled",
     "dispatchRateLimitGateDangerPct",
@@ -134,13 +125,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "진행 중 정체 판정 (분)",
         "In-Progress Stale (min)",
         Some("120"),
-    ),
-    (
-        "long_turn_alert_interval_min",
-        "timeout",
-        "장시간 턴 알림 주기 (분)",
-        "Long-Turn Alert Interval (min)",
-        Some("30"),
     ),
     (
         "context_compact_percent",
@@ -526,9 +510,6 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),
         "requested_timeout_min" => stringified_number(config.runtime.requested_timeout_min),
         "in_progress_stale_min" => stringified_number(config.runtime.in_progress_stale_min),
-        "long_turn_alert_interval_min" => {
-            stringified_number(config.runtime.long_turn_alert_interval_min)
-        }
         "context_compact_percent" => stringified_number(config.runtime.context_compact_percent),
         "context_compact_percent_codex" => {
             stringified_number(config.runtime.context_compact_percent_codex)
@@ -786,41 +767,6 @@ fn insert_runtime_string(map: &mut Map<String, Value>, key: &str, value: Option<
 
 fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, Value> {
     let mut overrides = Map::new();
-    insert_runtime_number(
-        &mut overrides,
-        "dispatchPollSec",
-        config.runtime.dispatch_poll_sec,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "agentSyncSec",
-        config.runtime.agent_sync_sec,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "githubIssueSyncSec",
-        config.runtime.github_issue_sync_sec,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "claudeRateLimitPollSec",
-        config.runtime.claude_rate_limit_poll_sec,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "codexRateLimitPollSec",
-        config.runtime.codex_rate_limit_poll_sec,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "issueTriagePollSec",
-        config.runtime.issue_triage_poll_sec,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "ceoWarnDepth",
-        config.runtime.ceo_warn_depth,
-    );
     insert_runtime_number(&mut overrides, "maxRetries", config.runtime.max_retries);
     insert_runtime_number(
         &mut overrides,
@@ -849,11 +795,6 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
     );
     insert_runtime_number(
         &mut overrides,
-        "reviewReminderMin",
-        config.runtime.review_reminder_min,
-    );
-    insert_runtime_number(
-        &mut overrides,
         "rateLimitWarningPct",
         config.runtime.rate_limit_warning_pct,
     );
@@ -861,11 +802,6 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
         &mut overrides,
         "rateLimitDangerPct",
         config.runtime.rate_limit_danger_pct,
-    );
-    insert_runtime_number(
-        &mut overrides,
-        "githubRepoCacheSec",
-        config.runtime.github_repo_cache_sec,
     );
     insert_runtime_number(
         &mut overrides,
@@ -890,23 +826,14 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
 
 fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Value> {
     let mut defaults = json!({
-        "dispatchPollSec": 30,
-        "agentSyncSec": 300,
-        "githubIssueSyncSec": 900,
-        "claudeRateLimitPollSec": 120,
-        "codexRateLimitPollSec": 120,
-        "issueTriagePollSec": 300,
-        "ceoWarnDepth": 3,
         "maxRetries": 3,
         "maxEntryRetries": 3,
         "staleDispatchedGraceMin": 2,
         "staleDispatchedTerminalStatuses": "cancelled,failed",
         "staleDispatchedRecoverNullDispatch": true,
         "staleDispatchedRecoverMissingDispatch": true,
-        "reviewReminderMin": 30,
         "rateLimitWarningPct": 80,
         "rateLimitDangerPct": 95,
-        "githubRepoCacheSec": 300,
         "rateLimitStaleSec": 600,
         "dispatchRateLimitGateEnabled": true,
         "dispatchRateLimitGateDangerPct": 100,

@@ -32,8 +32,6 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_progress_stale_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_turn_alert_interval_min: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_codex: Option<u64>,
@@ -48,20 +46,6 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_lower_bound_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dispatch_poll_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_sync_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github_issue_sync_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_rate_limit_poll_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_rate_limit_poll_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issue_triage_poll_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ceo_warn_depth: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_entry_retries: Option<u64>,
@@ -74,13 +58,9 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_dispatched_recover_missing_dispatch: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_reminder_min: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_warning_pct: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_danger_pct: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github_repo_cache_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_stale_sec: Option<u64>,
     /// Completed same-channel pairs supplied to fresh sessions.
@@ -148,29 +128,19 @@ impl RuntimeSettingsConfig {
             && self.intake_delivery_sweep_batch_limit.is_none()
             && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
-            && self.long_turn_alert_interval_min.is_none()
             && self.context_compact_percent.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
             && self.context_compact_window_claude.is_none()
             && self.context_compact_lower_bound_tokens.is_none()
-            && self.dispatch_poll_sec.is_none()
-            && self.agent_sync_sec.is_none()
-            && self.github_issue_sync_sec.is_none()
-            && self.claude_rate_limit_poll_sec.is_none()
-            && self.codex_rate_limit_poll_sec.is_none()
-            && self.issue_triage_poll_sec.is_none()
-            && self.ceo_warn_depth.is_none()
             && self.max_retries.is_none()
             && self.max_entry_retries.is_none()
             && self.stale_dispatched_grace_min.is_none()
             && self.stale_dispatched_terminal_statuses.is_none()
             && self.stale_dispatched_recover_null_dispatch.is_none()
             && self.stale_dispatched_recover_missing_dispatch.is_none()
-            && self.review_reminder_min.is_none()
             && self.rate_limit_warning_pct.is_none()
             && self.rate_limit_danger_pct.is_none()
-            && self.github_repo_cache_sec.is_none()
             && self.rate_limit_stale_sec.is_none()
             && self.session_context_recent_pairs.is_none()
             && self.stream_json_startup_output_timeout_secs.is_none()

@@ -336,7 +336,7 @@ mod tests {
                     "maxRetries": 6,
                     "staleDispatchedTerminalStatuses": "failed,expired",
                     "staleDispatchedRecoverNullDispatch": false,
-                    "reviewReminderMin": null,
+                    "rateLimitStaleSec": null,
                     "privateBlobField": "secret"
                 }"#,
             )
@@ -362,8 +362,8 @@ mod tests {
                     boolValue: agentdesk.config.get("staleDispatchedRecoverNullDispatch"),
                     intValue: agentdesk.config.get("maxRetries"),
                     stringValue: agentdesk.config.get("staleDispatchedTerminalStatuses"),
-                    nullValue: agentdesk.config.get("reviewReminderMin"),
-                    miss: agentdesk.config.get("githubRepoCacheSec"),
+                    nullValue: agentdesk.config.get("rateLimitStaleSec"),
+                    miss: agentdesk.config.get("rateLimitWarningPct"),
                     unknown: agentdesk.config.get("privateBlobField"),
                     reserved: agentdesk.config.get("runtime-config")
                 })"#,
