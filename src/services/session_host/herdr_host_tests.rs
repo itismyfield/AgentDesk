@@ -720,7 +720,7 @@ fn production_sources() -> BTreeMap<String, String> {
 
 /// Code with comments blanked and literals emptied, so a scan sees only tokens;
 /// `None` when a comment or literal never closes.
-fn code_tokens(prod: &str) -> Option<String> {
+fn closed_code_tokens(prod: &str) -> Option<String> {
     let chars: Vec<char> = prod.chars().collect();
     let (mut out, mut i) = (String::new(), 0);
     while i < chars.len() {
@@ -737,6 +737,12 @@ fn code_tokens(prod: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Token-only code for scans of one file; an unclosed literal empties it, and the
+/// whole-tree scans report that file.
+fn code_tokens(prod: &str) -> String {
+    closed_code_tokens(prod).unwrap_or_default()
 }
 
 /// Byte ranges of the `use` declarations in token-only code.
@@ -802,6 +808,18 @@ fn use_tree(tokens: &[&str], i: &mut usize, mut path: Vec<String>, out: &mut Vec
     out.push(UseLeaf { path, binds });
 }
 
+/// Every name the `use` declarations of token-only code bind.
+fn use_leaves(code: &str) -> Vec<UseLeaf> {
+    let token = regex::Regex::new(r"::|[{},*;]|(?:r#)?\w+").unwrap();
+    let mut leaves = Vec::new();
+    for span in use_spans(code) {
+        let tokens: Vec<&str> = token.find_iter(&code[span]).map(|t| t.as_str()).collect();
+        // Token 0 is the `use` keyword itself.
+        use_tree(&tokens, &mut 1, Vec::new(), &mut leaves);
+    }
+    leaves
+}
+
 /// Module path of a source file: `src/a/b.rs` and `src/a/b/mod.rs` are both `a::b`.
 fn module_of(relative: &str) -> Vec<String> {
     let path = relative.strip_prefix("src/").unwrap_or(relative);
@@ -857,18 +875,13 @@ fn scan_files(
     sources: &BTreeMap<String, String>,
     violations: &mut Vec<String>,
 ) -> BTreeMap<String, ScannedFile> {
-    let token = regex::Regex::new(r"::|[{},*;]|(?:r#)?\w+").unwrap();
     let mut files = BTreeMap::new();
     for (relative, prod) in sources {
-        let Some(code) = code_tokens(prod) else {
+        let Some(code) = closed_code_tokens(prod) else {
             violations.push(format!("{relative}: unterminated comment or literal"));
             continue;
         };
-        let mut leaves = Vec::new();
-        for span in use_spans(&code) {
-            let tokens: Vec<&str> = token.find_iter(&code[span]).map(|t| t.as_str()).collect();
-            use_tree(&tokens, &mut 1, Vec::new(), &mut leaves);
-        }
+        let leaves = use_leaves(&code);
         let module = module_of(relative);
         files.insert(
             relative.clone(),
@@ -927,6 +940,21 @@ fn word_uses(code: &str, name: &str) -> Vec<Vec<String>> {
         })
         .map(|found| qualifier(code, found.start()))
         .collect()
+}
+
+/// Uses of `name` in one file's code, plus the names its `use … as` or `type … =` bind it to.
+fn item_uses(code: &str, name: &str) -> (usize, Vec<String>) {
+    let file = ScannedFile {
+        code: code.to_string(),
+        module: Vec::new(),
+        leaves: use_leaves(code),
+    };
+    let files = BTreeMap::from([(String::new(), file)]);
+    let aliases = bindings(&files, name)
+        .into_iter()
+        .map(|(alias, _)| alias)
+        .collect();
+    (word_uses(code, name).len(), aliases)
 }
 
 /// Other names `item` is reachable by, with the file binding each: `use … as`,
@@ -1155,7 +1183,7 @@ fn herdr_items_have_no_production_caller() {
                 .chain(activated)
                 .map(|n| format!("{relative}: {n}")),
         );
-        let code = code_tokens(prod).unwrap_or_default();
+        let code = code_tokens(prod);
         if !word_uses(&code, "herdr_pane").is_empty() {
             violations.push(format!("{relative}: herdr_pane use"));
         }
@@ -1397,8 +1425,24 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     }
 }
 
-// Dormant guard: the typed probe entries have no production caller outside their
-// owner, so no consumer reads host liveness through them yet.
+/// Byte range of the body of the first `signature` in token-only code.
+fn fn_body(code: &str, signature: &str) -> std::ops::Range<usize> {
+    let start = code.find(signature).expect(signature);
+    let open = start + code[start..].find('{').expect(signature);
+    let mut depth = 0usize;
+    for (offset, ch) in code[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth == 1 => return open..open + offset,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    open..code.len()
+}
+
+// Dormant guard: nothing outside the owner names the typed probe entries; inside it
+// the observer runs only in the dormant `for_target` body, which nothing calls.
 #[test]
 fn typed_session_probe_entries_have_no_production_caller() {
     const OWNER: &str = "src/services/provider/session_probe.rs";
@@ -1413,7 +1457,7 @@ fn typed_session_probe_entries_have_no_production_caller() {
         owner.contains("fn observe_session_liveness(") && owner.contains("fn for_target("),
         "source scan must see the typed entries"
     );
-    let violations: Vec<String> = sources
+    let mut violations: Vec<String> = sources
         .iter()
         .filter(|(relative, _)| relative.as_str() != OWNER)
         .flat_map(|(relative, prod)| {
@@ -1423,8 +1467,71 @@ fn typed_session_probe_entries_have_no_production_caller() {
                 .map(move |entry| format!("{relative}: {entry}"))
         })
         .collect();
+    let code = code_tokens(owner);
+    let dormant = fn_body(&code, "fn for_target(");
+    let imports = use_spans(&code);
+    let observer = regex::Regex::new(r"\bobserve_session_liveness\b").unwrap();
+    for found in observer.find_iter(&code) {
+        let defined = code[..found.start()].trim_end().ends_with("fn");
+        let imported = imports.iter().any(|span| span.contains(&found.start()));
+        if !defined && !imported && !dormant.contains(&found.start()) {
+            violations.push(format!(
+                "{OWNER}: observe_session_liveness outside for_target"
+            ));
+        }
+    }
+    for (entry, allowed) in [("for_target", 0), ("observe_session_liveness", 1)] {
+        let (uses, aliases) = item_uses(&code, entry);
+        if uses > allowed || !aliases.is_empty() {
+            violations.push(format!("{OWNER}: {entry} x{uses} {aliases:?}"));
+        }
+    }
     assert!(
         violations.is_empty(),
         "typed probe production caller: {violations:?}"
+    );
+}
+
+// Draft guard: the Claude warm follow-up reaches the pane only through the host
+// input executor, and a fresh session only follows an executor retire.
+#[test]
+fn claude_warm_followup_reaches_tmux_only_through_the_executor() {
+    const HOSTING: &str = "src/services/claude_tui/hosting/";
+    const WARM: &str = "src/services/claude_tui/hosting/warm_followup.rs";
+    const DIRECT: &[&str] = &[
+        "tmux::",
+        "kill_session",
+        "send_keys",
+        "capture_pane",
+        "record_termination_for_tmux",
+        "record_tmux_exit_reason",
+    ];
+    let sources = production_sources();
+    let hosting: Vec<(&String, String)> = sources
+        .iter()
+        .filter(|(relative, _)| relative.starts_with(HOSTING))
+        .map(|(relative, prod)| (relative, code_tokens(prod)))
+        .collect();
+    assert!(
+        hosting.len() >= 4 && sources[WARM].contains("fn try_claude_tui_warm_followup("),
+        "source scan must see the hosting files"
+    );
+    let mut violations = Vec::new();
+    for (relative, code) in &hosting {
+        violations.extend(
+            DIRECT
+                .iter()
+                .filter(|direct| code.contains(**direct))
+                .map(|direct| format!("{relative}: {direct}")),
+        );
+        let (fresh, aliases) = item_uses(code, "fresh_claude_tui_session_resolution");
+        let allowed = usize::from(relative.as_str() == WARM);
+        if fresh > allowed || !aliases.is_empty() {
+            violations.push(format!("{relative}: fresh resolution x{fresh} {aliases:?}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "warm follow-up bypasses the executor: {violations:?}"
     );
 }
