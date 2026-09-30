@@ -605,12 +605,16 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             )
         };
         let notification_anchor_message_id = if let Some(message_id) = task_card_anchor {
+            synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
             message_id
         } else {
             match channel_id.say(&*notify_http, content).await {
-                Ok(message) => message.id,
+                Ok(message) => {
+                    synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
+                    message.id
+                }
                 Err(error) => {
-                    synthetic_start_wiring::withdraw_prompt_id_if_unsent(&prompt, &error);
+                    synthetic_start_wiring::record_prompt_id_after_post(&prompt, Some(&error));
                     tracing::warn!(
                         provider = %prompt.provider,
                         channel_id = channel_id.get(),

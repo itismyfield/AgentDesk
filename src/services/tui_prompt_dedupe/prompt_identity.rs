@@ -1,5 +1,5 @@
 //! Claude `prompt_id` as the relayed-entry ledger's second key: the hook has it
-//! before the row's uuid exists. Only hooks record it (forks rewrite row ids).
+//! before the row's uuid exists. Only announced hooks record it (forks rewrite row ids).
 
 use super::*;
 
@@ -77,14 +77,29 @@ pub(super) fn check_relayed_prompt_id(
     PromptIdMatch::Ambiguous
 }
 
-/// Records a hook-submitted `prompt_id` at the relay point. A present id keeps
-/// its first record time; other text only marks it ambiguous.
-pub(super) fn record_relayed_prompt_id(
+/// Records the hook `prompt_id` of a published SSH-direct observation once its
+/// announcement was sent or may have been; an unannounced prompt records nothing.
+pub fn record_announced_prompt_id(prompt: &ObservedTuiPrompt) {
+    let Some(prompt_id) = prompt.hook_prompt_id.as_deref() else {
+        return;
+    };
+    if prompt.ssh_direct_observation_generation == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return;
+    }
+    record_relayed_prompt_id(
+        &prompt.provider,
+        prompt.tmux_session_name.trim(),
+        prompt_id,
+        &prompt.prompt,
+    );
+}
+
+/// A present id keeps its first record time; other text only marks it ambiguous.
+fn record_relayed_prompt_id(
     provider: &str,
     tmux_session_name: &str,
     prompt_id: &str,
     prompt: &str,
-    recorded_by: u64,
 ) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -106,26 +121,11 @@ pub(super) fn record_relayed_prompt_id(
             prompt_id: prompt_id.to_string(),
             prompt: prompt.to_string(),
             ambiguous: false,
-            recorded_by,
         },
         recorded_at: Instant::now(),
     });
     while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
         queue.pop_front();
-    }
-}
-
-/// Drops the prompt id recorded by observation `recorded_by` once its announcement
-/// is known unsent, so the idle scanner can announce the prompt again.
-pub fn withdraw_relayed_prompt_id(provider: &str, tmux_session_name: &str, recorded_by: u64) {
-    if recorded_by == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
-        return;
-    }
-    let provider = normalize_provider(provider);
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    let key = PromptKey::new(&provider, tmux_session_name.trim());
-    if let Some(queue) = state.relayed_prompt_ids_by_tmux.get_mut(&key) {
-        queue.retain(|seen| seen.value.recorded_by != recorded_by);
     }
 }
 

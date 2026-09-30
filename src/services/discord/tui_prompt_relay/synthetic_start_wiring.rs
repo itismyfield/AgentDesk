@@ -52,17 +52,20 @@ pub(super) async fn post_suppressed_injection_note(
         format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt)
     };
     match channel_id.say(&**notify_http, note).await {
-        Ok(message) => tracing::info!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            tmux_session_name = %prompt.tmux_session_name,
-            note_message_id = message.id.get(),
-            session_resetting_slash_control,
-            slash_command_kind = slash_command_kind.unwrap_or(""),
-            "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
-        ),
+        Ok(message) => {
+            record_prompt_id_after_post(prompt, None);
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                note_message_id = message.id.get(),
+                session_resetting_slash_control,
+                slash_command_kind = slash_command_kind.unwrap_or(""),
+                "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
+            )
+        }
         Err(error) => {
-            withdraw_prompt_id_if_unsent(prompt, &error);
+            record_prompt_id_after_post(prompt, Some(&error));
             tracing::warn!(
                 provider = %prompt.provider,
                 channel_id = channel_id.get(),
@@ -89,16 +92,16 @@ pub(super) fn discord_post_certainly_unsent(error: &serenity::Error) -> bool {
     }
 }
 
-/// An announcement that certainly never reached Discord leaves no prompt-id
-/// suppression behind, so the idle scanner can still announce the prompt.
-pub(super) fn withdraw_prompt_id_if_unsent(prompt: &ObservedTuiPrompt, error: &serenity::Error) {
-    if discord_post_certainly_unsent(error) {
-        crate::services::tui_prompt_dedupe::withdraw_relayed_prompt_id(
-            &prompt.provider,
-            &prompt.tmux_session_name,
-            prompt.ssh_direct_observation_generation,
-        );
+/// Records the hook prompt_id once its announcement POST was sent or may have been;
+/// a POST that certainly created nothing leaves the idle scanner free to announce it.
+pub(super) fn record_prompt_id_after_post(
+    prompt: &ObservedTuiPrompt,
+    error: Option<&serenity::Error>,
+) {
+    if error.is_some_and(discord_post_certainly_unsent) {
+        return;
     }
+    crate::services::tui_prompt_dedupe::record_announced_prompt_id(prompt);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -5,11 +5,13 @@ const CLAUDE: &str = "claude";
 const RECENT_PLUS: Duration = Duration::from_secs(31);
 
 /// Holds the dedupe lock and a receiver subscribed before the first observation,
-/// so every published `(source_event_id, prompt)` for this pane is counted.
+/// so every published `(source_event_id, prompt)` for this pane is counted. Each
+/// published event is announced as a successful relay would, right after it.
 struct Pane {
     tmux: String,
     session: String,
     rx: broadcast::Receiver<ObservedTuiPrompt>,
+    events: Vec<(Option<String>, String)>,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -24,52 +26,62 @@ impl Pane {
         register_provider_session(CLAUDE, &session, &tmux);
         Self {
             rx: subscribe_observed_prompts(),
+            events: Vec::new(),
             tmux,
             session,
             _guard: guard,
         }
     }
 
-    fn hook(&self, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
-        observe_prompt_by_provider_session_with_prompt_id_at(
+    fn hook(&mut self, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
+        let observation = observe_prompt_by_provider_session_with_prompt_id_at(
             CLAUDE,
             &self.session,
             prompt,
             prompt_id,
             Utc::now(),
-        )
+        );
+        self.announce_published();
+        observation
     }
 
-    fn scan(&self, uuid: &str, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
-        observe_prompt_by_tmux_with_row_ids_at(
+    fn scan(&mut self, uuid: &str, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
+        let observation = observe_prompt_by_tmux_with_row_ids_at(
             CLAUDE,
             &self.tmux,
             prompt,
             Some(uuid),
             prompt_id,
             Utc::now(),
-        )
+        );
+        self.announce_published();
+        observation
     }
 
     fn age(&self, by: Duration) {
         age_observed_prompt_records_for_tests(CLAUDE, &self.tmux, by);
     }
 
-    /// Published events for this pane since the last call, oldest first.
-    fn published(&mut self) -> Vec<(Option<String>, String)> {
-        let mut events = Vec::new();
+    fn announce_published(&mut self) {
         loop {
             match self.rx.try_recv() {
                 Ok(event) if event.tmux_session_name == self.tmux => {
-                    events.push((event.source_event_id, event.prompt));
+                    record_announced_prompt_id(&event);
+                    self.events.push((event.source_event_id, event.prompt));
                 }
                 Ok(_) => {}
                 Err(broadcast::error::TryRecvError::Lagged(_)) => {
                     panic!("observed-prompt receiver lagged; the count would be unsound")
                 }
-                Err(_) => return events,
+                Err(_) => return,
             }
         }
+    }
+
+    /// Published events for this pane since the last call, oldest first.
+    fn published(&mut self) -> Vec<(Option<String>, String)> {
+        self.announce_published();
+        std::mem::take(&mut self.events)
     }
 }
 

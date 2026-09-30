@@ -104,8 +104,8 @@ pub fn observe_prompt_by_tmux_with_entry_id_at(
     )
 }
 
-/// Claude hook entry: the submitted `prompt_id` is recorded on relay so the
-/// scanner's later row with the same `promptId` and text is suppressed.
+/// Claude hook entry: the submitted `prompt_id` is recorded once its announcement
+/// is sent, so the scanner's later row with that `promptId` and text is suppressed.
 pub fn observe_prompt_by_provider_session_with_prompt_id_at(
     provider: &str,
     provider_session_id: &str,
@@ -242,6 +242,7 @@ fn observe_prompt_candidates_by_tmux_inner(
             observed_at,
             external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+            hook_prompt_id: None,
         };
         let _ = OBSERVED_PROMPTS.send(event);
         return PromptObservation::PublishedTaskNotification;
@@ -333,20 +334,18 @@ fn observe_prompt_candidates_by_tmux_inner(
                 tmux_session_name,
                 ExternalInputRelayLease::unassigned(None),
             );
-            let observation_generation =
-                mark_ssh_direct_observation_pending(&provider, tmux_session_name);
-            // Tagged with this observation so its relay can withdraw it if unsent.
-            if let Some(ClaudePromptId::HookSubmit(prompt_id)) = prompt_id {
-                record_relayed_prompt_id(
-                    &provider,
-                    tmux_session_name,
-                    prompt_id.trim(),
-                    &candidates[0],
-                    observation_generation,
-                );
-            }
-            (external_input_lease.generation, observation_generation)
+            (
+                external_input_lease.generation,
+                mark_ssh_direct_observation_pending(&provider, tmux_session_name),
+            )
         };
+    // A hook's prompt_id rides the event; the relay records it after its POST.
+    let hook_prompt_id = match prompt_id {
+        Some(ClaudePromptId::HookSubmit(prompt_id)) if local_only_control.is_none() => {
+            Some(prompt_id.trim().to_string())
+        }
+        _ => None,
+    };
     let prompt = candidates
         .first()
         .expect("non-empty candidates")
@@ -359,6 +358,7 @@ fn observe_prompt_candidates_by_tmux_inner(
         observed_at,
         external_input_lease_generation,
         ssh_direct_observation_generation,
+        hook_prompt_id,
     };
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect

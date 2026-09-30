@@ -432,6 +432,21 @@ impl RelayE2eHarness {
         *self.mock.note_answer.lock().expect("note answer") = answer;
     }
 
+    /// Holds the next non-placeholder POST open until [`Self::release_held_note`].
+    pub(super) fn hold_next_note(&self) {
+        self.mock.hold_next_note.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) async fn wait_for_held_note(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.mock.note_held.notified())
+            .await
+            .is_ok()
+    }
+
+    pub(super) fn release_held_note(&self) {
+        self.mock.release_held_note.notify_one();
+    }
+
     /// Points the notify bot at the mock; `timeout` bounds each of its requests.
     pub(super) async fn use_mock_notify_bot(&self, timeout: Duration) {
         let client = reqwest::Client::builder()

@@ -111,6 +111,9 @@ pub struct ObservedTuiPrompt {
     /// publish no lease/SSH state at all.
     pub(crate) external_input_lease_generation: u64,
     pub(crate) ssh_direct_observation_generation: u64,
+    /// Hook-submitted Claude `prompt_id`; the relay records it only once the
+    /// announcement was sent or may have been.
+    pub(crate) hook_prompt_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,8 +255,8 @@ struct TuiPromptDedupeState {
     // (30min) — long enough to span the rotation+self-loop window, bounded so
     // the set cannot grow without limit; additionally ring-capped per key.
     relayed_entry_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<String>>>,
-    // Hook-submitted Claude `prompt_id` -> relayed text, so the idle scanner's
-    // later row (`promptId`, fresh uuid) is suppressed as the same input.
+    // Announced hook `prompt_id` -> its text, so the idle scanner's later row
+    // (`promptId`, fresh uuid) is suppressed as the same input.
     relayed_prompt_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<RelayedPromptId>>>,
 }
 
@@ -262,9 +265,6 @@ struct RelayedPromptId {
     prompt_id: String,
     prompt: String,
     ambiguous: bool,
-    /// SSH-direct observation generation of the hook that recorded it; lets that
-    /// relay withdraw only its own record when the announcement was never sent.
-    recorded_by: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -306,9 +306,9 @@ pub use observation::*;
 pub(crate) use prompt_identity::age_observed_prompt_records_for_tests;
 pub use prompt_identity::{
     ClaudePromptId, extract_claude_transcript_prompt_id, extract_prompt_id_from_hook_payload,
-    withdraw_relayed_prompt_id,
+    record_announced_prompt_id,
 };
-use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_relayed_prompt_id};
+use prompt_identity::{PromptIdMatch, check_relayed_prompt_id};
 pub use runtime_binding::*;
 
 #[cfg(test)]

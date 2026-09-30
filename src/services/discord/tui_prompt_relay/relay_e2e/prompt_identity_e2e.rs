@@ -1,7 +1,8 @@
 //! Hook-announced Claude prompts through the real relay and a mock Discord: the
-//! idle scanner's row matches by `prompt_id` unless Discord certainly never got it.
+//! idle scanner's row matches by `prompt_id` only once the announcement was sent.
 
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -22,27 +23,59 @@ const ROW_UUID: &str = "5845e2e0-0000-0000-0000-00000000a001";
 const QUIET: Duration = Duration::from_millis(1500);
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Boots the relay over the mock and runs the production observer loop and relay on `hooks`.
+/// What the relay can reach when the hook arrives; either can be restored later.
+struct Setup {
+    notify_timeout: Option<Duration>,
+    owner: bool,
+}
+
+const READY: Setup = Setup {
+    notify_timeout: Some(WAIT),
+    owner: true,
+};
+
+/// Boots the relay over the mock and runs the production observer loop and relay on
+/// `hooks`; the counter holds how many relays have returned.
 async fn start(
     tmux: &str,
     sessions: &[&str],
     hooks: broadcast::Receiver<HookEvent>,
-    notify_timeout: Duration,
-) -> RelayE2eHarness {
+    setup: Setup,
+) -> (RelayE2eHarness, Arc<AtomicUsize>) {
     let harness = RelayE2eHarness::start_with_health_registry().await;
     harness.cache_relay_transport();
     harness.answer_placeholders_immediately();
-    harness.use_mock_notify_bot(notify_timeout).await;
-    harness.attach_tmux_watcher(tmux, "prompt-identity.jsonl");
+    if let Some(timeout) = setup.notify_timeout {
+        harness.use_mock_notify_bot(timeout).await;
+    }
+    if setup.owner {
+        harness.attach_tmux_watcher(tmux, "prompt-identity.jsonl");
+    }
     for session in sessions {
         dedupe::register_provider_session(PROVIDER_KEY, session, tmux);
     }
     let shared = harness.shared.clone();
+    let relayed = Arc::new(AtomicUsize::new(0));
+    let counter = relayed.clone();
     super::super::spawn_tui_prompt_relay_observer(PROVIDER_KEY.to_string(), hooks, move |prompt| {
         let shared = shared.clone();
-        Box::pin(async move { super::super::relay_observed_prompt(&shared, prompt).await })
+        let counter = counter.clone();
+        Box::pin(async move {
+            super::super::relay_observed_prompt(&shared, prompt).await;
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
     });
-    harness
+    (harness, relayed)
+}
+
+async fn wait_for_relays(relayed: &Arc<AtomicUsize>, count: usize) {
+    let relayed = relayed.clone();
+    let done = wait_until(WAIT, move || {
+        let done = relayed.load(Ordering::SeqCst) >= count;
+        Box::pin(async move { done })
+    })
+    .await;
+    assert!(done, "the relay never returned");
 }
 
 fn user_prompt_submit_payload(session: &str) -> serde_json::Value {
@@ -117,6 +150,10 @@ async fn wait_for_failed_announcement(harness: &RelayE2eHarness, tmux: &str, att
 /// The idle scanner's call for the prompt's transcript row, after the 30s content window.
 fn scanner_sees_the_row(tmux: &str) -> dedupe::PromptObservation {
     dedupe::age_observed_prompt_records_for_tests(PROVIDER_KEY, tmux, Duration::from_secs(31));
+    scanner_reads_the_row_now(tmux)
+}
+
+fn scanner_reads_the_row_now(tmux: &str) -> dedupe::PromptObservation {
     dedupe::observe_prompt_by_tmux_with_row_ids_at(
         PROVIDER_KEY,
         tmux,
@@ -147,7 +184,7 @@ async fn a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner() {
     let tmux = "AgentDesk-claude-5845-hook-then-scan";
     let session = "5845e2e0-0000-0000-0000-0000000000c1";
     let hooks = HookServerState::new();
-    let harness = start(tmux, &[session], hooks.subscribe(), WAIT).await;
+    let (harness, _) = start(tmux, &[session], hooks.subscribe(), READY).await;
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!(
@@ -178,7 +215,7 @@ async fn an_aliased_hook_broadcast_twice_is_announced_once() {
     let command = "5845e2e0-0000-0000-0000-0000000000c2";
     let payload = "5845e2e0-0000-0000-0000-0000000000c3";
     let (hook_tx, hook_rx) = broadcast::channel(8);
-    let harness = start(tmux, &[command, payload], hook_rx, WAIT).await;
+    let (harness, _) = start(tmux, &[command, payload], hook_rx, READY).await;
     let event = HookEvent {
         payload: user_prompt_submit_payload(payload),
         ..hook_event(command)
@@ -205,7 +242,7 @@ async fn a_refused_announcement_leaves_the_prompt_to_the_idle_scanner() {
     let tmux = "AgentDesk-claude-5845-refused-hook";
     let session = "5845e2e0-0000-0000-0000-0000000000c4";
     let (hook_tx, hook_rx) = broadcast::channel(8);
-    let harness = start(tmux, &[session], hook_rx, WAIT).await;
+    let (harness, _) = start(tmux, &[session], hook_rx, READY).await;
     harness.answer_notes_with(NoteAnswer::Refuse);
     hook_tx
         .send(hook_event(session))
@@ -228,7 +265,11 @@ async fn a_timed_out_announcement_keeps_the_scanner_row_suppressed() {
     let tmux = "AgentDesk-claude-5845-timed-out-hook";
     let session = "5845e2e0-0000-0000-0000-0000000000c5";
     let (hook_tx, hook_rx) = broadcast::channel(8);
-    let harness = start(tmux, &[session], hook_rx, Duration::from_millis(300)).await;
+    let setup = Setup {
+        notify_timeout: Some(Duration::from_millis(300)),
+        ..READY
+    };
+    let (harness, _) = start(tmux, &[session], hook_rx, setup).await;
     harness.answer_notes_with(NoteAnswer::Stall);
     hook_tx
         .send(hook_event(session))
@@ -239,7 +280,99 @@ async fn a_timed_out_announcement_keeps_the_scanner_row_suppressed() {
         scanner_sees_the_row(tmux),
         dedupe::PromptObservation::SuppressedReplayedEntry
     );
-    let (posts, _, placeholders) = settled_counts(&harness).await;
-    assert_eq!((posts, placeholders), (1, 0));
+    assert_eq!(settled_counts(&harness).await, (1, 1, 0));
     drop(hook_tx);
+}
+
+/// The scanner reads the row while the announcement POST is open; the 403 then leaves
+/// neither the prompt_id nor a row uuid derived from it, so the row is announced later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_read_during_a_refused_announcement_is_announced_afterwards() {
+    let tmux = "AgentDesk-claude-5845-held-refused-hook";
+    let session = "5845e2e0-0000-0000-0000-0000000000c6";
+    let (hook_tx, hook_rx) = broadcast::channel(8);
+    let (harness, _) = start(tmux, &[session], hook_rx, READY).await;
+    harness.answer_notes_with(NoteAnswer::Refuse);
+    harness.hold_next_note();
+    hook_tx
+        .send(hook_event(session))
+        .expect("observer subscribed");
+    assert!(
+        harness.wait_for_held_note(WAIT).await,
+        "no announcement POST"
+    );
+
+    assert_eq!(
+        scanner_reads_the_row_now(tmux),
+        dedupe::PromptObservation::SuppressedRecentDuplicate
+    );
+    harness.release_held_note();
+    wait_for_failed_announcement(&harness, tmux, 1).await;
+    harness.answer_notes_with(NoteAnswer::Create);
+    assert_eq!(
+        scanner_sees_the_row(tmux),
+        dedupe::PromptObservation::PublishedSshDirect
+    );
+    wait_for_announcement(&harness).await;
+    assert_eq!(settled_counts(&harness).await, (2, 1, 1));
+    drop(hook_tx);
+}
+
+/// The relay returns before any announcement POST; once that cause is repaired, the
+/// scanner's row 31s later is announced exactly once.
+async fn a_prompt_unsent_before_its_post_is_announced_by_the_scanner(
+    tmux: &str,
+    session: &str,
+    setup: Setup,
+) {
+    let (restore_bot, restore_owner) = (setup.notify_timeout.is_none(), !setup.owner);
+    let (hook_tx, hook_rx) = broadcast::channel(8);
+    let (harness, relayed) = start(tmux, &[session], hook_rx, setup).await;
+    hook_tx
+        .send(hook_event(session))
+        .expect("observer subscribed");
+    wait_for_relays(&relayed, 1).await;
+    assert_eq!(harness.local_note_posts(), 0);
+
+    if restore_bot {
+        harness.use_mock_notify_bot(WAIT).await;
+    }
+    if restore_owner {
+        harness.attach_tmux_watcher(tmux, "prompt-identity.jsonl");
+    }
+    assert_eq!(
+        scanner_sees_the_row(tmux),
+        dedupe::PromptObservation::PublishedSshDirect
+    );
+    wait_for_announcement(&harness).await;
+    assert_eq!(settled_counts(&harness).await, (1, 1, 1));
+    drop(hook_tx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_without_an_owner_channel_is_announced_once_the_owner_returns() {
+    let setup = Setup {
+        owner: false,
+        ..READY
+    };
+    a_prompt_unsent_before_its_post_is_announced_by_the_scanner(
+        "AgentDesk-claude-5845-ownerless-hook",
+        "5845e2e0-0000-0000-0000-0000000000c7",
+        setup,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns() {
+    let setup = Setup {
+        notify_timeout: None,
+        ..READY
+    };
+    a_prompt_unsent_before_its_post_is_announced_by_the_scanner(
+        "AgentDesk-claude-5845-botless-hook",
+        "5845e2e0-0000-0000-0000-0000000000c8",
+        setup,
+    )
+    .await;
 }
