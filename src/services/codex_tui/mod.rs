@@ -1,3 +1,4 @@
+pub(crate) mod host_input;
 pub mod input;
 pub mod rollout_index;
 pub mod rollout_tail;
