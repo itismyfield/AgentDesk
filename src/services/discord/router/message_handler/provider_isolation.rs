@@ -421,10 +421,14 @@ pub(super) async fn restore_live_tui_provider_session_from_binding(
     None
 }
 
+/// Kills a live session of the wrong runtime kind so the turn recreates it, only when
+/// the turn's own key reads a legacy row or no row yet with no trace of another host.
 #[cfg(unix)]
-pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
+pub(super) async fn reconcile_managed_tmux_runtime_kind_for_config(
+    shared: &SharedData,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
+    session_key: Option<&str>,
     tmux_session_name: Option<&str>,
     expected_runtime_kind: Option<RuntimeHandoffKind>,
 ) {
@@ -444,6 +448,18 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         return;
     };
     if observed_runtime_kind == expected_runtime_kind {
+        return;
+    }
+    let caller = "runtime_kind_mismatch_recreate";
+    let deferred = super::super::super::host_defer_gate::turn_session_deferred(
+        shared.pg_pool.as_ref(),
+        provider,
+        channel_id.get(),
+        session_key,
+        tmux_session_name,
+        caller,
+    );
+    if deferred.await {
         return;
     }
 
@@ -821,6 +837,10 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
     *memento_context_loaded = false;
     *session_strategy_reason = "provider_channel_worktree_isolated";
 }
+#[cfg(all(test, unix))]
+#[path = "provider_isolation_host_tests.rs"]
+mod host_tests;
+
 #[cfg(test)]
 mod thread_role_inheritance_tests {
     use super::*;

@@ -336,6 +336,11 @@ async fn resolve_terminal_ui_tmux_session(
             .and_then(|session| session.channel_name.clone())
     }?;
     let tmux_session_name = provider.build_tmux_session_name(&channel_name);
+    // A session the host guard keeps has no tmux-derived context; the card waits.
+    let host = super::host_defer_gate::channel_session_deferred;
+    if host(shared, provider, channel_id.get(), &tmux_session_name).await {
+        return None;
+    }
     if crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name)
         || terminal_ui_generation_mtime_for_tmux(&tmux_session_name) != 0
     {
@@ -636,5 +641,55 @@ mod tests {
             terminal_ui_reconcile_action(false, 9, 10),
             TerminalUiReconcileAction::Wait
         );
+    }
+
+    // A status card whose tmux generation went stale is dropped only for a session the
+    // host guard admits; a kept session's card waits for its deadline instead.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg() {
+        use crate::services::discord::host_defer_gate::tests::{
+            Case, ScriptedTmux, map_channel, postgres,
+        };
+        use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let http = Arc::new(serenity::Http::new("Bot p4c1-test"));
+        let root = runtime_store::discord_terminal_ui_obligations_root().expect("root");
+        let claude = ProviderKind::Claude;
+        let channel_of = |n: usize| 1_479_671_301_387_064_000 + n as u64;
+        let pending = |n: usize| {
+            let obligation = TerminalUiObligation {
+                generation_mtime_ns: 1,
+                deadline_unix: terminal_ui_obligation_now_unix() + 3600,
+                ..sample_obligation(channel_of(n))
+            };
+            write_obligation_in_root(&root, &obligation).expect("write obligation");
+        };
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let channel_name = format!("p4c1-card-{n}");
+            let name = claude.build_tmux_session_name(&channel_name);
+            map_channel(&shared, ChannelId::new(channel_of(n)), &channel_name).await;
+            case.seed(&pool, &channel_key(&shared, &name), &name, channel_of(n))
+                .await;
+            let marker = crate::services::tmux_common::session_temp_path(&name, "generation");
+            std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(&marker, "2").expect("a later spawn's generation marker");
+            pending(n);
+        }
+        sweep_terminal_ui_obligations(&http, &shared, &claude).await;
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(n)).is_some();
+            assert_eq!(kept, !case.admitted(), "{case:?}");
+            clear_obligation_in_root(&root, claude.as_str(), channel_of(n));
+        }
+        pool.close().await;
+        pending(0);
+        sweep_terminal_ui_obligations(&http, &shared, &claude).await;
+        let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(0)).is_some();
+        assert!(kept, "a failed row read is not a legacy answer");
+        db.drop().await;
     }
 }

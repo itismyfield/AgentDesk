@@ -484,6 +484,15 @@ async fn attempt_drift_repair(
     tmux_session_name: &str,
     _guard: RepairInflightGuard,
 ) {
+    // Drift witness / agreement check value (read-only mirror use).
+    let mirror_channel =
+        crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
+    // A session the host guard keeps is neither repaired nor counted as lost.
+    let host = super::host_defer_gate::channel_session_deferred;
+    let channel = mirror_channel.unwrap_or(0);
+    if host(shared, &provider, channel, tmux_session_name).await {
+        return;
+    }
     // Claude has settings + sessions-table repair sources. Codex still runs the
     // same bounded liveness/accounting path; it simply has no promotable source.
     let settings_channel = (provider == ProviderKind::Claude)
@@ -497,10 +506,6 @@ async fn attempt_drift_repair(
     } else {
         (None, None)
     };
-
-    // Drift witness / agreement check value (read-only mirror use).
-    let mirror_channel =
-        crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
 
     // The shared #3635 probe bounds both tmux commands and keeps transient probe
     // failures distinct from confirmed death. A blocking-task failure is unknown.
@@ -961,5 +966,65 @@ mod tests {
             "cooldown elapsed ⇒ a new repair attempt is allowed"
         );
         reset_drift_state_for_tests();
+    }
+
+    // A dead pane's pending emissions count as lost only for a session the host guard
+    // admits; a kept one is neither probed, repaired nor counted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg() {
+        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
+        use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _drift = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let repair = |name: String, channel: u64| {
+            let shared = shared.clone();
+            async move {
+                crate::services::tui_prompt_dedupe::register_tmux_channel(&name, channel);
+                note_pending_emission_count(&name, &ProviderKind::Claude, Some(channel), 3);
+                let guard = try_begin_repair(&name, Instant::now()).expect("first attempt");
+                attempt_drift_repair(&shared, ProviderKind::Claude, &name, guard).await;
+                take_pending_emission_count(&name)
+            }
+        };
+        let channel_of = |n: usize| 1_479_671_301_387_063_000 + n as u64;
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let name = format!("AgentDesk-claude-p4c1-drift-{n}");
+            let key = channel_key(&shared, &name);
+            case.seed(&pool, &key, &name, channel_of(n)).await;
+            let kept = repair(name, channel_of(n)).await;
+            assert_eq!(kept, if case.admitted() { 0 } else { 3 }, "{case:?}");
+            let probed = tmux
+                .take_calls()
+                .iter()
+                .any(|c| c.starts_with("has-session"));
+            assert_eq!(
+                probed,
+                case.admitted(),
+                "{case:?}: probed only once admitted"
+            );
+        }
+
+        let legacy = Case::Stored(super::super::host_teardown_gate::test_support::Stored::Legacy);
+        let [probe_error, unread] =
+            ["probe-error", "unread"].map(|tag| format!("AgentDesk-claude-p4c1-drift-{tag}"));
+        for (name, n) in [(&probe_error, 80), (&unread, 81)] {
+            let key = channel_key(&shared, name);
+            legacy.seed(&pool, &key, name, channel_of(n)).await;
+        }
+        tmux.fail_probes(true);
+        let kept = repair(probe_error, channel_of(80)).await;
+        assert_eq!(kept, 3, "a failed probe is not death");
+        tmux.fail_probes(false);
+        pool.close().await;
+        assert_eq!(
+            repair(unread, channel_of(81)).await,
+            3,
+            "a failed row read defers"
+        );
+        db.drop().await;
     }
 }

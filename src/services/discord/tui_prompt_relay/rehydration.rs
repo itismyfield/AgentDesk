@@ -11,6 +11,7 @@
 //! sites (and the `#[cfg(test)] mod tests` block) stay byte-identical via the
 //! `use self::rehydration::{...}` re-import.
 
+use super::super::host_defer_gate::mirror_evict_admitted as host_admits;
 use super::launch_script::{claude_tui_launch_transcript, claude_tui_rehydrated_binding};
 use super::*;
 use std::collections::HashMap;
@@ -56,7 +57,7 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
         || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
-    )
+    ) && host_admits(shared, &ProviderKind::Claude, tmux_session_name)
 }
 
 /// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (the
@@ -169,7 +170,7 @@ fn codex_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_nam
         || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
-    )
+    ) && host_admits(shared, &ProviderKind::Codex, tmux_session_name)
 }
 
 #[cfg(all(unix, test))]
@@ -274,6 +275,9 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
         None => return,
     };
     if !claude_pane_live(tmux_session_name) {
+        if !host_admits(shared, &ProviderKind::Claude, tmux_session_name) {
+            return;
+        }
         // #3105: the restored owner binding is only valid for a LIVE session;
         // drop it once the pane is gone so a dead session can never resolve.
         shared
@@ -445,6 +449,9 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
         };
 
         if !codex_pass_pane_is_live(&tmux_session_name) {
+            if !host_admits(shared, &ProviderKind::Codex, &tmux_session_name) {
+                continue;
+            }
             shared
                 .tmux_watchers
                 .clear_restored_owner_for_tmux_session(&tmux_session_name);
@@ -1187,5 +1194,131 @@ mod tests {
             plan.markerless_fallback_allowed_sessions.is_empty(),
             "two live sessions with no usable rollout identity in the same cwd must skip fallback"
         );
+    }
+
+    /// The rehydration pass's dead-pane eviction against the rows stored for each session.
+    mod host_defer {
+        use super::*;
+        use crate::db::dispatched_sessions::hosted_execution;
+        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
+        use crate::services::discord::host_teardown_gate::test_support::shared_on;
+
+        fn binding(
+            kind: RuntimeHandoffKind,
+        ) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: kind,
+                output_path: "/runtime/p4c1-rehydrate.jsonl".to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 0,
+                relay_last_offset: None,
+            }
+        }
+
+        // A dead pane's relay mirror and restored owner are dropped only for a session the host
+        // guard admits, in the unlisted sweep and the listed-pane pass of both providers.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg() {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            crate::services::tui_prompt_dedupe::reset_state_for_tests();
+            let tmux = ScriptedTmux::install();
+            let (db, pool) = postgres().await;
+            let shared = shared_on(&pool).await;
+            let providers = [
+                (ProviderKind::Claude, RuntimeHandoffKind::ClaudeTui),
+                (ProviderKind::Codex, RuntimeHandoffKind::CodexTui),
+            ];
+            let mut sessions = Vec::new();
+            for (p, (provider, kind)) in providers.iter().enumerate() {
+                for listed in [false, true] {
+                    for (n, case) in Case::ALL.into_iter().enumerate() {
+                        let at = (p * 2 + usize::from(listed)) * 10 + n;
+                        let channel = 1_479_671_301_387_065_000 + at as u64;
+                        let name = format!("AgentDesk-{}-p4c1-evict-{at}", provider.as_str());
+                        let key =
+                            crate::services::discord::adk_session::build_namespaced_session_key(
+                                &shared.token_hash,
+                                provider,
+                                &name,
+                            );
+                        case.seed(&pool, &key, &name, channel).await;
+                        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                            &name,
+                            binding(*kind),
+                        );
+                        crate::services::tui_prompt_dedupe::register_tmux_channel(&name, channel);
+                        let owner = ChannelId::new(channel);
+                        shared
+                            .tmux_watchers
+                            .restore_owner_channel_for_tmux_session(&name, owner);
+                        sessions.push((name, key, listed, case));
+                    }
+                }
+            }
+            let unread = "AgentDesk-claude-p4c1-evict-unread";
+            let key = crate::services::discord::host_teardown_gate::test_support::channel_key;
+            let legacy = crate::services::discord::host_teardown_gate::test_support::Stored::Legacy;
+            let unread_channel = 1_479_671_301_387_065_900;
+            Case::Stored(legacy)
+                .seed(&pool, &key(&shared, unread), unread, unread_channel)
+                .await;
+            let listed: Vec<&str> = sessions
+                .iter()
+                .filter(|(_, _, listed, _)| *listed)
+                .map(|(name, ..)| name.as_str())
+                .collect();
+            let rows = |keys: Vec<String>| {
+                let pool = pool.clone();
+                async move {
+                    let mut rows = Vec::new();
+                    for key in keys {
+                        let key = hosted_execution::HostedLookupKey::SessionKey(&key);
+                        let row = hosted_execution::load_hosted_execution_pg(&pool, key).await;
+                        rows.push(format!("{row:?}"));
+                    }
+                    rows
+                }
+            };
+            let keys = || sessions.iter().map(|(_, key, ..)| key.clone()).collect();
+            let rows_before = rows(keys()).await;
+            tmux.list(&listed);
+            let pass = shared.clone();
+            tokio::task::spawn_blocking(move || {
+                rehydrate_existing_claude_tui_bindings(&pass);
+                rehydrate_existing_codex_tui_bindings(&pass);
+            })
+            .await
+            .expect("rehydrate pass");
+            assert_eq!(rows(keys()).await, rows_before, "eviction is memory only");
+            for (name, _, listed, case) in &sessions {
+                let mirrored =
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name)
+                        .is_some();
+                let owned = shared
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(name)
+                    .is_some();
+                let label = format!("{name} listed={listed} {case:?}");
+                assert_eq!(mirrored, !case.admitted(), "{label}: mirror");
+                assert_eq!(owned, !case.admitted(), "{label}: restored owner");
+            }
+
+            let claude_tui = binding(RuntimeHandoffKind::ClaudeTui);
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(unread, claude_tui);
+            crate::services::tui_prompt_dedupe::register_tmux_channel(unread, unread_channel);
+            pool.close().await;
+            let pass = shared.clone();
+            tokio::task::spawn_blocking(move || rehydrate_existing_claude_tui_bindings(&pass))
+                .await
+                .expect("rehydrate pass");
+            let kept = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(unread);
+            assert!(kept.is_some(), "a failed row read is not a legacy answer");
+            db.drop().await;
+        }
     }
 }

@@ -3442,6 +3442,7 @@ services::discord::health::watcher_respawn::tests::the_sweep_arms_the_registry_d
 services::discord::health::watcher_respawn::tests::unwatched_candidates_exclude_a_channel_served_by_a_sibling_runtime
 services::discord::health::watcher_respawn::tests::unwatched_candidates_include_a_mailbox_channel_whose_watcher_was_cancelled
 services::discord::health::watcher_respawn::tests::watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap
+services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::http::tests::discord_content_or_zwsp_replaces_empty_content
@@ -3527,6 +3528,7 @@ services::discord::idle_relay_drift::tests::db_channel_foreign_instance_is_block
 services::discord::idle_relay_drift::tests::db_channel_without_mirror_witness_is_blocked
 services::discord::idle_relay_drift::tests::dead_pane_blocks_any_candidate
 services::discord::idle_relay_drift::tests::dead_pane_without_source_is_still_permanent
+services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg
 services::discord::idle_relay_drift::tests::drift_warn_first_emits_then_suppresses_then_reemits
 services::discord::idle_relay_drift::tests::drift_warn_sessions_are_independent
 services::discord::idle_relay_drift::tests::probe_error_preserves_pending_emissions
@@ -5344,6 +5346,7 @@ services::discord::router::message_handler::pre_admission_control::pre_admission
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
+services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
@@ -6088,6 +6091,7 @@ services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_re
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_restart_retries_original_snapshot
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_unknown_schema_and_changed_snapshot_survive
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_valid_json_corruption_is_not_acknowledged
+services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::terminal_ui_obligation::tests::obligation_store_round_trips_lists_and_clears
 services::discord::terminal_ui_obligation::tests::terminal_ui_claude_tui_without_runtime_output_path_stays_not_ready
 services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
@@ -6969,6 +6973,7 @@ services::discord::tui_prompt_relay::rehydration::tests::codex_tui_marker_rehydr
 services::discord::tui_prompt_relay::rehydration::tests::codex_tui_marker_rehydrate_decision_uses_valid_marker
 services::discord::tui_prompt_relay::rehydration::tests::codex_tui_rehydrate_plan_counts_stale_marker_sessions_as_markerless_ambiguity
 services::discord::tui_prompt_relay::rehydration::tests::codex_tui_rehydrate_plan_reserves_marker_paths_before_markerless_fallback
+services::discord::tui_prompt_relay::rehydration::tests::host_defer::a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_allows_unambiguous_cwd_sessions
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_rejects_ambiguous_same_cwd_sessions
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::checkpointed_catch_up_reads_the_page_just_past_the_cursor
@@ -9393,6 +9398,7 @@ services::session_resume::tests::off_runtime_discovery_preserves_selection_and_r
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes
 services::session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime
 services::session_resume::tests::resume_production_path_retains_live_owner_after_teardown
+services::session_resume::tests::resume_refuses_what_the_host_guard_keeps_before_any_change_pg
 services::session_resume::tests::resume_runtime_binding_clear_absence_is_success
 services::session_resume::tests::transition_busy_response_exposes_retryable_korean_contract
 services::session_selector_validity::tests::equal_persisted_watermark_without_sticky_flag_is_not_growth_evidence
