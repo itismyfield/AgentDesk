@@ -1,6 +1,10 @@
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests;
+use crate::services::claude_tui::hook_server::adoption_retry::{
+    AdoptionHttp, DurableKind, NotDurableReason, adopt_from_hook, deferred_adoption_count,
+    reset_deferred_adoptions_for_tests,
+};
+use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
 use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::binding_context::{
     observe_spawn_nonce_marker, tests::fixture,
@@ -9,10 +13,11 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     APPEND_FAULT, BINDING_EVENTS_DIR, forget_channel_for_tests, records_strict, set_test_root,
 };
 use crate::services::tui_prompt_dedupe::{
-    TEST_LOCK, TuiRuntimeBinding, adopt_claude_continuation_session,
-    lock_claude_session_rotations_for_tests, register_launched_tmux_runtime_binding,
-    register_provider_session, register_rehydrated_tmux_runtime_binding, register_tmux_channel,
-    reset_state_for_tests, resolve_tmux_session_name,
+    AdoptSkip, TEST_LOCK, TuiRuntimeBinding, adopt_claude_continuation_session,
+    clear_claude_session_rotation, lock_claude_session_rotations_for_tests,
+    register_launched_tmux_runtime_binding, register_provider_session,
+    register_rehydrated_tmux_runtime_binding, register_tmux_channel, reset_state_for_tests,
+    resolve_tmux_session_name, runtime_binding_for_tmux_session,
 };
 use std::fs;
 use std::sync::MutexGuard;
@@ -391,6 +396,31 @@ fn file_less_exact_binding_waits_for_that_path_only() {
 }
 
 #[test]
+fn a_transcript_gone_after_the_judgment_is_waited_for() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_518, "p2b-vanished");
+    stamp(tmux);
+    let (a, b) = launch_then_clear(&lane, channel, tmux, false);
+    restart(channel);
+    lane.touch(&b);
+    let exact = exact(lane.judge(channel, tmux, &a));
+    fs::remove_file(lane.path(&b)).unwrap();
+    let wait = ExactPathWait {
+        session_id: b.clone(),
+        transcript: lane.path(&b),
+    };
+    let expected = PendingRestore::BoundFromLedger {
+        pending_seq: 2,
+        exact_wait: Some(wait),
+    };
+    assert_eq!(
+        exact.outcome(REGISTERED),
+        expected,
+        "a vanished B is waited for"
+    );
+}
+
+#[test]
 fn resolved_pending_restores_exactly_that_session_on_the_next_restart() {
     let lane = Lane::new();
     let resolve = |channel: u64, tmux: &str, respawn: bool| {
@@ -610,4 +640,209 @@ fn pending_path_away_from_the_launch_directory_is_blocked() {
     let kind = CorruptKind::PathMismatch;
     let blocked = RestoreStep::Finished(PendingRestore::BlockedCorrupt(Corrupt { line: 2, kind }));
     assert_eq!(lane.judge(channel, tmux, &a), blocked);
+}
+
+#[test]
+fn strict_read_takes_blank_and_crlf_lines_as_the_writer_does() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_513, "p2b-crlf");
+    stamp(tmux);
+    let (a, _) = launch_then_clear(&lane, channel, tmux, true);
+    restart(channel);
+    let expected = records_strict(channel).unwrap().unwrap();
+    let text = fs::read_to_string(lane.log(channel)).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let (first, second) = (lines[0], lines[1]);
+    for (form, edited) in [
+        ("blank", format!("{first}\n\n{second}\n")),
+        ("crlf", format!("{first}\r\n{second}\r\n")),
+    ] {
+        fs::write(lane.log(channel), edited).unwrap();
+        let read = records_strict(channel).unwrap().unwrap();
+        assert_eq!(read, expected, "{form} lines read as the writer reads them");
+        let step = lane.judge(channel, tmux, &a);
+        assert!(
+            matches!(step, RestoreStep::SeedAfterLaunch(_)),
+            "{form}: {step:?}"
+        );
+    }
+    fs::write(lane.log(channel), format!("{first}\n\r\n{second}\n")).unwrap();
+    let kind = CorruptKind::Unparseable;
+    let blocked = RestoreStep::Finished(PendingRestore::BlockedCorrupt(Corrupt { line: 2, kind }));
+    assert_eq!(
+        lane.judge(channel, tmux, &a),
+        blocked,
+        "a bare CR line blocks"
+    );
+}
+
+#[test]
+fn another_sessions_pending_does_not_repeat_an_earlier_refusal() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_514, "p2b-refused-once");
+    stamp(tmux);
+    let (a, b, c, d) = (uuid(), uuid(), uuid(), uuid());
+    lane.touch(&a);
+    register_tmux_channel(tmux, channel);
+    register_provider_session("claude", &a, tmux);
+    register_launched_tmux_runtime_binding(tmux, claude(&lane.path(&a), &a));
+    let b_path = lane.touch(&b);
+    let c_path = lane.touch(&c);
+    let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let c_file = fs::File::options().write(true).open(&c_path).unwrap();
+    c_file.set_modified(newer).unwrap();
+    assert!(
+        adopt_claude_continuation_session(&a, &c, &clear(&c_path))
+            .unwrap()
+            .is_some()
+    );
+    let refuse_b = || adopt_claude_continuation_session(&a, &b, &clear(&b_path));
+    assert!(refuse_b().unwrap().is_none(), "B is older than bound C");
+    let pending = adopt_claude_continuation_session(&a, &d, &clear(&lane.path(&d)));
+    assert!(pending.unwrap().is_none(), "D waits for its transcript");
+    assert!(refuse_b().unwrap().is_none(), "B is refused again");
+    let records = records_strict(channel).unwrap().unwrap();
+    let refusals = records.iter().filter(|r| {
+        matches!(&r.new, BindingTarget::Rejected { payload_session_id, .. } if *payload_session_id == b)
+    });
+    assert_eq!(
+        refusals.count(),
+        1,
+        "another session's Pending repeats no refusal of B"
+    );
+}
+
+/// A pane launched on an existing A, bound and logging to `channel`.
+fn launched(lane: &Lane, channel: u64, tmux: &str) -> String {
+    let a = uuid();
+    lane.touch(&a);
+    stamp(tmux);
+    register_tmux_channel(tmux, channel);
+    register_provider_session("claude", &a, tmux);
+    register_launched_tmux_runtime_binding(tmux, claude(&lane.path(&a), &a));
+    a
+}
+
+fn bound_session(tmux: &str) -> Option<String> {
+    runtime_binding_for_tmux_session(tmux).and_then(|b| b.session_id)
+}
+
+#[test]
+fn a_waiting_pending_is_replaced_by_the_next_clear_of_its_pane() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_515, "p2b-replace");
+    let l = launched(&lane, channel, tmux);
+    let (x, y) = (uuid(), uuid());
+    let pending = AdoptionHttp::Durable(DurableKind::Pending);
+    assert_eq!(adopt_from_hook(&l, &x, &clear(&lane.path(&x))), pending);
+    let second = adopt_from_hook(&l, &y, &clear(&lane.path(&y)));
+    assert_eq!(second, pending, "Y replaces the waiting X");
+    assert_eq!(deferred_adoption_count(), 1);
+    let y_seq = records_strict(channel)
+        .unwrap()
+        .unwrap()
+        .last()
+        .unwrap()
+        .seq;
+
+    lane.touch(&y);
+    retry_deferred_claude_adoptions();
+    retry_deferred_claude_adoptions();
+    let records = records_strict(channel).unwrap().unwrap();
+    let last = &records.last().unwrap().new;
+    assert!(
+        matches!(last, BindingTarget::Resolved { pending_seq, source } if *pending_seq == y_seq && source.session_id == y),
+        "Y resolved: {last:?}"
+    );
+    assert_eq!(bound_session(tmux), Some(y));
+    let adopted_x = records.iter().any(|r| match &r.new {
+        BindingTarget::Source(s) | BindingTarget::Resolved { source: s, .. } => s.session_id == x,
+        _ => false,
+    });
+    assert!(!adopted_x, "X is never adopted");
+}
+
+#[test]
+fn a_waiting_pending_holds_only_its_own_pane_and_the_poll_returns() {
+    let lane = Lane::new();
+    let (ch1, p1, ch2, p2) = (7_516, "p2b-hold", 7_517, "p2b-hold-other");
+    let a1 = launched(&lane, ch1, p1);
+    let a2 = launched(&lane, ch2, p2);
+    let (b1, c2) = (uuid(), uuid());
+    let pending = AdoptionHttp::Durable(DurableKind::Pending);
+    assert_eq!(adopt_from_hook(&a1, &b1, &clear(&lane.path(&b1))), pending);
+    lane.touch(&c2);
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    let refused = adopt_from_hook(&a2, &c2, &clear(&lane.path(&c2)));
+    APPEND_FAULT.with(|fault| fault.set(None));
+    assert_eq!(refused, AdoptionHttp::NotDurable(NotDurableReason::Append));
+    assert_eq!(deferred_adoption_count(), 2, "B1 waits and C2 is queued");
+    let lines = records_strict(ch1).unwrap().unwrap().len();
+
+    // The poll runs on its own thread so one that never returns fails here instead of hanging.
+    let root = lane.root.path().to_owned();
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        set_test_root(Some(&root));
+        retry_deferred_claude_adoptions();
+        set_test_root(None);
+        let _ = done.send(());
+    });
+    let poll = returned.recv_timeout(std::time::Duration::from_secs(2));
+    poll.expect("poll returned");
+    let waited = records_strict(ch1).unwrap().unwrap().len();
+    assert_eq!(waited, lines, "the waiting Pending logs nothing more");
+    assert_eq!(bound_session(p2), Some(c2), "the other pane is adopted");
+    assert!(clear_claude_session_rotation(p2));
+    retry_deferred_claude_adoptions();
+    assert_eq!(deferred_adoption_count(), 1, "only B1 stays queued");
+
+    lane.touch(&b1);
+    retry_deferred_claude_adoptions();
+    let records = records_strict(ch1).unwrap().unwrap();
+    assert!(matches!(
+        records.last().unwrap().new,
+        BindingTarget::Resolved { .. }
+    ));
+    assert_eq!(bound_session(p1), Some(b1));
+}
+
+#[test]
+fn a_late_hook_refused_as_older_leaves_the_waiting_pending_queued() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_518, "p2b-late-hook");
+    let a = launched(&lane, channel, tmux);
+    let (b, c, d) = (uuid(), uuid(), uuid());
+    let mtime = |secs: i64| {
+        let c_mtime = fs::metadata(lane.path(&c)).unwrap().modified().unwrap();
+        let shift = std::time::Duration::from_secs(secs.unsigned_abs());
+        if secs < 0 {
+            c_mtime - shift
+        } else {
+            c_mtime + shift
+        }
+    };
+    let pin = |path: &Path, at| {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+    };
+    lane.touch(&c);
+    let b_path = lane.touch(&b);
+    pin(&b_path, mtime(-60)).unwrap();
+    let adopted = AdoptionHttp::Durable(DurableKind::Adopted);
+    assert_eq!(adopt_from_hook(&a, &c, &clear(&lane.path(&c))), adopted);
+    assert!(clear_claude_session_rotation(tmux));
+    let pending = AdoptionHttp::Durable(DurableKind::Pending);
+    assert_eq!(adopt_from_hook(&a, &d, &clear(&lane.path(&d))), pending);
+
+    let late = adopt_from_hook(&a, &b, &clear(&b_path));
+    assert_eq!(late, AdoptionHttp::Skipped(AdoptSkip::OlderThanBound));
+    assert_eq!(deferred_adoption_count(), 1, "D stays queued");
+    let d_path = lane.touch(&d);
+    pin(&d_path, mtime(60)).unwrap();
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound_session(tmux), Some(d));
 }

@@ -732,10 +732,11 @@ pub(super) fn freshest_claude_transcript_for_session(
         );
         return Some((candidate_path, session_id));
     }
-    // Bound transcript is gone — fall back to the freshest project transcript,
-    // excluding files that authoritatively belong to other live Claude TUI tmux
-    // sessions (live watcher path + launch-script transcript + registered
-    // binding) so we still never steal another session's transcript.
+    // Bound transcript is gone: take the freshest project transcript no other live session claims,
+    // unless a restore bound this exact path before it existed and only that file may bind.
+    if crate::services::tui_prompt_dedupe::pending::awaits_exact_path(tmux_session_name, binding) {
+        return None;
+    }
     let claimed_by_other_sessions = other_session_claimed_transcripts(shared, tmux_session_name);
     claude_tui_launch_context(tmux_session_name)
         .and_then(|(cwd, launch_mtime)| {

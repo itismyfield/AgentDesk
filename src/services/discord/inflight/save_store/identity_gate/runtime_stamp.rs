@@ -587,6 +587,9 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         return GuardedSaveOutcome::AuthorityPinned;
     }
 
+    if !hosted_binding_write_admitted(&on_disk, &requested) {
+        return GuardedSaveOutcome::AuthorityPinned;
+    }
     if !merge_runtime_stamp_progress(&mut on_disk, &requested) {
         tracing::warn!(
             provider = %provider.as_str(),
@@ -603,6 +606,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         &requested.output_path,
         &requested.input_fifo_path,
         &requested.session_id,
+        hosted_binding(&requested),
     );
     let durable_runtime = (
         on_disk.runtime_kind,
@@ -610,6 +614,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         &on_disk.output_path,
         &on_disk.input_fifo_path,
         &on_disk.session_id,
+        hosted_binding(&on_disk),
     );
     let requested_owner = (
         requested.watcher_owner_channel_id,
@@ -628,6 +633,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             &baseline.output_path,
             &baseline.input_fifo_path,
             &baseline.session_id,
+            hosted_binding(baseline),
         );
         let baseline_owner = (
             baseline.watcher_owner_channel_id,
@@ -660,6 +666,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             .input_fifo_path
             .clone_from(&requested.input_fifo_path);
         on_disk.session_id.clone_from(&requested.session_id);
+        copy_hosted_binding(&mut on_disk, &requested);
     }
     if apply_owner {
         on_disk.watcher_owner_channel_id = requested.watcher_owner_channel_id;
