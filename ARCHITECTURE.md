@@ -336,6 +336,7 @@ src/
 │   │   │   ├── reviews.rs
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
+│   │   │   ├── host_guard_tests.rs
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
@@ -538,6 +539,7 @@ src/
 │   ├── claude/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
+│   │   ├── c1_teardown_tests.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── stream_result.rs
 │   │   └── tui_session_launch.rs
@@ -663,6 +665,7 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
+│   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
 │   │   ├── process_session_launch.rs
 │   │   └── tui_session_launch.rs
@@ -814,6 +817,8 @@ src/
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
+│   │   ├── host_teardown_gate/
+│   │   │   └── test_support.rs
 │   │   ├── idle_recap/
 │   │   │   ├── card.rs
 │   │   │   ├── context_display.rs
@@ -926,6 +931,7 @@ src/
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── o_writer_io.rs
+│   │   │   ├── o_writer_legacy.rs
 │   │   │   ├── policy.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
@@ -1188,6 +1194,7 @@ src/
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── journal.rs
+│   │   │   ├── o_adoption_e2e_tests.rs
 │   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
@@ -1217,6 +1224,7 @@ src/
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
+│   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs
@@ -1244,6 +1252,9 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
+│   │   ├── tmux_reaper/
+│   │   │   ├── host_guard.rs
+│   │   │   └── host_guard_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1311,6 +1322,7 @@ src/
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── task_response_authority.rs
+│   │   │   ├── task_response_authority_tests.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_delivery_types.rs
@@ -1377,6 +1389,7 @@ src/
 │   │   │   ├── claude_idle_tail.rs
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── idle_offset_resolution.rs
+│   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
@@ -1436,7 +1449,8 @@ src/
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── guarded_persist.rs
-│   │   │   │   └── guarded_persist_tests.rs
+│   │   │   │   ├── guarded_persist_tests.rs
+│   │   │   │   └── o_adoption_tests.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs
@@ -1604,6 +1618,9 @@ src/
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
+│   │   ├── host_key_derivation.rs
+│   │   ├── host_key_derivation_tests.rs
+│   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_recap.rs
@@ -1712,6 +1729,8 @@ src/
 │   │   ├── turn_finalizer.rs
 │   │   ├── turn_lease.rs
 │   │   ├── turn_lease_tests.rs
+│   │   ├── turn_teardown_clearance.rs
+│   │   ├── turn_teardown_clearance_tests.rs
 │   │   ├── turn_view_reconciler.rs
 │   │   ├── voice_acknowledgement.rs
 │   │   ├── voice_background_driver.rs
@@ -1985,6 +2004,9 @@ src/
 │   │   └── mod.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
+│   │   │   ├── adoption/
+│   │   │   │   └── body_check.rs
+│   │   │   ├── adoption.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/
 │   │   │   ├── channel_gate/
@@ -2015,6 +2037,8 @@ src/
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
+│   │   │   ├── adoption.rs
+│   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deliver.rs
@@ -2155,6 +2179,8 @@ src/
 │   ├── provider_output_guard.rs
 │   ├── provider_output_guard_tests.rs
 │   ├── provider_runtime.rs
+│   ├── provider_teardown.rs
+│   ├── provider_teardown_tests.rs
 │   ├── queue.rs
 │   ├── qwen.rs
 │   ├── qwen_tmux_wrapper.rs

@@ -67,6 +67,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::dispatched_sessions::tests
   --skip server::routes::dispatches::crud::tests::dispatch_api_pg_tests
   --skip server::routes::escalation::manual_decision_gate_tests
+  --skip server::routes::health_api::host_guard_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
   --skip server::routes::pipeline::stage_save_tests
@@ -106,8 +107,10 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::catch_up::too_old_notice::tests
   --skip services::discord::commands::control::clear_persist_failure_tests
+  --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
@@ -129,6 +132,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
+  --skip services::discord::tmux_reaper::host_guard_tests
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   --skip services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -138,6 +142,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
+  --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
   --skip services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
   --skip services::dispatches::wait_queue::tests
@@ -155,6 +160,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
   --skip services::pipeline_override::pipeline_override_pg_tests
   --skip services::pipeline_routes::tests
+  --skip services::routines::agent_executor::reliability::tests
   --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
@@ -164,6 +170,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tmux_turn_liveness::tests_pg
+  --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
   --skip voice::turn_link::tests
 )
@@ -466,6 +473,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_returns_marker_recorded_voice_channel
   services::discord::turn_bridge::voice_completion::voice_completion_tests::handoff_prompt_classification_requires_typed_marker
   services::discord::turn_bridge::voice_completion::voice_completion_tests::recognizes_voice_background_handoff_via_typed_marker
+  services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
   services::discord::voice_barge_in::tests::background_handoff_refuses_publish_when_pg_reservation_fails
   services::dispatches::wait_queue::tests::wait_timeout_uses_wait_started_at
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries
@@ -481,6 +489,12 @@ NON_PG_FILTER_REPLAY=(
   services::pipeline_routes::tests::persistence_sql_includes_backoff_column
   services::pipeline_routes::tests::stage_json_absent_backoff_is_null
   services::pipeline_routes::tests::stage_json_emits_backoff_field
+  services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
+  services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
+  services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
+  services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
+  services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
+  services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence
   services::routines::session_control::tests::fallback_tmux_channel_name_preserves_thread_suffix
   services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label
   services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel

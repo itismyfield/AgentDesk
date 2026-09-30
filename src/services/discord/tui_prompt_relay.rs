@@ -42,6 +42,8 @@ use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
 
+mod idle_tail_state;
+pub(in crate::services::discord) use self::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
     ClaudeIdleTranscriptScan, CodexIdleRolloutScan, claude_idle_compaction_reanchor,

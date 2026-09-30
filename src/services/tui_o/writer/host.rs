@@ -1,6 +1,5 @@
-//! Starts the O writer on the gateway runtime: one actor per channel the boot snapshot hands to
-//! O, creating a new channel's first store. A channel is ready only while its actor has resumed
-//! and the gateway is Owned.
+//! Starts the O writer on the gateway runtime: one actor per channel this home may adopt, creating
+//! a new channel's first store unless Legacy took it. Ready only while resumed and Owned.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -12,10 +11,12 @@ use tokio::task::JoinHandle;
 
 use super::activation::{self, ActivationFacts};
 use super::actor;
+use super::adoption::{self, LegacyView};
 use super::binding::BindingEvents;
 use super::deliver::ChannelWriter;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::tui_o::channel_policy::Candidate;
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::ShadowProvider;
@@ -38,6 +39,11 @@ pub trait HostIo: Send + Sync + 'static {
         channel: u64,
         provider: ShadowProvider,
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send;
+    /// Whether local Legacy inflight, custody or a pending start holds the channel. Read under its
+    /// adoption lock right before the first `init`, so it must not judge TUI output itself.
+    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<bool, String>;
+    /// Legacy's relay state, asked only for a Claude channel whose sources already hold output.
+    fn legacy(&self) -> Arc<dyn LegacyView>;
 }
 
 /// Channels with a hosted actor and those ready to take work.
@@ -112,8 +118,8 @@ pub struct HostParts<I> {
     pub readiness: Arc<Readiness>,
 }
 
-/// Spawns one host task per channel this provider's bot owns. Without a PG gateway lease the gate
-/// never becomes Owned, so those channels are held with an alarm and get no actor.
+/// Spawns one host task per channel this provider's bot may adopt. Without a PG gateway lease the
+/// gate never becomes Owned, so those channels are held with an alarm and get no actor.
 pub fn start<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
@@ -123,8 +129,13 @@ pub fn start<I: HostIo>(
         ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
     };
-    let ours = |&(_, channel_kind, owned): &(u64, _, bool)| owned && channel_kind == Some(kind);
-    let channels: Vec<_> = cutover::boot_ownership().into_iter().filter(ours).collect();
+    let ours = |(channel, channel_kind, candidate): (u64, _, Option<Candidate>)| {
+        Some((channel, candidate.filter(|_| channel_kind == Some(kind))?))
+    };
+    let channels: Vec<_> = cutover::boot_ownership()
+        .into_iter()
+        .filter_map(ours)
+        .collect();
     if channels.is_empty() {
         return Vec::new();
     }
@@ -135,7 +146,7 @@ pub fn start<I: HostIo>(
         readiness,
     } = prepare();
     let mut tasks = Vec::new();
-    for (channel, _, owned) in channels {
+    for (channel, candidate) in channels {
         if !readiness.claim(channel) {
             continue;
         }
@@ -155,7 +166,7 @@ pub fn start<I: HostIo>(
         let host = host_channel(
             Arc::clone(&io),
             channel,
-            owned,
+            candidate,
             provider,
             root,
             gate,
@@ -172,10 +183,16 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
     alarms.raise(channel, WriterAlarm::Halted { detail });
 }
 
+/// A channel not adopted before its first `init` stays Legacy's for this process.
+fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
+    candidate.release(channel);
+    hold(alarms, channel, &format!("adoption held: {detail}"));
+}
+
 async fn host_channel<I: HostIo>(
     io: Arc<I>,
     channel: u64,
-    owned: bool,
+    candidate: Candidate,
     provider: ShadowProvider,
     runtime_root: PathBuf,
     gate: Arc<OwnershipGate>,
@@ -183,24 +200,62 @@ async fn host_channel<I: HostIo>(
 ) {
     let alarms = io.alarms();
     let mut bindings = None;
-    let store = match recover(&runtime_root, channel, owned) {
+    let store = match recover(&runtime_root, channel) {
+        Ok(Recovered::Store(_)) if !candidate.confirm_store() => {
+            return hold(
+                &alarms,
+                channel,
+                "Legacy took the channel before its store was seen",
+            );
+        }
         Ok(Recovered::Store(store)) => store,
         Ok(Recovered::Fresh(fresh)) => {
             let log = bindings.insert(io.bindings(channel, provider));
-            let created = loop {
+            let held =
+                provider == ShadowProvider::Claude && adoption::holds_output(&**log, channel);
+            let legacy = held.then(|| io.legacy());
+            if let Some(legacy) = &legacy
+                && !adoption::legacy_started(&**legacy).await
+            {
+                return release(
+                    &candidate,
+                    &alarms,
+                    channel,
+                    "legacy cursor not established",
+                );
+            }
+            let facts = loop {
                 until_owned(&gate).await;
                 let facts = io.activation_facts(channel, provider).await;
                 // Facts read before a lost gate are not acted on; wait for Owned and read again.
-                if !matches!(gate.current(), GatewayOwnership::Owned { .. }) {
-                    continue;
+                if matches!(gate.current(), GatewayOwnership::Owned { .. }) {
+                    break facts;
                 }
-                break facts
-                    .and_then(|facts| activation::activate(&fresh, channel, &facts, &**log));
+            };
+            let local = || io.local_custody(channel, provider);
+            let created = match legacy {
+                None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
+                Some(legacy) => {
+                    let events = log.binding_events_since(channel, 0);
+                    let events = events.map_err(|error| format!("binding log: {error}"));
+                    // Pinning reads whole transcripts, so it stays off the runtime's threads.
+                    let view = Arc::clone(&legacy);
+                    let pinned = tokio::task::spawn_blocking(move || {
+                        adoption::pin(&*view, &events?, channel)
+                    });
+                    let pinned = pinned.await.map_err(|error| format!("pin task: {error}"));
+                    let snapshot = match pinned.and_then(|pinned| pinned) {
+                        Ok(snapshot) => snapshot,
+                        Err(detail) => return release(&candidate, &alarms, channel, &detail),
+                    };
+                    let sources = || snapshot.recheck(&*legacy, &**log, channel);
+                    activation::activate_with(&fresh, channel, facts, local, &candidate, sources)
+                }
             };
             if let Err(detail) = created {
                 return hold(&alarms, channel, &format!("first activation: {detail}"));
             }
-            match recover(&runtime_root, channel, owned) {
+            match recover(&runtime_root, channel) {
                 Ok(Recovered::Store(store)) => store,
                 Ok(Recovered::Fresh(_)) => {
                     return hold(&alarms, channel, "init missing after activation");
@@ -214,7 +269,7 @@ async fn host_channel<I: HostIo>(
     let writer = ChannelWriter::new(store, Arc::clone(&gate), port, io.lease(), alarms);
     let (stop_tx, stop) = watch::channel(false);
     let (resumed_tx, resumed) = watch::channel(false);
-    let config = WriterConfig { enabled: owned };
+    let config = WriterConfig { enabled: true };
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let spawned = actor::spawn_if_enabled(&config, writer, provider, bindings, stop, resumed_tx);
     let Some(actor) = spawned else { return };
@@ -241,8 +296,8 @@ enum Recovered {
 
 /// Recovers the channel's store. Damage, a foreign init, an era channel without init or an init
 /// without era holds it.
-fn recover(runtime_root: &Path, channel: u64, owned: bool) -> Result<Recovered, String> {
-    let config = StoreConfig { enabled: owned };
+fn recover(runtime_root: &Path, channel: u64) -> Result<Recovered, String> {
+    let config = StoreConfig { enabled: true };
     let store = OStore::open_if_enabled(&config, runtime_root)
         .map_err(|error| format!("store: {error}"))?
         .ok_or_else(|| "store disabled".to_string())?;
@@ -384,11 +439,18 @@ pub(crate) mod test_io {
         }
     }
 
-    /// Reports every channel as new and empty; the store's own checks still apply.
+    /// Reports `facts` for every channel (none blocking by default); the store's own checks and
+    /// the adoption still apply. `on_facts` runs once as the next facts are read.
     pub(crate) struct TestHost {
         pub(crate) posts: Arc<Posts>,
         pub(crate) alarms: Alarms,
         sources: BTreeMap<u64, SourceId>,
+        pub(crate) facts: Mutex<ActivationFacts>,
+        pub(crate) on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Legacy's relay state for channels that already hold output; fails closed when unset.
+        pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
+        /// The tmux session each channel's binding names, `host-<channel>` when unset.
+        pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
     }
 
     impl TestHost {
@@ -397,6 +459,10 @@ pub(crate) mod test_io {
                 posts: Arc::default(),
                 alarms: Alarms::default(),
                 sources: sources.into_iter().collect(),
+                facts: Mutex::default(),
+                on_facts: Mutex::default(),
+                legacy: Mutex::default(),
+                sessions: Mutex::default(),
             })
         }
     }
@@ -438,7 +504,10 @@ pub(crate) mod test_io {
                 seq: 1,
                 channel_id: channel,
                 provider,
-                tmux_session: format!("host-{channel}"),
+                tmux_session: locked(&self.sessions)
+                    .get(&channel)
+                    .cloned()
+                    .unwrap_or_else(|| format!("host-{channel}")),
                 execution_nonce: "host".into(),
                 record,
                 committed_at: received_at,
@@ -452,7 +521,19 @@ pub(crate) mod test_io {
             _: u64,
             _: ShadowProvider,
         ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
-            std::future::ready(Ok(ActivationFacts::default()))
+            if let Some(hook) = locked(&self.on_facts).take() {
+                hook();
+            }
+            std::future::ready(Ok(locked(&self.facts).clone()))
+        }
+
+        fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        fn legacy(&self) -> Arc<dyn LegacyView> {
+            let set = locked(&self.legacy).clone();
+            set.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
         }
     }
 }

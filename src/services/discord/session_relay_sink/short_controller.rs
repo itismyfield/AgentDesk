@@ -29,6 +29,8 @@ pub(super) struct SinkShortReplaceCtx<'a> {
     pub(super) trace: &'a SessionRelayTraceContext,
     pub(super) range: (u64, u64),
     pub(super) delivered_total: &'a AtomicU64,
+    /// The pending O adoption this body ends, claimed only just before the edit.
+    pub(super) body_claim: Option<crate::services::tui_o::cutover::BodyClaim<'a>>,
 }
 
 pub(super) async fn deliver_short_replace_via_controller<
@@ -51,6 +53,7 @@ pub(super) async fn deliver_short_replace_via_controller<
         trace,
         range: (start, end),
         delivered_total,
+        body_claim,
     } = ctx;
     let cell = shared.delivery_lease(channel);
     cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
@@ -110,6 +113,7 @@ pub(super) async fn deliver_short_replace_via_controller<
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
+            body_claim,
         },
     )
     .await;

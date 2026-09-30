@@ -119,8 +119,8 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     // produced tail.
     // O posts this channel's TUI body from the transcript itself, so a Done turn needs no
     // Legacy delivery confirmation; the live/paused guards above still apply. A held identity
-    // keeps the Legacy confirmation requirement.
-    let o_owns_body = crate::services::tui_o::cutover::o_owns_tui_output_for_channel(
+    // keeps the Legacy confirmation requirement. Sending no body, it leaves an adoption pending.
+    let o_owns_body = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
         channel_id.get(),
         runtime_kind,
     ) == Ok(true);
@@ -509,6 +509,19 @@ mod tests {
                 paused.store(false, std::sync::atomic::Ordering::Release);
                 std::fs::write(&transcript, busy).unwrap();
                 assert!(!terminal(), "an unterminated transcript never finalizes");
+            }
+            {
+                let _pending = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+                    channel.get(),
+                    crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                )]);
+                std::fs::write(&transcript, done).unwrap();
+                assert!(!terminal(), "a pending adoption still waits for Legacy delivery proof");
+                let adoption = crate::services::tui_o::cutover::test_override::with_channels(|b| {
+                    b.unwrap().candidate(channel.get()).unwrap().peek()
+                });
+                let pending = crate::services::tui_o::channel_policy::Adoption::Pending;
+                assert_eq!(adoption, pending, "the backstop sends no body, so it decides nothing");
             }
             let _ = std::fs::remove_file(transcript);
         })

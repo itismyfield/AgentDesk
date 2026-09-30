@@ -887,7 +887,7 @@ impl ScannedFile {
     }
 
     /// Whether the glob imports here reach `module`, also through modules that glob-import it
-    /// in turn; a crate-relative glob no scanned file answers for may reach it.
+    /// in turn; a crate-relative or aliased glob no scanned file answers for may reach it.
     fn globs_reach(&self, files: &BTreeMap<String, ScannedFile>, module: &[String]) -> bool {
         let (mut seen, mut queue) = (vec![self.module.clone()], vec![self]);
         while let Some(file) = queue.pop() {
@@ -902,14 +902,13 @@ impl ScannedFile {
                         queue.push(next);
                     }
                     Some(_) => {}
-                    None if matches!(
-                        leaf.path.first().map(String::as_str),
-                        Some("crate" | "self" | "super")
-                    ) =>
-                    {
-                        return true;
+                    None => {
+                        let head = leaf.path.first().map(String::as_str);
+                        let aliased = head.is_some_and(|head| file.bound(head).is_some());
+                        if aliased || matches!(head, Some("crate" | "self" | "super")) {
+                            return true;
+                        }
                     }
-                    None => {}
                 }
             }
         }
@@ -1127,9 +1126,9 @@ fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, S
                 };
                 let from = || resolve_path(files, file, &leaf.path[..leaf.path.len() - 1]);
                 let reaches = (last == item && binds != item)
-                    || found
-                        .iter()
-                        .any(|(name, at)| name == last && files[at].module == from());
+                    || found.iter().any(|(name, at)| {
+                        name == last && path_reaches(files, &from(), &files[at].module)
+                    });
                 if reaches && binds != "_" {
                     fresh.push(binds.clone());
                 }
@@ -1161,16 +1160,19 @@ fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, S
     }
 }
 
-/// Guarded items (name, files that may name it, uses allowed there) reached anywhere
-/// else, or used past their budget. An alias shares its item's owners and budget.
+/// Files that may name a guarded item, each with the uses allowed there.
+type Owners = &'static [(&'static str, usize)];
+
+/// Guarded items reached outside their owners, or used past the budget of the file that
+/// names them. An alias shares its item's owners and budgets.
 fn guarded_item_violations(
     sources: &BTreeMap<String, String>,
-    items: &[(&str, &[&str], usize)],
+    items: &[(&str, Owners)],
 ) -> Vec<String> {
     let mut violations = Vec::new();
     let files = scan_files(sources, &mut violations);
     let mut claimed: BTreeMap<(String, String), &str> = BTreeMap::new();
-    for (needle, owners, budget) in items {
+    for (needle, owners) in items {
         let aliases = bindings(&files, needle);
         for (name, at) in &aliases {
             let taken = claimed.insert((name.clone(), at.clone()), *needle);
@@ -1182,9 +1184,12 @@ fn guarded_item_violations(
             }
         }
         for (relative, (used, values)) in item_uses_by_file(&files, needle, &aliases) {
-            if !owners.contains(&relative.as_str()) {
+            let budget = owners.iter().find(|(owner, _)| *owner == relative);
+            let Some((_, budget)) = budget else {
                 violations.push(format!("{relative}: {needle}"));
-            } else if *budget != usize::MAX && used > *budget {
+                continue;
+            };
+            if *budget != usize::MAX && used > *budget {
                 violations.push(format!("{relative}: {needle} used x{used} > {budget}"));
             } else if *budget != usize::MAX && values > 0 {
                 // A budget counts calls; a function value could be called any number of times.
@@ -1195,6 +1200,16 @@ fn guarded_item_violations(
     violations
 }
 
+/// Whether names bound in `module` are reachable through `path`: it names that module, names
+/// no scanned module, or names one whose glob imports reach it.
+fn path_reaches(files: &BTreeMap<String, ScannedFile>, path: &[String], module: &[String]) -> bool {
+    path == module
+        || files
+            .values()
+            .find(|other| other.module == path)
+            .is_none_or(|other| other.sees_bare(files, false, module))
+}
+
 /// Uses of `needle` and its `aliases` per naming file, and how many take it as a value. An
 /// alias path that cannot be ruled out counts.
 fn item_uses_by_file(
@@ -1203,15 +1218,6 @@ fn item_uses_by_file(
     aliases: &[(String, String)],
 ) -> BTreeMap<String, (usize, usize)> {
     let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
-    // Whether a path reaches `module`: it names it, names no scanned module, or names one
-    // whose glob imports reach it.
-    let reaches = |path: &[String], module: &[String]| {
-        path == module
-            || files
-                .values()
-                .find(|other| other.module == path)
-                .is_none_or(|other| other.sees_bare(files, false, module))
-    };
     let mut uses = BTreeMap::new();
     for (relative, file) in files {
         let mut sites = word_sites(&file.code, needle);
@@ -1231,7 +1237,7 @@ fn item_uses_by_file(
                     .into_iter()
                     .filter(|(prefix, _)| {
                         let path = || resolve_path(files, file, prefix);
-                        bare || (!prefix.is_empty() && reaches(&path(), module))
+                        bare || (!prefix.is_empty() && path_reaches(files, &path(), module))
                     }),
             );
             named |= at == relative || sites.len() > before;
@@ -1252,7 +1258,8 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
     let kinds = bindings(&files, "HostKind");
     let variant = regex::Regex::new(r"\b(\w+)\s*::\s*Herdr\b").unwrap();
     for (relative, file) in files.iter().filter(|(r, _)| !owners.contains(&r.as_str())) {
-        // Whether `path[k]`, reached through `path[..k]`, names HostKind or an alias of it.
+        // Whether `path[k]`, reached through `path[..k]`, may name HostKind or an alias of it;
+        // a qualifier that globs the alias's module, or names no scanned module, counts.
         let kind_at = |path: &[String], k: usize| {
             path[k] == "HostKind"
                 || kinds.iter().any(|(name, at)| {
@@ -1261,7 +1268,7 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
                         && if k == 0 {
                             file.sees_bare(&files, at == relative, module)
                         } else {
-                            resolve_path(&files, file, &path[..k]) == *module
+                            path_reaches(&files, &resolve_path(&files, file, &path[..k]), module)
                         }
                 })
         };
@@ -1431,56 +1438,105 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
     const GUARD: &str = "src/services/session_host/consumer_guard.rs";
     const ROOT: &str = "src/services/session_host.rs";
     const INPUT: &str = "src/services/claude_tui/host_input.rs";
-    // Needle, files that may name it, and the calls allowed there beyond its `fn`.
-    const ITEMS: &[(&str, &[&str], usize)] = &[
+    const ANY: usize = usize::MAX;
+    // Needle, and each file that may name it with the calls allowed there beyond its `fn`.
+    const ITEMS: &[(&str, Owners)] = &[
         (
             "resolve_session_target",
-            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
-            1,
+            &[
+                (RESOLVE, 0),
+                (ROOT, 0),
+                (GUARD_ADAPTER, 1),
+                (POLICY_REPAIR, 1),
+            ],
         ),
-        ("resolve_target_host", &[RESOLVE], 1),
-        ("legacy_target_host", &[RESOLVE], 1),
-        ("guard_first_state_change", &[GUARD, ROOT, POLICY_REPAIR], 1),
-        ("clear_legacy_session", &[GUARD, ROOT, GUARD_ADAPTER], 1),
-        ("probe_for_policy", &[GUARD, ROOT, POLICY_REPAIR], 1),
-        ("legacy_ref", &[RESOLVE, GUARD, POLICY_REPAIR], 2),
-        ("with_inflight_row", &[GUARD_ADAPTER], 1),
-        ("locator_witness", &[GUARD_ADAPTER], 1),
-        ("marker_witness", &[GUARD_ADAPTER], 1),
+        ("resolve_target_host", &[(RESOLVE, 1)]),
+        ("legacy_target_host", &[(RESOLVE, 1)]),
+        (
+            "guard_first_state_change",
+            &[(GUARD, 1), (ROOT, 0), (POLICY_REPAIR, 1)],
+        ),
+        (
+            "clear_legacy_session",
+            &[(GUARD, 0), (ROOT, 0), (GUARD_ADAPTER, 1)],
+        ),
+        (
+            "probe_for_policy",
+            &[(GUARD, 0), (ROOT, 0), (POLICY_REPAIR, 1)],
+        ),
+        (
+            "legacy_ref",
+            &[(RESOLVE, 0), (GUARD, 2), (POLICY_REPAIR, 1)],
+        ),
+        (
+            "teardown_for_lookup",
+            &[
+                (GUARD_ADAPTER, 1),
+                ("src/services/discord/inflight.rs", 0),
+                ("src/services/discord/host_key_derivation.rs", 1),
+            ],
+        ),
+        ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
+        ("locator_witness", &[(GUARD_ADAPTER, 1)]),
+        ("marker_witness", &[(GUARD_ADAPTER, 1)]),
         (
             "session_record_witness",
-            &[SESSION_RECORD, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
-            1,
+            &[
+                (SESSION_RECORD, 0),
+                (ROOT, 0),
+                (GUARD_ADAPTER, 1),
+                (POLICY_REPAIR, 1),
+            ],
         ),
-        ("with_host_marker", &[RESOLVE, POLICY_REPAIR], 1),
+        ("with_host_marker", &[(RESOLVE, 0), (POLICY_REPAIR, 1)]),
         (
             "ResolvedSessionTarget",
-            &[RESOLVE, GUARD, ROOT, INPUT, POLICY_REPAIR],
-            usize::MAX,
+            &[
+                (RESOLVE, ANY),
+                (GUARD, ANY),
+                (ROOT, ANY),
+                (INPUT, ANY),
+                (POLICY_REPAIR, ANY),
+            ],
         ),
-        ("from_session_target", &[INPUT], 0),
+        ("from_session_target", &[(INPUT, 0)]),
         (
             "SessionTargetEvidence",
-            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
-            usize::MAX,
+            &[
+                (RESOLVE, ANY),
+                (ROOT, ANY),
+                (GUARD_ADAPTER, ANY),
+                (POLICY_REPAIR, ANY),
+            ],
         ),
         (
             "SessionTargetInput",
-            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
-            usize::MAX,
+            &[
+                (RESOLVE, ANY),
+                (ROOT, ANY),
+                (GUARD_ADAPTER, ANY),
+                (POLICY_REPAIR, ANY),
+            ],
         ),
         (
             "HostWitness",
-            &[RESOLVE, ROOT, GUARD_ADAPTER, SESSION_RECORD, POLICY_REPAIR],
-            usize::MAX,
+            &[
+                (RESOLVE, ANY),
+                (ROOT, ANY),
+                (GUARD_ADAPTER, ANY),
+                (SESSION_RECORD, ANY),
+                (POLICY_REPAIR, ANY),
+            ],
         ),
-        ("GuardVerdict", &[GUARD, ROOT, POLICY_REPAIR], usize::MAX),
-        ("PolicyProbe", &[GUARD, ROOT], usize::MAX),
-        ("consumer_guard", &[ROOT], usize::MAX),
+        (
+            "GuardVerdict",
+            &[(GUARD, ANY), (ROOT, ANY), (POLICY_REPAIR, ANY)],
+        ),
+        ("PolicyProbe", &[(GUARD, ANY), (ROOT, ANY)]),
+        ("consumer_guard", &[(ROOT, ANY)]),
         (
             "host_recovery_guard",
-            &["src/services/discord/inflight.rs"],
-            usize::MAX,
+            &[("src/services/discord/inflight.rs", ANY)],
         ),
     ];
     let sources = production_sources();
@@ -1506,11 +1562,12 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     const CHILD: &str = "src/services/session_host/resolve/child.rs";
     const MODEL: &str = "src/services/session_host/model.rs";
     const OTHER: &str = "src/services/termination_audit.rs";
-    const ITEMS: &[(&str, &[&str], usize)] = &[
-        ("resolve_session_target", &[RESOLVE, ROOT], 0),
-        ("resolve_target_host", &[RESOLVE], 1),
-        ("legacy_target_host", &[RESOLVE], 1),
-        ("HostWitness", &[RESOLVE, ROOT], usize::MAX),
+    const FACADE: &str = "src/services/facade.rs";
+    const ITEMS: &[(&str, Owners)] = &[
+        ("resolve_session_target", &[(RESOLVE, 0), (ROOT, 0)]),
+        ("resolve_target_host", &[(RESOLVE, 1), (ROOT, 0)]),
+        ("legacy_target_host", &[(RESOLVE, 1)]),
+        ("HostWitness", &[(RESOLVE, usize::MAX), (ROOT, usize::MAX)]),
     ];
     const ALIAS: &str = "pub(crate) use self::resolve_session_target as target;\n";
     const ROOT_ALIAS: &str = "pub(crate) use resolve::resolve_session_target as target;\n";
@@ -1549,6 +1606,11 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
                 "use self::resolve_target_host as more;\nfn f() { more(); }\n",
             )],
             "resolve.rs: resolve_target_host used x2 > 1",
+        ),
+        (
+            "a budget holds for its own file only",
+            &[(ROOT, "fn f() { resolve::resolve_target_host(); }\n")],
+            "session_host.rs: resolve_target_host used x1 > 0",
         ),
         (
             "an alias may not reuse a guarded name",
@@ -1637,6 +1699,27 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
                     "use crate::services::session_host as hosts;\nuse hosts::Kind::*;\n\
                      fn scan_gap() { let _ = hosts::host_for(Herdr); }\n",
                 ),
+            ],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "a HostKind alias path through a glob re-export",
+            &[
+                (ROOT, "pub(crate) use model::HostKind as Kind;\n"),
+                (FACADE, "pub(crate) use crate::services::session_host::*;\n"),
+                (
+                    OTHER,
+                    "fn route() { let _ = crate::services::facade::Kind::Herdr; }\n",
+                ),
+            ],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "a HostKind alias import through a glob re-export",
+            &[
+                (ROOT, "pub(crate) use model::HostKind as Kind;\n"),
+                (FACADE, "pub(crate) use crate::services::session_host::*;\n"),
+                (OTHER, "use crate::services::facade::Kind::Herdr;\n"),
             ],
             "termination_audit.rs: HostKind::Herdr import",
         ),
@@ -1733,9 +1816,9 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
 // listed with why it keeps the name; a new call, or a moved caller going back, fails.
 #[test]
 fn name_only_teardown_calls_stay_on_the_reviewed_list() {
-    // Launch clears its session name before the sessions row exists.
-    const SPAWN: &str = "spawn before the sessions row";
-    const W2: &str = "no token hash for the key";
+    const SWEEP: &str = "a spawn-time sweep; each site's reason is checked below";
+    const BEFORE_WRITER: &str = "runs before the turn's writer posts the sessions row";
+    const UNKEYED: &str = "a turn with no session key keeps the main teardown";
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
@@ -1768,9 +1851,10 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                 (
                     "src/services/discord/router/message_handler/provider_isolation.rs",
                     1,
-                    W2,
+                    BEFORE_WRITER,
                 ),
-                ("src/services/claude.rs", 6, W2),
+                ("src/services/provider_teardown.rs", 1, UNKEYED),
+                ("src/services/claude.rs", 1, OWNED),
                 ("src/services/codex.rs", 1, OWNED),
                 (
                     "src/services/provider/cancel_token_cleanup/executor.rs",
@@ -1784,14 +1868,14 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             "cleanup_session_temp_files",
             &[
                 ("src/services/tmux_common.rs", 1, ENTRY),
-                ("src/services/claude/tui_session_launch.rs", 1, SPAWN),
-                ("src/services/claude.rs", 1, SPAWN),
-                ("src/services/codex.rs", 2, SPAWN),
-                ("src/services/qwen/session_lifecycle.rs", 1, SPAWN),
+                ("src/services/claude/tui_session_launch.rs", 1, SWEEP),
+                ("src/services/claude.rs", 1, SWEEP),
+                ("src/services/codex.rs", 2, SWEEP),
+                ("src/services/qwen/session_lifecycle.rs", 1, SWEEP),
                 (
                     "src/services/discord/router/message_handler/provider_isolation.rs",
                     1,
-                    W2,
+                    BEFORE_WRITER,
                 ),
                 ("src/services/discord/tmux_reaper.rs", 2, MISSING),
                 ("src/services/discord/commands/control.rs", 1, MISSING),
@@ -1807,11 +1891,130 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             ],
         ),
     ];
-    let violations = listed_call_violations(&production_sources(), CALLS);
+    // Keeping Herdr sessions out of these launch paths belongs to launch admission; none
+    // of the reasons below claims more than its own function shows.
+    const SWEEPS: &[(&str, &str, Sweep)] = &[
+        (
+            "src/services/claude.rs",
+            "execute_streaming_local_tmux",
+            Sweep::C1Gated,
+        ),
+        (
+            "src/services/codex.rs",
+            "execute_streaming_local_tmux",
+            Sweep::C1Gated,
+        ),
+        (
+            "src/services/codex.rs",
+            "execute_streaming_local_tui_tmux",
+            Sweep::ExistingTuiPath,
+        ),
+        (
+            "src/services/claude/tui_session_launch.rs",
+            "prepare_and_create_claude_tui_session",
+            Sweep::ExistingTuiPath,
+        ),
+        (
+            "src/services/qwen/session_lifecycle.rs",
+            "execute_streaming_local_tmux",
+            Sweep::ExistingQwenPath,
+        ),
+    ];
+    let sources = production_sources();
+    let mut violations = listed_call_violations(&sources, CALLS);
+    violations.extend(sweep_site_violations(&sources, SWEEPS));
     assert!(
         violations.is_empty(),
         "name-only teardown calls: {violations:?}"
     );
+}
+
+/// Why a spawn-time sweep of a session's temp files keeps the name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sweep {
+    /// A refused C1 host gate earlier in the function returns before the sweep.
+    C1Gated,
+    /// The existing D/P10 teardown of a TUI launch stays in front of it.
+    ExistingTuiPath,
+    /// The existing Qwen launch path, which no host gate covers yet.
+    ExistingQwenPath,
+}
+
+/// Direct `cleanup_session_temp_files` calls per (file, function) against the sweep list;
+/// each reason must hold in its function: a C1 gate before the call, or no C1 gate at all.
+fn sweep_site_violations(
+    sources: &BTreeMap<String, String>,
+    sweeps: &[(&str, &str, Sweep)],
+) -> Vec<String> {
+    let call = regex::Regex::new(r"\bcleanup_session_temp_files\s*\(").unwrap();
+    let mut found: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    let files: BTreeSet<&str> = sweeps.iter().map(|(file, ..)| *file).collect();
+    let mut violations = Vec::new();
+    for file in &files {
+        let code = code_tokens(&sources[*file]);
+        for at in call.find_iter(&code).map(|m| m.start()) {
+            let Some(function) = enclosing_fn(&code, at) else {
+                violations.push(format!("{file}: sweep outside any function"));
+                continue;
+            };
+            found
+                .entry((file.to_string(), function))
+                .or_default()
+                .push(at);
+        }
+    }
+    for (file, function, why) in sweeps {
+        let key = (file.to_string(), function.to_string());
+        let Some(calls) = found.remove(&key) else {
+            violations.push(format!("{file}#{function}: listed sweep not found"));
+            continue;
+        };
+        let code = code_tokens(&sources[*file]);
+        let body = fn_body(&code, &format!("fn {function}("));
+        let gated = |at: usize| code[body.start..at].contains("teardown_tmux(");
+        let holds = match why {
+            Sweep::C1Gated => calls.iter().all(|at| gated(*at)),
+            Sweep::ExistingTuiPath => {
+                !file.contains("/qwen/") && !code[body.clone()].contains("teardown_tmux(")
+            }
+            Sweep::ExistingQwenPath => {
+                file.contains("/qwen/") && !code[body.clone()].contains("teardown_tmux(")
+            }
+        };
+        if calls.len() != 1 || !holds {
+            violations.push(format!("{file}#{function}: x{} {why:?}", calls.len()));
+        }
+    }
+    violations.extend(
+        found
+            .into_keys()
+            .map(|(file, function)| format!("{file}#{function}: unlisted sweep")),
+    );
+    violations
+}
+
+/// Name of the innermost `fn` whose body holds byte `at` of token-only code.
+fn enclosing_fn(code: &str, at: usize) -> Option<String> {
+    let signature = regex::Regex::new(r"\bfn\s+(\w+)").unwrap();
+    signature
+        .captures_iter(code)
+        .filter(|found| found.get(0).unwrap().start() < at)
+        .filter_map(|found| {
+            let open =
+                found.get(0).unwrap().end() + code[found.get(0).unwrap().end()..].find('{')?;
+            let mut depth = 0usize;
+            let close = code[open..].char_indices().find_map(|(offset, ch)| {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(open + offset)
+            })?;
+            (open < at && at < close).then(|| (open, found[1].to_string()))
+        })
+        .max_by_key(|(open, _)| *open)
+        .map(|(_, name)| name)
 }
 
 /// (file, calls there, why the call keeps the name)
@@ -2001,6 +2204,33 @@ fn name_only_scan_follows_reexports_and_function_values() {
             "caller.rs: unlisted cleanup_session_temp_files x1",
         ),
         (
+            "a glob-imported alias renamed again by another module",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (
+                    FACADE2,
+                    "pub(crate) use crate::services::facade1::wipe as erase;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::erase(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a glob behind a module alias no file answers for",
+            &[
+                WIPE,
+                (
+                    CALLER,
+                    "use crate::services::gone as g;\nuse g::*;\nfn go(n: &str) { wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
             "an alias path that names no scanned module",
             &[
                 (
@@ -2052,6 +2282,22 @@ fn name_only_scan_follows_reexports_and_function_values() {
     }
 
     let clean: &[(&str, Extra)] = &[
+        (
+            "another module's function renamed after a glob of that module",
+            &[
+                WIPE,
+                (OTHER, "pub(crate) fn wipe(n: &str) {}\n"),
+                (FACADE1, "pub(crate) use crate::services::other::*;\n"),
+                (
+                    FACADE2,
+                    "pub(crate) use crate::services::facade1::wipe as erase;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::erase(n); }\n",
+                ),
+            ],
+        ),
         (
             "an unrelated local closure",
             &[(

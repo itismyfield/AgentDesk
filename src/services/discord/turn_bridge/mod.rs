@@ -80,7 +80,7 @@ use panel_lifecycle::{
     refresh_session_panel_line_from_lifecycle, refresh_task_panel_line_from_dispatch,
 };
 use response_delivery::{
-    done_result_requires_full_terminal_replay, push_transcript_event,
+    done_result_requires_full_terminal_replay, no_answer, push_transcript_event,
     response_portion_after_offset, terminal_delivery_response_after_offset,
 };
 use std::collections::VecDeque;
@@ -162,7 +162,7 @@ use current_message_anchor::{
 };
 use guards::{make_bridge_guards, resolve_guard_owner_channel};
 use headless_delivery::{
-    cleanup_headless_streaming_placeholder_after_delivery, enqueue_headless_delivery,
+    cleanup_headless_streaming_placeholder_after_delivery, enqueue_claimed_headless_delivery,
     is_synthetic_headless_message_id,
 };
 use memory_lifecycle::{

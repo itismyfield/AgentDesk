@@ -6,7 +6,7 @@ use super::shared::RecoveryRelayOutcome;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::{self, InflightTurnState};
 use crate::services::discord::outbound::delivery_record;
-use crate::services::discord::recovery_engine::o_cut_recorder::start_with;
+use crate::services::discord::recovery_engine::o_cut_recorder::{start_watching, start_with};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::cutover::test_override::force_channels;
 use poise::serenity_prelude::ChannelId;
@@ -155,5 +155,57 @@ async fn o_delegated_anchor_repost_is_skipped() {
             u32::from(reposts),
             "{name}: only a Legacy repost spends an attempt"
         );
+    }
+}
+
+/// A repost refused before its send (its attempt was not recorded) leaves a pending adoption; the
+/// repost that posts ends it first and shows the answer once.
+#[tokio::test(flavor = "current_thread")]
+async fn only_an_anchor_repost_that_posts_ends_a_pending_adoption() {
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+    if !isolated("only_an_anchor_repost_that_posts_ends_a_pending_adoption") {
+        return;
+    }
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let codex = Some(RuntimeHandoffKind::CodexTui);
+    for (destination, refused) in [(9_435_140u64, true), (9_435_150, false)] {
+        let state = committed_row(destination, destination + 1, codex);
+        if refused {
+            assert!(inflight::delete_inflight_state_file(
+                &ProviderKind::Codex,
+                destination
+            ));
+        }
+        let _pending = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+            destination,
+            RuntimeHandoffKind::CodexTui,
+        )]);
+        let check = BodyCheck::watch(destination, BODY);
+        let recorder = start_watching(destination, check.clone(), true).await;
+        let outcome =
+            try_recover_anchor_repost(&recorder.http, &shared, &ProviderKind::Codex, &state, BODY)
+                .await;
+        let shown = recorder.contents();
+        let posts = shown
+            .iter()
+            .filter(|content| content.contains(BODY))
+            .count();
+        check.assert_settled();
+        if refused {
+            assert_eq!(outcome, AnchorRepostOutcome::RefusedPreserveRow);
+            assert_eq!(
+                (posts, check.adoption()),
+                (0, Adoption::Pending),
+                "{shown:?}"
+            );
+        } else {
+            let delivered = AnchorRepostOutcome::Relayed(RecoveryRelayOutcome::Delivered);
+            assert_eq!(outcome, delivered);
+            assert_eq!(
+                (posts, check.adoption()),
+                (1, Adoption::Released),
+                "{shown:?}"
+            );
+        }
     }
 }

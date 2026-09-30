@@ -21,6 +21,8 @@ pub(crate) mod formatting;
 mod gateway;
 mod gateway_voice_queue;
 pub(crate) mod health;
+pub(crate) mod host_key_derivation;
+pub(crate) mod host_teardown_gate;
 pub(crate) mod http;
 mod idle_detector;
 pub(crate) mod idle_recap;
@@ -84,6 +86,7 @@ mod router;
 mod runtime_bootstrap;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
+mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
 pub mod runtime_store;

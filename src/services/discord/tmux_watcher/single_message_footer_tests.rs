@@ -30,6 +30,7 @@ async fn watcher_single_message_completion_footer_emits_background_agent_pending
         "⠸",
         false,
         true,
+        crate::services::tui_o::cutover::BodyClaim::tmux(channel_id.get(), None),
     )
     .await;
 
@@ -169,4 +170,93 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
         let shows_body = recorder.contents().iter().any(|c| c.contains(BODY));
         assert_eq!(shows_body, !delegated, "delegated={delegated}");
     }
+}
+
+/// A footer with no assistant body to show (no target, empty or chrome-only text, or a clean mirror
+/// body needing no edit) leaves a pending adoption; the one that shows the body ends it first.
+#[tokio::test(flavor = "current_thread")]
+async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
+    use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
+    use crate::services::discord::recovery_engine::o_cut_recorder::start_watching;
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+    use crate::services::tui_o::cutover::test_override;
+    const BODY: &str = "ADK-C1A-footer-body";
+    const CHANNEL: u64 = 4_047_131;
+    let _candidates = test_override::force_candidates(&[(
+        CHANNEL,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let check = BodyCheck::watch(CHANNEL, BODY);
+    let tmux = format!("AgentDesk-claude-o-adopt-footer-{CHANNEL}");
+    let _bound = test_override::bind_claude_tui_session(&tmux, "/tmp/adk-o-adopt-footer.jsonl");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let placeholder = Some(serenity::all::MessageId::new(9_425_941));
+    let complete = |target: Option<&str>, placeholder, last_edit_text: &str, mirror: bool| {
+        let last_edit_text = last_edit_text.to_string();
+        let (shared, tmux, check) = (shared.clone(), tmux.clone(), check.clone());
+        let target = target.map(|text| WatcherCompletionFooterTerminalTarget {
+            msg_id: serenity::all::MessageId::new(9_425_941),
+            text: text.to_string(),
+        });
+        async move {
+            let recorder = start_watching(CHANNEL, check, false).await;
+            complete_watcher_terminal_footer_or_status_panel_with_sniffer(
+                &recorder.http,
+                &shared,
+                ChannelId::new(CHANNEL),
+                &ProviderKind::Claude,
+                1_700_000_000,
+                true,
+                &mut 0,
+                target,
+                placeholder,
+                &last_edit_text,
+                None,
+                &mut String::new(),
+                None,
+                Some(tmux),
+                |_| async { false },
+                Some(CHANNEL + 1),
+                false,
+                mirror,
+                false,
+            )
+            .await;
+            recorder.contents()
+        }
+    };
+    let chrome = crate::services::discord::formatting::build_processing_status_block("⠸");
+    let chrome_only = [
+        (None, BODY),
+        (placeholder, ""),
+        (placeholder, " \n"),
+        (placeholder, &chrome),
+    ];
+    for (placeholder, text) in chrome_only {
+        let shown = complete(None, placeholder, text, false).await;
+        assert!(!shown.iter().any(|c| c.contains(BODY)), "{shown:?}");
+        check.assert_settled();
+        assert_eq!(
+            check.adoption(),
+            Adoption::Pending,
+            "{placeholder:?} {text:?}"
+        );
+    }
+
+    let shown = complete(Some(BODY), placeholder, BODY, true).await;
+    assert!(
+        shown.is_empty(),
+        "a clean mirror body needs no edit: {shown:?}"
+    );
+    check.assert_settled();
+    assert_eq!(check.adoption(), Adoption::Pending);
+
+    let shown = complete(Some(BODY), placeholder, "", false).await;
+    assert_eq!(
+        shown.iter().filter(|c| c.contains(BODY)).count(),
+        1,
+        "{shown:?}"
+    );
+    check.assert_settled();
+    assert_eq!(check.adoption(), Adoption::Released);
 }

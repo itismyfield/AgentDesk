@@ -199,12 +199,15 @@ pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_
 // alias) and so the root's `restore_inflight_turns` reattach call sites stay
 // byte-identical. Its private `reseed_watcher_owned_finalizer_ledger` helper is
 // not re-exported.
-pub(in crate::services::discord) use self::completion_delivery::relay_recovered_terminal_text_to_placeholder;
 use self::completion_delivery::{
-    CapturedRecoveryDelivery, RecoveryCompletionOutcome, complete_recovery_visible_turn,
-    relay_captured_recovery_terminal_notice, relay_captured_recovery_terminal_notice_with_gateway,
-    relay_recovery_body_notice, relay_recovery_body_to_placeholder, relay_recovery_terminal_notice,
+    CapturedRecoveryDelivery, RECOVERED_WITHOUT_TEXT, RecoveryCompletionOutcome,
+    complete_recovery_visible_turn, relay_captured_recovery_terminal_notice,
+    relay_captured_recovery_terminal_notice_with_gateway, relay_recovery_body_notice,
+    relay_recovery_body_to_placeholder, relay_recovery_terminal_notice,
     should_advance_recovery_dispatch_after_relay,
+};
+pub(in crate::services::discord) use self::completion_delivery::{
+    relay_recovered_body_to_placeholder, relay_recovered_terminal_text_to_placeholder,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
 // a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.

@@ -926,8 +926,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
-        // O posts this body: consume the range without a lease, a journal or transport.
-        let o_ownership = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+        // O posts this body: consume the range without a lease, journal or transport; read only.
+        let o_ownership = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
             channel_id.get(),
             Some(&tmux_session_name),
         );
@@ -1163,7 +1163,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 }
             }
         } else if watcher_direct_fallback_after_session_bound_ack {
-            terminal_direct_fallback::apply_watcher_direct_fallback_send(
+            let claims = watcher_will_direct_send && task_notification_kind.is_none();
+            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name);
+            let sent = Box::pin(terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
                 &shared,
                 &watcher_provider,
@@ -1196,6 +1198,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 external_input_lease_generation_before_relay,
                 prompt_anchor_present_before_relay,
                 ssh_direct_pending,
+                body_claim,
                 terminal_direct_fallback::WatcherDirectFallbackLocals {
                     tui_direct_anchor_terminal_body_visible:
                         &mut tui_direct_anchor_terminal_body_visible,
@@ -1217,8 +1220,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     last_observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
                     task_response_claim: &mut watcher_task_response_claim,
                 },
-            )
-            .await
+            ))
+            .await;
+            // O took the channel since the peek: retry, and the next pass consumes it for O.
+            retry_terminal_delivery_from_offset |=
+                !sent && o_delegated_arm::o_took_channel(channel_id, &tmux_session_name);
+            sent
         } else if watcher_direct_fallback_requested {
             false
         } else if relay_decision.suppressed {

@@ -1102,6 +1102,7 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
         },
         0,
         raw_body.len() as u64,
+        None,
     )
     .await;
     assert!(matches!(

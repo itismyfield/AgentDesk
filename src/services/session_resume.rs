@@ -930,7 +930,10 @@ mod tests {
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        // As in production, the runtime has a pool and the row is the channel's own key, so
+        // the force-kill host guard finds the legacy row it admits.
+        let test_support = crate::services::discord::host_teardown_gate::test_support::shared_on;
+        let shared = test_support(&pool).await;
         let registry = HealthRegistry::new();
         registry
             .register("claude".to_string(), Arc::clone(&shared))
@@ -938,7 +941,8 @@ mod tests {
         let channel_id = ChannelId::new(4_794_101);
         let tmux = "AgentDesk-claude-resume-production-path";
         let unrelated = "AgentDesk-claude-resume-unrelated";
-        let session_key = "claude/test/host:AgentDesk-claude-resume-production-path";
+        let session_key =
+            &crate::services::discord::host_teardown_gate::test_support::channel_key(&shared, tmux);
         let old_session_id = "11111111-1111-1111-1111-111111111111";
         let target_session_id = "22222222-2222-2222-2222-222222222222";
         let old_cwd = tempfile::tempdir().expect("old cwd");

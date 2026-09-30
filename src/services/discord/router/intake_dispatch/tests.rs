@@ -542,6 +542,26 @@ async fn an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_post
     assert!(held.contains("gateway"), "{held}");
     let _ready = test_probe::answers(&[true]);
     assert_eq!(local(o).await, Ok(()), "the ready gateway runs it");
+
+    let _foreign = test_override::force_foreign(&[(o.get(), ClaudeTui)], "home-node");
+    let held = local(o)
+        .await
+        .expect_err("a non-home node places no selected channel");
+    assert!(held.contains("O home home-node"), "{held}");
+    let _pending = test_override::force_candidates(&[(o.get(), ClaudeTui)]);
+    assert_eq!(
+        local(o).await,
+        Ok(()),
+        "a pending channel is placed as Legacy"
+    );
+    let released = |boot: Option<&crate::services::tui_o::channel_policy::BootChannels>| {
+        boot.unwrap().candidate(o.get()).unwrap().peek()
+    };
+    let state = test_override::with_channels(released);
+    assert_eq!(
+        state,
+        crate::services::tui_o::channel_policy::Adoption::Released
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

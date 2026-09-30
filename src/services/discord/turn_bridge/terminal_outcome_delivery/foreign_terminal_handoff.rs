@@ -427,9 +427,10 @@ pub(super) async fn resume_with_gateway(
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
-    let Ok(o_owns_body) =
-        crate::services::tui_o::cutover::o_owns_tui_output_for_channel(snapshot.channel_id, kind)
-    else {
+    let Ok(o_owns_body) = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        snapshot.channel_id,
+        kind,
+    ) else {
         return Ok(false);
     };
     let mut delivered = o_owns_body
@@ -459,18 +460,30 @@ pub(super) async fn resume_with_gateway(
         // Recheck after acquiring; an actor may have completed just before this
         // lease became available. NoRange remains the existing honest exemption.
         delivered = decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+        // Only the post itself claims the channel, after every skip above.
         if !delivered {
             // Reuse the ordinary chunk formatter and gateway. Persist each
             // acknowledged prefix before another await, while the SAME source
             // lease and custody file lock remain held across the whole loop.
-            for chunk in chunks.iter().skip(snapshot.delivery_receipts.len()) {
-                let id = TurnGateway::send_message(gateway, channel, chunk).await?;
-                if super::super::headless_delivery::is_synthetic_headless_message_id(id) {
-                    return Err("terminal POST returned no real Discord receipt".into());
+            let claim = crate::services::tui_o::cutover::BodyClaim::new(snapshot.channel_id, kind);
+            let (snap, chunks) = (&mut *snapshot, &chunks);
+            let post = move || async move {
+                for chunk in chunks.iter().skip(snap.delivery_receipts.len()) {
+                    let id = TurnGateway::send_message(gateway, channel, chunk).await?;
+                    if super::super::headless_delivery::is_synthetic_headless_message_id(id) {
+                        return Err("terminal POST returned no real Discord receipt".into());
+                    }
+                    snap.delivery_receipts.push(id.get());
+                    let value = serde_json::to_value(&*snap).map_err(|e| e.to_string())?;
+                    checkpoint.persist(&value)?;
                 }
-                snapshot.delivery_receipts.push(id.get());
-                checkpoint
-                    .persist(&serde_json::to_value(&*snapshot).map_err(|e| e.to_string())?)?;
+                Ok::<(), String>(())
+            };
+            match crate::services::tui_o::cutover::claim_then_send(Some(claim), post).await {
+                Ok(crate::services::tui_o::cutover::BodySend::Sent(posted)) => posted?,
+                // O took the channel since the peek: settle the custody as O's.
+                Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {}
+                Err(_) => return Ok(false),
             }
         }
         // Custody never advances a read cursor, clears the foreign row or
