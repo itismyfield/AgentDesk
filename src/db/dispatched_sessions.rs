@@ -8,6 +8,8 @@ use crate::db::session_agent_resolution::{
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_activity::SessionActivityResolver;
 
+#[path = "dispatched_sessions/hosted_execution.rs"]
+pub(crate) mod hosted_execution;
 #[path = "dispatched_sessions/thread_gc.rs"]
 mod thread_gc;
 pub use thread_gc::gc_stale_thread_sessions_pg;
@@ -2768,11 +2770,7 @@ pub(crate) async fn upsert_hook_session_pg(
 }
 
 pub(crate) async fn cleanup_disconnected_sessions_pg(pool: &PgPool) -> Result<u64, String> {
-    sqlx::query("DELETE FROM sessions WHERE status = 'disconnected'")
-        .execute(pool)
-        .await
-        .map(|result| result.rows_affected())
-        .map_err(|error| format!("{error}"))
+    hosted_execution::delete_disconnected_sessions_pg(pool).await
 }
 
 pub(crate) async fn delete_session_by_key_pg(
@@ -2791,12 +2789,7 @@ pub(crate) async fn delete_session_by_key_pg(
         .await
         .map_err(|error| format!("resolve session delete locator: {error:?}"))?;
     let deleted = match session_id {
-        Some(session_id) => sqlx::query("DELETE FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("delete postgres session: {error}"))?
-            .rows_affected(),
+        Some(session_id) => hosted_execution::delete_locked_session_pg(&mut tx, session_id).await?,
         None => 0,
     };
     tx.commit()

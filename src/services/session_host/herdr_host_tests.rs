@@ -811,11 +811,12 @@ fn herdr_items_have_no_production_caller() {
         "HerdrSocketTransport::new(",
         "HerdrSocketTransport::<",
     ];
-    // Nothing writes a host locator or `.host_kind` marker; only their owners and the
-    // dormant guard adapter read one. The termination owner holds a locator only as a warrant's target.
+    // Nothing writes a host locator or `.host_kind` marker; only their owners, the guard
+    // adapter and the cleanup gate read one. Termination holds a locator only as a target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
     const MARKER: &str = "src/services/tmux_common/host_marker.rs";
     const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
+    const CLEANUP_GATE: &str = "src/db/dispatched_sessions/hosted_execution.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -831,9 +832,9 @@ fn herdr_items_have_no_production_caller() {
             ],
         ),
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
-        ("HostKindMarker", &[MARKER, GUARD_ADAPTER]),
-        ("read_host_kind_marker", &[MARKER]),
-        ("host_marker::", &[GUARD_ADAPTER]),
+        ("HostKindMarker", &[MARKER, GUARD_ADAPTER, CLEANUP_GATE]),
+        ("read_host_kind_marker", &[MARKER, CLEANUP_GATE]),
+        ("host_marker::", &[GUARD_ADAPTER, CLEANUP_GATE]),
         (".host_locator", &[GUARD_ADAPTER]),
         ("host_locator: Some", &[]),
         ("host_locator:", &[INFLIGHT_MODEL, GUARD_ADAPTER]),
@@ -976,8 +977,24 @@ fn session_target_guard_has_no_production_caller() {
     );
 }
 
-// Dormant guard: the typed probe entries have no production caller outside their
-// owner, so no consumer reads host liveness through them yet.
+/// Byte range of the body of the first `signature` in token-only code.
+fn fn_body(code: &str, signature: &str) -> std::ops::Range<usize> {
+    let start = code.find(signature).expect(signature);
+    let open = start + code[start..].find('{').expect(signature);
+    let mut depth = 0usize;
+    for (offset, ch) in code[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth == 1 => return open..open + offset,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    open..code.len()
+}
+
+// Dormant guard: nothing outside the owner names the typed probe entries; inside it
+// the observer runs only in the dormant `for_target` body, which nothing calls.
 #[test]
 fn typed_session_probe_entries_have_no_production_caller() {
     const OWNER: &str = "src/services/provider/session_probe.rs";
@@ -992,7 +1009,7 @@ fn typed_session_probe_entries_have_no_production_caller() {
         owner.contains("fn observe_session_liveness(") && owner.contains("fn for_target("),
         "source scan must see the typed entries"
     );
-    let violations: Vec<String> = sources
+    let mut violations: Vec<String> = sources
         .iter()
         .filter(|(relative, _)| relative.as_str() != OWNER)
         .flat_map(|(relative, prod)| {
@@ -1002,8 +1019,71 @@ fn typed_session_probe_entries_have_no_production_caller() {
                 .map(move |entry| format!("{relative}: {entry}"))
         })
         .collect();
+    let code = code_tokens(owner);
+    let dormant = fn_body(&code, "fn for_target(");
+    let imports = use_spans(&code);
+    let observer = regex::Regex::new(r"\bobserve_session_liveness\b").unwrap();
+    for found in observer.find_iter(&code) {
+        let defined = code[..found.start()].trim_end().ends_with("fn");
+        let imported = imports.iter().any(|span| span.contains(&found.start()));
+        if !defined && !imported && !dormant.contains(&found.start()) {
+            violations.push(format!(
+                "{OWNER}: observe_session_liveness outside for_target"
+            ));
+        }
+    }
+    for (entry, allowed) in [("for_target", 0), ("observe_session_liveness", 1)] {
+        let (uses, aliases) = item_uses(&code, entry);
+        if uses > allowed || !aliases.is_empty() {
+            violations.push(format!("{OWNER}: {entry} x{uses} {aliases:?}"));
+        }
+    }
     assert!(
         violations.is_empty(),
         "typed probe production caller: {violations:?}"
+    );
+}
+
+// Draft guard: the Claude warm follow-up reaches the pane only through the host
+// input executor, and a fresh session only follows an executor retire.
+#[test]
+fn claude_warm_followup_reaches_tmux_only_through_the_executor() {
+    const HOSTING: &str = "src/services/claude_tui/hosting/";
+    const WARM: &str = "src/services/claude_tui/hosting/warm_followup.rs";
+    const DIRECT: &[&str] = &[
+        "tmux::",
+        "kill_session",
+        "send_keys",
+        "capture_pane",
+        "record_termination_for_tmux",
+        "record_tmux_exit_reason",
+    ];
+    let sources = production_sources();
+    let hosting: Vec<(&String, String)> = sources
+        .iter()
+        .filter(|(relative, _)| relative.starts_with(HOSTING))
+        .map(|(relative, prod)| (relative, code_tokens(prod)))
+        .collect();
+    assert!(
+        hosting.len() >= 4 && sources[WARM].contains("fn try_claude_tui_warm_followup("),
+        "source scan must see the hosting files"
+    );
+    let mut violations = Vec::new();
+    for (relative, code) in &hosting {
+        violations.extend(
+            DIRECT
+                .iter()
+                .filter(|direct| code.contains(**direct))
+                .map(|direct| format!("{relative}: {direct}")),
+        );
+        let (fresh, aliases) = item_uses(code, "fresh_claude_tui_session_resolution");
+        let allowed = usize::from(relative.as_str() == WARM);
+        if fresh > allowed || !aliases.is_empty() {
+            violations.push(format!("{relative}: fresh resolution x{fresh} {aliases:?}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "warm follow-up bypasses the executor: {violations:?}"
     );
 }

@@ -898,9 +898,13 @@ fn run_actions_with_submission_confirmation(
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let actions_contained_paste = actions_contain_paste_buffer(actions);
-    let result = run_actions(session_name, actions, cancel_token)
+    let run = host_input::run_legacy(session_name, actions, cancel_token);
+    let cleanup_may_follow =
+        host_input::InputTarget::legacy_tmux(session_name).keys_may_follow(&run);
+    let result = run
+        .into_legacy()
         .and_then(|()| confirm_prompt_submission_left_editor(session_name, cancel_token));
-    if should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
+    if cleanup_may_follow && should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
         clear_prompt_draft_before_error(session_name);
     }
     result

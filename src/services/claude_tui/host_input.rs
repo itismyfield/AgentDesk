@@ -8,12 +8,14 @@ use super::input::{
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,
     prompt_marker_confirms_prompt_ready, prompt_readiness_snapshot_from_capture,
 };
+use super::startup_dialog::detect_claude_startup_dialog;
 use crate::services::platform::tmux;
 use crate::services::provider::session_probe::SessionLiveness;
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::session_host::{
     HostKey, HostKind, ResolvedSessionTarget, TargetHost, TmuxHost,
 };
+use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputTarget {
@@ -51,6 +53,20 @@ impl InputTarget {
             TargetHost::Conflict { .. } => Self::Refused(InputRefusal::Conflict),
         }
     }
+
+    /// Legacy keys may follow a stopped plan only on a confirmed tmux target
+    /// that no gate refused; anywhere else nothing more is sent.
+    pub(crate) fn keys_may_follow(&self, run: &InputRun) -> bool {
+        matches!(self, Self::Tmux(_))
+            && !matches!(
+                run,
+                InputRun::Refused(_)
+                    | InputRun::Indeterminate {
+                        cause: StopCause::Refused(_),
+                        ..
+                    }
+            )
+    }
 }
 
 /// Checked before every pane mutation; the execution validator implements it.
@@ -77,6 +93,8 @@ pub(crate) trait InputTransport {
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String>;
     fn pane_alive(&mut self, session: &str) -> bool;
     fn present(&mut self, session: &str) -> bool;
+    /// Records the termination and exit reason, then kills the session.
+    fn retire(&mut self, session: &str, reason_code: &str, reason: &str);
 }
 
 struct TmuxInput;
@@ -113,6 +131,19 @@ impl InputTransport for TmuxInput {
 
     fn present(&mut self, session: &str) -> bool {
         tmux::has_session(session)
+    }
+
+    fn retire(&mut self, session: &str, reason_code: &str, reason: &str) {
+        crate::services::termination_audit::record_termination_for_tmux(
+            session,
+            None,
+            "claude_tui_provider",
+            reason_code,
+            Some(reason),
+            None,
+        );
+        crate::services::tmux_diagnostics::record_tmux_exit_reason(session, reason);
+        tmux::kill_session(session, reason);
     }
 }
 
@@ -266,15 +297,7 @@ impl Plan<'_> {
     }
 
     fn admit(&self) -> Result<(), InputRun> {
-        self.gate
-            .admit(self.session)
-            .map_err(|refusal| match self.confirmed {
-                0 => InputRun::Refused(refusal),
-                confirmed => InputRun::Indeterminate {
-                    confirmed,
-                    cause: StopCause::Refused(refusal),
-                },
-            })
+        admit_after(self.gate, self.session, self.confirmed)
     }
 
     fn send(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
@@ -291,6 +314,76 @@ impl Plan<'_> {
         self.send(action, send)?;
         self.confirmed += 1;
         Ok(())
+    }
+}
+
+fn admit_after(gate: &dyn MutationGate, session: &str, confirmed: usize) -> Result<(), InputRun> {
+    gate.admit(session).map_err(|refusal| match confirmed {
+        0 => InputRun::Refused(refusal),
+        confirmed => InputRun::Indeterminate {
+            confirmed,
+            cause: StopCause::Refused(refusal),
+        },
+    })
+}
+
+/// Gated multi-key sends: each group is one send and keeps its legacy error name.
+#[cfg(unix)]
+pub(crate) struct KeyGroups<'a> {
+    pub(crate) session: &'a str,
+    gate: &'a dyn MutationGate,
+    cancel_token: Option<&'a CancelToken>,
+    confirmed: usize,
+}
+
+#[cfg(unix)]
+impl<'a> KeyGroups<'a> {
+    pub(crate) fn new(
+        session: &'a str,
+        gate: &'a dyn MutationGate,
+        cancel_token: Option<&'a CancelToken>,
+    ) -> Self {
+        Self {
+            session,
+            gate,
+            cancel_token,
+            confirmed: 0,
+        }
+    }
+
+    pub(crate) fn check_cancel(&self) -> Result<(), InputRun> {
+        if cancel_requested(self.cancel_token) {
+            return Err(InputRun::Cancelled {
+                confirmed: self.confirmed,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn send(&mut self, keys: &[HostKey], name: &str) -> Result<(), InputRun> {
+        admit_after(self.gate, self.session, self.confirmed)?;
+        let session = self.session;
+        with_transport(|transport| transport.send_keys(session, keys))
+            .and_then(|output| ensure_named_success(output, name))
+            .map_err(|error| InputRun::Indeterminate {
+                confirmed: self.confirmed,
+                cause: StopCause::Send(error),
+            })?;
+        self.confirmed += 1;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn ensure_named_success(output: Output, name: &str) -> Result<(), String> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("tmux send {name} failed: {}", output.status))
+    } else {
+        Err(format!("tmux send {name} failed: {stderr}"))
     }
 }
 
@@ -320,6 +413,11 @@ pub(crate) fn legacy_present(session_name: &str) -> bool {
     with_transport(|transport| transport.present(session_name))
 }
 
+#[cfg(unix)]
+pub(crate) fn legacy_retire(session_name: &str, reason_code: &str, reason: &str) {
+    with_transport(|transport| transport.retire(session_name, reason_code, reason));
+}
+
 pub(crate) fn legacy_load_buffer(buffer: &str, text: &str) -> Result<Output, String> {
     with_transport(|transport| transport.load_buffer(buffer, text))
 }
@@ -345,7 +443,6 @@ pub(crate) enum HostCapture {
 }
 
 /// Executor result a follow-up consumes; never folded into a generic error.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostInputOutcome {
     Cleared,
@@ -416,7 +513,12 @@ pub(crate) fn classify(
         return HostInputOutcome::UnknownTranscript;
     };
     let snapshot = prompt_readiness_snapshot_from_capture(Some(text), true);
-    if snapshot.prompt_draft_detected {
+    // A mounted dialog takes Enter as its answer, whatever else the pane shows.
+    if tmux_capture_indicates_claude_tui_interactive_modal(&snapshot.pane_tail)
+        || detect_claude_startup_dialog(&snapshot.pane_tail).is_some()
+    {
+        HostInputOutcome::Busy
+    } else if snapshot.prompt_draft_detected {
         HostInputOutcome::PersistentDraft
     } else if prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
         HostInputOutcome::ReadySameExecution
@@ -447,14 +549,30 @@ mod spy {
         pub dead: bool,
         pub absent: bool,
         pub sends: usize,
+        /// Cancels this token when the n-th (from 1) call with this prefix is recorded.
+        pub cancel_on: Option<(&'static str, usize, std::sync::Arc<CancelToken>)>,
     }
 
     pub(crate) struct Spy(pub Rc<RefCell<SpyState>>);
 
+    impl SpyState {
+        fn record(&mut self, call: String) {
+            self.calls.push(call);
+            if let Some((prefix, nth, token)) = &self.cancel_on
+                && self.calls.iter().filter(|c| c.starts_with(prefix)).count() == *nth
+                && self.calls.last().is_some_and(|c| c.starts_with(prefix))
+            {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     impl Spy {
         fn send(&mut self, call: String) -> Result<Output, String> {
             let mut state = self.0.borrow_mut();
-            state.calls.push(call);
+            state.record(call);
             let index = state.sends;
             state.sends += 1;
             match state.fail_send.take() {
@@ -499,20 +617,26 @@ mod spy {
 
         fn capture(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {
             let mut state = self.0.borrow_mut();
-            state.calls.push("capture".to_string());
+            state.record("capture".to_string());
             state.captures.pop_front().flatten()
         }
 
         fn pane_alive(&mut self, _session: &str) -> bool {
             let mut state = self.0.borrow_mut();
-            state.calls.push("alive".to_string());
+            state.record("alive".to_string());
             !state.dead
         }
 
         fn present(&mut self, _session: &str) -> bool {
             let mut state = self.0.borrow_mut();
-            state.calls.push("present".to_string());
+            state.record("present".to_string());
             !state.absent
+        }
+
+        fn retire(&mut self, _session: &str, reason_code: &str, reason: &str) {
+            self.0
+                .borrow_mut()
+                .record(format!("retire:{reason_code}:{reason}"));
         }
     }
 
@@ -819,6 +943,9 @@ mod tests {
         fn present(&mut self, s: &str) -> bool {
             self.0.present(s)
         }
+        fn retire(&mut self, s: &str, c: &str, r: &str) {
+            self.0.retire(s, c, r)
+        }
     }
 
     #[test]
@@ -899,5 +1026,61 @@ mod tests {
             HostInputOutcome::after_clear(&partial, alive(EMPTY_COMPOSER)),
             HostInputOutcome::Indeterminate { confirmed: 1 }
         );
+    }
+
+    #[test]
+    fn a_mounted_dialog_is_never_ready_even_after_clear() {
+        let tmux = InputTarget::legacy_tmux("p6a2-modal");
+        for pane in [
+            "Ready for input (type message + Enter)\nAllow / Deny\nEnter to confirm",
+            "Claude Code v2.1.141\n\n\u{276f} \nAllow / Deny\nEnter to confirm",
+            "Do you want to make this edit?\n\u{276f} 1. Yes\n  2. No\nEnter to confirm \u{b7} Esc to cancel",
+        ] {
+            let capture = HostCapture::Complete(pane.to_string());
+            let outcome = classify(&tmux, SessionLiveness::Alive, &capture);
+            assert!(!outcome.allows_submit(), "{pane:?}: {outcome:?}");
+            let cleared = HostInputOutcome::after_clear(&InputRun::Applied, outcome);
+            assert!(!cleared.allows_submit(), "{pane:?}: {cleared:?}");
+        }
+    }
+
+    #[test]
+    fn draft_cleanup_follows_a_stop_only_on_a_confirmed_tmux_session() {
+        let plan = [
+            TuiInputAction::Literal("a".to_string()),
+            TuiInputAction::PasteBuffer("b\nc".to_string()),
+            TuiInputAction::Enter,
+        ];
+        let tmux = InputTarget::legacy_tmux("p6a2-cleanup");
+        let (mut failing, _) = spy(SpyState {
+            fail_send: Some((2, Ok(exit(1, "no buffer")))),
+            ..SpyState::default()
+        });
+        let send_failure = run_plan(&tmux, &LegacyTmuxGate, &mut failing, &plan, None);
+        assert!(matches!(
+            send_failure,
+            InputRun::Indeterminate {
+                cause: StopCause::Send(_),
+                ..
+            }
+        ));
+        assert!(tmux.keys_may_follow(&send_failure));
+        assert!(resolved(known(HostKind::Tmux)).keys_may_follow(&send_failure));
+
+        // A gate refusal means the host changed: no cleanup key follows.
+        for admitted in [0, 2] {
+            let (mut swapped, _) = spy(SpyState::default());
+            let gate = RefuseAfter(admitted.into(), InputRefusal::IdentityMismatch);
+            let stopped = run_plan(&tmux, &gate, &mut swapped, &plan, None);
+            assert!(!tmux.keys_may_follow(&stopped), "{stopped:?}");
+        }
+        for target in [
+            resolved(known(HostKind::Herdr)),
+            resolved(TargetHost::Unknown(UnknownHost::NoHostEvidence)),
+        ] {
+            for run in [send_failure.clone(), InputRun::Cancelled { confirmed: 1 }] {
+                assert!(!target.keys_may_follow(&run), "{target:?} {run:?}");
+            }
+        }
     }
 }
