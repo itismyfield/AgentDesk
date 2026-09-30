@@ -99,39 +99,19 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
         return;
     }
     let reason = "provider:claude:tui_output_requires_gateway";
-    let dormant = public_body(false, None).await;
-    assert!(
-        dormant.get("tui_output_gateway_channels").is_none(),
-        "{dormant}"
-    );
-    assert!(!reasons(&dormant).contains(&reason), "{dormant}");
-
-    // With an empty list the intake gate still refuses the provider, which no evidence settles.
-    let refused = public_body(false, Some(&[])).await;
-    assert!(reasons(&refused).contains(&reason), "{refused}");
-    assert!(
-        refused.get("tui_output_gateway_channels").is_none(),
-        "{refused}"
-    );
-    assert_ready(
-        "intake refused without writer channels",
-        &refused.to_string(),
-        false,
-    );
-
-    // Writer channels prove nothing while the intake gate still refuses the provider.
-    for standby in [false, true] {
-        let refused = public_body(standby, Some(CHANNELS)).await;
-        assert!(reasons(&refused).contains(&reason), "{refused}");
-        assert!(
-            refused.get("tui_output_gateway_channels").is_none(),
-            "{refused}"
-        );
-        let label = format!("intake refused with writer channels (standby={standby})");
-        assert_ready(&label, &refused.to_string(), false);
+    // With the switch on, an empty writer list reports exactly what the switch off does.
+    let dormant = {
+        let _off = test_override::force_off();
+        public_body(false, None).await
+    };
+    let empty = public_body(false, Some(&[])).await;
+    for (label, body) in [("switch off", &dormant), ("empty writer list", &empty)] {
+        assert!(body.get("tui_output_gateway_channels").is_none(), "{body}");
+        assert!(!reasons(body).contains(&reason), "{body}");
+        assert_ready(label, &body.to_string(), true);
     }
+    assert_eq!(reasons(&dormant), reasons(&empty));
 
-    let _admitted = test_override::admit_intake();
     let worker = public_body(false, Some(CHANNELS)).await;
     assert!(reasons(&worker).contains(&reason), "{worker}");
     assert_eq!(

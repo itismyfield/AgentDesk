@@ -22,8 +22,8 @@ pub(super) struct ProviderHealthSnapshot {
     /// #5951 — per-channel re-mint fence cells; never pruned, so this only
     /// grows with the distinct channels the runtime has served.
     remint_fence_cells: usize,
-    /// Boot writer channels this node leaves to the gateway; present only when there are some and
-    /// the provider's intake is not refused, since readiness reads it as proof the restriction is all.
+    /// Boot writer channels this node leaves to the gateway; present only when there are some, since
+    /// readiness reads it as proof the restriction is all.
     #[serde(skip_serializing_if = "Option::is_none")]
     tui_output_gateway_channels: Option<usize>,
 }
@@ -114,7 +114,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
         .lock()
         .ok()
         .and_then(|g| g.clone());
-    let (gateway_channels, intake_refused) = tui_output_gateway(&entry.name, entry.role);
+    let gateway_channels = tui_output_gateway(&entry.name, entry.role);
 
     let classification = classify_provider(
         &entry.name,
@@ -127,7 +127,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
             deferred_hooks,
             queue_depth,
             recovering_channels,
-            tui_output_requires_gateway: intake_refused || gateway_channels != Some(0),
+            tui_output_requires_gateway: gateway_channels != Some(0),
         },
     );
 
@@ -144,8 +144,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
             restart_pending,
             last_turn_at,
             remint_fence_cells: entry.shared.mailboxes.remint_fence_cells(),
-            tui_output_gateway_channels: gateway_channels
-                .filter(|count| *count > 0 && !intake_refused),
+            tui_output_gateway_channels: gateway_channels.filter(|count| *count > 0),
         },
         status: classification.status,
         fully_recovered: classification.fully_recovered,
@@ -230,9 +229,8 @@ fn classify_provider(
     }
 }
 
-/// Writer channels this entry's role leaves to the gateway (`None` when the boot list is unknown),
-/// and whether the intake worker gate still refuses the whole provider here.
-fn tui_output_gateway(provider_name: &str, role: ProviderRuntimeRole) -> (Option<usize>, bool) {
+/// Writer channels this entry's role leaves to the gateway; `None` when the boot list is unknown.
+fn tui_output_gateway(provider_name: &str, role: ProviderRuntimeRole) -> Option<usize> {
     use crate::services::tui_o::channel_policy::BootChannels;
     use crate::services::tui_o::topology::{self, HostRole};
     let role = match role {
@@ -240,25 +238,14 @@ fn tui_output_gateway(provider_name: &str, role: ProviderRuntimeRole) -> (Option
         ProviderRuntimeRole::Standby => HostRole::Standby,
         ProviderRuntimeRole::Worker => HostRole::Runner,
     };
-    let facts = |enabled: bool, boot: Option<&BootChannels>| {
-        let channels = topology::gateway_only_channels(enabled, provider_name, role, boot);
-        (
-            channels,
-            !topology::intake_worker_allowed(enabled, provider_name, role),
-        )
+    let channels = |boot: Option<&BootChannels>| {
+        let enabled = crate::services::tui_o::cutover::writer_enabled();
+        topology::gateway_only_channels(enabled, provider_name, role, boot)
     };
     #[cfg(test)]
-    {
-        use crate::services::tui_o::cutover::test_override;
-        let enabled = topology::O_TUI_WRITER || test_override::forced();
-        let (channels, refused) = test_override::with_channels(|boot| facts(enabled, boot));
-        (channels, refused && !test_override::intake_admitted())
-    }
+    return crate::services::tui_o::cutover::test_override::with_channels(channels);
     #[cfg(not(test))]
-    facts(
-        topology::O_TUI_WRITER,
-        crate::services::tui_o::channel_policy::boot(),
-    )
+    channels(crate::services::tui_o::channel_policy::boot())
 }
 
 /// Whether an unfinished reconcile has outlived its boot-relative deadline and
@@ -382,6 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_idle_standby_is_degraded_but_http_ready() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = HealthRegistry::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         registry.register_standby("codex".to_string(), shared).await;
@@ -424,6 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_profile_health_does_not_require_gateway_or_hide_recovery_failure() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = HealthRegistry::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         registry

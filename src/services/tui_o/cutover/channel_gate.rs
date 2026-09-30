@@ -48,7 +48,7 @@ fn decide(
     channel_id: u64,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    let enabled = super::O_TUI_WRITER || super::test_override::forced();
+    let enabled = super::writer_enabled();
     if !enabled {
         return Ok(false);
     }
@@ -80,6 +80,10 @@ fn decide_with_snapshot(
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
+    // A verified empty list is O off: Legacy before any destination or kind is resolved.
+    if snapshot.channels().is_empty() {
+        return Ok(false);
+    }
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
@@ -102,3 +106,6 @@ fn decide_with_snapshot(
         Some(kind),
     ))
 }
+
+#[cfg(test)]
+mod tests;

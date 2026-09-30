@@ -77,6 +77,10 @@ pub async fn run_channel<P, L, A, B>(
         actor.deliver_owed().await;
         actor.collect_settled();
         actor.read_sources();
+        // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
+        if actor.writer.is_stopped() {
+            return;
+        }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
             changed = stop.changed() => if changed.is_err() { return },

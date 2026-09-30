@@ -862,6 +862,7 @@ agents:
     /// `mark_reconcile_complete`, so the reason was permanent for the process.
     #[tokio::test]
     async fn standby_registration_settles_the_reconcile_obligation() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = Arc::new(health::HealthRegistry::new());
         let shared = crate::services::discord::make_shared_data_for_tests();
         // A real boot starts unreconciled; the test helper starts settled.

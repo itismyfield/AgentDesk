@@ -549,6 +549,7 @@ fn committed_progress_pinned_identity_suppresses_trailing_body() {
 
 #[test]
 fn active_progress_tick_emits_once() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (_lock, guard) = isolate_root();
     capture_warns(async {
         let fx = seed_row(guard.root.path(), 12, false, false);
@@ -579,6 +580,7 @@ fn active_progress_tick_emits_once() {
 /// writes none of that body to Discord, while the Legacy owner of the same tick does.
 #[test]
 fn o_delegated_rollover_tick_writes_no_body() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
         module_path!(),
         "::o_delegated_rollover_tick_writes_no_body"
@@ -640,6 +642,7 @@ fn o_delegated_rollover_tick_writes_no_body() {
 /// SBR row alone must not be mistaken for proof that the streaming tick ran.
 #[test]
 fn recovered_session_bound_codex_stream_tick_reaches_http() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (_lock, guard) = isolate_root();
     capture_warns(async {
         let (fx, _) = native_collector_tests::seed_recovered_row(guard.root.path(), 5833);
