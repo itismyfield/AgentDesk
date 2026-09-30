@@ -121,7 +121,7 @@ pub(crate) async fn try_route_intake(
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
     // The actual Discord destination decides O ownership, never the policy channel.
-    match intake_route::route_text(ctx.provider, ctx.channel_id) {
+    match intake_route::route_text_for_placement(ctx.provider, ctx.channel_id) {
         IntakeRoute::Unselected => route_intake(pool, ctx).await,
         IntakeRoute::Hold(detail) => required_block(detail),
         IntakeRoute::Gateway => match route_intake(pool, ctx).await {
@@ -579,7 +579,8 @@ async fn route_to_instance(
     // An O channel is never placed off its gateway, whatever the owner, override or preference.
     let off_gateway = target != ctx.leader_instance_id;
     if off_gateway
-        && intake_route::route_text(ctx.provider, ctx.channel_id) != IntakeRoute::Unselected
+        && intake_route::route_text_for_placement(ctx.provider, ctx.channel_id)
+            != IntakeRoute::Unselected
     {
         let detail = format!("O channel runs only on its gateway, not {target}");
         return apply_observe_mode(ctx.mode, required_block(detail));

@@ -1,17 +1,19 @@
-//! Channel ownership uses the immutable boot policy; uncertain identities withhold the body.
+//! Channel ownership uses the immutable boot policy and, for a selected channel, this process's
+//! adoption of it; uncertain identities withhold the body.
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
 /// The one O writer build switch, shared with the intake topology so both flip together.
 /// On, only the channels the boot list selects move to O; an empty list leaves all to Legacy.
 pub(crate) use super::topology::O_TUI_WRITER;
 
-use super::channel_policy;
+use super::channel_policy::{self, Candidate, Site};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod channel_gate;
 pub(crate) mod intake_route;
 pub(crate) use channel_gate::{
     IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
+    peek_o_owns_tui_output_for_channel, peek_o_owns_tui_output_for_channel_tmux,
 };
 
 /// Whether the writer switch is on; test builds may turn it on or off per thread.
@@ -19,9 +21,9 @@ pub(crate) fn writer_enabled() -> bool {
     test_override::enabled()
 }
 
-/// Each boot-snapshot channel with its boot kind and whether O owns its output; the writer host
-/// derives its store and actor switches from this, never from a reloaded config.
-pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, bool)> {
+/// Each boot-snapshot channel with its boot kind and, where this node may host it, its adoption;
+/// the writer host derives its channels from this, never from a reloaded config.
+pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)> {
     let enabled = writer_enabled();
     let evaluate = |snapshot: Option<&channel_policy::BootChannels>| {
         let Some(snapshot) = snapshot else {
@@ -30,8 +32,9 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, bool)> {
         let channels = snapshot.channels();
         let judged = |&channel: &u64| {
             let kind = snapshot.kind(channel);
-            let owned = channel_policy::owns_output(enabled, channels, channel, kind);
-            (channel, kind, owned)
+            let hosted = channel_policy::owns_output(enabled, channels, channel, kind);
+            let candidate = snapshot.candidate(channel).filter(|_| hosted).cloned();
+            (channel, kind, candidate)
         };
         channels.iter().map(judged).collect()
     };
@@ -43,10 +46,41 @@ fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
     if !writer_enabled() {
         return Vec::new();
     }
-    let owned = boot_ownership().into_iter().filter(|&(_, _, owned)| owned);
-    owned
-        .filter_map(|(channel, kind, _)| Some((channel, kind?)))
-        .collect()
+    let owned =
+        |(channel, kind, candidate): (u64, Option<RuntimeHandoffKind>, Option<Candidate>)| {
+            candidate.filter(|c| c.peek().owned())?;
+            Some((channel, kind?))
+        };
+    boot_ownership().into_iter().filter_map(owned).collect()
+}
+
+/// Before a new placement: a non-home node holds a selected channel, and the home releases a
+/// pending adoption so the placed Legacy turn never shares the channel with O.
+fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
+    if !writer_enabled() {
+        return Ok(());
+    }
+    test_override::with_channels(|snapshot| {
+        let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {
+            return Ok(());
+        };
+        // An unparseable destination may be any selected channel.
+        if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) {
+            return Ok(());
+        }
+        if let Site::Foreign { home } = snapshot.site() {
+            let channel = channel.map_or("an unknown channel".into(), |c| c.to_string());
+            return Err(format!(
+                "O channel {channel} is served only on O home {home}"
+            ));
+        }
+        if let Some(channel) = channel
+            && let Some(candidate) = snapshot.candidate(channel)
+        {
+            candidate.claim(channel);
+        }
+        Ok(())
+    })
 }
 
 #[cfg(not(test))]
@@ -124,7 +158,7 @@ pub(crate) mod test_override {
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.0);
         }
     }
-    use crate::services::tui_o::channel_policy::{self, BootChannels};
+    use crate::services::tui_o::channel_policy::{self, Adoption, BootChannels};
     use std::cell::RefCell;
 
     pub(crate) const CHANNELS_ENV: &str = "ADK_TEST_O_TUI_CHANNELS";
@@ -132,7 +166,12 @@ pub(crate) mod test_override {
         static CHANNELS: RefCell<Option<BootChannels>> = const { RefCell::new(None) };
     }
 
+    /// Selected channels read as committed, as if each already had its store.
     fn snapshot(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {
+        unadopted(channels).adopted(Adoption::Committed)
+    }
+
+    fn unadopted(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {
         let agents: Vec<_> = channels
             .iter()
             .map(|(id, kind)| {
@@ -160,9 +199,26 @@ pub(crate) mod test_override {
     }
 
     pub(crate) fn force_channels(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
+        force_snapshot(snapshot(channels))
+    }
+
+    /// Selected channels on the home with no store yet: each adoption starts pending.
+    pub(crate) fn force_candidates(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
+        force_snapshot(unadopted(channels).adopted(Adoption::Pending))
+    }
+
+    /// Selected channels as a node other than the O home `home` sees them.
+    pub(crate) fn force_foreign(
+        channels: &[(u64, RuntimeHandoffKind)],
+        home: &str,
+    ) -> ChannelsGuard {
+        force_snapshot(unadopted(channels).foreign(home))
+    }
+
+    fn force_snapshot(snapshot: BootChannels) -> ChannelsGuard {
         ChannelsGuard {
             _forced: force_on(),
-            previous: CHANNELS.with(|cell| cell.replace(Some(snapshot(channels)))),
+            previous: CHANNELS.with(|cell| cell.replace(Some(snapshot))),
         }
     }
 

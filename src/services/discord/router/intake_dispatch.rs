@@ -102,7 +102,9 @@ pub(crate) async fn admit_text_intake(
 ) -> IntakeAdmission {
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
-    if let IntakeRoute::Hold(detail) = intake_route::route(provider, destination.get()) {
+    if let IntakeRoute::Hold(detail) =
+        intake_route::route_for_placement(provider, destination.get())
+    {
         let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
         return IntakeAdmission::Blocked { reason };
     }

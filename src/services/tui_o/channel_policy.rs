@@ -1,18 +1,43 @@
-//! Validated writer membership is fixed for the lifetime of the process.
+//! Validated writer membership is fixed for the lifetime of the process; on the O home each
+//! selected channel also carries this process's adoption state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use anyhow::{Result, ensure};
 
 use crate::config::Config;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider_hosting::RuntimeMode;
+use crate::services::tui_o::alarm::AlarmRouter;
+use crate::services::tui_o::writer::WriterAlarm;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+mod adoption;
+#[cfg(test)]
+pub(crate) use adoption::stored;
+pub(crate) use adoption::{Adoption, Candidate, Site};
+
+#[derive(Clone, Debug, Default)]
 pub(crate) struct BootChannels {
     channels: BTreeSet<u64>,
     kinds: BTreeMap<u64, RuntimeHandoffKind>,
+    site: Site,
+    configured_id: Option<String>,
+    candidates: BTreeMap<u64, Candidate>,
+}
+
+/// Membership as configured; the adoption states are process state, not configuration.
+impl PartialEq for BootChannels {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.channels, &self.kinds, &self.site, &self.configured_id)
+            == (
+                &other.channels,
+                &other.kinds,
+                &other.site,
+                &other.configured_id,
+            )
+    }
 }
 
 static BOOT: OnceLock<BootChannels> = OnceLock::new();
@@ -94,7 +119,42 @@ impl BootChannels {
                 "tui_o.writer.channels: channel {id} is not registered"
             );
         }
-        Ok(Self { channels, kinds })
+        let (site, configured_id) = site(config, !channels.is_empty())?;
+        Ok(Self {
+            channels,
+            kinds,
+            site,
+            configured_id,
+            candidates: BTreeMap::new(),
+        })
+    }
+
+    /// Starts each selected channel's adoption. The store is read only for an enabled writer with
+    /// a non-empty list; a non-home node adopts nothing and only reports local store state.
+    fn seeded(
+        mut self,
+        enabled: bool,
+        stored: impl FnOnce(&BTreeSet<u64>) -> BTreeMap<u64, Adoption>,
+    ) -> Self {
+        if !enabled || self.channels.is_empty() {
+            return self;
+        }
+        let states = stored(&self.channels);
+        match &self.site {
+            Site::Home => {
+                let candidate = |(channel, state)| (channel, Candidate::new(state));
+                self.candidates = states.into_iter().map(candidate).collect();
+            }
+            Site::Foreign { home } => {
+                let detail = format!("non-home node ignores its local O store; O home is {home}");
+                let alarm = WriterAlarm::Halted { detail };
+                let alarms = AlarmRouter::for_process(None, None);
+                for (&channel, _) in states.iter().filter(|(_, s)| **s != Adoption::Pending) {
+                    alarms.raise_at(channel, &alarm, Instant::now());
+                }
+            }
+        }
+        self
     }
 
     pub(crate) fn channels(&self) -> &BTreeSet<u64> {
@@ -104,11 +164,80 @@ impl BootChannels {
     pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
         self.kinds.get(&channel).copied()
     }
+
+    pub(crate) fn site(&self) -> &Site {
+        &self.site
+    }
+
+    /// `cluster.instance_id` when clustering is on: the id the home judgement used.
+    pub(crate) fn configured_id(&self) -> Option<&str> {
+        self.configured_id.as_deref()
+    }
+
+    /// The adoption of a selected channel; none off the home or while the writer is off.
+    pub(crate) fn candidate(&self, channel: u64) -> Option<&Candidate> {
+        self.candidates.get(&channel)
+    }
+
+    /// Every selected channel starts in `state`, as `seeded` would leave it on the home.
+    #[cfg(test)]
+    pub(crate) fn adopted(mut self, state: Adoption) -> Self {
+        self.candidates = self
+            .channels
+            .iter()
+            .map(|&c| (c, Candidate::new(state)))
+            .collect();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn foreign(mut self, home: &str) -> Self {
+        self.site = Site::Foreign { home: home.into() };
+        self.candidates.clear();
+        self
+    }
+}
+
+/// The O home is `cluster.gateway_preferred_instance_id`; without clustering this node is it.
+/// A clustered node selecting channels must name both ids, or no node could tell it is home.
+fn site(config: &Config, selects: bool) -> Result<(Site, Option<String>)> {
+    let cluster = &config.cluster;
+    if !cluster.enabled {
+        return Ok((Site::Home, None));
+    }
+    let trimmed = |id: &Option<String>| {
+        let id = id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+        id.map(str::to_owned)
+    };
+    let (home, local) = (
+        trimmed(&cluster.gateway_preferred_instance_id),
+        trimmed(&cluster.instance_id),
+    );
+    let (Some(home), Some(local)) = (home, local) else {
+        ensure!(
+            !selects,
+            "tui_o.writer.channels needs cluster.instance_id and cluster.gateway_preferred_instance_id"
+        );
+        return Ok((Site::Home, None));
+    };
+    let site = if home == local {
+        Site::Home
+    } else {
+        Site::Foreign { home }
+    };
+    Ok((site, Some(local)))
 }
 
 pub(crate) fn install(config: &Config) -> Result<()> {
     let candidate = BootChannels::validate(config)?;
-    let installed = BOOT.get_or_init(|| candidate.clone());
+    let installed = BOOT.get_or_init(|| {
+        let stored = |channels: &BTreeSet<u64>| {
+            adoption::stored(crate::config::runtime_root().as_deref(), channels)
+        };
+        candidate
+            .clone()
+            .seeded(super::cutover::writer_enabled(), stored)
+    });
     ensure!(
         installed == &candidate,
         "tui_o.writer.channels requires a process restart"

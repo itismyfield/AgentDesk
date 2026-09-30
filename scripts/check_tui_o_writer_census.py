@@ -60,7 +60,7 @@ PRIMITIVES: dict[str, str] = {
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
 GATE_RE = re.compile(
-    r"\b(?:o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
+    r"\b(?:(?:peek_)?o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
 )
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 DEFN_RE = re.compile(r"\bfn\s+$")
@@ -311,10 +311,10 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/recovery_paths/restart.rs": 1,
     "src/services/discord/session_relay_sink.rs": 2,
     "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
-    "src/services/discord/tmux_watcher.rs": 1,
+    "src/services/discord/tmux_watcher.rs": 2,
     "src/services/discord/tmux_watcher/completion_producer.rs": 1,
     "src/services/discord/tmux_restart_handoff.rs": 1,
-    "src/services/discord/tmux_watcher/streaming_status_tick.rs": 1,
+    "src/services/discord/tmux_watcher/streaming_status_tick.rs": 2,
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 1,
     "src/services/discord/turn_bridge/stream_tick.rs": 1,
     "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
@@ -323,7 +323,7 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
     "src/services/discord/turn_finalizer/watcher_backstop.rs": 1,
-    "src/services/tui_o/cutover.rs": 2,
+    "src/services/tui_o/cutover.rs": 4,
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.

@@ -1099,7 +1099,8 @@ async fn activation_facts_use_only_the_published_self_id_pg() {
     o_writer_session(&pool, "foreign", &foreign.to_string(), "node-runner").await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    let host = super::o_writer_host::test_host::over(shared, std::time::Duration::from_millis(300));
+    let host =
+        super::o_writer_host::test_host::over(shared, std::time::Duration::from_millis(300), None);
 
     let unpublished = host
         .activation_facts(own, crate::services::tui_o::shadow::ShadowProvider::Claude)
@@ -1126,6 +1127,56 @@ async fn activation_facts_use_only_the_published_self_id_pg() {
         )
         .await;
     assert_eq!(facts.unwrap().runner_sessions, 1, "another node's session");
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() {
+    if !in_unpublished_child("activation_facts_use_the_configured_home_id_and_local_starts_hold_pg")
+    {
+        return;
+    }
+    use crate::services::tui_o::shadow::ShadowProvider::Claude;
+    use crate::services::tui_o::writer::host::HostIo;
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let own = 6_470_011;
+    o_writer_session(&pool, "own", &own.to_string(), "node-self").await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let wait = std::time::Duration::from_millis(300);
+    let host = super::o_writer_host::test_host::over(shared, wait, Some("node-self"));
+
+    let facts = host.activation_facts(own, Claude).await;
+    assert_eq!(
+        facts.unwrap(),
+        crate::services::tui_o::writer::activation::ActivationFacts::default(),
+        "the configured id counts its own session before any id is published"
+    );
+    assert_eq!(host.local_custody(own, Claude), Ok(false));
+    let pending = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+    std::fs::create_dir_all(&pending).unwrap();
+    let record = serde_json::json!({"provider": "claude", "channel_id": own,
+        "tmux_session_name": "s", "prompt_text": "p", "anchor_message_id": 1,
+        "lease_relay_owner": "o", "lease_runtime_kind": null, "lease_turn_id": null,
+        "lease_session_key": null, "generation": 0, "created_at_ms": 0, "observed_at_ms": 0});
+    std::fs::write(pending.join("claude_6470011_1.json"), record.to_string()).unwrap();
+    assert_eq!(
+        host.local_custody(own, Claude),
+        Ok(true),
+        "a durable pending start holds"
+    );
+
+    crate::services::cluster::node_registry::SELF_INSTANCE_ID
+        .set("node-other".into())
+        .unwrap();
+    let facts = host.activation_facts(own, Claude).await;
+    assert!(
+        matches!(&facts, Err(detail) if detail.contains("differs")),
+        "a published id other than the configured one holds: {facts:?}"
+    );
 
     pool.close().await;
     fixture.drop().await;

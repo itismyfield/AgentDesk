@@ -10,24 +10,29 @@ is never removed from the list and never added again. The next canary uses a dif
 ## 1. Pick the channel
 
 Use a Discord channel created for the canary. Do not use a channel that already carries a
-conversation. On the gateway node all of these must hold, or activation holds the channel:
+conversation. On the gateway node all of these must hold, or the channel is not adopted:
 
 - The channel is registered in `agents[].channels` with a Claude or Codex TUI runtime.
+- The gateway node is the O home: without clustering every node is; with clustering both
+  `cluster.instance_id` and `cluster.gateway_preferred_instance_id` are set and equal on it. A
+  clustered node with a non-empty list and either id unset refuses to boot.
 - The provider's gateway runs on a node with the PG gateway lease. Without PG the channel is held.
 - `intake_outbox` has no `pending`, `claimed`, `accepted`, `spawned` or `dispatched` row for it.
 - `sessions` has no live row for it owned by another node (`status` other than `disconnected` or
   `aborted` with a different `instance_id`).
 - There is no `/node` override for the channel and its agent has no `default_execution_node_id`.
-- There is no Legacy inflight state for the channel and no retained terminal delivery custody
+- There is no Legacy inflight state for the channel, no pending TUI-direct start for it
+  (`<runtime_root>/discord_tui_direct_pending_start`) and no retained terminal delivery custody
   record naming it (`<runtime_root>/discord_terminal_delivery_custody`). A custody record that does
-  not parse also holds activation.
+  not parse also blocks adoption.
 - The channel's binding log (`<runtime_root>/binding_events/<channel>.log`) binds at least one
   transcript, every transcript it names is still empty (0 bytes, same file), and no bind is pending.
 - `<runtime_root>/o_store/<channel>` does not exist.
 
-The TUI session must be running on the gateway with an empty transcript before the restart. Do
-not send a message to the channel before activation: its first turn would grow the transcript and
-activation would hold.
+The TUI session must be running on the gateway with an empty transcript before the restart. Only
+the canary must stay quiet; other channels may keep working through the restart. Do not send a
+message to the canary before activation: its placement or first Legacy body cancels the adoption
+for that process, the channel stays on Legacy, and its grown transcript blocks later adoptions.
 
 ## 2. Apply
 
@@ -48,13 +53,16 @@ activation would hold.
 - The next restart logs no new init line: the stored init is recovered, never written again.
 
 Activation waits, without a hold, until the gateway lease is owned; facts read while the lease was
-lost are read again once it is owned. It waits up to 10 seconds for the cluster bootstrap to publish
-this node's instance id, and holds with `this node's instance id is not published yet` otherwise.
+lost are read again once it is owned. With clustering it uses `cluster.instance_id` and stops if
+the cluster bootstrap published another id; without clustering it waits up to 10 seconds for the
+published id and stops with `this node's instance id is not published yet` otherwise.
 
-When activation holds, the log line and `tui_o:halted:<channel>` name the reason, for example
+When activation stops, the log line and `tui_o:halted:<channel>` name the reason, for example
 `first activation: 1 open intake rows` or `first activation: source ... already holds N bytes`.
-Output of that channel stays withheld; Legacy does not take it over. Do not delete store files or
-edit the list to retry. Leave the channel in the list and start again with another new channel.
+A stop before any store write releases the channel: Legacy keeps its output for this process. A
+stop after a store write holds it: output stays withheld and Legacy does not take it over. Do not
+delete store files or edit the list to retry. Leave the channel in the list and start again with
+another new channel.
 
 A held store is never initialized again: an era channel whose `init` is missing or damaged, an
 `init` without `o_era`, or a channel directory without `init` all hold.
@@ -68,7 +76,9 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 - Keep the channel in `tui_o.writer.channels`. Removing it would hand the channel to Legacy on the
   next boot; that handback is not supported.
 - Do not start Legacy delivery for the channel by any other means.
-- A standby that takes the gateway lease has no store for the channel and holds it.
+- A node other than the O home adopts nothing. If it takes the gateway lease it holds new messages
+  for the canary with `served only on O home <id>`; keep no TUI session for the canary there,
+  since such a session's output would go through Legacy.
 
 ## 5. Observe
 

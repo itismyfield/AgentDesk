@@ -926,11 +926,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
-        // O posts this body: consume the range without a lease, a journal or transport.
-        let o_ownership = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
-            channel_id.get(),
-            Some(&tmux_session_name),
-        );
+        // O posts this body: consume the range without a lease, a journal or transport. Only a
+        // direct send ends a pending adoption; otherwise the watcher sends no body and just reads it.
+        let o_owns = if watcher_will_direct_send {
+            crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux
+        } else {
+            crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux
+        };
+        let o_ownership = o_owns(channel_id.get(), Some(&tmux_session_name));
         let o_delegated_session = o_ownership.unwrap_or(true);
         let o_delegated_terminal = o_ownership == Ok(true) && watcher_will_direct_send;
         let watcher_will_direct_send = watcher_will_direct_send && !o_delegated_session;

@@ -30,6 +30,7 @@ fn boot_membership_survives_reload_until_restart() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart", "--nocapture"])
             .env(CHILD, "1")
+            .env("AGENTDESK_ROOT_DIR", tempfile::tempdir().unwrap().path())
             .output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -88,4 +89,178 @@ fn boot_membership_survives_reload_until_restart() {
         41,
         Some(RuntimeHandoffKind::ClaudeTui)
     ));
+}
+
+fn writer_config(channels: &[u64], cluster: serde_json::Value) -> Config {
+    serde_json::from_value(serde_json::json!({
+        "server": {}, "cluster": cluster, "tui_o": {"writer": {"channels": channels}},
+        "agents": [{"id": "w", "name": "W", "channels": {"claude": {"id": "41", "runtime": "tui"}}}],
+    }))
+    .unwrap()
+}
+
+#[test]
+fn only_an_enabled_home_with_a_list_reads_the_store_and_adopts() {
+    use serde_json::json;
+    let untouched = |_: &BTreeSet<u64>| -> BTreeMap<u64, Adoption> { panic!("store read") };
+    let found = |_: &BTreeSet<u64>| BTreeMap::from([(41, Adoption::Committed)]);
+    let off = json!({});
+    let boot =
+        |channels: &[u64], cluster| BootChannels::validate(&writer_config(channels, cluster));
+    let seeded = boot(&[41], off.clone()).unwrap().seeded(false, untouched);
+    assert!(seeded.candidate(41).is_none(), "writer off");
+    let seeded = boot(&[], off.clone()).unwrap().seeded(true, untouched);
+    assert!(seeded.candidate(41).is_none(), "empty list");
+    let seeded = boot(&[41], off).unwrap().seeded(true, found);
+    assert_eq!(
+        seeded.candidate(41).map(Candidate::peek),
+        Some(Adoption::Committed)
+    );
+
+    let home = json!({"enabled": true, "instance_id": "a", "gateway_preferred_instance_id": "a"});
+    let home = boot(&[41], home).unwrap();
+    assert_eq!(
+        (home.site(), home.configured_id()),
+        (&Site::Home, Some("a"))
+    );
+    let foreign =
+        json!({"enabled": true, "instance_id": "b", "gateway_preferred_instance_id": "a"});
+    let foreign = boot(&[41], foreign).unwrap();
+    assert_eq!(foreign.site(), &Site::Foreign { home: "a".into() });
+    assert!(
+        foreign.seeded(true, found).candidate(41).is_none(),
+        "a non-home node adopts nothing"
+    );
+    for unnamed in [
+        json!({"enabled": true, "instance_id": "a"}),
+        json!({"enabled": true, "gateway_preferred_instance_id": "a"}),
+    ] {
+        assert!(boot(&[41], unnamed.clone()).is_err(), "{unnamed}");
+        assert!(boot(&[], unnamed).is_ok(), "no list needs no home");
+    }
+}
+
+#[test]
+fn a_selected_channel_starts_committed_only_over_a_readable_init() {
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    let root = tempfile::tempdir().unwrap();
+    let channels = BTreeSet::from([1, 2, 3, 4, 5]);
+    let all = |state| {
+        channels
+            .iter()
+            .map(|&c| (c, state))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        adoption::stored(Some(root.path()), &channels),
+        all(Adoption::Pending),
+        "no store"
+    );
+    assert_eq!(
+        adoption::stored(None, &channels),
+        all(Adoption::Held),
+        "no runtime root"
+    );
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path());
+    let at = chrono::Utc::now();
+    let init = |channel| {
+        let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "b".into());
+        Ok(Initialized {
+            channel,
+            sources,
+            initial_anchor,
+            build_digest,
+            at,
+        })
+    };
+    store
+        .unwrap()
+        .unwrap()
+        .begin_era(&[1, 2], at, init)
+        .unwrap();
+    let dir = root.path().join("o_store");
+    std::fs::remove_file(dir.join("2/init")).unwrap();
+    std::fs::create_dir(dir.join("3")).unwrap();
+    std::fs::create_dir(dir.join("5")).unwrap();
+    std::fs::write(dir.join("5/init"), b"{").unwrap();
+    let expected = BTreeMap::from([
+        (1, Adoption::Committed),
+        (2, Adoption::Held),
+        (3, Adoption::Held),
+        (4, Adoption::Pending),
+        (5, Adoption::Held),
+    ]);
+    assert_eq!(adoption::stored(Some(root.path()), &channels), expected);
+}
+
+#[test]
+fn a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it() {
+    use crate::services::tui_o::cutover::{self, IdentityError, test_override};
+    use RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    let _candidates = test_override::force_candidates(&[(41, ClaudeTui)]);
+    let state = || test_override::with_channels(|boot| boot.unwrap().candidate(41).unwrap().peek());
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(false)
+    );
+    assert_eq!(cutover::o_owns_tui_output_for_channel(42, None), Ok(false));
+    let mismatch = cutover::o_owns_tui_output_for_channel(41, Some(CodexTui));
+    assert!(matches!(mismatch, Err(IdentityError::KindMismatch { .. })));
+    assert_eq!(state(), Adoption::Pending, "no body was judged for 41");
+    assert_eq!(
+        cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(false)
+    );
+    assert_eq!(state(), Adoption::Released);
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(false)
+    );
+
+    let _committed = test_override::force_channels(&[(41, ClaudeTui)]);
+    assert_eq!(
+        cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(true)
+    );
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(true)
+    );
+    let _foreign = test_override::force_foreign(&[(41, ClaudeTui)], "a");
+    assert_eq!(
+        cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(false)
+    );
+}
+
+#[test]
+fn a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it() {
+    use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+    use crate::services::tui_o::cutover::test_override;
+    use RuntimeHandoffKind::ClaudeTui;
+    let held = |route| matches!(route, IntakeRoute::Hold(detail) if detail.contains("O home a"));
+    let _foreign = test_override::force_foreign(&[(41, ClaudeTui)], "a");
+    assert!(held(intake_route::route_for_placement("claude", 41)));
+    assert!(held(intake_route::route_text_for_placement(
+        "claude",
+        "not-a-channel"
+    )));
+    assert_eq!(
+        intake_route::route_for_placement("claude", 42),
+        IntakeRoute::Unselected
+    );
+    assert_eq!(
+        intake_route::route("claude", 41),
+        IntakeRoute::Unselected,
+        "claims are not held"
+    );
+    assert!(intake_route::held_channels("claude").is_empty());
+
+    let _candidates = test_override::force_candidates(&[(41, ClaudeTui)]);
+    assert_eq!(
+        intake_route::route_for_placement("claude", 41),
+        IntakeRoute::Unselected
+    );
+    let state = test_override::with_channels(|boot| boot.unwrap().candidate(41).unwrap().peek());
+    assert_eq!(state, Adoption::Released);
 }

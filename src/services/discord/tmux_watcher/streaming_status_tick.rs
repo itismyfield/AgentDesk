@@ -690,13 +690,18 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // Withhold Legacy body writes for O ownership or unresolved selected identities.
-        if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
-            channel_id.get(),
-            Some(&tmux_session_name),
-        )
-        .unwrap_or(true)
-        {
+        // Withhold Legacy body writes for O ownership or unresolved selected identities. Only a
+        // tick with unsent body text may end a pending adoption; an empty one just reads it.
+        let has_unsent_body = !full_response
+            .get(response_sent_offset..)
+            .unwrap_or("")
+            .is_empty();
+        let o_owns = if has_unsent_body {
+            crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux
+        } else {
+            crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux
+        };
+        if o_owns(channel_id.get(), Some(&tmux_session_name)).unwrap_or(true) {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
         }

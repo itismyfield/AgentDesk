@@ -24,28 +24,56 @@ pub(crate) enum IdentityError {
     },
 }
 
+/// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Use {
+    /// A pending adoption is released: Legacy takes the channel for this process.
+    Body,
+    /// A pending adoption reads as Legacy and stays pending.
+    Peek,
+}
+
+/// For a caller about to send a TUI body; a pending adoption is released to Legacy first.
 pub(crate) fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, || kind)
+    decide(channel_id, Use::Body, || kind)
 }
 
 pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, || {
-        session.and_then(|session| {
-            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
-                .map(|binding| binding.runtime_kind)
-                .or_else(|| crate::services::tmux_common::resolve_tmux_runtime_kind_marker(session))
-        })
+    decide(channel_id, Use::Body, || session_kind(session))
+}
+
+/// For diagnostics and lifecycle checks that send no body: a pending adoption stays pending.
+pub(crate) fn peek_o_owns_tui_output_for_channel(
+    channel_id: u64,
+    kind: Option<RuntimeHandoffKind>,
+) -> Result<bool, IdentityError> {
+    decide(channel_id, Use::Peek, || kind)
+}
+
+pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
+    channel_id: u64,
+    session: Option<&str>,
+) -> Result<bool, IdentityError> {
+    decide(channel_id, Use::Peek, || session_kind(session))
+}
+
+fn session_kind(session: Option<&str>) -> Option<RuntimeHandoffKind> {
+    session.and_then(|session| {
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+            .map(|binding| binding.runtime_kind)
+            .or_else(|| crate::services::tmux_common::resolve_tmux_runtime_kind_marker(session))
     })
 }
 
 fn decide(
     channel_id: u64,
+    usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     let enabled = super::writer_enabled();
@@ -53,7 +81,7 @@ fn decide(
         return Ok(false);
     }
     let evaluate = |snapshot: Option<&BootChannels>| {
-        decide_with_snapshot(enabled, snapshot, channel_id, resolve_kind)
+        decide_with_snapshot(enabled, snapshot, channel_id, usage, resolve_kind)
     };
     #[cfg(test)]
     let result = super::test_override::with_channels(evaluate);
@@ -77,6 +105,7 @@ fn decide_with_snapshot(
     enabled: bool,
     snapshot: Option<&BootChannels>,
     channel_id: u64,
+    usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
@@ -99,12 +128,16 @@ fn decide_with_snapshot(
             actual: kind,
         });
     }
-    Ok(channel_policy::owns_output(
-        enabled,
-        snapshot.channels(),
-        channel_id,
-        Some(kind),
-    ))
+    let selected =
+        channel_policy::owns_output(enabled, snapshot.channels(), channel_id, Some(kind));
+    // Only a committed (or held) adoption is O's; off the home a selected channel has none.
+    let Some(candidate) = snapshot.candidate(channel_id).filter(|_| selected) else {
+        return Ok(false);
+    };
+    Ok(match usage {
+        Use::Body => candidate.claim(channel_id),
+        Use::Peek => candidate.peek().owned(),
+    })
 }
 
 #[cfg(test)]
