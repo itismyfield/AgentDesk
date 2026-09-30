@@ -999,6 +999,15 @@ mod tests {
                 proceed,
             ),
             (
+                "row not proven, no votes",
+                SessionTargetEvidence {
+                    session_record: HostWitness::Absent,
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::NoHostEvidence),
+                refused,
+            ),
+            (
                 "no row",
                 SessionTargetEvidence {
                     session_record: HostWitness::NoRow,
