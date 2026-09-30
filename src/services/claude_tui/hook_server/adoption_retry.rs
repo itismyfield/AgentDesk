@@ -198,7 +198,8 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             let held = if pending {
                 !(queued && queued_count(tmux) > 1)
             } else {
-                no_channel || adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some()
+                no_channel
+                    || (adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some())
             };
             let queue = if held {
                 QueueStep::Hold

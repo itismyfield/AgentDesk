@@ -5,8 +5,8 @@ use crate::services::claude_tui::hook_server::adoption_retry::{
 };
 use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
 use crate::services::tui_prompt_dedupe::pending::{
-    ExactPathWait, PendingRestore, expire_channel_mapping_for_tests, last_restore_outcome,
-    reset_restore_outcomes_for_tests,
+    CHANNEL_MAPPING_TTL, ExactPathWait, PendingRestore, age_channel_mapping_for_tests,
+    expire_channel_mapping_for_tests, last_restore_outcome, reset_restore_outcomes_for_tests,
 };
 use crate::services::tui_prompt_dedupe::{
     claude_session_rotation_for_tmux, register_launched_tmux_runtime_binding,
@@ -134,6 +134,31 @@ impl Pane {
             Some(self.tmux.as_str()),
             "launch A maps to the pane"
         );
+    }
+
+    /// Sends the file-less C's /clear with `request` and returns the hook's status.
+    fn clear_to(&self, ingress: &Ingress, c: &str, request: &str) -> u16 {
+        let clear = serde_json::json!({
+            "session_id": c, "source": "clear", "transcript_path": self.path(c),
+        });
+        ingress.claude_hook("SessionStart", &self.a, &clear, Some(request))
+    }
+
+    /// Writes C's transcript a minute newer than `bound`'s and lets the deferred poll adopt it.
+    fn adopt_newer(&self, c: &str, bound: &str) {
+        let bound = std::fs::metadata(self.path(bound))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let c_file = std::fs::File::options()
+            .write(true)
+            .open(self.touch(c))
+            .unwrap();
+        c_file
+            .set_modified(bound + std::time::Duration::from_secs(60))
+            .unwrap();
+        retry_deferred_claude_adoptions();
+        self.expect_bound(c);
     }
 
     fn last_record(&self) -> BindingTarget {
@@ -394,7 +419,7 @@ fn a_restored_b_whose_channel_mapping_expired_still_logs_and_adopts_a_file_less_
     let _reset = Reset;
     let pane = Pane::new(&ingress, root.path(), 7_526, false);
     pane.restart();
-    let b_path = pane.touch(&pane.b);
+    pane.touch(&pane.b);
     let bound = PendingRestore::BoundFromLedger {
         pending_seq: 2,
         exact_wait: None,
@@ -402,16 +427,18 @@ fn a_restored_b_whose_channel_mapping_expired_still_logs_and_adopts_a_file_less_
     assert_eq!(pane.rehydrate(), Some(bound.clone()), "B restored");
 
     // The idle reader keeps B's runtime binding fresh; only the channel mapping outlives its TTL.
-    expire_channel_mapping_for_tests(&pane.tmux);
-    assert_eq!(dedupe::owner_channel_for_tmux_session(&pane.tmux), None);
-    assert_eq!(pane.rehydrate(), Some(bound), "B kept on the next pass");
+    // The next pass judges B again (its Resolved moved the log on), the one after hits the memo.
+    for pass in ["judged again", "memoized"] {
+        expire_channel_mapping_for_tests(&pane.tmux);
+        assert_eq!(dedupe::owner_channel_for_tmux_session(&pane.tmux), None);
+        assert_eq!(pane.rehydrate(), Some(bound.clone()), "B kept when {pass}");
+        let mapped = dedupe::owner_channel_for_tmux_session(&pane.tmux);
+        assert_eq!(mapped, Some(pane.channel), "mapping renewed when {pass}");
+    }
     pane.expect_bound(&pane.b);
 
     let c = uuid();
-    let clear = serde_json::json!({
-        "session_id": c, "source": "clear", "transcript_path": pane.path(&c),
-    });
-    let status = ingress.claude_hook("SessionStart", &pane.a, &clear, Some(&uuid()));
+    let status = pane.clear_to(&ingress, &c, &uuid());
     assert_eq!(status, 202, "/clear to a file-less C is acknowledged");
     assert_eq!(
         pending_lines(pane.channel, &c),
@@ -423,14 +450,56 @@ fn a_restored_b_whose_channel_mapping_expired_still_logs_and_adopts_a_file_less_
         1,
         "C waits in the adoption queue"
     );
+    pane.adopt_newer(&c, &pane.b);
+}
 
-    let newer = std::fs::metadata(&b_path).unwrap().modified().unwrap()
-        + std::time::Duration::from_secs(60);
-    let c_path = pane.touch(&c);
-    let c_file = std::fs::File::options().write(true).open(c_path).unwrap();
-    c_file.set_modified(newer).unwrap();
+#[test]
+fn a_seeded_pane_keeps_its_channel_and_refuses_a_file_less_c_until_the_pass_restores_it() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_528, true);
+    pane.restart();
+    let seeded = PendingRestore::Seeded { pending_seq: 2 };
+    assert_eq!(pane.rehydrate(), Some(seeded.clone()), "B seeded");
+    pane.adopt_newer(&pane.b, &pane.a);
+    // The delivery path settles the A to B rotation; the next poll retires B's entry.
+    dedupe::clear_claude_session_rotation(&pane.tmux);
     retry_deferred_claude_adoptions();
-    pane.expect_bound(&c);
+    assert_eq!(deferred_adoption_count(), 0, "B's entry retired");
+
+    // Later passes over the Seeded pane renew a mapping that would lapse before the next one.
+    age_channel_mapping_for_tests(
+        &pane.tmux,
+        CHANNEL_MAPPING_TTL - std::time::Duration::from_secs(30),
+    );
+    assert_eq!(pane.rehydrate(), Some(seeded), "the outcome stays Seeded");
+    pane.expect_bound(&pane.b);
+    age_channel_mapping_for_tests(&pane.tmux, std::time::Duration::from_secs(60));
+    let mapped = dedupe::owner_channel_for_tmux_session(&pane.tmux);
+    assert_eq!(mapped, Some(pane.channel), "the pass renewed the mapping");
+
+    // A mapping that lapsed anyway refuses the file-less C instead of dropping it.
+    expire_channel_mapping_for_tests(&pane.tmux);
+    let (c, request) = (uuid(), uuid());
+    let status = pane.clear_to(&ingress, &c, &request);
+    assert_eq!(status, 425, "C refused while its pane has no channel");
+    assert_eq!(pending_lines(pane.channel, &c), 0, "nothing logged for C");
+    pane.rehydrate();
+    let status = pane.clear_to(&ingress, &c, &request);
+    assert_eq!(status, 202, "the retry after the pass is acknowledged");
+    assert_eq!(
+        pending_lines(pane.channel, &c),
+        1,
+        "C is Pending in the log"
+    );
+    assert_eq!(
+        deferred_adoption_count(),
+        1,
+        "C waits in the adoption queue"
+    );
+    pane.adopt_newer(&c, &pane.b);
 }
 
 #[test]

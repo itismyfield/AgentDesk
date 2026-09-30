@@ -556,6 +556,21 @@ pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
     }
 }
 
+#[cfg(test)]
+pub(crate) const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPING_TTL;
+
+/// Moves the pane's channel mapping `by` into the past while its runtime binding stays fresh.
+#[cfg(test)]
+pub(crate) fn age_channel_mapping_for_tests(tmux_session: &str, by: std::time::Duration) {
+    let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(mapping) = state.channel_by_tmux.get_mut(tmux_session) {
+        mapping.recorded_at = mapping
+            .recorded_at
+            .checked_sub(by)
+            .expect("uptime spans the age");
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "pending_tests.rs"]
 mod tests;

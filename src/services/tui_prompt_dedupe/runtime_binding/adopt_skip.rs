@@ -9,7 +9,8 @@ pub(crate) enum AdoptSkip {
     UnmappedCommandSession,
     NotClaudeTui,
     MalformedBindingPath,
-    /// Adopted in memory only: the pane has no channel, so there is no log to write.
+    /// The pane has no channel, so there is no log to write; an existing transcript is adopted in
+    /// memory only.
     NoChannel,
     /// A file-less candidate on a pane the rehydrate pass maps, whose channel mapping lapsed.
     ChannelNotRestored,
