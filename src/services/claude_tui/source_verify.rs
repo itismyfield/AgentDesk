@@ -1,6 +1,5 @@
 //! Decides whether a Claude hook names a transcript the pane may bind to.
 //! Payload path, session id, opened-file identity and first record decide; mtime never does.
-#![allow(dead_code)] // Dormant until the Claude binding path calls these checks.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -10,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
+use crate::services::tui_prompt_dedupe::binding_events::{HookSignal, SourceId};
 
 /// Longest first line read to learn whose transcript a file is.
 const FIRST_RECORD_LIMIT: u64 = 1 << 20;
@@ -27,6 +28,7 @@ pub(crate) struct ClaudeHookSource {
 
 impl ClaudeHookSource {
     /// Reads parent fields only, so a subagent's `agent_transcript_path` never names the pane source.
+    #[cfg(test)]
     pub(crate) fn from_payload(payload: &Value) -> Option<Self> {
         let field = |key: &str| payload.get(key).and_then(Value::as_str);
         Some(Self {
@@ -37,8 +39,23 @@ impl ClaudeHookSource {
         })
     }
 
+    /// `transcript_path` is the payload's path, already spelled under the pane's projects root.
+    pub(crate) fn from_signal(
+        session_id: &str,
+        hook: &HookSignal,
+        transcript_path: PathBuf,
+    ) -> Self {
+        Self {
+            event: hook.event.clone(),
+            session_id: session_id.to_owned(),
+            transcript_path,
+            start_source: hook.source.clone(),
+        }
+    }
+
     fn is_explicit_resume(&self) -> bool {
-        self.event == "SessionStart" && self.start_source.as_deref() == Some("resume")
+        HookEventKind::from_path(&self.event) == HookEventKind::SessionStart
+            && self.start_source.as_deref() == Some("resume")
     }
 }
 
@@ -49,6 +66,23 @@ pub(crate) struct ClaudeSource {
     pub path: PathBuf,
     /// None until a hook verified the file; the launch binding exists before it.
     pub file: Option<SourceFileIdentity>,
+}
+
+impl ClaudeSource {
+    /// The log identity of a verified source; `None` without a Unix file identity.
+    pub(crate) fn source_id(&self) -> Option<SourceId> {
+        let (dev, ino) = match self.file? {
+            #[cfg(unix)]
+            SourceFileIdentity::Unix { dev, ino } => (dev, ino),
+            SourceFileIdentity::Unavailable => return None,
+        };
+        Some(SourceId {
+            session_id: self.session_id.clone(),
+            path: self.path.clone(),
+            dev,
+            ino,
+        })
+    }
 }
 
 /// First line of an opened transcript.
@@ -134,11 +168,8 @@ pub(crate) fn verify_claude_source(
     history: &[ClaudeSource],
 ) -> SourceVerdict {
     use SourceVerdict::{Anomaly, Confirm, Current, Pending, PendingConflict, Rejected, Rotate};
-    if uuid::Uuid::parse_str(&hook.session_id).is_err() {
-        return Rejected(SourceRejection::InvalidSessionId);
-    }
-    if !is_top_level_transcript(projects_root, &hook.transcript_path, &hook.session_id) {
-        return Rejected(SourceRejection::NotTopLevelTranscript);
+    if let Some(rejection) = precheck(hook, projects_root) {
+        return Rejected(rejection);
     }
     let named = |source: &&ClaudeSource| source.session_id == hook.session_id;
     let current = history.last().filter(named);
@@ -184,7 +215,35 @@ pub(crate) fn verify_claude_source(
     }
 }
 
-fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
+/// The checks that need no file: a valid session id and a top-level transcript path.
+pub(crate) fn precheck(hook: &ClaudeHookSource, projects_root: &Path) -> Option<SourceRejection> {
+    if uuid::Uuid::parse_str(&hook.session_id).is_err() {
+        return Some(SourceRejection::InvalidSessionId);
+    }
+    if !is_top_level_transcript(projects_root, &hook.transcript_path, &hook.session_id) {
+        return Some(SourceRejection::NotTopLevelTranscript);
+    }
+    None
+}
+
+/// Spells `payload` under `root` when only the spelling differs (a symlinked or `/private` root);
+/// any other path is returned as is and fails the top-level check.
+pub(crate) fn normalize_payload_path(root: &Path, payload: &Path) -> PathBuf {
+    if payload.starts_with(root) {
+        return payload.to_path_buf();
+    }
+    let parts = payload.parent().and_then(|project| {
+        let same_root =
+            std::fs::canonicalize(project.parent()?).ok()? == std::fs::canonicalize(root).ok()?;
+        same_root.then(|| (project.file_name(), payload.file_name()))
+    });
+    match parts {
+        Some((Some(project), Some(file))) => root.join(project).join(file),
+        _ => payload.to_path_buf(),
+    }
+}
+
+pub(crate) fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
     let file_name = format!("{session_id}.jsonl");
     let Ok(rest) = path.strip_prefix(root) else {
         return false;
@@ -196,6 +255,7 @@ fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
 }
 
 /// Byte offset where a fork's own rows start, and how many leading rows it inherited.
+#[allow(dead_code)] // Dormant until the fork boundary path calls it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ForkBoundary {
     pub offset: u64,
@@ -203,6 +263,7 @@ pub(crate) struct ForkBoundary {
 }
 
 /// Why a fork boundary cannot be named; the caller stops that source instead of guessing.
+#[allow(dead_code)] // Dormant until the fork boundary path calls it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ForkBoundaryError {
     ParentUuidsUnknown,
@@ -214,6 +275,7 @@ pub(crate) enum ForkBoundaryError {
 
 /// Finds the byte after the leading rows whose `uuid` the parent already had.
 /// Rows are matched by native uuid only; bodies are never compared.
+#[allow(dead_code)] // Dormant until the fork boundary path calls it.
 pub(crate) fn fork_start_boundary(
     parent_uuids: &HashSet<String>,
     fork_head: &[u8],
@@ -434,6 +496,21 @@ mod tests {
         assert_eq!(history.len(), 3);
         let stop = hook("Stop", C, &transcript(root, C), None);
         assert_eq!(feed(root, &mut history, &stop), SourceVerdict::Current);
+    }
+
+    #[test]
+    fn snake_case_session_start_is_an_explicit_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let history = bound_chain(root, &[A, B, C]);
+        // The receiver hands hooks over under their snake_case event name.
+        let signal = HookSignal::from_payload("session_start", &json!({"source": "resume"}));
+        let resume = ClaudeHookSource::from_signal(B, &signal, transcript(root, B));
+        let opened = observe_transcript(&resume.transcript_path).unwrap();
+        assert_eq!(
+            verify_claude_source(&resume, root, &opened, &history),
+            SourceVerdict::PendingConflict
+        );
     }
 
     #[test]

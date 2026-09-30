@@ -1,6 +1,10 @@
 use super::*;
 use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 mod adopt_skip;
+mod claude_source;
+#[cfg(test)]
+pub(crate) use claude_source::AFTER_CHECK;
+pub(crate) use claude_source::Record;
 mod codex_hook;
 pub(crate) use codex_hook::{codex_tail_source_retired, observe_codex_hook};
 pub(crate) mod pane_registration;
@@ -129,7 +133,13 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Observed)
+    publish_runtime_binding(
+        authority,
+        binding,
+        None,
+        CauseSource::Observed,
+        Record::Stat,
+    )
 }
 
 /// Launch paths let the execution's context name the cause of a new source.
@@ -146,7 +156,7 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Launch)
+    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
 }
 
 /// Persists the binding event first; if that fails the binding is not published.
@@ -155,6 +165,7 @@ fn publish_runtime_binding(
     binding: TuiRuntimeBinding,
     channel_id: Option<u64>,
     cause: CauseSource,
+    record: Record,
 ) -> bool {
     let tmux_session_name = authority.session();
     if tmux_session_name.is_empty() || binding.output_path.trim().is_empty() {
@@ -176,8 +187,7 @@ fn publish_runtime_binding(
             .map(|e| &e.value);
         let proposal =
             Proposal::for_binding(channel_id, tmux_session_name, &binding, replaced, cause);
-        if let Some(Err(error)) = proposal.map(|proposal| binding_events::record_source(&proposal))
-        {
+        if let Some(Err(error)) = proposal.map(|proposal| record.persist(&proposal)) {
             tracing::error!(
                 tmux_session_name,
                 channel_id,
@@ -214,6 +224,22 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) -> bool {
+    register_rehydrated_under_source_authority(
+        authority,
+        provider,
+        channel_id,
+        binding,
+        Record::Stat,
+    )
+}
+
+fn register_rehydrated_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    channel_id: u64,
+    binding: TuiRuntimeBinding,
+    record: Record,
+) -> bool {
     let provider = normalize_provider(provider);
     let tmux_session_name = authority.session();
     if provider.is_empty()
@@ -227,7 +253,8 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     #[rustfmt::skip]
     let Some(binding) = codex_hook::restored_source(authority, &provider, channel_id, binding) else { return false };
     let session_id = binding.session_id.clone();
-    if !publish_runtime_binding(authority, binding, Some(channel_id), CauseSource::Observed) {
+    let cause = CauseSource::Observed;
+    if !publish_runtime_binding(authority, binding, Some(channel_id), cause, record) {
         return false;
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -646,10 +673,10 @@ pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
 /// transcript writes to a new `<uuid>.jsonl`.  The hook command therefore still
 /// addresses the old UUID while stdin carries the new one.  This update is
 /// deliberately limited to an existing ClaudeTui binding reached through the
-/// command UUID and to a real sibling transcript file. For a second or later
+/// command UUID and to the payload's own transcript, which must pass the Claude
+/// source check under the bound transcript's projects root. For a second or later
 /// continuation hop, the candidate must also be newer than the transcript
 /// currently bound to that pane, unless that is a restored one not written yet.
-/// It never guesses across project directories.
 pub(crate) fn adopt_claude_continuation_session(
     command_session_id: &str,
     payload_session_id: &str,
@@ -678,6 +705,11 @@ fn adopt_continuation(
     {
         return None;
     }
+    *skip = Some(AdoptSkip::PayloadPathMissing);
+    let payload_path = hook.transcript_path.as_deref().map(str::trim);
+    let payload_path = PathBuf::from(payload_path.filter(|path| !path.is_empty())?);
+    // Up to 1 MiB of first line is read before the binding state is locked.
+    let opened = crate::services::claude_tui::source_verify::observe_transcript(&payload_path);
 
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -689,10 +721,15 @@ fn adopt_continuation(
     }
     *skip = Some(AdoptSkip::MalformedBindingPath);
     let old_output_path = PathBuf::from(&binding.value.output_path);
-    let new_output_path = old_output_path
-        .parent()?
-        .join(format!("{payload_session_id}.jsonl"));
+    // Projects root of the account this pane launched under, not the receiver's own.
+    let root = old_output_path.parent()?.parent()?;
+    let new_output_path =
+        crate::services::claude_tui::source_verify::normalize_payload_path(root, &payload_path);
     let (candidate, replaced) = (new_output_path.display().to_string(), binding.value.clone());
+    let hook = &HookSignal {
+        transcript_path: Some(candidate.clone()),
+        ..hook.clone()
+    };
     let channel_id = state
         .channel_by_tmux
         .get(&tmux_session_name)
@@ -707,50 +744,23 @@ fn adopt_continuation(
         cause: CauseSource::Hook(hook.cause()),
         hook: Some(hook),
     });
-    let unlogged = AdoptSkip::unlogged(proposal.is_none(), &tmux_session_name, &candidate);
-    *skip = unlogged;
-    let audit = |result: std::io::Result<()>, kind: &str| {
-        if let Err(error) = result {
-            tracing::warn!(tmux_session_name, kind, %error, "binding event audit record not persisted");
-        }
+    let judged = claude_source::Candidate {
+        proposal,
+        tmux_session: &tmux_session_name,
+        bound: &replaced,
+        root,
+        command_session_id,
+        payload_session_id,
+        hook,
+        opened: &opened,
     };
-    let persist_error = |error| BindingPersistError {
-        tmux_session: tmux_session_name.clone(),
-        error,
-    };
-    if !new_output_path.is_file() || unlogged == Some(AdoptSkip::ChannelNotRestored) {
-        // The candidate stays Pending in the log until its transcript exists; that record is the hook's ACK.
-        *failure = proposal
-            .as_ref()
-            .map(binding_events::record_source)
-            .and_then(Result::err)
-            .map(persist_error);
+    if !judged.judge(failure, skip) {
         return None;
     }
-    if let Some(current_session_id) = binding.value.session_id.as_deref()
-        && current_session_id != command_session_id
-        && current_session_id != payload_session_id
-    {
-        *skip = Some(AdoptSkip::MtimeUnreadable);
-        let current_mtime =
-            super::pending::bound_transcript_mtime(&tmux_session_name, &binding.value)?;
-        let candidate_mtime = std::fs::metadata(&new_output_path)
-            .and_then(|metadata| metadata.modified())
-            .ok()?;
-        *skip = unlogged;
-        if current_mtime.is_some_and(|current| candidate_mtime <= current) {
-            *skip = Some(AdoptSkip::OlderThanBound);
-            let reject =
-                |p: &Proposal| binding_events::record_rejected(p, "older_than_bound_transcript");
-            audit(proposal.as_ref().map_or(Ok(()), reject), "rejected");
-            return None;
-        }
-    }
-    let new_output_path = new_output_path.display().to_string();
-
-    if binding.value.session_id.as_deref() == Some(payload_session_id)
-        && binding.value.output_path == new_output_path
-    {
+    let new_output_path = candidate;
+    let same_session = binding.value.session_id.as_deref() == Some(payload_session_id)
+        && binding.value.output_path == new_output_path;
+    if same_session {
         // Subsequent hooks still carry the launch-time query UUID. Do not reset
         // the already-adopted continuation cursor to zero on every event.
         //
@@ -779,16 +789,6 @@ fn adopt_continuation(
         return Some((tmux_session_name, new_output_path));
     }
 
-    if let Some(Err(error)) = proposal.as_ref().map(binding_events::record_source) {
-        tracing::error!(
-            tmux_session_name,
-            payload_session_id,
-            %error,
-            "binding event log append failed; Claude continuation not adopted"
-        );
-        *failure = Some(persist_error(error));
-        return None;
-    }
     let binding = state.runtime_by_tmux.get_mut(&tmux_session_name)?;
     // #5188 (R1/R2): record the rotation BEFORE the fields are overwritten. The
     // pre-rotation transcript and cursor are the only evidence of what may still

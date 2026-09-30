@@ -46,6 +46,9 @@ pub(crate) enum NotApplicableReason {
     MalformedBindingPath,
     OlderThanBound,
     UnmappedCommandSession,
+    PayloadPathMissing,
+    SourceRejected,
+    SourceAnomaly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +58,7 @@ pub(crate) enum UnavailableReason {
     MtimeUnreadable,
     ChannelNotRestored,
     RuntimeNotRestored,
+    HistoryUnreadable,
 }
 
 impl IngressOutcome {
@@ -192,6 +196,10 @@ fn classify_skip(
         AdoptSkip::NotClaudeTui => NotApplicable(NotApplicableReason::NotClaudeTui),
         AdoptSkip::MalformedBindingPath => NotApplicable(NotApplicableReason::MalformedBindingPath),
         AdoptSkip::OlderThanBound => NotApplicable(NotApplicableReason::OlderThanBound),
+        AdoptSkip::PayloadPathMissing => NotApplicable(NotApplicableReason::PayloadPathMissing),
+        AdoptSkip::SourceRejected(_) => NotApplicable(NotApplicableReason::SourceRejected),
+        AdoptSkip::SourceAnomaly => NotApplicable(NotApplicableReason::SourceAnomaly),
+        AdoptSkip::HistoryUnreadable => Unavailable(UnavailableReason::HistoryUnreadable),
     }
 }
 

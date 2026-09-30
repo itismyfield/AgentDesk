@@ -9,7 +9,7 @@ pub(crate) enum AdoptSkip {
     UnmappedCommandSession,
     NotClaudeTui,
     MalformedBindingPath,
-    /// The pane has no channel, so there is no log to write; an existing transcript is adopted in
+    /// The pane has no channel, so there is no log to write; a verified transcript is adopted in
     /// memory only.
     NoChannel,
     /// A file-less candidate on a pane the rehydrate pass maps, whose channel mapping lapsed.
@@ -18,6 +18,13 @@ pub(crate) enum AdoptSkip {
     RuntimeNotRestored,
     MtimeUnreadable,
     OlderThanBound,
+    /// The hook names no transcript, so there is no candidate to check.
+    PayloadPathMissing,
+    /// The pane's binding event log could not be loaded; the hook is retried.
+    HistoryUnreadable,
+    SourceRejected(crate::services::claude_tui::source_verify::SourceRejection),
+    /// The bound transcript was replaced or rewritten; the pane stays as it is.
+    SourceAnomaly,
 }
 
 impl AdoptSkip {

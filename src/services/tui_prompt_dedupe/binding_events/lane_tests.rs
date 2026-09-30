@@ -10,6 +10,29 @@ use crate::services::tui_prompt_dedupe::{
     register_tmux_runtime_binding, reset_state_for_tests, runtime_binding_for_tmux_session,
 };
 
+thread_local! {
+    static LANE_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A Claude transcript's first line, which names its session.
+fn first_row(session: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "mode", "sessionId": session})
+    )
+}
+
+/// Claude names the continuation's transcript in the payload; here it is in the lane directory.
+fn named(payload: &str, hook: &HookSignal) -> HookSignal {
+    let dir = LANE_DIR.with_borrow(Clone::clone).expect("a lane is open");
+    let path = dir.join(format!("{payload}.jsonl")).display().to_string();
+    let transcript_path = Some(hook.transcript_path.clone().unwrap_or(path));
+    HookSignal {
+        transcript_path,
+        ..hook.clone()
+    }
+}
+
 /// Serialises the dedupe state and points the log at a scratch root for one test.
 struct Lane {
     root: tempfile::TempDir,
@@ -26,9 +49,11 @@ impl Lane {
         reset_deferred_adoptions_for_tests();
         let root = tempfile::tempdir().unwrap();
         set_test_root(Some(root.path()));
+        let dir = tempfile::tempdir().unwrap();
+        LANE_DIR.with_borrow_mut(|lane| *lane = Some(dir.path().to_path_buf()));
         Self {
             root,
-            dir: tempfile::tempdir().unwrap(),
+            dir,
             _rotations: rotations,
             _state: state,
         }
@@ -36,7 +61,7 @@ impl Lane {
 
     fn transcript(&self, session: &str) -> PathBuf {
         let path = self.dir.path().join(format!("{session}.jsonl"));
-        fs::write(&path, b"{}\n").unwrap();
+        fs::write(&path, first_row(session)).unwrap();
         path
     }
 
@@ -49,6 +74,7 @@ impl Lane {
 impl Drop for Lane {
     fn drop(&mut self) {
         set_test_root(None);
+        LANE_DIR.with_borrow_mut(|lane| *lane = None);
         APPEND_FAULT.with(|fault| fault.set(None));
         reset_deferred_adoptions_for_tests();
         reset_state_for_tests();
@@ -71,7 +97,7 @@ fn src(path: &Path, session: &str) -> SourceId {
     source_id(
         Some(session),
         &path.display().to_string(),
-        &fs::metadata(path).unwrap(),
+        file_identity(&fs::metadata(path).unwrap()),
     )
 }
 
@@ -81,7 +107,8 @@ fn hook(event: &str, source: Option<&str>) -> HookSignal {
 }
 
 fn adopt(command: &str, payload: &str, hook: &HookSignal) -> Option<(String, String)> {
-    adopt_claude_continuation_session(command, payload, hook).expect("binding event persisted")
+    adopt_claude_continuation_session(command, payload, &named(payload, hook))
+        .expect("binding event persisted")
 }
 
 fn uuid() -> String {
@@ -222,11 +249,12 @@ fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent
             register_rehydrated_tmux_runtime_binding("claude", tmux, channel, binding);
         }
         if step["transcript_exists_at_hook"] == true && !fork_path.exists() {
-            fs::write(&fork_path, b"{}\n").unwrap();
+            fs::write(&fork_path, first_row(fork)).unwrap();
         }
-        let payload = &step["payload"];
+        let mut payload = step["payload"].clone();
+        payload["transcript_path"] = serde_json::json!(fork_path);
         let event = HookEventKind::from_path(step["event"].as_str().unwrap());
-        let signal = HookSignal::from_payload(event.as_str(), payload);
+        let signal = HookSignal::from_payload(event.as_str(), &payload);
         let command = step["command_session_id"].as_str().unwrap();
         let session = payload["session_id"].as_str().unwrap();
         adopted.push(adopt(command, session, &signal).is_some());
@@ -244,9 +272,7 @@ fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent
         "a repeated hook before the file exists adds nothing"
     );
     let a = src(&parent_path, parent);
-    let payload_path = steps[0]["payload"]["transcript_path"]
-        .as_str()
-        .map(str::to_owned);
+    let payload_path = Some(fork_path.display().to_string());
     let pending = BindingTarget::Pending {
         payload_session_id: fork.to_owned(),
         payload_transcript_path: payload_path,
@@ -295,11 +321,13 @@ fn clear_run_through_the_hook_is_pending_first_and_bound_by_the_next_hook() {
 
     for (index, step) in switches.iter().enumerate() {
         if step["transcript_exists_at_hook"] == true && !b_path.exists() {
-            fs::write(&b_path, b"{}\n").unwrap();
+            fs::write(&b_path, first_row(b)).unwrap();
         }
+        let mut payload = step["payload"].clone();
+        payload["transcript_path"] = serde_json::json!(b_path);
         let event = HookEventKind::from_path(step["event"].as_str().unwrap());
-        let signal = HookSignal::from_payload(event.as_str(), &step["payload"]);
-        let http = adopt_from_hook(a, b, &signal);
+        let signal = HookSignal::from_payload(event.as_str(), &payload);
+        let http = adopt_from_hook(a, b, &named(b, &signal));
         if index == 0 {
             assert_eq!(http, AdoptionHttp::Durable(DurableKind::Pending));
             let last = events(channel).last().unwrap().new.clone();
@@ -369,7 +397,7 @@ fn crash_leaves_log_and_memory_on_the_same_source() {
     };
     let before = held();
     APPEND_FAULT.with(|fault| fault.set(Some("sync")));
-    assert!(adopt_claude_continuation_session(&a, &c, &hook("stop", None)).is_err());
+    assert!(adopt_claude_continuation_session(&a, &c, &named(&c, &hook("stop", None))).is_err());
     let after_failure = held();
     APPEND_FAULT.with(|fault| fault.set(None));
     assert_eq!(
@@ -455,7 +483,7 @@ fn judgment_trace(dir: &Path, tmux: &str, channel: u64) -> Vec<String> {
         "b missing",
         adopt(a, b, &hook("session_start", Some("clear"))),
     );
-    fs::write(path(b), b"{}\n").unwrap();
+    fs::write(path(b), first_row(b)).unwrap();
     filetime::set_file_mtime(path(b), filetime::FileTime::from_unix_time(20, 0)).unwrap();
     note("b present", adopt(a, b, &hook("stop", None)));
     note("b again", adopt(a, b, &hook("stop", None)));
@@ -687,7 +715,7 @@ fn a_transcript_replaced_on_the_same_path_is_a_new_source() {
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
     let first = src(&a_path, &a);
     let replacement = lane.dir.path().join("replacement.jsonl");
-    fs::write(&replacement, b"{}\n").unwrap();
+    fs::write(&replacement, first_row(&a)).unwrap();
     fs::rename(&replacement, &a_path).unwrap();
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
@@ -723,7 +751,7 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
     );
     let prompt = b"{\"type\":\"user\",\"text\":\"B-only prompt\"}\n";
     let answer = b"{\"type\":\"assistant\",\"text\":\"B-only answer\"}\n";
-    fs::write(&b_path, [&prompt[..], &answer[..]].concat()).unwrap();
+    fs::write(&b_path, [first_row(&b).as_bytes(), prompt, answer].concat()).unwrap();
     filetime::set_file_mtime(&b_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
     filetime::set_file_mtime(&c_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
     register_provider_session("claude", &a, tmux);
@@ -852,9 +880,9 @@ fn a_follow_up_hook_keeps_the_first_session_start_as_the_deferred_evidence() {
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     let start = hook("session_start", Some("clear"));
     let refused = AdoptionHttp::NotDurable(NotDurableReason::Append);
-    assert_eq!(adopt_from_hook(&a, &b, &start), refused);
+    assert_eq!(adopt_from_hook(&a, &b, &named(&b, &start)), refused);
     let stop = hook("stop", None);
-    assert_eq!(adopt_from_hook(&a, &b, &stop), refused);
+    assert_eq!(adopt_from_hook(&a, &b, &named(&b, &stop)), refused);
     assert_eq!(deferred_adoption_count(), 1);
     APPEND_FAULT.with(|fault| fault.set(None));
     retry_deferred_claude_adoptions();
@@ -893,7 +921,7 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
     let clear = hook("session_start", Some("clear"));
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     let refused = AdoptionHttp::NotDurable(NotDurableReason::Append);
-    assert_eq!(adopt_from_hook(&a, &b, &clear), refused);
+    assert_eq!(adopt_from_hook(&a, &b, &named(&b, &clear)), refused);
     APPEND_FAULT.with(|fault| fault.set(None));
     retry_deferred_claude_adoptions();
     assert!(clear_claude_session_rotation(tmux));
@@ -923,10 +951,10 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
         retry_deferred_claude_adoptions();
     });
     paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let (live_a, live_c) = (a.clone(), c.clone());
+    let (live_a, live_c, clear_c) = (a.clone(), c.clone(), named(&c, &clear));
     let live = std::thread::spawn(move || {
         set_test_root(Some(&root));
-        let report = adopt_from_hook(&live_a, &live_c, &clear);
+        let report = adopt_from_hook(&live_a, &live_c, &clear_c);
         done_tx.send(()).ok();
         report
     });
@@ -968,13 +996,13 @@ fn a_new_source_after_recovery_waits_until_the_retried_b_rotation_settles() {
     let clear = hook("session_start", Some("clear"));
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     let append = AdoptionHttp::NotDurable(NotDurableReason::Append);
-    assert_eq!(adopt_from_hook(&a, &b, &clear), append);
+    assert_eq!(adopt_from_hook(&a, &b, &named(&b, &clear)), append);
     APPEND_FAULT.with(|fault| fault.set(None));
     retry_deferred_claude_adoptions();
     assert_eq!(bound(tmux).1.as_deref(), Some(b.as_str()));
 
     assert_eq!(
-        adopt_from_hook(&a, &c, &clear),
+        adopt_from_hook(&a, &c, &named(&c, &clear)),
         AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
         "C's first hook lands before A→B settles"
     );

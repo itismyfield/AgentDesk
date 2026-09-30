@@ -124,7 +124,7 @@ pub(crate) fn record(
         })
         .transpose()?;
     commit_with(channel, |writer| {
-        writer.plan_codex(context, session, hook, source)
+        (writer.plan_codex(context, session, hook, source)).map(|event| (event, false))
     })
 }
 

@@ -2040,6 +2040,7 @@ src/
 │   │   │   └── lane_tests.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── adopt_skip.rs
+│   │   │   ├── claude_source.rs
 │   │   │   ├── codex_hook.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs

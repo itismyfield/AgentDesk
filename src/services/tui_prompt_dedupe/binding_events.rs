@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
@@ -73,6 +74,24 @@ pub(crate) struct BindingEvent {
     pub parent_hint: Option<SourceId>,
     pub evidence: BindingEvidence,
     pub committed_at: DateTime<Utc>,
+}
+
+/// A log line: the event plus whether its source passed the Claude source check. The flag sits
+/// beside the event so readers of `BindingEvent` see the same record either way.
+#[derive(Deserialize)]
+struct Logged {
+    #[serde(flatten)]
+    event: BindingEvent,
+    #[serde(default)]
+    verified: bool,
+}
+
+#[derive(Serialize)]
+struct LoggedRef<'a> {
+    #[serde(flatten)]
+    event: &'a BindingEvent,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    verified: bool,
 }
 
 /// A binding change whose event could not be persisted; the binding was not published.
@@ -175,12 +194,24 @@ impl<'a> Proposal<'a> {
     }
 }
 
+/// `verified` pins `current`'s (dev, ino): a hook naming it on another file is an anomaly.
 #[derive(Default)]
 struct PaneState {
     current: Option<SourceId>,
+    verified: bool,
     pending: Option<BindingEvent>,
-    rejected: Option<String>,
+    /// `(session, reason)` of the latest refusal, so only a repeat of the same judgment is dropped.
+    rejected: Option<(String, String)>,
     nonce: Option<String>,
+}
+
+/// How a proposal is written. Only `Stat` reads the file; the others record the caller's judgment.
+#[derive(Clone, Copy)]
+enum Plan<'a> {
+    Stat,
+    ForcePending,
+    Verified(&'a SourceId),
+    Rejected(&'a str),
 }
 
 struct Writer {
@@ -218,15 +249,15 @@ fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 
-struct LogRead {
-    records: Vec<BindingEvent>,
+struct LogRead<T = BindingEvent> {
+    records: Vec<T>,
     lines: u64,
     complete_len: u64,
     total_len: u64,
 }
 
 /// Complete lines only: a torn tail is left out, and a corrupt line is skipped with a warning.
-fn read_log(path: &Path) -> io::Result<LogRead> {
+fn read_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -269,7 +300,7 @@ pub(crate) fn binding_events_since(
     };
     // Holding the lock keeps a record that is being rolled back out of every read.
     let _logs = lock_logs();
-    let read = read_log(&path)?;
+    let read = read_log::<BindingEvent>(&path)?;
     if read.lines != read.records.len() as u64 {
         let unreadable = read.lines - read.records.len() as u64;
         return Err(io::Error::other(format!(
@@ -341,7 +372,11 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     if let Some(log) = logs.get(&path) {
         return Ok(log.notify.subscribe());
     }
-    let last = read_log(&path)?.records.iter().map(|r| r.seq).max();
+    let last = read_log::<BindingEvent>(&path)?
+        .records
+        .iter()
+        .map(|r| r.seq)
+        .max();
     let notify = watch::channel(last.unwrap_or(0)).0;
     let log = logs.entry(path).or_insert(ChannelLog {
         notify,
@@ -352,24 +387,58 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
 
 /// Appends what `proposal` changes for its pane, if anything; `Ok` means the binding may be published.
 pub(crate) fn record_source(proposal: &Proposal) -> io::Result<()> {
-    commit(proposal, None)
+    commit(proposal, Plan::Stat).map(|_| ())
 }
 
-/// Audits a candidate the binding judgment refused; the binding itself stays as it is.
-pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<()> {
-    commit(proposal, Some(reason))
+/// A candidate that has no verified transcript yet waits as a Pending, whether or not a file exists.
+pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<()> {
+    commit(proposal, Plan::ForcePending).map(|_| ())
 }
 
-fn commit(proposal: &Proposal, rejected: Option<&str>) -> io::Result<()> {
-    commit_with(proposal.channel_id, |writer| {
-        writer.plan(proposal, rejected)
-    })
-    .map(|_| ())
+/// Records exactly `source`, the identity the check read; the path is not looked at again.
+pub(crate) fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<()> {
+    commit(proposal, Plan::Verified(source)).map(|_| ())
 }
 
+/// Audits a candidate the binding judgment refused; `true` when this judgment was newly logged.
+pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<bool> {
+    commit(proposal, Plan::Rejected(reason))
+}
+
+/// The (dev, ino) a verified record pinned for the pane, if its current source is `path` of `session`.
+pub(crate) fn pinned_file(
+    channel_id: u64,
+    tmux_session: &str,
+    session: &str,
+    path: &str,
+) -> io::Result<Option<crate::services::cluster::stream_relay::SourceFileIdentity>> {
+    let mut pinned = None;
+    commit_with(channel_id, |writer| {
+        let pane = writer.panes.get(tmux_session).filter(|pane| pane.verified);
+        let current = pane.and_then(|pane| pane.current.as_ref());
+        let current = current.filter(|c| c.session_id == session && c.path == Path::new(path));
+        #[cfg(unix)]
+        let pin = |c: &SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+            dev: c.dev,
+            ino: c.ino,
+        };
+        #[cfg(not(unix))]
+        let pin =
+            |_: &SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable;
+        pinned = current.map(pin);
+        None
+    })?;
+    Ok(pinned)
+}
+
+fn commit(proposal: &Proposal, mode: Plan) -> io::Result<bool> {
+    commit_with(proposal.channel_id, |writer| writer.plan(proposal, mode))
+}
+
+/// `plan` returns the record to append and whether its source was verified, or `None` for no change.
 fn commit_with(
     channel_id: u64,
-    plan: impl FnOnce(&mut Writer) -> Option<BindingEvent>,
+    plan: impl FnOnce(&mut Writer) -> Option<(BindingEvent, bool)>,
 ) -> io::Result<bool> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(false);
@@ -392,23 +461,22 @@ fn commit_with(
     let Some(writer) = log.writer.as_mut() else {
         return Ok(false);
     };
-    let Some(record) = plan(writer) else {
+    let Some((record, verified)) = plan(writer) else {
         return Ok(false);
     };
-    if let Err(error) = writer.append(&path, &record) {
+    if let Err(error) = writer.append(&path, &record, verified) {
         // A line that could not be cut back off is re-read from disk before the next append.
         if writer.poisoned {
             log.writer = None;
         }
         return Err(error);
     }
-    writer.apply(&record);
+    writer.apply(&record, verified);
     log.notify.send_replace(record.seq);
     Ok(true)
 }
 
-fn source_id(session: Option<&str>, path: &str, meta: &fs::Metadata) -> SourceId {
-    let (dev, ino) = file_identity(meta);
+fn source_id(session: Option<&str>, path: &str, (dev, ino): (u64, u64)) -> SourceId {
     SourceId {
         session_id: session.unwrap_or_default().to_owned(),
         path: PathBuf::from(path),
@@ -422,11 +490,11 @@ fn same_source(
     current: &SourceId,
     session: Option<&str>,
     path: &str,
-    meta: Option<&fs::Metadata>,
+    file: Option<(u64, u64)>,
 ) -> bool {
     current.path == Path::new(path)
         && session.is_none_or(|id| current.session_id.is_empty() || current.session_id == id)
-        && meta.is_none_or(|meta| file_identity(meta) == (current.dev, current.ino))
+        && file.is_none_or(|file| file == (current.dev, current.ino))
 }
 
 fn pending_matches(pending: &BindingEvent, session: Option<&str>, path: &str) -> bool {
@@ -452,7 +520,7 @@ impl Writer {
             }
             _ => {}
         }
-        let read = read_log(path)?;
+        let read = read_log::<Logged>(path)?;
         if read.total_len > 0 {
             let file = OpenOptions::new().write(true).open(path)?;
             if read.complete_len < read.total_len {
@@ -471,24 +539,31 @@ impl Writer {
             parents_synced: read.total_len > 0,
             poisoned: false,
         };
-        read.records.iter().for_each(|record| writer.apply(record));
+        (read.records.iter()).for_each(|logged| writer.apply(&logged.event, logged.verified));
         Ok(writer)
     }
 
-    fn apply(&mut self, record: &BindingEvent) {
+    fn apply(&mut self, record: &BindingEvent, verified: bool) {
         self.last_seq = self.last_seq.max(record.seq);
         let pane = self.panes.entry(record.tmux_session.clone()).or_default();
         if record.execution_nonce.is_some() {
             pane.nonce = record.execution_nonce.clone();
         }
         match &record.new {
-            BindingTarget::Source(source) => pane.current = Some(source.clone()),
+            BindingTarget::Source(source) => {
+                pane.current = Some(source.clone());
+                pane.verified = verified;
+            }
             BindingTarget::Pending {
                 payload_session_id, ..
             } => {
                 pane.pending = Some(record.clone());
                 // The refused session is a candidate again, so its next refusal must reach the log.
-                if pane.rejected.as_ref() == Some(payload_session_id) {
+                if pane
+                    .rejected
+                    .as_ref()
+                    .is_some_and(|(session, _)| session == payload_session_id)
+                {
                     pane.rejected = None;
                 }
             }
@@ -497,17 +572,20 @@ impl Writer {
                 source,
             } => {
                 pane.current = Some(source.clone());
+                pane.verified = verified;
                 if pane.pending.as_ref().is_some_and(|p| p.seq == *pending_seq) {
                     pane.pending = None;
                 }
             }
             BindingTarget::Rejected {
-                payload_session_id, ..
-            } => pane.rejected = Some(payload_session_id.clone()),
+                payload_session_id,
+                reason,
+                ..
+            } => pane.rejected = Some((payload_session_id.clone(), reason.clone())),
         }
     }
 
-    fn plan(&mut self, p: &Proposal, rejected: Option<&str>) -> Option<BindingEvent> {
+    fn plan(&mut self, p: &Proposal, mode: Plan) -> Option<(BindingEvent, bool)> {
         let pane = self.panes.entry(p.tmux_session.to_owned()).or_default();
         let session = p.session();
         let replaced = p.replaced.filter(|(path, id)| {
@@ -516,13 +594,23 @@ impl Writer {
         });
         let replaced = replaced.and_then(|(path, id)| {
             let meta = fs::metadata(path).ok()?;
-            Some(source_id(id, path, &meta))
+            Some(source_id(id, path, file_identity(&meta)))
         });
         let old = pane.current.clone().or(replaced);
         let payload_session_id = session.unwrap_or_default().to_owned();
-        let meta = fs::metadata(p.path);
-        let (new, inherited) = if let Some(reason) = rejected {
-            if pane.rejected.as_deref() == Some(payload_session_id.as_str()) {
+        // Only a stat reads the file; a Pending judgment has none and a verified one brings its own.
+        let file = match mode {
+            Plan::Stat => fs::metadata(p.path).ok().map(|meta| file_identity(&meta)),
+            Plan::Verified(source) => Some((source.dev, source.ino)),
+            Plan::ForcePending | Plan::Rejected(_) => None,
+        };
+        let pending = pane.pending.as_ref();
+        let pending = pending.filter(|e| pending_matches(e, session, p.path));
+        // A verified source is no change only once its record is pinned and no Pending waits on it.
+        let unsettled = matches!(mode, Plan::Verified(_)) && (!pane.verified || pending.is_some());
+        let (new, inherited) = if let Plan::Rejected(reason) = mode {
+            let judged = (payload_session_id.clone(), reason.to_owned());
+            if pane.rejected.as_ref() == Some(&judged) {
                 return None;
             }
             let payload_transcript_path = p.payload_path();
@@ -536,15 +624,14 @@ impl Writer {
         } else if pane
             .current
             .as_ref()
-            .is_some_and(|current| same_source(current, session, p.path, meta.as_ref().ok()))
+            .is_some_and(|current| same_source(current, session, p.path, file))
+            && !unsettled
         {
             return None;
         } else {
-            let pending = pane.pending.as_ref();
-            let pending = pending.filter(|e| pending_matches(e, session, p.path));
-            match (meta, pending) {
-                (Err(_), Some(_)) => return None,
-                (Err(_), None) => {
+            match (file, pending) {
+                (None, Some(_)) => return None,
+                (None, None) => {
                     let payload_transcript_path = p.payload_path();
                     let new = BindingTarget::Pending {
                         payload_session_id,
@@ -552,8 +639,8 @@ impl Writer {
                     };
                     (new, None)
                 }
-                (Ok(meta), Some(pending)) => {
-                    let source = source_id(session, p.path, &meta);
+                (Some(file), Some(pending)) => {
+                    let source = source_id(session, p.path, file);
                     let pending_seq = pending.seq;
                     let new = BindingTarget::Resolved {
                         pending_seq,
@@ -561,12 +648,16 @@ impl Writer {
                     };
                     (new, Some(pending.clone()))
                 }
-                (Ok(meta), None) => (
-                    BindingTarget::Source(source_id(session, p.path, &meta)),
+                (Some(file), None) => (
+                    BindingTarget::Source(source_id(session, p.path, file)),
                     None,
                 ),
             }
         };
+        let verified = matches!(mode, Plan::Verified(_));
+        // Pinning the source it already names is not a new source, so it has no parent.
+        let repinned = matches!(&new, BindingTarget::Source(s) if pane.current.as_ref() == Some(s));
+        let rejected = matches!(mode, Plan::Rejected(_)).then_some(());
         let nonce = match observe_spawn_nonce_marker(p.tmux_session) {
             SpawnNonceMarker::Known(nonce) => Some(nonce),
             _ => None,
@@ -593,7 +684,7 @@ impl Writer {
                     cause,
                     BindingCause::Fork | BindingCause::Compact | BindingCause::Continuation
                 );
-                let parent = (derived && rejected.is_none())
+                let parent = (derived && rejected.is_none() && !repinned)
                     .then(|| old.clone())
                     .flatten();
                 (cause, parent)
@@ -601,7 +692,7 @@ impl Writer {
         };
         let hook_event = p.hook.map(|hook| hook.event.clone());
         let received_at = p.hook.map_or_else(Utc::now, |hook| hook.received_at);
-        Some(BindingEvent {
+        let event = BindingEvent {
             seq: self.last_seq + 1,
             channel_id: p.channel_id,
             provider: p.provider.to_owned(),
@@ -616,12 +707,17 @@ impl Writer {
                 received_at,
             },
             committed_at: Utc::now(),
-        })
+        };
+        Some((event, verified))
     }
 
     /// Append and fsync one line; on failure the line is cut back off so no reader sees it.
-    fn append(&mut self, path: &Path, record: &BindingEvent) -> io::Result<()> {
-        let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+    fn append(&mut self, path: &Path, record: &BindingEvent, verified: bool) -> io::Result<()> {
+        let logged = LoggedRef {
+            event: record,
+            verified,
+        };
+        let mut line = serde_json::to_vec(&logged).map_err(io::Error::other)?;
         line.push(b'\n');
         let mut file = OpenOptions::new().write(true).create(true).open(path)?;
         let start = file.seek(SeekFrom::End(0))?;

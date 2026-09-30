@@ -5,19 +5,21 @@ use crate::services::claude_tui::hook_server::adoption_retry::{
     reset_deferred_adoptions_for_tests,
 };
 use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
+use crate::services::claude_tui::source_verify::SourceRejection;
 use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::binding_context::{
     observe_spawn_nonce_marker, tests::fixture,
 };
 use crate::services::tui_prompt_dedupe::binding_events::{
-    APPEND_FAULT, BINDING_EVENTS_DIR, forget_channel_for_tests, records_strict, set_test_root,
+    APPEND_FAULT, BINDING_EVENTS_DIR, forget_channel_for_tests, record_pending, records_strict,
+    set_test_root,
 };
 use crate::services::tui_prompt_dedupe::{
-    AdoptSkip, TEST_LOCK, TuiRuntimeBinding, adopt_claude_continuation_session,
-    clear_claude_session_rotation, lock_claude_session_rotations_for_tests,
-    register_launched_tmux_runtime_binding, register_provider_session,
-    register_rehydrated_tmux_runtime_binding, register_tmux_channel, reset_state_for_tests,
-    resolve_tmux_session_name, runtime_binding_for_tmux_session,
+    AdoptSkip, TEST_LOCK, TuiRuntimeBinding, adopt_claude_continuation_explained,
+    adopt_claude_continuation_session, clear_claude_session_rotation,
+    lock_claude_session_rotations_for_tests, register_launched_tmux_runtime_binding,
+    register_provider_session, register_rehydrated_tmux_runtime_binding, register_tmux_channel,
+    reset_state_for_tests, resolve_tmux_session_name, runtime_binding_for_tmux_session,
 };
 use std::fs;
 use std::sync::MutexGuard;
@@ -55,7 +57,8 @@ impl Lane {
 
     fn touch(&self, session: &str) -> PathBuf {
         let path = self.path(session);
-        fs::write(&path, b"{}\n").unwrap();
+        let row = serde_json::json!({"type": "mode", "sessionId": session});
+        fs::write(&path, format!("{row}\n")).unwrap();
         path
     }
 
@@ -87,9 +90,15 @@ impl Lane {
             transcript: self.path(launch),
         };
         let marker = observe_spawn_nonce_marker(tmux);
-        judge_restore(tmux, records_strict(channel), &marker, Some(&launch), |p| {
-            p.is_file()
-        })
+        let records = records_strict(channel);
+        judge_restore(
+            tmux,
+            records,
+            &marker,
+            Some(&launch),
+            Path::is_file,
+            transcript_state,
+        )
     }
 }
 
@@ -518,7 +527,16 @@ fn pending_without_a_current_execution_is_never_restored() {
         transcript: lane.path(&a),
     };
     let unreadable = SpawnNonceMarker::Unreadable;
-    let judged = |records| judge_restore(tmux, records, &unreadable, Some(&launch), |_| true);
+    let judged = |records| {
+        judge_restore(
+            tmux,
+            records,
+            &unreadable,
+            Some(&launch),
+            |_| true,
+            transcript_state,
+        )
+    };
     let down = |why| RestoreStep::Finished(PendingRestore::Unavailable(why));
     let log_error = judged(Err(io::Error::other("log read")));
     assert_eq!(log_error, down(Unavailable::LogRead(io::ErrorKind::Other)));
@@ -629,16 +647,28 @@ fn pending_path_away_from_the_launch_directory_is_blocked() {
     register_tmux_channel(tmux, channel);
     register_provider_session("claude", &a, tmux);
     register_launched_tmux_runtime_binding(tmux, claude(&lane.path(&a), &a));
-    let elsewhere = lane.root.path().join(format!("{b}.jsonl"));
-    assert!(
-        adopt_claude_continuation_session(&a, &b, &clear(&elsewhere))
-            .unwrap()
-            .is_none()
-    );
+    // One directory deeper than `<projects root>/<project>/<id>.jsonl`.
+    let elsewhere = lane.root.path().join("nested").join(format!("{b}.jsonl"));
+    let refused = adopt_claude_continuation_explained(&a, &b, &clear(&elsewhere)).unwrap();
+    let not_top_level = AdoptSkip::SourceRejected(SourceRejection::NotTopLevelTranscript);
+    assert_eq!(refused, (None, Some(not_top_level)));
+    // A Pending an older build logged for such a path is not restored either.
+    let (hook, path) = (clear(&elsewhere), elsewhere.display().to_string());
+    let proposal = Proposal {
+        channel_id: channel,
+        provider: "claude",
+        tmux_session: tmux,
+        session_id: Some(&b),
+        path: &path,
+        replaced: None,
+        cause: CauseSource::Hook(BindingCause::Clear),
+        hook: Some(&hook),
+    };
+    record_pending(&proposal).unwrap();
     restart(channel);
 
     let kind = CorruptKind::PathMismatch;
-    let blocked = RestoreStep::Finished(PendingRestore::BlockedCorrupt(Corrupt { line: 2, kind }));
+    let blocked = RestoreStep::Finished(PendingRestore::BlockedCorrupt(Corrupt { line: 3, kind }));
     assert_eq!(lane.judge(channel, tmux, &a), blocked);
 }
 
@@ -845,4 +875,547 @@ fn a_late_hook_refused_as_older_leaves_the_waiting_pending_queued() {
     pin(&d_path, mtime(60)).unwrap();
     retry_deferred_claude_adoptions();
     assert_eq!(bound_session(tmux), Some(d));
+}
+
+/// Continuation adoption follows the payload's own transcript once the Claude source check passes.
+/// Transcripts live under `<home>/projects/<project>/<session>.jsonl`, as Claude writes them.
+mod verified_adoption {
+    use super::*;
+    use crate::services::claude_tui::hook_server::observation_ingress::{
+        IngressOutcome, UnavailableReason, observe_binding_hook,
+    };
+    use crate::services::tui_o::shadow::capture::file_identity;
+    use crate::services::tui_prompt_dedupe::binding_events::{
+        SourceId, binding_events_since, pinned_file, record_verified,
+    };
+    use crate::services::tui_prompt_dedupe::{
+        AFTER_CHECK, claude_session_rotation_for_tmux, forget_hook_adopted_claude_session_id,
+        hook_adopted_claude_session_id, register_tmux_runtime_binding,
+    };
+
+    fn first_row(session: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "mode", "sessionId": session})
+        )
+    }
+
+    /// `<home>/projects/<project>/<session>.jsonl`, written with `body` when it is given.
+    fn at(home: &Path, project: &str, session: &str, body: Option<&str>) -> PathBuf {
+        let path = home
+            .join("projects")
+            .join(project)
+            .join(format!("{session}.jsonl"));
+        if let Some(body) = body {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, body).unwrap();
+        }
+        path
+    }
+
+    fn signal(event: &str, source: Option<&str>, transcript: Option<&Path>) -> HookSignal {
+        let payload = serde_json::json!({ "source": source, "transcript_path": transcript });
+        HookSignal::from_payload(event, &payload)
+    }
+
+    fn stop(transcript: &Path) -> HookSignal {
+        signal("stop", None, Some(transcript))
+    }
+
+    /// A launched pane bound to `a_path`, logging to `channel` under a fresh spawn nonce.
+    fn pane(channel: u64, tmux: &str, a: &str, a_path: &Path) {
+        stamp(tmux);
+        register_tmux_channel(tmux, channel);
+        register_provider_session("claude", a, tmux);
+        register_launched_tmux_runtime_binding(tmux, claude(a_path, a));
+    }
+
+    fn adopt(a: &str, b: &str, hook: &HookSignal) -> (Option<(String, String)>, Option<AdoptSkip>) {
+        adopt_claude_continuation_explained(a, b, hook).expect("binding event persisted")
+    }
+
+    fn log(channel: u64) -> Vec<BindingEvent> {
+        binding_events_since(channel, 0).unwrap()
+    }
+
+    fn last(channel: u64) -> BindingTarget {
+        log(channel).pop().unwrap().new
+    }
+
+    fn bound(tmux: &str) -> TuiRuntimeBinding {
+        runtime_binding_for_tmux_session(tmux).unwrap()
+    }
+
+    /// Whether the log pins the pane's current binding to a file identity.
+    fn pinned(channel: u64, tmux: &str) -> bool {
+        let binding = bound(tmux);
+        let session = binding.session_id.unwrap_or_default();
+        pinned_file(channel, tmux, &session, &binding.output_path)
+            .unwrap()
+            .is_some()
+    }
+
+    fn source(session: &str, path: &Path) -> SourceId {
+        let (dev, ino) = file_identity(&fs::metadata(path).unwrap());
+        let (session_id, path) = (session.to_owned(), path.to_path_buf());
+        SourceId {
+            session_id,
+            path,
+            dev,
+            ino,
+        }
+    }
+
+    fn rejected(channel: u64) -> Option<String> {
+        match last(channel) {
+            BindingTarget::Rejected { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Writes a new file with `body` and renames it over `path`, so the path names another inode.
+    fn replace(path: &Path, body: &str) {
+        let replacement = path.with_extension("tmp");
+        fs::write(&replacement, body).unwrap();
+        fs::rename(&replacement, path).unwrap();
+    }
+
+    #[test]
+    fn a_resume_into_another_worktree_follows_the_payload_transcript() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, y) = (7_600, "n2a-worktree", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        // `/resume` in the TUI picked a session of another worktree's project directory.
+        let y_path = at(home.path(), "-work-b", &y, Some(&first_row(&y)));
+        let resume = signal("session_start", Some("resume"), Some(&y_path));
+
+        let (adopted, skip) = adopt(&a, &y, &resume);
+
+        let y_text = y_path.display().to_string();
+        assert_eq!(
+            (adopted, skip),
+            (Some((tmux.to_owned(), y_text.clone())), None)
+        );
+        assert_eq!(bound(tmux).output_path, y_text);
+        assert_eq!(last(channel), BindingTarget::Source(source(&y, &y_path)));
+        assert!(pinned(channel, tmux), "the adopted file is pinned");
+        let rotation = claude_session_rotation_for_tmux(tmux).expect("rotation queued");
+        assert_eq!(rotation.old_session_id.as_deref(), Some(a.as_str()));
+    }
+
+    #[test]
+    fn a_payload_transcript_that_fails_the_check_is_refused_and_audited() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let other_home = tempfile::tempdir().unwrap();
+        for (index, case) in ["subagent", "foreign first record", "other root", "no path"]
+            .into_iter()
+            .enumerate()
+        {
+            let (channel, tmux) = (7_610 + index as u64, format!("n2a-refused-{index}"));
+            let (a, b) = (uuid(), uuid());
+            let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+            pane(channel, &tmux, &a, &a_path);
+            // Next to A so the pre-check `parent + id` rule would have adopted it.
+            let sibling = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+            let (payload, want, reason) = match case {
+                "subagent" => {
+                    let child = a_path.with_extension("").join("subagents/agent-x.jsonl");
+                    fs::create_dir_all(child.parent().unwrap()).unwrap();
+                    fs::write(&child, first_row(&b)).unwrap();
+                    let why = SourceRejection::NotTopLevelTranscript;
+                    (
+                        Some(child),
+                        AdoptSkip::SourceRejected(why),
+                        Some("not_top_level_transcript"),
+                    )
+                }
+                "foreign first record" => {
+                    fs::write(&sibling, first_row(&uuid())).unwrap();
+                    let why = SourceRejection::FirstRecordMismatch;
+                    (
+                        Some(sibling),
+                        AdoptSkip::SourceRejected(why),
+                        Some("first_record_mismatch"),
+                    )
+                }
+                "other root" => {
+                    let elsewhere = at(other_home.path(), "-work-a", &b, Some(&first_row(&b)));
+                    let why = SourceRejection::NotTopLevelTranscript;
+                    (
+                        Some(elsewhere),
+                        AdoptSkip::SourceRejected(why),
+                        Some("not_top_level_transcript"),
+                    )
+                }
+                _ => (None, AdoptSkip::PayloadPathMissing, None),
+            };
+            let records = log(channel).len();
+
+            let result = adopt(&a, &b, &signal("stop", None, payload.as_deref()));
+
+            assert_eq!(result, (None, Some(want)), "{case}");
+            assert_eq!(
+                bound(&tmux).output_path,
+                a_path.display().to_string(),
+                "{case}"
+            );
+            assert_eq!(
+                log(channel).len(),
+                records + usize::from(reason.is_some()),
+                "{case}"
+            );
+            assert_eq!(rejected(channel).as_deref(), reason, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_transcript_before_its_first_record_is_pending_until_it_is_verified() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_620, "n2a-not-written", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        // Claude has created B but not finished its first line.
+        let row = first_row(&b);
+        let b_path = at(home.path(), "-work-a", &b, Some(row.trim_end()));
+        let clear = signal("session_start", Some("clear"), Some(&b_path));
+        APPEND_FAULT.with(|fault| fault.set(Some("sync")));
+        assert!(adopt_claude_continuation_explained(&a, &b, &clear).is_err());
+        APPEND_FAULT.with(|fault| fault.set(None));
+
+        // The retried hook finds the file but still no first record: B waits as a Pending.
+        assert_eq!(adopt(&a, &b, &clear), (None, None));
+        let pending_seq = log(channel).pop().unwrap().seq;
+        let b_text = Some(b_path.display().to_string());
+        let pending = BindingTarget::Pending {
+            payload_session_id: b.clone(),
+            payload_transcript_path: b_text,
+        };
+        assert_eq!(last(channel), pending);
+        assert_eq!(bound(tmux).output_path, a_path.display().to_string());
+
+        fs::write(&b_path, &row).unwrap();
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        let source = source(&b, &b_path);
+        assert_eq!(
+            last(channel),
+            BindingTarget::Resolved {
+                pending_seq,
+                source
+            }
+        );
+        assert!(pinned(channel, tmux));
+    }
+
+    #[test]
+    fn a_replaced_bound_transcript_stops_instead_of_rebinding() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_630, "n2a-replaced", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        assert!(pinned(channel, tmux));
+        let before = bound(tmux);
+
+        replace(&b_path, &first_row(&b));
+        assert!(forget_hook_adopted_claude_session_id(tmux));
+        let result = adopt(&a, &b, &stop(&b_path));
+
+        assert_eq!(result, (None, Some(AdoptSkip::SourceAnomaly)));
+        assert_eq!(rejected(channel).as_deref(), Some("source_anomaly"));
+        assert_eq!(
+            hook_adopted_claude_session_id(tmux),
+            None,
+            "the hook restates nothing"
+        );
+        assert_eq!(bound(tmux), before);
+    }
+
+    #[test]
+    fn an_unpinned_current_source_is_pinned_once_and_the_pin_survives_a_restart() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_640, "n2a-pin-upgrade", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        // A registration without a check, as a record from before the check existed.
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        let registered = TuiRuntimeBinding {
+            last_offset: 12,
+            ..claude(&b_path, &b)
+        };
+        register_tmux_runtime_binding(tmux, registered.clone());
+        assert_eq!(last(channel), BindingTarget::Source(source(&b, &b_path)));
+        assert!(!pinned(channel, tmux));
+
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        let pin = log(channel).pop().unwrap();
+        assert_eq!(pin.new, BindingTarget::Source(source(&b, &b_path)));
+        assert_eq!(pin.parent_hint, None);
+        assert!(pinned(channel, tmux));
+        assert!(
+            claude_session_rotation_for_tmux(tmux).is_none(),
+            "no rotation"
+        );
+        assert_eq!(bound(tmux), registered, "the cursor stays where it was");
+        let records = log(channel).len();
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        assert_eq!(
+            log(channel).len(),
+            records,
+            "a pinned source is not logged again"
+        );
+
+        restart(channel);
+        register_tmux_channel(tmux, channel);
+        register_provider_session("claude", &a, tmux);
+        register_rehydrated_tmux_runtime_binding("claude", tmux, channel, registered);
+        replace(&b_path, &first_row(&b));
+        let result = adopt(&a, &b, &stop(&b_path));
+        assert_eq!(result, (None, Some(AdoptSkip::SourceAnomaly)));
+    }
+
+    #[test]
+    fn a_verified_record_keeps_the_identity_the_check_read() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, b) = (7_650, "n2a-writer", uuid());
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        register_tmux_channel(tmux, channel);
+        // The identity the check read, which the path no longer names.
+        let checked = SourceId {
+            ino: source(&b, &b_path).ino + 1,
+            ..source(&b, &b_path)
+        };
+        let (path, hook) = (b_path.display().to_string(), stop(&b_path));
+        let proposal = Proposal {
+            channel_id: channel,
+            provider: "claude",
+            tmux_session: tmux,
+            session_id: Some(&b),
+            path: &path,
+            replaced: None,
+            cause: CauseSource::Hook(BindingCause::Unknown),
+            hook: Some(&hook),
+        };
+
+        record_verified(&proposal, &checked).unwrap();
+
+        assert_eq!(last(channel), BindingTarget::Source(checked));
+    }
+
+    #[test]
+    fn an_unreadable_new_transcript_is_kept_as_a_durable_pending() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_660, "n2a-unreadable", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        // A path that opens but cannot be read as a file.
+        let b_path = at(home.path(), "-work-a", &b, None);
+        fs::create_dir_all(&b_path).unwrap();
+        let clear = signal("session_start", Some("clear"), Some(&b_path));
+
+        let pending = AdoptionHttp::Durable(DurableKind::Pending);
+        assert_eq!(adopt_from_hook(&a, &b, &clear), pending);
+        let pending_seq = log(channel).pop().unwrap().seq;
+        assert!(
+            matches!(last(channel), BindingTarget::Pending { payload_session_id, .. } if payload_session_id == b)
+        );
+        assert_eq!(deferred_adoption_count(), 1);
+
+        fs::remove_dir(&b_path).unwrap();
+        fs::write(&b_path, first_row(&b)).unwrap();
+        retry_deferred_claude_adoptions();
+        assert_eq!(bound(tmux).output_path, b_path.display().to_string());
+        let source = source(&b, &b_path);
+        assert_eq!(
+            last(channel),
+            BindingTarget::Resolved {
+                pending_seq,
+                source
+            }
+        );
+    }
+
+    #[test]
+    fn an_unreadable_binding_log_refuses_the_hook_until_it_loads() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_670, "n2a-log-down", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        let payload = serde_json::json!({ "session_id": b, "transcript_path": b_path });
+        let observe = || {
+            let headers = axum::http::HeaderMap::new();
+            observe_binding_hook("claude", "stop", Some(&a), Some(&b), &payload, &headers)
+        };
+        forget_channel_for_tests(channel);
+        APPEND_FAULT.with(|fault| fault.set(Some("reload")));
+
+        let refused = IngressOutcome::Unavailable(UnavailableReason::HistoryUnreadable);
+        assert_eq!(observe(), refused);
+        assert_eq!(deferred_adoption_count(), 0, "the sender retries it");
+        assert_eq!(bound(tmux).output_path, a_path.display().to_string());
+
+        APPEND_FAULT.with(|fault| fault.set(None));
+        assert_eq!(observe(), IngressOutcome::Durable(DurableKind::Adopted));
+        assert_eq!(bound(tmux).output_path, b_path.display().to_string());
+    }
+
+    #[test]
+    fn a_front_held_by_an_unreadable_log_keeps_its_pending_mark() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b, e) = (7_680, "n2a-transient-front", uuid(), uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let pending = AdoptionHttp::Durable(DurableKind::Pending);
+        let b_clear = signal(
+            "session_start",
+            Some("clear"),
+            Some(&at(home.path(), "-work-a", &b, None)),
+        );
+        assert_eq!(adopt_from_hook(&a, &b, &b_clear), pending);
+        forget_channel_for_tests(channel);
+        APPEND_FAULT.with(|fault| fault.set(Some("reload")));
+        retry_deferred_claude_adoptions();
+        APPEND_FAULT.with(|fault| fault.set(None));
+        assert_eq!(deferred_adoption_count(), 1, "B is held, not dropped");
+
+        // B is still a Pending waiting for its file, so the next clear replaces it.
+        let e_clear = signal(
+            "session_start",
+            Some("clear"),
+            Some(&at(home.path(), "-work-a", &e, None)),
+        );
+        assert_eq!(adopt_from_hook(&a, &e, &e_clear), pending);
+        assert_eq!(deferred_adoption_count(), 1);
+        assert!(
+            matches!(last(channel), BindingTarget::Pending { payload_session_id, .. } if payload_session_id == e)
+        );
+    }
+
+    #[test]
+    fn a_payload_spelled_through_a_symlinked_root_is_adopted_under_the_bound_spelling() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let real = home.path().join("real");
+        let link = home.path().join("link");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (channel, tmux, a, b) = (7_690, "n2a-symlink", uuid(), uuid());
+        at(&real, "-work-a", &a, Some(&first_row(&a)));
+        let a_path = at(&link, "-work-a", &a, None);
+        pane(channel, tmux, &a, &a_path);
+        let b_real = at(&real, "-work-a", &b, Some(&first_row(&b)));
+        let b_link = at(&link, "-work-a", &b, None).display().to_string();
+
+        assert_eq!(
+            adopt(&a, &b, &stop(&b_real)).0,
+            Some((tmux.to_owned(), b_link.clone()))
+        );
+        assert_eq!(bound(tmux).output_path, b_link);
+        let records = log(channel).len();
+        assert!(adopt(&a, &b, &stop(&b_real)).0.is_some());
+        assert_eq!(
+            log(channel).len(),
+            records,
+            "the same file under either spelling"
+        );
+    }
+
+    #[test]
+    fn a_transcript_replaced_between_its_check_and_its_record_waits_for_the_next_check() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_700, "n2a-recheck", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        let checked = source(&b, &b_path);
+        let (seam_path, row) = (b_path.clone(), first_row(&b));
+        AFTER_CHECK
+            .with_borrow_mut(|seam| *seam = Some(Box::new(move || replace(&seam_path, &row))));
+        let clear = signal("session_start", Some("clear"), Some(&b_path));
+
+        let pending = AdoptionHttp::Durable(DurableKind::Pending);
+        assert_eq!(adopt_from_hook(&a, &b, &clear), pending);
+        assert!(matches!(last(channel), BindingTarget::Pending { .. }));
+        assert_eq!(bound(tmux).output_path, a_path.display().to_string());
+
+        retry_deferred_claude_adoptions();
+        let replaced = source(&b, &b_path);
+        assert_ne!(replaced, checked);
+        assert!(
+            matches!(last(channel), BindingTarget::Resolved { source, .. } if source == replaced)
+        );
+        assert_eq!(bound(tmux).output_path, b_path.display().to_string());
+    }
+
+    fn judge_at(channel: u64, tmux: &str, a: &str, a_path: &Path) -> RestoreStep {
+        let launch = LaunchTranscript {
+            session_id: a.to_owned(),
+            transcript: a_path.to_path_buf(),
+        };
+        let (records, marker) = (records_strict(channel), observe_spawn_nonce_marker(tmux));
+        judge_restore(
+            tmux,
+            records,
+            &marker,
+            Some(&launch),
+            Path::is_file,
+            transcript_state,
+        )
+    }
+
+    #[test]
+    fn a_restored_pending_in_another_project_dir_is_seeded() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_710, "n2a-restore-other-dir", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-b", &b, None);
+        let clear = signal("session_start", Some("clear"), Some(&b_path));
+        assert_eq!(adopt(&a, &b, &clear), (None, None));
+        restart(channel);
+
+        let seed = seed(judge_at(channel, tmux, &a, &a_path));
+        assert_eq!(seed.payload_session_id, b);
+        assert_eq!(
+            seed.hook.transcript_path,
+            Some(b_path.display().to_string())
+        );
+    }
+
+    #[test]
+    fn a_restored_pending_whose_file_names_another_session_is_blocked() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_720, "n2a-restore-foreign", uuid(), uuid());
+        // Launch A is known but its transcript is not written, so the restore publishes B itself.
+        let a_path = at(home.path(), "-work-a", &a, None);
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, None);
+        let clear = signal("session_start", Some("clear"), Some(&b_path));
+        assert_eq!(adopt(&a, &b, &clear), (None, None));
+        let pending_seq = log(channel).pop().unwrap().seq;
+        at(home.path(), "-work-a", &b, Some(&first_row(&uuid())));
+        restart(channel);
+
+        let kind = CorruptKind::PathMismatch;
+        let corrupt = Corrupt {
+            line: pending_seq,
+            kind,
+        };
+        let blocked = RestoreStep::Finished(PendingRestore::BlockedCorrupt(corrupt));
+        assert_eq!(judge_at(channel, tmux, &a, &a_path), blocked);
+    }
 }

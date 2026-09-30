@@ -18,6 +18,16 @@ thread_local! { pub(crate) static BLOCK_ALIAS: std::cell::Cell<bool> = const { s
 thread_local! { pub(crate) static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
+    register_claude_pane_with(tmux, channel, binding, Record::Stat);
+}
+
+/// A restore names how the pane's binding is logged; see `Record`.
+pub(crate) fn register_claude_pane_with(
+    tmux: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+    record: Record,
+) {
     let key = pane_key(tmux);
     if let Some(launch) = binding
         .session_id
@@ -26,7 +36,9 @@ pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntime
     {
         begin_registration(&key, launch);
     }
-    let registered = register_rehydrated_tmux_runtime_binding("claude", tmux, channel, binding);
+    let registered = crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+        register_rehydrated_under_source_authority(authority, "claude", channel, binding, record)
+    });
     #[cfg(test)]
     if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
         complete();
