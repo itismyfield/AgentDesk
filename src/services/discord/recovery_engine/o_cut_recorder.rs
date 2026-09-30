@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use poise::serenity_prelude as serenity;
 
+use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+
 use axum::{
     Json, Router,
     body::Bytes,
@@ -16,6 +18,8 @@ use axum::{
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct Call {
     pub(in crate::services::discord) content: Option<String>,
+    /// The watched channel's adoption when the request arrived, if one was watched.
+    pub(in crate::services::discord) adoption: Option<Adoption>,
 }
 
 pub(in crate::services::discord) struct DiscordRecorder {
@@ -48,21 +52,39 @@ pub(in crate::services::discord) async fn start(channel_id: u64) -> DiscordRecor
     start_with(channel_id, false).await
 }
 
+/// Also records `adoption`'s state as each request arrives.
+pub(in crate::services::discord) async fn start_watching(
+    channel_id: u64,
+    adoption: Candidate,
+) -> DiscordRecorder {
+    serve(channel_id, false, Some(adoption)).await
+}
+
 /// `gone_messages` answers every GET with 404, so a probed anchor reads as deleted.
 pub(in crate::services::discord) async fn start_with(
     channel_id: u64,
     gone_messages: bool,
+) -> DiscordRecorder {
+    serve(channel_id, gone_messages, None).await
+}
+
+async fn serve(
+    channel_id: u64,
+    gone_messages: bool,
+    watched: Option<Candidate>,
 ) -> DiscordRecorder {
     let calls: Arc<Mutex<Vec<Call>>> = Arc::default();
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(900_001));
     let recorded = calls.clone();
     let app = Router::new().fallback(any(move |method: Method, uri: Uri, body: Bytes| {
         let (recorded, next_id) = (recorded.clone(), next_id.clone());
+        let adoption = watched.as_ref().map(Candidate::peek);
         async move {
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             let content = payload["content"].as_str().map(str::to_owned);
             recorded.lock().unwrap().push(Call {
                 content: content.clone(),
+                adoption,
             });
             if method == Method::DELETE {
                 return (StatusCode::NO_CONTENT, String::new()).into_response();

@@ -6330,6 +6330,7 @@ services::discord::tmux::tmux_watcher::single_message_footer::tests::single_mess
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_pathological_panel_stays_within_discord_limit
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_terminal_footer_strips_panel_block
 services::discord::tmux::tmux_watcher::single_message_footer_tests::o_delegated_single_message_footer_completion_sends_no_body
+services::discord::tmux::tmux_watcher::single_message_footer_tests::only_a_footer_that_rewrites_a_body_ends_a_pending_adoption
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_emits_background_agent_pending_payload
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
@@ -6701,6 +6702,7 @@ services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_no
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_notice_targets_existing_message
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_takeover_forgets_registered_completion_footer_target
 services::discord::tmux_restart_handoff::o_cut_tests::o_delegated_restart_handoff_keeps_only_the_marker
+services::discord::tmux_restart_handoff::o_cut_tests::only_a_handoff_notice_with_the_body_ends_a_pending_adoption
 services::discord::tmux_watcher_registry_restore_tests::base_and_thread_suffixed_names_resolve_independently
 services::discord::tmux_watcher_registry_restore_tests::cancel_and_remove_channel_if_current_only_rolls_back_matching_claim
 services::discord::tmux_watcher_registry_restore_tests::channel_binding_exposes_the_live_watcher_output_path
@@ -7559,6 +7561,7 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
+services::discord::turn_bridge::stream_tick::o_adoption_tests::only_a_tick_that_streams_a_body_ends_a_pending_adoption
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::absent_anchor_becomes_real_only_after_guarded_bind
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::competing_same_owner_anchor_aborts_stale_bridge_candidate
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::failed_anchor_bind_keeps_absence_and_deletes_candidate
@@ -9543,6 +9546,7 @@ services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it
+services::tui_o::channel_policy::tests::a_placement_never_waits_on_another_channels_adoption_in_progress
 services::tui_o::channel_policy::tests::a_selected_channel_starts_committed_only_over_a_readable_init
 services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
 services::tui_o::channel_policy::tests::only_an_enabled_home_with_a_list_reads_the_store_and_adopts

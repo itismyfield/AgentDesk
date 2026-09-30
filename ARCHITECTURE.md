@@ -1428,7 +1428,8 @@ src/
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── guarded_persist.rs
-│   │   │   │   └── guarded_persist_tests.rs
+│   │   │   │   ├── guarded_persist_tests.rs
+│   │   │   │   └── o_adoption_tests.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs

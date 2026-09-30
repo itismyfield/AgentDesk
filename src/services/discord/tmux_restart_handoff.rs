@@ -691,4 +691,67 @@ mod o_cut_tests {
         })
         .await;
     }
+
+    /// A cleanup that posts no notice leaves a pending adoption; the notice that carries the saved
+    /// body ends it before it is sent and shows that body once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_a_handoff_notice_with_the_body_ends_a_pending_adoption() {
+        use crate::services::discord::recovery_engine::o_cut_recorder::start_watching;
+        use crate::services::tui_o::channel_policy::Adoption;
+        use crate::services::tui_o::cutover::test_override;
+        const CHANNEL: u64 = 9_425_031;
+        let _boot = test_override::force_candidates(&[(CHANNEL, RuntimeHandoffKind::CodexTui)]);
+        let adoption =
+            test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).cloned()).unwrap();
+        with_isolated_runtime_root(|| async move {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let handoff = |rebind_origin: bool, current_msg_id: u64| {
+                let (shared, adoption) = (shared.clone(), adoption.clone());
+                async move {
+                    let recorder = start_watching(CHANNEL, adoption).await;
+                    let mut state = InflightTurnState::new(
+                        ProviderKind::Codex,
+                        CHANNEL,
+                        None,
+                        1,
+                        10,
+                        current_msg_id,
+                        "restart me".to_string(),
+                        None,
+                        Some(format!("AgentDesk-codex-o-adopt-{CHANNEL}")),
+                        None,
+                        None,
+                        0,
+                    );
+                    state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+                    state.rebind_origin = rebind_origin;
+                    let handled = super::start_restart_handoff_from_state(
+                        ChannelId::new(CHANNEL),
+                        &recorder.http,
+                        &shared,
+                        &ProviderKind::Codex,
+                        state,
+                        BODY,
+                    )
+                    .await;
+                    assert!(handled);
+                    recorder.calls()
+                }
+            };
+            for (rebind_origin, current_msg_id) in [(true, 0), (false, 0)] {
+                let calls = handoff(rebind_origin, current_msg_id).await;
+                assert!(calls.is_empty(), "no notice: {calls:?}");
+                assert_eq!(adoption.peek(), Adoption::Pending, "rebind={rebind_origin}");
+            }
+            let calls = handoff(false, 9_425_911).await;
+            let shown: Vec<_> = calls
+                .iter()
+                .filter(|call| call.content.as_deref().is_some_and(|c| c.contains(BODY)))
+                .collect();
+            assert_eq!(shown.len(), 1, "{calls:?}");
+            assert_eq!(shown[0].adoption, Some(Adoption::Released));
+            assert_eq!(adoption.peek(), Adoption::Released);
+        })
+        .await;
+    }
 }

@@ -7,6 +7,9 @@ use super::*;
 
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;
+#[cfg(test)]
+#[path = "stream_tick/o_adoption_tests.rs"]
+mod o_adoption_tests;
 use guarded_persist::{
     GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
     dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,
@@ -1135,6 +1138,19 @@ pub(super) mod provider_output_guard_tests {
         pub(in crate::services::discord::turn_bridge) sends: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) edits: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) deletes: Mutex<Vec<u64>>,
+        /// When set, the adoption each send or edit found, read at the moment it was made.
+        pub(in crate::services::discord::turn_bridge) adoption:
+            Option<crate::services::tui_o::channel_policy::Candidate>,
+        pub(in crate::services::discord::turn_bridge) seen:
+            Mutex<Vec<crate::services::tui_o::channel_policy::Adoption>>,
+    }
+
+    impl CapturingGateway {
+        fn observe(&self) {
+            if let Some(candidate) = &self.adoption {
+                self.seen.lock().expect("seen lock").push(candidate.peek());
+            }
+        }
     }
 
     impl TurnGateway for CapturingGateway {
@@ -1143,6 +1159,7 @@ pub(super) mod provider_output_guard_tests {
             _channel_id: ChannelId,
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            self.observe();
             self.sends
                 .lock()
                 .expect("sends lock")
@@ -1156,6 +1173,7 @@ pub(super) mod provider_output_guard_tests {
             _message_id: MessageId,
             content: &'a str,
         ) -> GatewayFuture<'a, Result<(), String>> {
+            self.observe();
             self.edits
                 .lock()
                 .expect("edits lock")
