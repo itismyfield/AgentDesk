@@ -539,6 +539,8 @@ impl RecoveryRuntime {
 }
 
 mod durable;
+#[cfg(test)]
+pub(crate) use durable::test_store;
 pub(crate) use durable::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,

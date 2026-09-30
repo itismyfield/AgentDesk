@@ -17,6 +17,8 @@ use crate::services::{disk_monitor, health_diagnostics};
 
 use super::AppState;
 
+#[cfg(test)]
+mod host_guard_tests;
 /// Disclosure rules for the unauthenticated `/api/health` body.
 mod public_projection;
 mod runtime_profile;
@@ -1051,15 +1053,23 @@ pub async fn stale_mailbox_repair_handler(
     } else {
         None
     };
+    let registry = state.health_registry.as_deref();
+    if let Some(refusal) = session_repair::host_refusal(
+        registry,
+        request.channel_id,
+        &before,
+        &before_watcher_inflight,
+    )
+    .await
+    {
+        return refusal;
+    }
     session_repair::with_session(
         health_diagnostics::load_channel_session_state(state.pg_pool_ref(), request.channel_id),
         &before,
         &before_watcher_inflight,
         || {
-            let tmux_present = before_watcher_inflight
-                .as_ref()
-                .and_then(|snapshot| snapshot.tmux_session.as_deref())
-                .is_some_and(crate::services::platform::tmux::has_session);
+            let tmux_present = session_repair::tmux_present(&before, &before_watcher_inflight)?;
             if tmux_present && !session_repair::idle_tmux_admits(
                 state.health_registry.is_some(), &before_watcher_inflight, request.channel_id,
             ) {

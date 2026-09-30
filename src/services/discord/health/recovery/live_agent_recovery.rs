@@ -3,6 +3,7 @@ use crate::services::agent_recovery::{
     self, ChannelRecoveryStatus, DetectorSignal, ObserveInput, OperationPlan, PendingOperation,
 };
 use crate::services::discord::health::{self, HealthRegistry};
+use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::legacy_collapse::dead_only_if_dead_or_absent;
 use crate::services::session_host::{HostKind, HostSessionRef, host_for};
@@ -174,6 +175,13 @@ async fn fence_runtime(
         .snapshot_watcher_state_for_provider(provider, channel.get())
         .await
         .and_then(|snapshot| snapshot.tmux_session);
+    // Only a found legacy row may be force-killed; any other answer keeps the pending intent.
+    if let Some(name) = session.as_deref() {
+        let gate = channel_teardown(registry, provider, channel, name, None, "recovery_fence");
+        if !matches!(gate.await, ChannelTeardown::Cleared(_)) {
+            return false;
+        }
+    }
     let process_backend = session
         .as_deref()
         .is_some_and(|name| crate::services::session_backend::process_session_pid(name).is_some());
@@ -284,6 +292,7 @@ fn recovery_metadata(
 #[cfg(test)]
 mod tests {
     use super::recovery_metadata;
+
     #[test]
     fn recovery_metadata_is_a_role_bound_persistent_routine_when_requested() {
         let metadata =
@@ -292,5 +301,156 @@ mod tests {
         assert_eq!(metadata["agent_id"], "claude");
         assert_eq!(metadata["execution_strategy"], "persistent");
         assert_eq!(metadata["agent_recovery"]["mode"], "restore");
+    }
+}
+
+#[cfg(test)]
+mod host_guard_tests {
+    use crate::services::agent_recovery::{
+        self, ChannelRecoveryStatus, ChannelState, CheckpointPayload, DetectorSignal, ObserveInput,
+        OrgAgentInput, OrgChannelInput, RecoveryCatalog, RecoveryConfigWire, RecoveryLease,
+        build_recovery_catalog, test_store,
+    };
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, busy_turn, channel_key, runtime, seed, turn_kept,
+    };
+    use crate::services::provider::ProviderKind;
+    use crate::services::session_host::test_support::InjectedLivenessGuard;
+    use crate::services::session_host::{HostLiveness, HostSessionRef};
+    use poise::serenity_prelude::ChannelId;
+
+    fn recovery() -> RecoveryConfigWire {
+        RecoveryConfigWire {
+            enabled: Some(true),
+            fallback_agent_id: Some("monitoring".to_string()),
+            stall_secs: Some(180),
+            workspace_mode: Some("inherit".to_string()),
+            triggers: None,
+        }
+    }
+
+    /// Claude owns every channel and falls back to codex.
+    fn catalog(channels: &[ChannelId]) -> RecoveryCatalog {
+        let agent = |id: &str, provider: &str, recovery| OrgAgentInput {
+            id: id.to_string(),
+            provider: Some(provider.to_string()),
+            model: None,
+            workspace: Some(format!("/p4a-{id}")),
+            auth_profile: "default".into(),
+            recovery,
+        };
+        let channels: Vec<_> = channels
+            .iter()
+            .map(|channel| OrgChannelInput {
+                channel_id: channel.get().to_string(),
+                agent: "claude".to_string(),
+                provider: None,
+                workspace: None,
+                auth_profile: None,
+                recovery: Some(recovery()),
+            })
+            .collect();
+        let agents = [
+            agent("claude", "claude", Some(recovery())),
+            agent("monitoring", "codex", None),
+        ];
+        build_recovery_catalog(&agents, &channels).expect("recovery catalog")
+    }
+
+    /// Commits a pending takeover, or a pending restore after the fallback finished.
+    async fn commit_pending(channel: &str, restore: bool) -> ChannelState {
+        let state = || async { agent_recovery::recovery_state(channel).await.unwrap() };
+        let observe = ObserveInput {
+            channel_id: channel.to_string(),
+            primary_turn_id: format!("{channel}-turn"),
+            signal: DetectorSignal::StreamIdleTimeout,
+        };
+        assert!(
+            agent_recovery::observe_durable(observe)
+                .await
+                .spawn
+                .is_some()
+        );
+        if restore {
+            let lease = RecoveryLease::from_state(&state().await.unwrap());
+            agent_recovery::acknowledge_start_durable(&lease)
+                .await
+                .unwrap();
+            let done = CheckpointPayload::compact("", "", "done", "", Vec::new(), "", "");
+            agent_recovery::complete_turn_durable(&lease, done)
+                .await
+                .unwrap();
+            let claude = ProviderKind::Claude;
+            let plan = agent_recovery::try_restore_owner_durable(channel, &claude, true, false);
+            assert!(plan.await.is_some(), "{channel}");
+        }
+        let pending = state().await.unwrap();
+        let expected = match restore {
+            true => ChannelRecoveryStatus::RestorePending,
+            false => ChannelRecoveryStatus::TakeoverPending,
+        };
+        assert_eq!(pending.status, expected, "{channel}");
+        pending
+    }
+
+    // A committed takeover or restore through the executor: a refused fence leaves the durable
+    // intent as it was, and a legacy fence holds only on a confirmed dead pane.
+    #[tokio::test]
+    async fn recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        let claude = ProviderKind::Claude;
+        let legacy = [HostLiveness::DeadOrAbsent, HostLiveness::ProbeError]
+            .map(|liveness| (Stored::Legacy, liveness));
+        let refused = Stored::ALL[1..]
+            .iter()
+            .map(|stored| (*stored, HostLiveness::DeadOrAbsent));
+        let cases: Vec<_> = legacy
+            .into_iter()
+            .chain(refused)
+            .flat_map(|case| [(case, false), (case, true)])
+            .collect();
+        let channels: Vec<_> = (0..cases.len() as u64)
+            .map(|n| ChannelId::new(1_479_671_301_387_059_700 + n))
+            .collect();
+        let executed = async {
+            for (((stored, liveness), restore), channel) in cases.into_iter().zip(&channels) {
+                let channel = *channel;
+                let name = format!("AgentDesk-claude-p4a-fence-{}", channel.get());
+                let key = channel_key(&shared, &name);
+                seed(&pool, &key, &name, channel.get(), stored).await;
+                let token = busy_turn(&shared, channel, &name).await;
+                let id = channel.get().to_string();
+                let before = commit_pending(&id, restore).await;
+                let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(&name), liveness);
+                let case = format!("{stored:?} {liveness:?} restore={restore}");
+                let snapshot = registry
+                    .snapshot_watcher_state_for_provider(&claude, channel.get())
+                    .await
+                    .expect("watcher snapshot");
+                if stored == Stored::Legacy {
+                    let fenced = super::fence_runtime(&registry, &claude, channel).await;
+                    let dead = liveness == HostLiveness::DeadOrAbsent;
+                    assert_eq!(fenced, dead, "{case}");
+                    assert!(!turn_kept(&shared, channel, &token).await, "{case}");
+                }
+                assert!(
+                    super::observe_and_execute(&registry, &snapshot).await,
+                    "{case}"
+                );
+                let after = agent_recovery::recovery_state(&id).await.unwrap();
+                assert_eq!(after.as_ref(), Some(&before), "{case}");
+                if stored != Stored::Legacy {
+                    assert!(turn_kept(&shared, channel, &token).await, "{case}");
+                    let queued = crate::services::discord::mailbox_snapshot(&shared, channel);
+                    assert!(queued.await.intervention_queue.is_empty(), "{case}");
+                }
+            }
+        };
+        test_store::with_store(pool.clone(), catalog(&channels), executed).await;
+        pool.close().await;
+        db.drop().await;
     }
 }

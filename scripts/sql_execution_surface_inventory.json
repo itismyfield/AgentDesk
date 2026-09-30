@@ -18041,6 +18041,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/server/routes/health_api/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e0ef26e5ca9195c05177c2adf07a34b39029ebf5d7937dd8756975d60741a3b9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/health_api/host_guard_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f673a1b0ea4c59ced1e2342619525e43a5e4829f626983092090efe3a0caa84f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/server/routes/home_metrics.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -27874,6 +27892,51 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:f6e4083d13de3cf767a031152776a3317a5bae62fbd46a0dd7a5404de6a5747f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:881f7da0484c6dbe7d2182b64a357a631bc050c3622834ac2f21ebdd0480945b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1a80b39033f1c25153908289cc87e17141beab9792b1f59941b638643302af5f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:635bb1cd837fe936489c2eebfdc3a574b83498cfd4d6e0c8574e8786e030720b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8fa216bc5bde76726fdea22c4054dfb77ee21d202178a9dcca7a3f633c6d897d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ac59595cffa0a17b6582ee5218ad24cbb85d57103f03d97d18d375077058cc0d"
     },
     {
       "root": "src",

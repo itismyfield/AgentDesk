@@ -131,6 +131,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/reachability/ledger_tests.rs",
         "src/services/discord/health/reachability/obligation_tests.rs",
         "src/services/discord/inflight/host_recovery_guard_keyed_tests.rs",
+        "src/server/routes/health_api/host_guard_tests.rs",
+        "src/services/discord/tmux_reaper/host_guard_tests.rs",
         "src/services/discord/inflight/removal/boot_custody_tests.rs",
         "src/services/discord/inflight/removal/custody_notice_tests.rs",
         "src/services/discord/inflight/rebind_reap/tests.rs",
@@ -325,6 +327,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/process/stream_child/test_fixture.rs",
         "src/services/provider/read_fault.rs",
         "src/services/session_host/test_support.rs",
+        "src/services/discord/host_teardown_gate/test_support.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
     }

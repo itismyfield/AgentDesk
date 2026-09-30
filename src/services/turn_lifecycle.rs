@@ -1,11 +1,13 @@
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
+const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
 
 #[cfg(test)]
 static FORCE_KILL_PRESERVE_TMUX_FOR_TESTS: std::sync::LazyLock<
@@ -180,12 +182,6 @@ async fn stop_turn_with_policy(
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
     emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
-    if let Some(channel_id) = target.channel_id {
-        let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
-        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
-            .await;
-    }
-
     // #1672: capture the *observed* tmux session name and the disk/memory
     // pending-queue snapshot before we touch anything. The cancel-API
     // response and the cancel observability event both want
@@ -196,6 +192,21 @@ async fn stop_turn_with_policy(
         .clone()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| target.tmux_name.clone());
+    let host = force_kill_host_gate(
+        health_registry,
+        target,
+        &probe_session_owned,
+        cleanup_policy,
+    );
+    let host = host.await;
+    if matches!(host, Some(ChannelTeardown::Kept)) {
+        return kept_by_host_guard(tmux_session_observed);
+    }
+    if let Some(channel_id) = target.channel_id {
+        let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
+        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
+            .await;
+    }
     let pre_snapshot = pending_queue_pre_snapshot(health_registry, target).await;
 
     let mut lifecycle_path = DIRECT_FALLBACK_PATH;
@@ -307,7 +318,12 @@ async fn stop_turn_with_policy(
         // so /tmp and ~/.adk/release/runtime/sessions/ don't accumulate
         // stale jsonl/FIFO/owner markers after forced termination (#892).
         if killed_now {
-            crate::services::tmux_common::cleanup_session_temp_files(kill_target);
+            match &host {
+                Some(ChannelTeardown::Cleared(session)) => {
+                    crate::services::tmux_common::cleanup_cleared_session_temp_files(session)
+                }
+                _ => crate::services::tmux_common::cleanup_session_temp_files(kill_target),
+            }
         }
         killed_now
     } else {
@@ -695,6 +711,42 @@ pub(crate) mod policy_observability_tests {
     }
 }
 
+/// The host guard for a force-kill whose session the registry can key; `None` when the
+/// policy keeps tmux or no provider, channel or name is known, which keeps main's path.
+async fn force_kill_host_gate(
+    registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    tmux_name: &str,
+    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+) -> Option<ChannelTeardown> {
+    if !cleanup_policy.should_cleanup_tmux() || tmux_name.is_empty() {
+        return None;
+    }
+    let (registry, provider) = (registry?, target.provider.as_ref()?);
+    let channel = target.channel_id?;
+    let caller = "turn_lifecycle_force_kill";
+    Some(channel_teardown(registry, provider, channel, tmux_name, None, caller).await)
+}
+
+/// A force-kill the host guard refused: nothing was stopped, cleared or killed.
+fn kept_by_host_guard(tmux_session_observed: Option<String>) -> TurnLifecycleStopResult {
+    TurnLifecycleStopResult {
+        lifecycle_path: HOST_GUARD_KEPT_PATH,
+        tmux_killed: false,
+        inflight_cleared: false,
+        queue_depth: None,
+        queue_preserved: None,
+        termination_recorded: false,
+        tmux_session_observed,
+        queue_depth_before: None,
+        queue_depth_after: None,
+        queue_disk_present_before: None,
+        queue_disk_present_after: None,
+        mailbox_foreground_free: None,
+        queue_dropped_message_ids: Vec::new(),
+    }
+}
+
 /// Scan inflight directory for the provider and delete the file matching the
 /// given tmux session.
 ///
@@ -791,4 +843,55 @@ fn compute_queue_preserved(
     let (pre, post) = (pre?, post?);
     let (before, after) = (pre.disk_present?, post.disk_present?);
     Some((!before || after) && post.queue_depth >= pre.queue_depth)
+}
+
+#[cfg(all(test, unix))]
+mod host_guard_tests {
+    use super::*;
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, busy_turn, channel_key, runtime, seed, stop_recorded, turn_kept,
+    };
+
+    // A force-kill the registry can key reads the stored rows before its tombstone, stop
+    // or kill; a missing row keeps main's name-only path, any other trace keeps the turn.
+    #[tokio::test]
+    async fn force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        for (n, stored) in Stored::ALL.into_iter().enumerate() {
+            let channel = ChannelId::new(1_479_671_301_387_059_800 + n as u64);
+            let name = format!("AgentDesk-claude-p4a-kill-{n}");
+            seed(
+                &pool,
+                &channel_key(&shared, &name),
+                &name,
+                channel.get(),
+                stored,
+            )
+            .await;
+            let token = busy_turn(&shared, channel, &name).await;
+            let target = TurnLifecycleTarget {
+                provider: Some(ProviderKind::Claude),
+                channel_id: Some(channel),
+                tmux_name: name.clone(),
+            };
+            let result = force_kill_turn(Some(&registry), &target, "p4a host guard", "p4a").await;
+            let admitted = matches!(stored, Stored::Legacy | Stored::Missing);
+            assert_eq!(
+                result.lifecycle_path != HOST_GUARD_KEPT_PATH,
+                admitted,
+                "{stored:?}"
+            );
+            assert_eq!(
+                !turn_kept(&shared, channel, &token).await,
+                admitted,
+                "{stored:?}"
+            );
+            assert_eq!(stop_recorded(channel), admitted, "{stored:?}");
+        }
+        pool.close().await;
+        db.drop().await;
+    }
 }
