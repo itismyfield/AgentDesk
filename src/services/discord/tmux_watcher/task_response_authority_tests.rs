@@ -7,7 +7,8 @@ use crate::services::tui_o::cutover::test_override;
 const BODY: &str = "ADK-C1A-watcher-task-response-body";
 
 /// A watcher task response that sends no body (a preparation failure, a live claim held by the
-/// sink, an already delivered or sent-but-uncommitted response) leaves a pending adoption.
+/// sink, an already delivered or sent-but-uncommitted response, or an owned response whose bot
+/// identity lookup fails before any chunk post) leaves a pending adoption.
 #[tokio::test]
 async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() {
     if !test_override::isolated_binding_case(concat!(
@@ -24,6 +25,7 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
         ("wait", 4_325_411),
         ("delivered", 4_325_412),
         ("sent", 4_325_413),
+        ("identity", 4_325_414),
     ];
     let channels: Vec<_> = cases.iter().map(|&(_, ch)| (ch, ClaudeTui)).collect();
     let _candidates = test_override::force_candidates(&channels);
@@ -34,7 +36,7 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
         let turn_key = task_delivery::durable_response_turn_key(
             channel, "claude", &session, 0, "", None, 4_300, BODY,
         );
-        if case != "unprepared" {
+        if !matches!(case, "unprepared" | "identity") {
             let claim = task_delivery::claim_task_response_delivery(
                 None,
                 channel,
@@ -56,6 +58,18 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
             }
             .unwrap();
         }
+        // A fresh context claims the response for the watcher; the recorder answers no bot user.
+        let context = (case == "identity").then(|| {
+            task_delivery::TaskNotificationContext::from_stream_json(
+                &serde_json::json!({
+                    "type": "system", "subtype": "task_notification", "task_id": "c1a-identity",
+                    "tool_use_id": "toolu-c1a-identity", "status": "completed",
+                    "summary": "background work", "task_notification_kind": "background"
+                }),
+                &crate::services::session_backend::StreamLineState::new(),
+            )
+            .expect("task context")
+        });
         let check = BodyCheck::watch(channel, BODY);
         let recorder = start_watching(channel, check.clone(), false).await;
         let (mut placeholder, mut restored, mut last_edit) = (None, false, String::new());
@@ -67,7 +81,7 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
             ChannelId::new(channel),
             &session,
             TaskNotificationKind::Background,
-            None,
+            context.as_ref(),
             &turn_key,
             None,
             None,
@@ -85,6 +99,25 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
             },
         )
         .await;
+        if case == "identity" {
+            let row = task_delivery::claim_existing_task_response_delivery(
+                None,
+                channel,
+                "claude",
+                &session,
+                &turn_key,
+                task_delivery::ResponseDeliveryOwner::Watcher,
+            )
+            .await;
+            assert!(
+                matches!(row, Ok(Some(_))),
+                "the watcher owned the response: {row:?}"
+            );
+            assert!(
+                retry,
+                "a failed identity lookup keeps the frontier for a retry"
+            );
+        }
         let shown = recorder.contents();
         assert!(!shown.iter().any(|c| c.contains(BODY)), "{case}: {shown:?}");
         check.assert_settled();

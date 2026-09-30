@@ -5973,6 +5973,8 @@ services::discord::streaming_finalizer::tests::normal_final_output_plans_streami
 services::discord::streaming_finalizer::tests::unknown_dispatch_type_preserves_state_for_reconcile
 services::discord::synthetic_headless_message_id::tests::predicate_preserves_floor_boundary
 services::discord::task_notification_delivery::gateway::tests::authoritative_card_post_4xx_maps_to_permanent_transport_failure
+services::discord::task_notification_delivery::response_chunks::claim_at_post_tests::a_task_response_claims_its_channel_only_at_a_chunk_post
+services::discord::task_notification_delivery::response_chunks::claim_at_post_tests::a_task_response_posts_nothing_on_a_channel_o_committed
 services::discord::task_notification_delivery::response_chunks::tests::discord_history_status_policy_keeps_auth_permanent_and_retryable_statuses_transient
 services::discord::task_notification_delivery::response_chunks::tests::nonce_retry_ttl_is_strict_at_boundary
 services::discord::task_notification_delivery::store::response_identity::tests::head_rotation_drops_the_stale_start_and_keeps_the_rebased_end

@@ -747,3 +747,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "claim_at_post_tests.rs"]
+mod claim_at_post_tests;
