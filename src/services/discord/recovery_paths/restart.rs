@@ -599,20 +599,18 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
             (anchor.panel_channel_id, anchor.panel_msg_id),
         )
         .with_record_channel_id(record_channel_id);
-    // Only the repost itself claims the channel, after every refusal above.
-    let repost = || {
-        super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
-            http,
-            shared,
-            anchor_channel_id,
-            None,
-            terminal_text,
-            Some(&recovery_context),
-        )
-    };
+    // Only the repost's POST claims the channel, after every refusal above and its fresh-send lease.
     let claim = crate::services::tui_o::cutover::BodyClaim::new(anchor.panel_channel_id, kind);
-    let outcome = match crate::services::tui_o::cutover::claim_then_send(Some(claim), repost).await
-    {
+    let repost = super::super::recovery_engine::relay_recovered_body_to_placeholder(
+        http,
+        shared,
+        anchor_channel_id,
+        None,
+        terminal_text,
+        Some(&recovery_context),
+        Some(claim),
+    );
+    let outcome = match repost.await {
         Ok(crate::services::tui_o::cutover::BodySend::Sent(outcome)) => outcome,
         Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {
             return AnchorRepostOutcome::NotReposted;

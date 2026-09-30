@@ -1672,6 +1672,7 @@ async fn run_short_replace_controller(
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&hb),
+            body_claim: None,
         },
     )
     .await;
@@ -1834,6 +1835,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
                 trace: &trace,
                 range: (start, end),
                 delivered_total: &sink.delivered_total,
+                body_claim: None,
             },
         ))
         .expect("matching-identity cut-over delivery is Ok");
@@ -1902,6 +1904,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
                 trace: &trace,
                 range: (start, end),
                 delivered_total: &sink.delivered_total,
+                body_claim: None,
             },
         ))
         .expect("mismatched-identity cut-over delivery is still Ok (POST landed)");
@@ -2038,6 +2041,7 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
                 trace: &SessionRelayTraceContext::default(),
                 range: (start, end),
                 delivered_total: &sink.delivered_total,
+                body_claim: None,
             },
         ))
         .unwrap();
@@ -2318,6 +2322,7 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
                 trace: &trace,
                 range: (start, end),
                 delivered_total: &sink.delivered_total,
+                body_claim: None,
             },
         ))
         .expect("raw-fingerprint cut-over delivery is Ok");
@@ -2411,6 +2416,7 @@ fn controller_skips_empty_body_so_cutover_gate_keeps_it_legacy() {
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&hb),
+            body_claim: None,
         },
     ));
     assert!(

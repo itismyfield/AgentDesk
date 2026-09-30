@@ -40,6 +40,8 @@ pub(in super::super) struct PinnedTerminalTransport<'a> {
     pub(in super::super) target: (ChannelId, ChannelId, MessageId),
     pub(in super::super) payload: (Option<&'a str>, &'a str, (u64, u64)),
     pub(in super::super) trace: (Option<&'a str>, Option<&'a str>, Option<&'a str>),
+    /// The pending O adoption this body ends, claimed only as its transport starts.
+    pub(in super::super) claim: Option<crate::services::tui_o::cutover::BodyClaim<'a>>,
 }
 
 #[cfg(unix)]
@@ -50,6 +52,7 @@ impl PinnedTerminalTransport<'_> {
         long: bool,
     ) -> (bool, bool, Option<MessageId>) {
         use crate::services::discord::formatting::ReplaceLongMessageOutcome as Replace;
+        use crate::services::tui_o::cutover::{BodySend, claim_then_send};
         use LeaseOutcome::{NotDelivered, Unknown};
         use terminal_controller_cutover as cutover;
         use terminal_delivery::PinnedBridgeCommit::*;
@@ -59,33 +62,35 @@ impl PinnedTerminalTransport<'_> {
         let settle =
             cutover::begin_pinned_terminal(shared, provider, long, (owner, channel), range);
         let (message_id, failed, fallback) = if long {
-            match send_ordered_long_terminal_response(
-                shared,
-                gateway,
-                provider,
-                channel,
-                msg,
-                tmux,
-                body,
-                self.trace.0,
-                self.trace.1,
-                self.trace.2,
-            )
-            .await
-            {
-                Ok((_, tail)) => (tail, false, false),
-                Err(_) => (None, true, false),
+            let send = || {
+                send_ordered_long_terminal_response(
+                    shared,
+                    gateway,
+                    provider,
+                    channel,
+                    msg,
+                    tmux,
+                    body,
+                    self.trace.0,
+                    self.trace.1,
+                    self.trace.2,
+                )
+            };
+            match claim_then_send(self.claim, send).await {
+                Ok(BodySend::Sent(Ok((_, tail)))) => (tail, false, false),
+                Ok(_) | Err(_) => (None, true, false),
             }
         } else {
-            let result = gateway
-                .replace_message_with_outcome(channel, msg, body)
-                .await;
-            match result {
-                Ok(Replace::EditedOriginal) => (Some(msg), false, false),
-                Ok(Replace::SentFallbackAfterEditFailure {
-                    replacement_anchor, ..
-                }) => (replacement_anchor, false, true),
-                result => (None, result.is_err(), false),
+            let send = || gateway.replace_message_with_outcome(channel, msg, body);
+            match claim_then_send(self.claim, send).await {
+                Ok(BodySend::Sent(Ok(Replace::EditedOriginal))) => (Some(msg), false, false),
+                Ok(BodySend::Sent(Ok(Replace::SentFallbackAfterEditFailure {
+                    replacement_anchor,
+                    ..
+                }))) => (replacement_anchor, false, true),
+                Ok(BodySend::Sent(result)) => (None, result.is_err(), false),
+                // Nothing was sent: O owns the channel or its identity is held.
+                Ok(BodySend::OwnedByO) | Err(_) => (None, true, false),
             }
         };
         let committed = if let Some(message_id) = message_id {
@@ -117,6 +122,7 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     gateway: &dyn TurnGateway,
     row: &InflightTurnState,
     text: &str,
+    claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
 ) -> bool {
     use crate::services::discord::{inflight, outbound::delivery_record as dr};
     let Some(admitted) = inflight::CodexRange::from_retained_tui_terminal(row) else {
@@ -154,6 +160,7 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
             admitted.source.range,
         ),
         trace: (row.dispatch_id.as_deref(), row.session_key.as_deref(), None),
+        claim,
     }
     .deliver(pinned, long)
     .await;
@@ -292,6 +299,7 @@ macro_rules! dispatch_pinned_terminal {
                             $session.as_deref(),
                             Some($turn.as_str()),
                         ),
+                        claim: Some($crate::services::discord::turn_bridge::terminal_controller_cutover::bridge_body_claim($channel, &$inflight, true)),
                     };
                     let (mut did_commit, fallback, anchor) = transport.deliver(pinned, $long).await;
                     if $long && did_commit {

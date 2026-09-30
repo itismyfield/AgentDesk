@@ -21,6 +21,7 @@ use super::super::task_notification_delivery::{
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, claim_then_send};
 use serenity::model::id::{ChannelId, MessageId};
 
 fn defer_task_response_to_watcher(
@@ -375,6 +376,7 @@ impl super::SessionBoundDiscordRelaySink {
         trace: &super::SessionRelayTraceContext,
         sink_lease_guard: Option<&super::SinkDeliveryLeaseGuard>,
         sink_delivery_ctx: super::delivery_frontier::SinkDeliveryCtx<'_>,
+        body_claim: BodyClaim<'_>,
     ) -> Result<super::SessionRelayDeliveryOutcome, RelaySinkError> {
         let channel = ChannelId::new(channel_id);
         // #4911 R10 (P1-5): a NewMessage route reached WITHOUT a task card is a
@@ -459,20 +461,28 @@ impl super::SessionBoundDiscordRelaySink {
                     http.as_ref(),
                     shared,
                 );
-            let (_messages, rebound) = super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
-                shared.pg_pool.as_ref(),
-                &clients,
-                &card_transport,
-                &response_transport,
-                &event,
-                task_response_claim.as_ref().expect("claim checked above").clone(),
-                relay_text,
-            )
-            .await
+            let response_claim = task_response_claim
+                .as_ref()
+                .expect("claim checked above")
+                .clone();
+            let send = || {
+                super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
+                    shared.pg_pool.as_ref(),
+                    &clients,
+                    &card_transport,
+                    &response_transport,
+                    &event,
+                    response_claim,
+                    relay_text,
+                )
+            };
+            let (_messages, rebound) = super::claimed_body_send(
+                claim_then_send(Some(body_claim), send).await,
+            )?
             .map_err(|error| match error {
-                super::super::task_notification_delivery::ResponseChunkDeliveryError::Permanent(_) => {
-                    RelaySinkError::Permanent(error.to_string())
-                }
+                super::super::task_notification_delivery::ResponseChunkDeliveryError::Permanent(
+                    _,
+                ) => RelaySinkError::Permanent(error.to_string()),
                 _ => RelaySinkError::Transient(error.to_string()),
             })?;
             task_card_message_id = Some(MessageId::new(rebound.card_message_id()));
@@ -488,19 +498,18 @@ impl super::SessionBoundDiscordRelaySink {
             if super::super::formatting::split_message(relay_text).len() == 1 {
                 plain_journal_attempt = self.journal.begin_fresh(shared, delivery);
             }
-            #[cfg(test)]
-            let message_ids = if let Some(gateway) = _gateway {
-                gateway
-                    .send_long_message_with_rollback(
-                        channel,
-                        prompt_anchor_reference
-                            .map(|(_, message_id)| message_id)
-                            .unwrap_or_else(|| MessageId::new(1)),
-                        relay_text,
-                    )
-                    .await
-                    .map_err(RelaySinkError::Transient)?
-            } else {
+            let receipt_slot = &mut plain_transport_receipt;
+            let send = move || async move {
+                #[cfg(test)]
+                if let Some(gateway) = _gateway {
+                    let anchor = prompt_anchor_reference
+                        .map(|(_, message_id)| message_id)
+                        .unwrap_or_else(|| MessageId::new(1));
+                    return gateway
+                        .send_long_message_with_rollback(channel, anchor, relay_text)
+                        .await
+                        .map_err(RelaySinkError::Transient);
+                }
                 let (message_ids, receipt) = self
                     .send_plain_response_chunks(
                         shared,
@@ -510,23 +519,11 @@ impl super::SessionBoundDiscordRelaySink {
                         prompt_anchor_reference,
                     )
                     .await?;
-                plain_transport_receipt = receipt;
-                message_ids
+                *receipt_slot = receipt;
+                Ok(message_ids)
             };
-            #[cfg(not(test))]
-            let message_ids = {
-                let (message_ids, receipt) = self
-                    .send_plain_response_chunks(
-                        shared,
-                        provider,
-                        channel,
-                        relay_text,
-                        prompt_anchor_reference,
-                    )
-                    .await?;
-                plain_transport_receipt = receipt;
-                message_ids
-            };
+            let message_ids =
+                super::claimed_body_send(claim_then_send(Some(body_claim), send).await)??;
             plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
             plain_body_posted = true;
         }

@@ -125,6 +125,7 @@ pub(in crate::services::discord) async fn deliver_recovery_replace_via_controlle
     placeholder: MessageId,
     body: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
+    body_claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
 ) -> RecoveryRelayOutcome
 where
     G: TurnGateway + ?Sized,
@@ -137,6 +138,7 @@ where
         placeholder,
         body,
         recovery_context,
+        body_claim,
         || probe_channel_liveness(http, channel_id),
     )
     .await;
@@ -175,6 +177,7 @@ async fn deliver_recovery_replace_via_controller_with_probe<G, F, Fut>(
     placeholder: MessageId,
     body: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
+    body_claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
     probe: F,
 ) -> RecoveryRelayOutcome
 where
@@ -234,6 +237,7 @@ where
             advance: None,
             // No heartbeat (no lease to renew).
             heartbeat: None,
+            body_claim,
         },
     )
     .await;
@@ -482,6 +486,7 @@ pub(in crate::services::discord) mod tests {
                 MessageId::new(77),
                 "answer",
                 recovery_context,
+                None,
                 || async move { probe },
             ));
         (
@@ -666,6 +671,7 @@ pub(in crate::services::discord) mod tests {
                 opt_message_id(state.current_msg_id).expect("non-zero test message id"),
                 "answer",
                 Some(&context),
+                None,
                 || async move { ChannelProbeVerdict::Gone },
             ));
 

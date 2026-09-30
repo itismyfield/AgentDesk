@@ -143,6 +143,7 @@ fn ctx<'a>(
         acquire_failure_mode: AcquireFailureMode::Transient,
         advance: None,
         heartbeat: None,
+        body_claim: None,
     }
 }
 

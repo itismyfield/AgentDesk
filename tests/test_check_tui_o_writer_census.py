@@ -96,11 +96,11 @@ class CensusGateTests(unittest.TestCase):
         self.assert_fails_with("census: CUT_D row W20 has no claim gate in src/services/discord/sink.rs")
 
     def test_a_peek_turned_into_a_claim_fails_the_pins(self) -> None:
-        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { bridge_o_body_peek_decision(k, true) }\n")
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { peek_o_owns_tui_output_for_channel(k, None) }\n")
         self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "probe:peek")
         ok, message = self.run_gate()
         self.assertTrue(ok, message)
-        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { bridge_o_body_cut_decision(k, true) }\n")
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { o_owns_tui_output_for_channel(k, None) }\n")
         self.assert_fails_with("has ['deliver:claim', 'probe:claim'], expected ['deliver:claim', 'probe:peek']")
 
     def test_gates_trading_roles_within_a_file_fail_with_unchanged_counts(self) -> None:
@@ -143,13 +143,27 @@ class CensusGateTests(unittest.TestCase):
         self.assert_fails_with(
             "raw claim: src/services/discord/sink.rs claims in early outside claim_then_send"
         )
-        for raw in ("candidate.claim(ch);", "bridge_o_body_cut_decision(ch, i, true);"):
-            with self.subTest(raw=raw):
-                self.write("src/services/discord/sink.rs", CUT_FILE + f"fn early(ch: u64) {{ {raw} }}\n")
-                self.assert_fails_with("claims in early outside claim_then_send")
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn early(ch: u64) { candidate.claim(ch); }\n")
+        self.assert_fails_with("claims in early outside claim_then_send")
         self.maps["RAW_CLAIM_SITES"] = {"src/services/discord/sink.rs": ("early",)}
         ok, message = self.run_gate()
         self.assertTrue(ok, message)
+
+    def test_a_tui_o_claim_is_seen_whatever_its_receiver_chain_or_path(self) -> None:
+        for raw in (
+            "adoption.claim(ch);",
+            "snapshot.candidate(ch).unwrap().claim(ch);",
+            "Candidate::claim(&adoption, ch);",
+        ):
+            with self.subTest(raw=raw):
+                self.write("src/services/tui_o/early.rs", f"fn early(ch: u64) {{ {raw} }}\n")
+                self.assert_fails_with(
+                    "raw claim: src/services/tui_o/early.rs claims in early outside claim_then_send"
+                )
+
+    def test_a_stale_raw_claim_exception_fails(self) -> None:
+        self.maps["RAW_CLAIM_SITES"] = {"src/services/discord/sink.rs": ("early",)}
+        self.assert_fails_with("raw claim: stale RAW_CLAIM_SITES entry src/services/discord/sink.rs early")
 
     def test_undecided_target_fails(self) -> None:
         for target in ("TBD", "?", "COV:TBD"):

@@ -54,6 +54,7 @@ mod recovery_retry;
 pub(super) mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
+use crate::services::tui_o::cutover::{BodySend, claim_then_send};
 
 const TERMINAL_DELIVERY_LOG_TARGET: &str = module_path!();
 
@@ -364,12 +365,17 @@ pub(super) async fn run_terminal_outcome_delivery(
             &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
-        let answerless = no_answer(&full_response, response_sent_offset, &delivery_response);
-        let o_body_cut = if silent_turn_handled || answerless {
-            terminal_controller_cutover::bridge_o_body_peek_decision
-        } else {
-            terminal_controller_cutover::bridge_o_body_cut_decision
-        }(channel_id, &inflight_state, can_deliver_directly);
+        // Ownership is only read here; each Legacy arm below claims at its own transport.
+        let o_body_cut = terminal_controller_cutover::bridge_o_body_peek_decision(
+            channel_id,
+            &inflight_state,
+            can_deliver_directly,
+        );
+        let body_claim = terminal_controller_cutover::bridge_body_claim(
+            channel_id,
+            &inflight_state,
+            can_deliver_directly,
+        );
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
@@ -475,6 +481,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
+                            Some(body_claim),
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -515,6 +522,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             inflight_state.user_msg_id,
+                            Some(body_claim),
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -577,6 +585,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
+                            Some(body_claim),
                             terminal_controller_cutover::BridgeShortReplaceLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -631,14 +640,26 @@ pub(super) async fn run_terminal_outcome_delivery(
                                 BridgeLeaseAcquire::Held(lease) => Some(lease),
                                 _ => None,
                             };
-                            {
-                                let replace_outcome = gateway
-                                    .replace_message_with_outcome(
-                                        channel_id,
-                                        current_msg_id,
-                                        &delivery_response,
-                                    )
-                                    .await;
+                            let replace = || {
+                                gateway.replace_message_with_outcome(
+                                    channel_id,
+                                    current_msg_id,
+                                    &delivery_response,
+                                )
+                            };
+                            let replaced = claim_then_send(Some(body_claim), replace).await;
+                            if !matches!(replaced, Ok(BodySend::Sent(_))) {
+                                // Nothing was sent: O owns the channel or its identity is held.
+                                if let Some(lease) = lease {
+                                    lease.commit_and_advance(
+                                        shared_owned.as_ref(),
+                                        watcher_owner_channel_id,
+                                        inflight_state.tmux_session_name.as_deref(),
+                                        crate::services::discord::LeaseOutcome::NotDelivered,
+                                    );
+                                }
+                                preserve_inflight_for_cleanup_retry = true;
+                            } else if let Ok(BodySend::Sent(replace_outcome)) = replaced {
                                 // #2860: delivered if the placeholder was edited OR a
                                 // fallback posted the full delivery_response as a fresh
                                 // message (edit non-committed); record it delivered so
@@ -731,8 +752,20 @@ pub(super) async fn run_terminal_outcome_delivery(
                             cancel_token: Some(cancel_token.as_ref()),
                         },
                     );
-                let delivery_outcome = enqueue_headless_delivery(delivery_arguments).await;
-                match super::headless_delivery::headless_delivery_disposition(&delivery_outcome) {
+                let enqueue = || enqueue_headless_delivery(delivery_arguments);
+                let enqueued = claim_then_send(Some(body_claim), enqueue).await;
+                let disposition = match &enqueued {
+                    Ok(BodySend::Sent(delivery_outcome)) => {
+                        super::headless_delivery::headless_delivery_disposition(&delivery_outcome)
+                    }
+                    // Nothing was enqueued: the selected channel's identity is held.
+                    Ok(BodySend::OwnedByO) | Err(_) => {
+                        super::headless_delivery::HeadlessDeliveryDisposition::PreserveForRetry {
+                            surfaced_error: Some("TUI output identity held"),
+                        }
+                    }
+                };
+                match disposition {
                     super::headless_delivery::HeadlessDeliveryDisposition::Commit => {
                         cleanup_headless_streaming_placeholder_after_delivery(
                             shared_owned.as_ref(),

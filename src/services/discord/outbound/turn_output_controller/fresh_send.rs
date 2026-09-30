@@ -6,6 +6,7 @@ use super::{ControllerLeaseGuard, DeliveryLease, DeliveryOutcome, OutputPlan, Tu
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::outbound::delivery_record;
 use crate::services::discord::{LeaseOutcome, lease_now_ms};
+use crate::services::tui_o::cutover::{BodySend, claim_then_send};
 
 /// The concrete fresh-send inputs live on the verb so later owner cutovers cannot
 /// accidentally omit the durable generation/fingerprint authority.
@@ -101,11 +102,18 @@ where
         .heartbeat
         .map(|heartbeat| heartbeat.start(ctx.holder, key.clone()));
 
-    let sent = gateway.send_message(ctx.channel_id, ctx.body).await;
+    let send = || gateway.send_message(ctx.channel_id, ctx.body);
+    let sent = claim_then_send(ctx.body_claim, send).await;
     drop(heartbeat_guard);
     let message_id = match sent {
-        Ok(message_id) => message_id,
-        Err(error) => {
+        Ok(BodySend::Sent(Ok(message_id))) => message_id,
+        Ok(BodySend::OwnedByO) | Err(_) => {
+            lease_guard.release_and_disarm();
+            return DeliveryOutcome::Transient {
+                retry_from_offset: start,
+            };
+        }
+        Ok(BodySend::Sent(Err(error))) => {
             tracing::warn!(
                 channel_id = ctx.channel_id.get(),
                 error = %error,

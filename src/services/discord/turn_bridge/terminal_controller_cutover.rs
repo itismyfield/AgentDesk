@@ -18,6 +18,7 @@ use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use unix_journal::{
     Disposition, begin_controller_terminal as journal_begin,
     settle_controller_terminal as journal_settle,
@@ -117,9 +118,7 @@ pub(super) fn bridge_long_chunks_cutover_decision(
 }
 
 mod o_body;
-pub(super) use o_body::{
-    bridge_body_claim, bridge_o_body_cut_decision, bridge_o_body_peek_decision,
-};
+pub(super) use o_body::{bridge_body_claim, bridge_o_body_peek_decision};
 
 /// #3089 A5: pure no-double-acquire gate. The legacy site-5 arm acquires its OWN
 /// `BridgeDeliveryLease` over `cutover_range` (mod.rs ~6134). When the
@@ -240,6 +239,7 @@ pub(super) async fn deliver_short_replace_via_controller(
     lease_key: Option<DeliveryLeaseKey>,
     start: u64,
     end: u64,
+    body_claim: Option<BodyClaim<'_>>,
 ) -> toc::DeliveryOutcome {
     let holder = super::terminal_delivery::next_bridge_lease_holder();
     // Self-heal like the legacy acquire (terminal_delivery.rs:516): reclaim an
@@ -315,6 +315,7 @@ pub(super) async fn deliver_short_replace_via_controller(
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
+            body_claim,
         },
     )
     .await;
@@ -378,6 +379,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
     lease_key: Option<DeliveryLeaseKey>,
     start: u64,
     end: u64,
+    body_claim: Option<BodyClaim<'_>>,
 ) -> toc::DeliveryOutcome {
     let holder = super::terminal_delivery::next_bridge_lease_holder();
     cell.reclaim_if_expired(lease_now_ms());
@@ -425,6 +427,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
+            body_claim,
         },
     )
     .await;
@@ -484,6 +487,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
     session_key: Option<&str>,
     turn_id: Option<&str>,
     lease_key: Option<DeliveryLeaseKey>,
+    body_claim: Option<BodyClaim<'_>>,
     locals: BridgeLongChunksLocals<'_>,
 ) {
     let outcome = deliver_long_chunks_via_controller(
@@ -502,6 +506,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
         lease_key,
         start,
         end,
+        body_claim,
     )
     .await;
     apply_bridge_long_chunks_outcome(
@@ -542,6 +547,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
     // threaded from the caller's inflight snapshot so the completed-turn ledger is
     // keyed by the inbound channel, not `watcher_owner_channel_id`.
     ledger_user_msg_id: u64,
+    body_claim: Option<BodyClaim<'_>>,
     locals: BridgeLongChunksLocals<'_>,
 ) {
     if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
@@ -563,20 +569,26 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
     let mut journal = unix_journal::begin_controller_terminal(shared, provider,
         Disposition::LongChunksLegacy, (watcher_owner_channel_id, channel_id),
         lease.as_ref().map(|lease| lease.range()));
-    match send_ordered_long_terminal_response(
-        shared,
-        gateway,
-        provider,
-        channel_id,
-        msg_id,
-        tmux_session_name,
-        relay_text,
-        dispatch_id,
-        session_key,
-        turn_id,
-    )
-    .await
-    {
+    let send = || {
+        send_ordered_long_terminal_response(
+            shared,
+            gateway,
+            provider,
+            channel_id,
+            msg_id,
+            tmux_session_name,
+            relay_text,
+            dispatch_id,
+            session_key,
+            turn_id,
+        )
+    };
+    let sent = match claim_then_send(body_claim, send).await {
+        Ok(BodySend::Sent(sent)) => sent,
+        // Nothing was sent: O owns the channel or its identity is held.
+        Ok(BodySend::OwnedByO) | Err(_) => Err("O owns this channel's body".into()),
+    };
+    match sent {
         Ok((_first, last_chunk_msg_id)) => {
             *locals.terminal_delivery_committed = true;
             *locals.terminal_body_visible = true;
@@ -782,6 +794,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     session_key: Option<&str>,
     turn_id: Option<&str>,
     lease_key: Option<DeliveryLeaseKey>,
+    body_claim: Option<BodyClaim<'_>>,
     locals: BridgeShortReplaceLocals<'_>,
 ) {
     let outcome = deliver_short_replace_via_controller(
@@ -800,6 +813,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
         lease_key,
         start,
         end,
+        body_claim,
     )
     .await;
     apply_bridge_short_replace_outcome(
@@ -1303,7 +1317,7 @@ mod tests {
         #[cfg(unix)]
         #[rustfmt::skip]
         fn pinned_transport<'a>(shared: &'a SharedData, gateway: &'a dyn TurnGateway, provider: &'a ProviderKind, owner: ChannelId) -> PinnedTerminalTransport<'a> {
-            PinnedTerminalTransport { source: (shared, gateway, provider), target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None) }
+            PinnedTerminalTransport { source: (shared, gateway, provider), target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None), claim: None }
         }
         #[cfg(unix)]
         #[rustfmt::skip]
@@ -1493,6 +1507,7 @@ mod tests {
                 Some(lease_key()),
                 START,
                 END,
+                None,
             )
             .await
         }
@@ -1859,6 +1874,7 @@ mod tests {
                 None,
                 None,
                 Some(lease_key()),
+                None,
                 BridgeLongChunksLocals {
                     terminal_delivery_committed: &mut locals.committed,
                     terminal_body_visible: &mut locals.visible,
@@ -2252,6 +2268,7 @@ mod tests {
                 None,
                 None,
                 Some(lease_key()),
+                None,
                 BridgeLongChunksLocals {
                     terminal_delivery_committed: &mut locals.committed,
                     terminal_body_visible: &mut locals.visible,

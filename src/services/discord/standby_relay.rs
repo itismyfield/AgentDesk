@@ -806,6 +806,7 @@ async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?
             advance: None,
             // No heartbeat (no lease to renew).
             heartbeat: None,
+            body_claim: None,
         },
     )
     .await;

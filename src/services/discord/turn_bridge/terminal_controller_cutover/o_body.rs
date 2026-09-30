@@ -5,17 +5,7 @@ use crate::services::tui_o::cutover::{self, BodyClaim, IdentityError};
 type Gate = fn(u64, Option<RuntimeHandoffKind>) -> Result<bool, IdentityError>;
 
 /// Direct TUI bodies follow destination membership; uncertain selected identities are held.
-/// For a caller about to send a body: a pending adoption is released to Legacy first.
-pub(in crate::services::discord::turn_bridge) fn bridge_o_body_cut_decision(
-    channel_id: ChannelId,
-    inflight: &InflightTurnState,
-    can_deliver_directly: bool,
-) -> Result<bool, IdentityError> {
-    let gate: Gate = cutover::o_owns_tui_output_for_channel;
-    decision(channel_id, inflight, can_deliver_directly, gate)
-}
-
-/// The same decision for a caller with no body to send; a pending adoption stays pending.
+/// Only read: a pending adoption stays pending, and a body claims at its transport instead.
 pub(in crate::services::discord::turn_bridge) fn bridge_o_body_peek_decision(
     channel_id: ChannelId,
     inflight: &InflightTurnState,

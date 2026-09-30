@@ -16,6 +16,7 @@ use crate::services::discord::placeholder_controller::{PlaceholderKey, Placehold
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::BodyClaim;
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
 pub(in crate::services::discord) use super::terminal_delivery_types::WatcherShortReplaceResult;
@@ -185,6 +186,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     source_authority: WatcherSourceAuthority,
     start: u64,
     end: u64,
+    body_claim: Option<BodyClaim<'_>>,
 ) -> WatcherShortReplaceResult {
     let delivery_identity = super::terminal_long_chunks::watcher_delivery_identity(
         source_authority.generation_mtime_ns,
@@ -282,6 +284,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
+            body_claim,
         },
         Some(&revalidate_after_edit_failure),
     )
@@ -429,6 +432,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
     response_sent_offset: usize,
     single_message_panel_footer_mode: bool,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
+    body_claim: Option<BodyClaim<'_>>,
     locals: WatcherShortReplaceLocals<'_>,
 ) {
     // Live path: the real `DiscordGateway` (the seam the ON-path test fakes).
@@ -454,6 +458,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         source_authority,
         range.0,
         range.1,
+        body_claim,
     )
     .await;
     if let WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } = result {

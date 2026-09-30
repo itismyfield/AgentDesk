@@ -17,6 +17,7 @@ use crate::services::discord::{
     LeaseHolder, LeaseOutcome, SharedData, inflight, lease_now_ms,
 };
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
 
 /// A restart may retain the old placeholder after the terminal POST receipt
 /// committed but before its inflight mirror. Revalidate the captured episode;
@@ -721,19 +722,26 @@ fn record_anchored_fallback_replacement(
     }
 }
 
+/// Fresh-sends a recovered body with no anchor; `claim` is taken only at the POST, after the
+/// fresh-send lease is won, so a busy lease leaves a pending O adoption untouched.
 pub(in crate::services::discord) async fn relay_no_anchor_terminal_text(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
-) -> RecoveryRelayOutcome {
+    claim: Option<BodyClaim<'_>>,
+) -> Result<BodySend<RecoveryRelayOutcome>, IdentityError> {
     let Some(context) = recovery_context else {
         tracing::warn!(
             channel_id = channel_id.get(),
             "recovery no-anchor delivery has no D1 idempotency context; falling back to legacy fresh send"
         );
-        return match formatting::send_long_message_raw(http, channel_id, text, shared).await {
+        let send = || formatting::send_long_message_raw(http, channel_id, text, shared);
+        let BodySend::Sent(sent) = claim_then_send(claim, send).await? else {
+            return Ok(BodySend::OwnedByO);
+        };
+        let outcome = match sent {
             Ok(()) => RecoveryRelayOutcome::Delivered,
             Err(error) => {
                 let classified =
@@ -745,19 +753,29 @@ pub(in crate::services::discord) async fn relay_no_anchor_terminal_text(
                 .await
             }
         };
+        return Ok(BodySend::Sent(outcome));
     };
     let Some(mut lease) = context.try_acquire_fresh_send_lease(shared, text) else {
         tracing::warn!(
             channel_id = channel_id.get(),
             "recovery no-anchor delivery lease busy; skipping fresh send for retry"
         );
-        return RecoveryRelayOutcome::TransientFailure;
+        return Ok(BodySend::Sent(RecoveryRelayOutcome::TransientFailure));
     };
-    let result = formatting::send_long_message_raw_with_reference_returning_message_ids(
-        http, channel_id, text, shared, None,
-    )
-    .await;
-    match result {
+    let send = || {
+        formatting::send_long_message_raw_with_reference_returning_message_ids(
+            http, channel_id, text, shared, None,
+        )
+    };
+    let result = match claim_then_send(claim, send).await {
+        Ok(BodySend::Sent(result)) => result,
+        refused => {
+            // Nothing was posted: free the range without recording an outcome.
+            lease.release();
+            return refused.map(|_| BodySend::OwnedByO);
+        }
+    };
+    let outcome = match result {
         Ok(message_ids) => {
             let committed = lease.commit(LeaseOutcome::Delivered);
             // Record chunk 0's message id. If only the inflight row proves reuse
@@ -791,7 +809,8 @@ pub(in crate::services::discord) async fn relay_no_anchor_terminal_text(
             })
             .await
         }
-    }
+    };
+    Ok(BodySend::Sent(outcome))
 }
 
 pub(in crate::services::discord) struct RecoveryFreshSendLease {
