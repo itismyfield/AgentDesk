@@ -6,6 +6,7 @@ use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::codex::CodexLaunchOptions;
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 
+use super::host_input::{self, InputTarget};
 use super::input::{
     CodexFollowupPromptSubmitOutcome, PromptReadinessKind, PromptReadinessSnapshot,
 };
@@ -240,54 +241,6 @@ fn log_fallback(tmux_session_name: &str, reason: CodexWarmFallbackReason, detail
 }
 
 #[cfg(unix)]
-fn kill_pane_and_confirm_stopped(
-    tmux_session_name: &str,
-    reason: CodexWarmFallbackReason,
-) -> Result<(), String> {
-    let pane_pid =
-        crate::services::platform::tmux::pane_pid(tmux_session_name).ok_or_else(|| {
-            "Codex TUI warm follow-up could not pin the pane PID before kill".to_string()
-        })?;
-    let pane_identity = crate::services::process::ProcessIdentity::capture(pane_pid);
-    let process_tree_kill_started =
-        crate::services::process::kill_pid_tree_if_identity_matches(pane_pid, pane_identity);
-    let kill_succeeded =
-        crate::services::platform::tmux::kill_session(tmux_session_name, reason.reason_text());
-    if !process_tree_kill_started || !kill_succeeded {
-        tracing::warn!(
-            tmux_session_name,
-            pane_pid,
-            process_tree_kill_started,
-            kill_succeeded,
-            "Codex TUI warm follow-up kill command was incomplete; requiring independent pane, PID, and process-group death proof"
-        );
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let pane_stopped = matches!(
-            crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
-            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
-        );
-        let process_stopped = matches!(
-            pane_identity.probe(pane_pid),
-            crate::services::process::ProcessIdentityProbe::GoneOrReused
-        );
-        let process_group_stopped = matches!(
-            crate::services::process::process_group_probe(pane_pid),
-            crate::services::process::ProcessGroupProbe::Gone
-        );
-        if pane_stopped && process_stopped && process_group_stopped {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    Err("Codex TUI warm follow-up could not prove pane, process, and process-group termination after fallback kill barrier".to_string())
-}
-
-#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_codex_tui_warm_followup(
     selection: &CodexTuiSessionSelection,
@@ -301,6 +254,62 @@ pub(crate) fn try_codex_tui_warm_followup(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
 ) -> CodexWarmFollowupOutcome {
+    let target = InputTarget::legacy_tmux(tmux_session_name);
+    warm_followup_on(
+        &target,
+        WarmFollowupRequest {
+            selection,
+            launch_options,
+            force_fresh,
+            session_exists,
+            live_pane,
+            prompt,
+            sender,
+            cancel_token,
+            report_channel_id,
+        },
+    )
+}
+
+/// Turn inputs for [`warm_followup_on`], everything except the input target.
+#[cfg(unix)]
+struct WarmFollowupRequest<'a> {
+    selection: &'a CodexTuiSessionSelection,
+    launch_options: &'a CodexLaunchOptions,
+    force_fresh: bool,
+    session_exists: bool,
+    live_pane: bool,
+    prompt: &'a str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    report_channel_id: Option<u64>,
+}
+
+/// Warm follow-up on `target`: only a confirmed tmux session is reused, killed
+/// or handed back for a relaunch.
+#[cfg(unix)]
+fn warm_followup_on(
+    target: &InputTarget,
+    request: WarmFollowupRequest<'_>,
+) -> CodexWarmFollowupOutcome {
+    let WarmFollowupRequest {
+        selection,
+        launch_options,
+        force_fresh,
+        session_exists,
+        live_pane,
+        prompt,
+        sender,
+        cancel_token,
+        report_channel_id,
+    } = request;
+    let tmux_session_name = match target {
+        InputTarget::Tmux(session) => session.as_str(),
+        InputTarget::Refused(refusal) => {
+            let run = host_input::InputRun::Refused(*refusal);
+            return CodexWarmFollowupOutcome::Terminal(Err(host_input::refusal_error(&run)));
+        }
+    };
     let marker = super::session::read_codex_tui_rollout_marker(tmux_session_name);
     let fingerprint = codex_tui_launch_options_fingerprint(launch_options);
     let eligibility = decide_warm_eligibility(WarmEligibilitySignals {
@@ -401,91 +410,20 @@ pub(crate) fn try_codex_tui_warm_followup(
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
 
-    match super::input::submit_codex_followup_prompt(
+    let outcome = super::input::submit_codex_followup_prompt(
         tmux_session_name,
         prompt,
         cancel_token.as_deref(),
+    );
+    if let Some(settled) = settle_submit(
+        target,
+        tmux_session_name,
+        outcome,
+        rollout_path,
+        rollout_len_before_submit,
+        prompt,
     ) {
-        CodexFollowupPromptSubmitOutcome::Submitted => {}
-        CodexFollowupPromptSubmitOutcome::NotSubmitted { error } => {
-            let rollout_len_after_submit = std::fs::metadata(rollout_path)
-                .ok()
-                .map(|metadata| metadata.len());
-            if pre_enter_failure_allows_fallback(
-                rollout_len_before_submit,
-                rollout_len_after_submit,
-            ) {
-                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                    ProviderKind::Codex.as_str(),
-                    tmux_session_name,
-                    prompt,
-                );
-                let reason = CodexWarmFallbackReason::SubmitFailed;
-                log_fallback(
-                    tmux_session_name,
-                    reason,
-                    &format!("prompt delivery failed before Enter: {error}"),
-                );
-                return CodexWarmFollowupOutcome::Fallback(reason);
-            }
-            return CodexWarmFollowupOutcome::Terminal(Err(format!(
-                "Codex TUI warm follow-up failed before Enter but rollout advanced; refusing replay: {error}"
-            )));
-        }
-        CodexFollowupPromptSubmitOutcome::Cancelled => {
-            return CodexWarmFollowupOutcome::Terminal(Ok(()));
-        }
-        CodexFollowupPromptSubmitOutcome::RetrySafeDraft { first, second } => {
-            let rollout_len_after_submit = std::fs::metadata(rollout_path)
-                .ok()
-                .map(|metadata| metadata.len());
-            if submit_failure_allows_fallback(
-                super::input::prompt_draft_matches(&first, prompt),
-                super::input::prompt_draft_matches(&second, prompt),
-                rollout_len_before_submit,
-                rollout_len_after_submit,
-            ) {
-                let reason = CodexWarmFallbackReason::SubmitFailed;
-                if let Err(error) = kill_pane_and_confirm_stopped(tmux_session_name, reason) {
-                    return CodexWarmFollowupOutcome::Terminal(Err(error));
-                }
-                let rollout_len_after_kill = std::fs::metadata(rollout_path)
-                    .ok()
-                    .map(|metadata| metadata.len());
-                if rollout_len_after_kill != Some(rollout_len_before_submit) {
-                    return CodexWarmFollowupOutcome::Terminal(Err(
-                        "Codex TUI warm follow-up rollout advanced across the pane-kill barrier; refusing replay"
-                            .to_string(),
-                    ));
-                }
-                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                    ProviderKind::Codex.as_str(),
-                    tmux_session_name,
-                    prompt,
-                );
-                log_fallback(
-                    tmux_session_name,
-                    reason,
-                    "draft persisted in two snapshots and rollout stayed unchanged through the pane-kill barrier",
-                );
-                return CodexWarmFollowupOutcome::FallbackAfterPaneKill(reason);
-            }
-            return CodexWarmFollowupOutcome::Terminal(Err(
-                "Codex TUI warm follow-up submit was unconfirmed; refusing replay".to_string(),
-            ));
-        }
-        CodexFollowupPromptSubmitOutcome::Unconfirmed { error, snapshot } => {
-            tracing::error!(
-                tmux_session_name,
-                error,
-                tmux_pane_alive = snapshot.tmux_pane_alive,
-                capture_available = snapshot.capture_available,
-                composer_marker_detected = snapshot.composer_marker_detected,
-                prompt_draft_detected = snapshot.prompt_draft_detected,
-                "Codex TUI warm follow-up submit unconfirmed; refusing cold replay"
-            );
-            return CodexWarmFollowupOutcome::Terminal(Err(error));
-        }
+        return settled;
     }
 
     let tail_result = super::rollout_tail::tail_warm_followup_rollout_for_tmux(
@@ -494,7 +432,7 @@ pub(crate) fn try_codex_tui_warm_followup(
         session_id,
         sender.clone(),
         cancel_token.clone(),
-        || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
+        || host_input::legacy_pane_alive(tmux_session_name),
         tmux_session_name,
         prompt,
     );
@@ -511,6 +449,96 @@ pub(crate) fn try_codex_tui_warm_followup(
         cancel_token,
         tmux_session_name,
     ))
+}
+
+/// Settles the one submit; `None` goes on to tail the rollout. A draft that stayed
+/// in the composer is killed for a relaunch only on a confirmed tmux session.
+#[cfg(unix)]
+fn settle_submit(
+    target: &InputTarget,
+    tmux_session_name: &str,
+    outcome: CodexFollowupPromptSubmitOutcome,
+    rollout_path: &Path,
+    rollout_len_before_submit: u64,
+    prompt: &str,
+) -> Option<CodexWarmFollowupOutcome> {
+    let rollout_len = || {
+        std::fs::metadata(rollout_path)
+            .ok()
+            .map(|metadata| metadata.len())
+    };
+    let settled = match outcome {
+        CodexFollowupPromptSubmitOutcome::Submitted => return None,
+        CodexFollowupPromptSubmitOutcome::NotSubmitted { error } => {
+            if !pre_enter_failure_allows_fallback(rollout_len_before_submit, rollout_len()) {
+                return Some(CodexWarmFollowupOutcome::Terminal(Err(format!(
+                    "Codex TUI warm follow-up failed before Enter but rollout advanced; refusing replay: {error}"
+                ))));
+            }
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                ProviderKind::Codex.as_str(),
+                tmux_session_name,
+                prompt,
+            );
+            let reason = CodexWarmFallbackReason::SubmitFailed;
+            log_fallback(
+                tmux_session_name,
+                reason,
+                &format!("prompt delivery failed before Enter: {error}"),
+            );
+            CodexWarmFollowupOutcome::Fallback(reason)
+        }
+        CodexFollowupPromptSubmitOutcome::Cancelled => CodexWarmFollowupOutcome::Terminal(Ok(())),
+        CodexFollowupPromptSubmitOutcome::RetrySafeDraft { first, second } => {
+            if !submit_failure_allows_fallback(
+                super::input::prompt_draft_matches(&first, prompt),
+                super::input::prompt_draft_matches(&second, prompt),
+                rollout_len_before_submit,
+                rollout_len(),
+            ) {
+                return Some(CodexWarmFollowupOutcome::Terminal(Err(
+                    "Codex TUI warm follow-up submit was unconfirmed; refusing replay".to_string(),
+                )));
+            }
+            let reason = CodexWarmFallbackReason::SubmitFailed;
+            if let Err(error) = host_input::kill_legacy_pane(target, reason.reason_text()) {
+                return Some(CodexWarmFollowupOutcome::Terminal(Err(error)));
+            }
+            if rollout_len() != Some(rollout_len_before_submit) {
+                return Some(CodexWarmFollowupOutcome::Terminal(Err(
+                    "Codex TUI warm follow-up rollout advanced across the pane-kill barrier; refusing replay"
+                        .to_string(),
+                )));
+            }
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                ProviderKind::Codex.as_str(),
+                tmux_session_name,
+                prompt,
+            );
+            log_fallback(
+                tmux_session_name,
+                reason,
+                "draft persisted in two snapshots and rollout stayed unchanged through the pane-kill barrier",
+            );
+            CodexWarmFollowupOutcome::FallbackAfterPaneKill(reason)
+        }
+        CodexFollowupPromptSubmitOutcome::Unconfirmed { error, snapshot } => {
+            tracing::error!(
+                tmux_session_name,
+                error,
+                tmux_pane_alive = snapshot.tmux_pane_alive,
+                capture_available = snapshot.capture_available,
+                composer_marker_detected = snapshot.composer_marker_detected,
+                prompt_draft_detected = snapshot.prompt_draft_detected,
+                "Codex TUI warm follow-up submit unconfirmed; refusing cold replay"
+            );
+            CodexWarmFollowupOutcome::Terminal(Err(error))
+        }
+        CodexFollowupPromptSubmitOutcome::Refused { run } => {
+            CodexWarmFollowupOutcome::Terminal(Err(host_input::refusal_error(&run)))
+        }
+    };
+    Some(settled)
 }
 
 #[cfg(test)]
@@ -726,5 +754,117 @@ mod tests {
         assert!(!codex_tui_warm_followup_enabled());
         unsafe { std::env::set_var(WARM_FOLLOWUP_ENV, "false") };
         assert!(codex_tui_warm_followup_enabled());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warm_followup_kills_and_relaunches_only_a_confirmed_tmux_session() {
+        use crate::services::codex_tui::host_input::spy::{
+            SpyGuard, SpyState, known, non_tmux_targets, resolved,
+        };
+        use crate::services::codex_tui::host_input::{InputRefusal, InputRun, StopCause};
+        use crate::services::session_host::HostKind;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "{}\n").unwrap();
+        let len = std::fs::metadata(&rollout).unwrap().len();
+        let prompt = "keep this draft";
+        let draft = PromptReadinessSnapshot {
+            composer_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: format!(
+                "old output\n\
+                 ╭────────────────────────────────────────╮\n\
+                 │ {prompt} ▌                              │\n\
+                 ╰────────────────────────────────────────╯\n\
+                   Esc to interrupt   Ctrl+J newline   ⏎ send"
+            ),
+        };
+        let stranded = || CodexFollowupPromptSubmitOutcome::RetrySafeDraft {
+            first: draft.clone(),
+            second: draft.clone(),
+        };
+        let selection = CodexTuiSessionSelection {
+            requested_session_id: Some("session-one".to_string()),
+            selected_session_id: Some("session-one".to_string()),
+            resume: true,
+            reason: "test".to_string(),
+            rollout_path: Some(rollout.clone()),
+            rollout_start_offset: Some(0),
+            candidate_count: 1,
+        };
+        let options = CodexLaunchOptions::new(prompt);
+        let pinned = || SpyState {
+            pane_pid: Some(4242),
+            ..SpyState::default()
+        };
+        let session = "AgentDesk-codex-p6b";
+
+        for (target, refusal) in non_tmux_targets() {
+            let guard = SpyGuard::install(pinned());
+            let (sender, _receiver) = std::sync::mpsc::channel();
+            let entry = warm_followup_on(
+                &target,
+                WarmFollowupRequest {
+                    selection: &selection,
+                    launch_options: &options,
+                    force_fresh: false,
+                    session_exists: true,
+                    live_pane: true,
+                    prompt,
+                    sender,
+                    cancel_token: None,
+                    report_channel_id: None,
+                },
+            );
+            assert!(
+                matches!(entry, CodexWarmFollowupOutcome::Terminal(Err(_))),
+                "{refusal:?}"
+            );
+            let settled = settle_submit(&target, session, stranded(), &rollout, len, prompt);
+            assert!(
+                matches!(settled, Some(CodexWarmFollowupOutcome::Terminal(Err(_)))),
+                "{refusal:?}: no relaunch"
+            );
+            assert!(
+                guard.calls().is_empty(),
+                "{refusal:?}: no read, key or kill"
+            );
+        }
+
+        // Positive control: a confirmed tmux draft is killed in the legacy order, then relaunched.
+        let tmux = resolved(known(HostKind::Tmux));
+        let guard = SpyGuard::install(pinned());
+        let settled = settle_submit(&tmux, session, stranded(), &rollout, len, prompt);
+        assert!(matches!(
+            settled,
+            Some(CodexWarmFollowupOutcome::FallbackAfterPaneKill(
+                CodexWarmFallbackReason::SubmitFailed
+            ))
+        ));
+        let reason = CodexWarmFallbackReason::SubmitFailed.reason_text();
+        let kill_session = format!("kill_session:{reason}");
+        assert_eq!(
+            guard.calls(),
+            ["pane_pid", "kill_tree", kill_session.as_str(), "stopped"]
+        );
+        drop(guard);
+
+        // A gate refusal ends the attempt on tmux too: no kill and no cold relaunch.
+        let guard = SpyGuard::install(pinned());
+        let run = InputRun::Indeterminate {
+            confirmed: 1,
+            cause: StopCause::Refused(InputRefusal::IdentityMismatch),
+        };
+        let refused = CodexFollowupPromptSubmitOutcome::Refused { run };
+        let settled = settle_submit(&tmux, session, refused, &rollout, len, prompt);
+        assert!(matches!(
+            settled,
+            Some(CodexWarmFollowupOutcome::Terminal(Err(_)))
+        ));
+        assert!(guard.calls().is_empty());
     }
 }
