@@ -38,11 +38,14 @@ pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<Sh
     }
     *last_guard = tokio::time::Instant::now();
     drop(last_guard);
+    cleanup_expired_sessions(shared).await;
+}
 
+async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     struct ExpiredSessionCleanup {
         channel_id: ChannelId,
+        channel_name: Option<String>,
         session_key: Option<String>,
-        tmux_session: Option<String>,
     }
 
     let provider = shared.settings.read().await.provider.clone();
@@ -60,39 +63,60 @@ pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<Sh
             })
             .map(|(ch, s)| ExpiredSessionCleanup {
                 channel_id: *ch,
-                tmux_session: s
-                    .channel_name
-                    .as_ref()
-                    .map(|name| provider.build_tmux_session_name(name)),
-                session_key: s.channel_name.as_ref().map(|name| {
-                    let tmux_name = provider.build_tmux_session_name(name);
-                    adk_session::build_namespaced_session_key(
-                        &shared.token_hash,
-                        &provider,
-                        &tmux_name,
-                    )
-                }),
+                channel_name: s.channel_name.clone(),
+                session_key: None,
             })
             .collect()
     };
     let mut safe_expired = Vec::new();
-    for candidate in expired {
+    for mut candidate in expired {
         // A missing watcher/inflight record can be a relay failure while the
         // actual provider still works. Do not clear its mailbox or worktree.
-        let (Some(pool), Some(key), Some(tmux_name)) = (
-            shared.pg_pool.as_ref(),
-            candidate.session_key.as_deref(),
-            candidate.tmux_session.as_ref(),
-        ) else {
+        let Some(pool) = shared.pg_pool.as_ref() else {
             continue;
         };
-        if super::mailbox_has_active_turn(shared, candidate.channel_id).await
-            || !crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(pool, key)
-                .await
+        if super::mailbox_has_active_turn(shared, candidate.channel_id).await {
+            continue;
+        }
+        // The channel's canonical row is checked before a tmux name is built from its name.
+        let tmux_name = |name: &String| provider.build_tmux_session_name(name);
+        let host =
+            crate::services::tmux_turn_liveness::cleanup_host::confirm_legacy_tmux_channel_pg(
+                pool,
+                provider.as_str(),
+                &shared.token_hash,
+                &candidate.channel_id.get().to_string(),
+                || {
+                    let tmux_name = tmux_name(candidate.channel_name.as_ref()?);
+                    let key = adk_session::build_namespaced_session_key(
+                        &shared.token_hash,
+                        &provider,
+                        &tmux_name,
+                    );
+                    Some(key)
+                },
+            )
+            .await;
+        let key = match host {
+            Ok(key) => key,
+            Err(refusal) => {
+                tracing::info!(
+                    channel_id = candidate.channel_id.get(),
+                    preserved_reason = refusal.reason(),
+                    "idle cleanup preserved session: not a legacy tmux session"
+                );
+                continue;
+            }
+        };
+        if !crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(pool, &key)
+            .await
         {
             continue;
         }
-        let tmux_name = tmux_name.clone();
+        let Some(tmux_name) = candidate.channel_name.as_ref().map(tmux_name) else {
+            continue;
+        };
+        candidate.session_key = Some(key);
         let safe = tokio::task::spawn_blocking(move || {
             use crate::services::platform::tmux::{SessionPresence, session_presence};
             match session_presence(&tmux_name) {
@@ -182,22 +206,29 @@ pub(in crate::services::discord) async fn mark_session_disconnected_for_idle_cle
     let Some(pool) = pg_pool else {
         return false;
     };
-    let prior_status =
-        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
-            .bind(session_key)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    // A row that gained a hosted record after the host check keeps its status and dispatch.
+    let prior_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM sessions WHERE session_key = $1 AND hosted_execution IS NULL",
+    )
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
 
     let _ = sqlx::query(
         "UPDATE sessions
          SET status = 'disconnected', active_dispatch_id = NULL
-         WHERE session_key = $1",
+         WHERE session_key = $1 AND hosted_execution IS NULL",
     )
     .bind(session_key)
     .execute(pool)
     .await;
 
-    prior_status.as_deref() != Some("disconnected")
+    prior_status.is_some_and(|status| status != "disconnected")
 }
+
+// Unix-gated: the test installs a fake `tmux` on PATH, which needs `PermissionsExt`.
+#[cfg(all(test, unix))]
+#[path = "session_idle_cleanup_tests.rs"]
+mod tests;

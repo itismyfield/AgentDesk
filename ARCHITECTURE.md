@@ -1653,6 +1653,7 @@ src/
 │   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
+│   │   ├── session_idle_cleanup_tests.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -1958,6 +1959,7 @@ src/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── blob.rs
