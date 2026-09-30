@@ -1258,7 +1258,8 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
     let kinds = bindings(&files, "HostKind");
     let variant = regex::Regex::new(r"\b(\w+)\s*::\s*Herdr\b").unwrap();
     for (relative, file) in files.iter().filter(|(r, _)| !owners.contains(&r.as_str())) {
-        // Whether `path[k]`, reached through `path[..k]`, names HostKind or an alias of it.
+        // Whether `path[k]`, reached through `path[..k]`, may name HostKind or an alias of it;
+        // a qualifier that globs the alias's module, or names no scanned module, counts.
         let kind_at = |path: &[String], k: usize| {
             path[k] == "HostKind"
                 || kinds.iter().any(|(name, at)| {
@@ -1267,7 +1268,7 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
                         && if k == 0 {
                             file.sees_bare(&files, at == relative, module)
                         } else {
-                            resolve_path(&files, file, &path[..k]) == *module
+                            path_reaches(&files, &resolve_path(&files, file, &path[..k]), module)
                         }
                 })
         };
@@ -1467,6 +1468,14 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
             "legacy_ref",
             &[(RESOLVE, 0), (GUARD, 2), (POLICY_REPAIR, 1)],
         ),
+        (
+            "teardown_for_lookup",
+            &[
+                (GUARD_ADAPTER, 1),
+                ("src/services/discord/inflight.rs", 0),
+                ("src/services/discord/host_key_derivation.rs", 1),
+            ],
+        ),
         ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
         ("locator_witness", &[(GUARD_ADAPTER, 1)]),
         ("marker_witness", &[(GUARD_ADAPTER, 1)]),
@@ -1553,6 +1562,7 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     const CHILD: &str = "src/services/session_host/resolve/child.rs";
     const MODEL: &str = "src/services/session_host/model.rs";
     const OTHER: &str = "src/services/termination_audit.rs";
+    const FACADE: &str = "src/services/facade.rs";
     const ITEMS: &[(&str, Owners)] = &[
         ("resolve_session_target", &[(RESOLVE, 0), (ROOT, 0)]),
         ("resolve_target_host", &[(RESOLVE, 1), (ROOT, 0)]),
@@ -1689,6 +1699,27 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
                     "use crate::services::session_host as hosts;\nuse hosts::Kind::*;\n\
                      fn scan_gap() { let _ = hosts::host_for(Herdr); }\n",
                 ),
+            ],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "a HostKind alias path through a glob re-export",
+            &[
+                (ROOT, "pub(crate) use model::HostKind as Kind;\n"),
+                (FACADE, "pub(crate) use crate::services::session_host::*;\n"),
+                (
+                    OTHER,
+                    "fn route() { let _ = crate::services::facade::Kind::Herdr; }\n",
+                ),
+            ],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "a HostKind alias import through a glob re-export",
+            &[
+                (ROOT, "pub(crate) use model::HostKind as Kind;\n"),
+                (FACADE, "pub(crate) use crate::services::session_host::*;\n"),
+                (OTHER, "use crate::services::facade::Kind::Herdr;\n"),
             ],
             "termination_audit.rs: HostKind::Herdr import",
         ),

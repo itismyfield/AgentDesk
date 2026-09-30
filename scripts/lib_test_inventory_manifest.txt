@@ -1522,6 +1522,7 @@ services::calendar_sync::model::tests::patches_distinguish_keep_set_and_clear
 services::calendar_sync::model::tests::time_is_not_rounded_and_offsets_must_agree
 services::calendar_sync::recovery::tests::recovery_requires_explicit_resolution_and_evidence
 services::calendar_sync::tests::patch_requires_its_observed_revision_and_preserves_other_fields
+services::claude::c1_teardown_tests::a_cleared_stale_session_is_relaunched_exactly_once
 services::claude::c1_teardown_tests::a_failed_fresh_turn_tears_down_only_under_its_clearance
 services::claude::c1_teardown_tests::a_stale_session_is_recreated_only_under_its_clearance
 services::claude::claude_tui_followup_requeue_flag_tests::followup_requeue_defaults_on_when_env_is_unset
@@ -2278,6 +2279,7 @@ services::cluster::watcher_supervisor::tests::shutdown_observation_sites_are_bra
 services::cluster::watcher_supervisor::tests::shutdown_observation_waits_before_reporting
 services::cluster::watcher_supervisor::tests::supervisor_publishes_producer_for_each_spawn
 services::cluster::watcher_supervisor::tests::supervisor_teardown_completes_with_outliving_producer_clone
+services::codex::c1_teardown_tests::a_cleared_existing_session_is_relaunched_exactly_once
 services::codex::c1_teardown_tests::an_existing_session_is_recreated_only_under_its_clearance
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
 services::codex::codex_fifo_followup_transport_tests::send_codex_pipe_prompt_writes_sentinel_to_fifo
@@ -3378,6 +3380,7 @@ services::discord::health::stall_verdict::tests::raw_hung_producer_with_fresh_wa
 services::discord::health::stall_verdict::tests::truth_table_covers_frontier_desync_dead_and_desync_only
 services::discord::health::stall_verdict::tests::unknown_watcher_ownership_skips_phantom_rule_and_records_reason
 services::discord::health::stall_verdict::tests::verdict_serializes_for_health_detail
+services::discord::health::tests::registered_token_hashes_are_the_providers_own_in_any_role
 services::discord::health::tests::reload_bot_tokens_keeps_previous_client_when_credential_is_missing
 services::discord::health::tests::reload_bot_tokens_reports_success_and_invalidates_user_id_cache
 services::discord::health::tests::utility_bot_user_id_cache_rejects_stale_http_after_reload
@@ -3436,6 +3439,8 @@ services::discord::health::watcher_respawn::tests::the_sweep_arms_the_registry_d
 services::discord::health::watcher_respawn::tests::unwatched_candidates_exclude_a_channel_served_by_a_sibling_runtime
 services::discord::health::watcher_respawn::tests::unwatched_candidates_include_a_mailbox_channel_whose_watcher_was_cancelled
 services::discord::health::watcher_respawn::tests::watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap
+services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
+services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::http::tests::discord_content_or_zwsp_replaces_empty_content
 services::discord::http::tests::relay_allowed_mentions_suppresses_everyone_and_roles_allows_users
 services::discord::http::tests::required_reference_classifier_is_structured_and_narrow
@@ -8951,6 +8956,7 @@ services::routines::action::tests::validates_agent_prompt_contract
 services::routines::action::tests::validates_complete_action_with_checkpoint
 services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
 services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
+services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript

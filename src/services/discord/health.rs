@@ -577,6 +577,21 @@ impl HealthRegistry {
             .collect()
     }
 
+    /// Bot token hashes of the runtimes registered under `provider`, sorted and deduplicated.
+    pub(crate) async fn registered_token_hashes(&self, provider: &ProviderKind) -> Vec<String> {
+        let mut hashes: Vec<String> = self
+            .providers
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
+            .map(|entry| entry.shared.token_hash.clone())
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        hashes
+    }
+
     /// #3293: every registered runtime regardless of provider. Used by the
     /// provider-unfiltered mailbox-registry purge, which must visit every
     /// instance registry because a bogus entry may live in any of them.
@@ -922,6 +937,29 @@ mod tests {
                 None => unsafe { std::env::remove_var(&self.key) },
             }
         }
+    }
+
+    // Probe candidates are the hashes of the provider's own runtimes in any role, each once.
+    #[tokio::test]
+    async fn registered_token_hashes_are_the_providers_own_in_any_role() {
+        let registry = HealthRegistry::new();
+        let runtime = |hash: &str| {
+            let mut shared = crate::services::discord::make_shared_data_for_tests();
+            Arc::get_mut(&mut shared).unwrap().token_hash = hash.to_string();
+            shared
+        };
+        registry.register("claude".into(), runtime("h-b")).await;
+        registry
+            .register_standby("Claude".into(), runtime("h-a"))
+            .await;
+        registry
+            .register_worker("claude".into(), runtime("h-b"))
+            .await;
+        registry.register("codex".into(), runtime("h-c")).await;
+        let hashes = |provider| registry.registered_token_hashes(provider);
+        assert_eq!(hashes(&ProviderKind::Claude).await, ["h-a", "h-b"]);
+        assert_eq!(hashes(&ProviderKind::Codex).await, ["h-c"]);
+        assert!(hashes(&ProviderKind::Qwen).await.is_empty());
     }
 
     fn write_test_bot_token(root: &Path, bot_name: &str, token: &str) {
