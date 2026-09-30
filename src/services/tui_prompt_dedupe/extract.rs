@@ -259,15 +259,8 @@ pub enum PromptObservation {
     PublishedTaskNotification,
     SuppressedDiscordDuplicate,
     SuppressedRecentDuplicate,
-    /// #3540: the observed prompt's stable JSONL entry `uuid` was ALREADY relayed
-    /// for this `(provider, tmux)` pair. Distinct from
-    /// [`Self::SuppressedRecentDuplicate`]: that is a content match bounded by the
-    /// 30s recent window, whereas this is an IDENTITY match bounded only by the
-    /// 30min entry-id TTL. The idle-transcript scanner treats it like the other
-    /// suppressions — `should_tail_response == false` — so a re-encountered
-    /// already-relayed entry (watermark reset / jsonl head rotation) never mints a
-    /// phantom synthetic inflight. A genuinely new prompt carries a new uuid and
-    /// is never returned here.
+    /// Identity match with an already-relayed prompt: its row uuid (30min) or a
+    /// hook-recorded `prompt_id` with the same text (4h). Never tails a response.
     SuppressedReplayedEntry,
     Ignored,
 }
@@ -345,13 +338,8 @@ pub(super) fn relayed_entry_id_already_seen(
         .is_some_and(|queue| queue.iter().any(|seen| seen.value == entry_id))
 }
 
-/// #3540: record `entry_id` as relayed for this `(provider, tmux)` pair. Called
-/// only at the actual relay point (after pending/recent dedup pass), so a
-/// dedup-suppressed candidate is never mis-recorded as relayed. Idempotent: a
-/// re-record of an id already present refreshes nothing and does not duplicate
-/// (the identity check would have short-circuited the caller anyway). Ring-capped
-/// per key at [`RELAYED_ENTRY_ID_RING_CAP`] (oldest dropped first); TTL-purged by
-/// `PROMPT_ANCHOR_TTL`.
+/// Records `entry_id` at the relay point or when a `prompt_id` match joins its row
+/// to a relayed prompt. Idempotent, ring-capped, purged after `PROMPT_ANCHOR_TTL`.
 pub(super) fn record_relayed_entry_id(provider: &str, tmux_session_name: &str, entry_id: &str) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -418,7 +406,7 @@ pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
     false
 }
 
-fn normalize_line_endings(value: &str) -> String {
+pub(super) fn normalize_line_endings(value: &str) -> String {
     value.replace("\r\n", "\n").replace('\r', "\n")
 }
 

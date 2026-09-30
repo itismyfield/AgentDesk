@@ -1356,6 +1356,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
+│   │   │   │   ├── prompt_identity_observer_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
@@ -2036,6 +2037,8 @@ src/
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_tests.rs
+│   │   ├── prompt_identity.rs
+│   │   ├── prompt_identity_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs

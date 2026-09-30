@@ -6860,6 +6860,7 @@ services::discord::tui_prompt_relay::claude_idle_runtime::tests::continuation_ca
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::the_idle_tick_settles_session_rotations_before_relaying_bindings
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::timestamp_continuation_binding_supersedes_stale_launch_binding
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::transcript_binding_refresh_requires_recent_activity
+services::discord::tui_prompt_relay::idle_transcript_scan::tests::claude_idle_scans_thread_the_row_prompt_id
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_latest_matching_prompt_uses_last_complete_match
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_scan_finds_user_prompt_and_stops_at_prompt_end
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_scan_preserves_partial_trailing_jsonl
@@ -7077,6 +7078,8 @@ services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_cl
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_does_not_clobber_newer_lease
 services::discord::tui_prompt_relay::tests::owner_channel_chokepoint_triggers_drift_repair_on_drift_drop
+services::discord::tui_prompt_relay::tests::prompt_identity_observer_tests::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
+services::discord::tui_prompt_relay::tests::prompt_identity_observer_tests::an_aliased_hook_broadcast_twice_is_announced_once
 services::discord::tui_prompt_relay::tests::registry_is_authoritative_for_owner_channel_resolution
 services::discord::tui_prompt_relay::tests::registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror
 services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_two_half_transcript
@@ -9732,6 +9735,16 @@ services::tui_prompt_dedupe::pending::tests::resolved_pending_restores_exactly_t
 services::tui_prompt_dedupe::pending::tests::strict_read_blocks_an_unparseable_or_out_of_sequence_line
 services::tui_prompt_dedupe::pending::tests::strict_read_takes_blank_and_crlf_lines_as_the_writer_does
 services::tui_prompt_dedupe::pending::tests::torn_tail_is_not_corruption
+services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_match_also_records_the_row_uuid
+services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_seen_with_other_text_stops_suppressing_either_text
+services::tui_prompt_dedupe::prompt_identity::tests::a_repeated_hook_for_the_same_prompt_id_does_not_extend_its_lifetime
+services::tui_prompt_dedupe::prompt_identity::tests::a_scanner_row_first_then_a_late_hook_is_not_suppressed_by_prompt_id
+services::tui_prompt_dedupe::prompt_identity::tests::fork_rewritten_prompt_ids_never_hide_the_new_input
+services::tui_prompt_dedupe::prompt_identity::tests::hook_prompt_id_suppresses_a_scanner_replay_after_the_recent_window
+services::tui_prompt_dedupe::prompt_identity::tests::hooks_without_prompt_id_keep_only_the_thirty_second_content_window
+services::tui_prompt_dedupe::prompt_identity::tests::prompt_ids_outlive_the_uuid_window_until_the_four_hour_budget
+services::tui_prompt_dedupe::prompt_identity::tests::suppressed_hook_observations_do_not_record_their_prompt_id
+services::tui_prompt_dedupe::prompt_identity::tests::the_prompt_id_ring_keeps_the_newest_512_ids_per_pane
 services::tui_prompt_dedupe::runtime_binding::shadow_session_tests::observer_discovery_lists_live_sessions_without_changing_relay_state
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript

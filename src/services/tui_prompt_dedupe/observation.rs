@@ -73,6 +73,7 @@ pub fn observe_prompt_by_tmux_at(
         tmux_session_name,
         &[prompt.to_string()],
         None,
+        None,
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -97,6 +98,50 @@ pub fn observe_prompt_by_tmux_with_entry_id_at(
         tmux_session_name,
         &[prompt.to_string()],
         entry_id,
+        None,
+        PromptObservationEffect::NotifyAndLease,
+        observed_at,
+    )
+}
+
+/// Claude hook entry: the submitted `prompt_id` is recorded on relay so the
+/// scanner's later row with the same `promptId` and text is suppressed.
+pub fn observe_prompt_by_provider_session_with_prompt_id_at(
+    provider: &str,
+    provider_session_id: &str,
+    prompt: &str,
+    prompt_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    let tmux_session_name = resolve_tmux_session_name(provider, provider_session_id)
+        .unwrap_or_else(|| provider_session_id.trim().to_string());
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        &tmux_session_name,
+        &[prompt.to_string()],
+        None,
+        prompt_id.map(ClaudePromptId::HookSubmit),
+        PromptObservationEffect::NotifyAndLease,
+        observed_at,
+    )
+}
+
+/// Claude idle-scanner entry: the row's `promptId` is only looked up, never
+/// recorded, because a fork rewrites inherited rows to the fork's prompt id.
+pub fn observe_prompt_by_tmux_with_row_ids_at(
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+    entry_id: Option<&str>,
+    prompt_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
+        &[prompt.to_string()],
+        entry_id,
+        prompt_id.map(ClaudePromptId::TranscriptRow),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -112,6 +157,7 @@ pub fn observe_prompt_candidates_by_tmux(
         tmux_session_name,
         prompts,
         None,
+        None,
         PromptObservationEffect::NotifyAndLease,
         Utc::now(),
     )
@@ -126,6 +172,7 @@ pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
         provider,
         tmux_session_name,
         prompts,
+        None,
         None,
         PromptObservationEffect::RelayLeaseOnly,
         Utc::now(),
@@ -143,12 +190,14 @@ fn observe_prompt_candidates_by_tmux_inner(
     tmux_session_name: &str,
     prompts: &[String],
     entry_id: Option<&str>,
+    prompt_id: Option<ClaudePromptId<'_>>,
     effect: PromptObservationEffect,
     observed_at: DateTime<Utc>,
 ) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     let entry_id = entry_id.map(str::trim).filter(|value| !value.is_empty());
+    let prompt_id = prompt_id.filter(|id| !id.value().trim().is_empty());
     let mut candidates = Vec::new();
     for prompt in prompts {
         let prompt = prompt.trim();
@@ -211,6 +260,26 @@ fn observe_prompt_candidates_by_tmux_inner(
             return PromptObservation::SuppressedReplayedEntry;
         }
     }
+    // Same input seen through its other native key: a hook-recorded prompt_id
+    // with identical text. The row uuid is recorded so later re-scans match it.
+    if let Some(prompt_id) = prompt_id {
+        let prompt_id = prompt_id.value().trim();
+        match check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]) {
+            PromptIdMatch::Same => {
+                if let Some(entry_id) = entry_id {
+                    record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+                }
+                return PromptObservation::SuppressedReplayedEntry;
+            }
+            PromptIdMatch::Ambiguous => tracing::warn!(
+                provider = %provider,
+                tmux_session_name,
+                prompt_id,
+                "prompt_id matched a relayed prompt with different text; not suppressed"
+            ),
+            PromptIdMatch::Absent => {}
+        }
+    }
     let local_only_control = candidates
         .first()
         .and_then(|prompt| classify_local_only_slash_control(prompt));
@@ -233,6 +302,14 @@ fn observe_prompt_candidates_by_tmux_inner(
     if local_only_control.is_none() {
         if let Some(entry_id) = entry_id {
             record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+        }
+        if let Some(ClaudePromptId::HookSubmit(prompt_id)) = prompt_id {
+            record_relayed_prompt_id(
+                &provider,
+                tmux_session_name,
+                prompt_id.trim(),
+                &candidates[0],
+            );
         }
     }
     if effect == PromptObservationEffect::RelayLeaseOnly {

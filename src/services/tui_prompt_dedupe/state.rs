@@ -70,6 +70,16 @@ impl TuiPromptDedupeState {
             }
             !queue.is_empty()
         });
+        // Prompt ids wait for the scanner, which reaches a row only after the turn
+        // ends; 4h is the observation-delay budget, not a guaranteed turn bound.
+        self.relayed_prompt_ids_by_tmux.retain(|_, queue| {
+            while queue.front().is_some_and(|entry| {
+                now.duration_since(entry.recorded_at) > PROMPT_ANCHOR_SUBMIT_TTL
+            }) {
+                queue.pop_front();
+            }
+            !queue.is_empty()
+        });
     }
 
     pub(super) fn purge_expired_runtime_binding_under_authority(

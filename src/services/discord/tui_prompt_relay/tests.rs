@@ -4,6 +4,7 @@ use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
 mod compact_summary_tests;
+mod prompt_identity_observer_tests;
 
 fn compact_command_name_first_stub() -> &'static str {
     "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
@@ -5210,6 +5211,7 @@ fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
             prompt_start_offset: compact.len() as u64,
             line_end_offset: (compact.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5272,6 +5274,7 @@ fn claude_idle_transcript_scan_relays_prompt_appended_after_compaction_anchor() 
             prompt_start_offset: anchored,
             line_end_offset: anchored + fresh_prompt.len() as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5307,6 +5310,7 @@ fn claude_idle_transcript_scan_preserves_normal_growth() {
             prompt_start_offset: before.len() as u64,
             line_end_offset: (before.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5334,6 +5338,7 @@ fn claude_idle_transcript_rotation_lookback_still_observes_new_file_prompt() {
             prompt_start_offset: before.len() as u64,
             line_end_offset: (before.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5519,6 +5524,7 @@ fn claude_idle_transcript_scan_finds_user_prompt_and_stops_at_prompt_end() {
             prompt_start_offset: before.len() as u64,
             line_end_offset: (before.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
     assert_eq!(
@@ -5546,6 +5552,7 @@ fn claude_idle_transcript_scan_ignores_meta_user_prompt() {
             prompt_start_offset: (meta.len() + synthetic.len()) as u64,
             line_end_offset: (meta.len() + synthetic.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5587,6 +5594,7 @@ fn claude_idle_transcript_scan_for_last_prompt_selects_newest_in_window() {
             prompt_start_offset: 0,
             line_end_offset: old_prompt.len() as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
     // Last-prompt scan returns the just-typed prompt instead.
@@ -5597,6 +5605,7 @@ fn claude_idle_transcript_scan_for_last_prompt_selects_newest_in_window() {
             prompt_start_offset: (old_prompt.len() + old_answer.len()) as u64,
             line_end_offset: (old_prompt.len() + old_answer.len() + new_prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5640,6 +5649,7 @@ fn claude_idle_transcript_scan_for_last_prompt_returns_complete_then_catches_nex
             prompt_start_offset: 0,
             line_end_offset: prompt.len() as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 
@@ -5655,6 +5665,7 @@ fn claude_idle_transcript_scan_for_last_prompt_returns_complete_then_catches_nex
             prompt_start_offset: prompt.len() as u64,
             line_end_offset: (prompt.len() + next.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
