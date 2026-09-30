@@ -438,23 +438,27 @@ fn terminal_ordering_fixture(
 
 #[test]
 fn synthetic_terminal_gateway_retains_original_actor_until_publication() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     terminal_ordering_fixture(false, false, false, None, ProviderKind::Claude);
     terminal_ordering_fixture(false, false, true, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_gateway_preserves_same_nonce_recovery_actor() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     terminal_ordering_fixture(true, false, false, None, ProviderKind::Claude);
     terminal_ordering_fixture(true, false, true, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_duplicate_finalizer_preserves_same_nonce_recovery_actor() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     terminal_ordering_fixture(false, true, false, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_gateway_rejects_lost_admitted_source() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for race in [
         SourceRace::Unchanged,
         SourceRace::Generation,
@@ -477,6 +481,7 @@ fn synthetic_terminal_gateway_rejects_lost_admitted_source() {
 
 #[test]
 fn synthetic_terminal_gateway_source_loss_preserves_same_nonce_successor() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for race in [
         SourceRace::Generation,
         SourceRace::FileIdentity,

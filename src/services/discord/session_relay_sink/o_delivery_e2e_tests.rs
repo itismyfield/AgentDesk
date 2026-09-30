@@ -332,3 +332,170 @@ async fn task_consumed_body_reaches_o_transport_once() {
         run(Turn::Task).await;
     }
 }
+
+/// One Claude channel's empty transcript, relay binding, open turn and Legacy sink, with a body
+/// no other channel carries.
+struct Leg {
+    channel: u64,
+    binding: crate::services::cluster::session_matcher::MatchedChannel,
+    body: String,
+    gateway: Arc<RelayContractFakeGateway>,
+    sink: SessionBoundDiscordRelaySink,
+}
+
+const STARTED: &str = "2026-09-30T00:00:00Z";
+
+impl Leg {
+    fn new(channel: u64, registry: &Arc<HealthRegistry>) -> Self {
+        let binding = matched(&channel.to_string());
+        let source = Path::new(&binding.expected_rollout_path);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, "").unwrap();
+        let session = &binding.expected_session_name;
+        let generation = crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(Path::new(&generation).parent().unwrap()).unwrap();
+        std::fs::write(&generation, b"e2e-generation").unwrap();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            session,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: binding.expected_rollout_path.clone(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("e2e".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let mut row = inflight_with_identity_offset(channel, session, 710, STARTED, Some(0));
+        row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        row.current_msg_id = 88010;
+        crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+        let gateway = Arc::new(RelayContractFakeGateway::edited());
+        let mut sink = SessionBoundDiscordRelaySink::new(Arc::clone(registry));
+        sink.test_gateway = Some(gateway.clone());
+        let body = format!("raw unit of channel {channel}");
+        Self {
+            channel,
+            binding,
+            body,
+            gateway,
+            sink,
+        }
+    }
+
+    fn source(&self) -> crate::services::tui_o::shadow::SourceId {
+        let path = Path::new(&self.binding.expected_rollout_path);
+        crate::services::tui_o::shadow::binding_reader::source_id_for("e2e", path).unwrap()
+    }
+
+    /// Writes the turn's one assistant unit and hands the terminal frame to the Legacy sink.
+    async fn finish_turn(&self) -> Result<RelaySinkOutcome, RelaySinkError> {
+        let text = &self.body;
+        let rows = [
+            serde_json::json!({"type":"assistant", "uuid":"row-answer", "apiBlockIndex":0,
+                "message":{"id":"answer", "content":[{"type":"text", "text":text}]}}),
+            serde_json::json!({"type":"result", "result":text}),
+        ];
+        let payload: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        std::fs::write(&self.binding.expected_rollout_path, &payload).unwrap();
+        let end = payload.len() as u64;
+        let binding = &self.binding;
+        let mut frame = terminal_frame_offset(binding, &payload, 1, end, 710, STARTED, Some(0));
+        let session = &binding.expected_session_name;
+        frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
+        self.sink.deliver(&frame).await
+    }
+
+    /// Body-carrying Legacy transport calls: a new message or an edited placeholder.
+    fn legacy_posts(&self) -> u64 {
+        let sent = self.gateway.send_calls.load(Ordering::Acquire);
+        sent + self.gateway.replace_calls.load(Ordering::Acquire)
+    }
+}
+
+/// Two Claude channels, one turn each, with `selected` as the writer list and the writer on:
+/// each unit must reach Discord exactly once, through O only on a selected channel.
+async fn run_canary_pair(selected: &[u64]) {
+    use crate::services::tui_o::ownership::OwnershipGate;
+    use crate::services::tui_o::writer::host::{self, HostParts, Readiness, test_io::TestHost};
+    let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared
+        .http
+        .cached_bot_token
+        .set("test-token".into())
+        .unwrap();
+    let registry = Arc::new(HealthRegistry::new());
+    registry.register("claude".into(), shared.clone()).await;
+    let legs = [Leg::new(640020, &registry), Leg::new(640021, &registry)];
+    let owned: Vec<_> = selected
+        .iter()
+        .map(|&c| (c, RuntimeHandoffKind::ClaudeTui))
+        .collect();
+    // A canary list is injected; the empty case relies on what the boot install left.
+    let _selected = (!selected.is_empty()).then(|| cutover::test_override::force_channels(&owned));
+    let io = TestHost::new(legs.iter().map(|leg| (leg.channel, leg.source())));
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let parts = || HostParts {
+        io: Arc::clone(&io),
+        runtime_root: Some(root.clone()),
+        gate: Arc::clone(&gate),
+        readiness: Arc::new(Readiness::default()),
+    };
+    let hosts = host::start(ShadowProvider::Claude, true, parts);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    for leg in &legs {
+        let outcome = leg.finish_turn().await;
+        assert!(
+            matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+            "{} body must be delivered, not held: {outcome:?}",
+            leg.channel
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    for leg in &legs {
+        // The oracle is the raw list, not the ownership helper under test.
+        let via_o = u64::from(selected.contains(&leg.channel));
+        let o_posts = io.posts.to(leg.channel);
+        let o_units = o_posts
+            .iter()
+            .filter(|post| post.contains(&leg.body))
+            .count() as u64;
+        assert_eq!(o_posts.len() as u64, o_units, "{o_posts:?}");
+        let counts = (o_units, leg.legacy_posts());
+        assert_eq!(
+            counts,
+            (via_o, 1 - via_o),
+            "O/Legacy posts of {}",
+            leg.channel
+        );
+    }
+    assert_eq!(*io.alarms.0.lock().unwrap(), []);
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_canary_channel_posts_only_through_o_and_its_legacy_neighbour_only_through_legacy() {
+    if isolated(
+        "a_canary_channel_posts_only_through_o_and_its_legacy_neighbour_only_through_legacy",
+    ) {
+        run_canary_pair(&[640020]).await;
+    }
+}
+
+// The empty list reaches the sinks through the same boot install the server entries run.
+#[tokio::test(start_paused = true)]
+async fn an_empty_writer_list_leaves_both_channels_to_legacy() {
+    if isolated("an_empty_writer_list_leaves_both_channels_to_legacy") {
+        let channel = |id: u64| {
+            serde_json::json!({"id": format!("legacy-{id}"), "name": "Legacy",
+            "channels": {"claude": {"id": id.to_string(), "runtime": "tui"}}})
+        };
+        let config = serde_json::from_value(serde_json::json!({"server": {},
+            "agents": [channel(640020), channel(640021)], "tui_o": {"writer": {"channels": []}}}));
+        crate::bootstrap::install_boot_snapshots(&config.unwrap()).unwrap();
+        run_canary_pair(&[]).await;
+    }
+}

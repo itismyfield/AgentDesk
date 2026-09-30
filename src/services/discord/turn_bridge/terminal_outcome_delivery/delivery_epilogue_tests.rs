@@ -760,6 +760,7 @@ fn poll_at_most<F: Future>(future: &mut Pin<Box<F>>, polls: usize) -> bool {
 /// intentional edit to this assertion, not a silent behaviour change.
 #[tokio::test]
 async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_5191() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     assert!(
         !driver.marker(),
@@ -805,6 +806,7 @@ async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_
 /// a turn that was never delivered, which is the slice's absolute-line failure.
 #[tokio::test]
 async fn driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Failed, 1);
 
     let (ctx, state) = driver.parts();
@@ -838,6 +840,7 @@ async fn driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191() 
 /// mechanism under it changes.
 #[tokio::test]
 async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::PanicMidPublish, 1);
     let (ctx, state) = driver.parts();
     let mut future = Box::pin(run_terminal_outcome_delivery(ctx, state));
@@ -909,6 +912,7 @@ async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
 /// tests above cover the anchored-user-message shape.
 #[tokio::test]
 async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     // (polls, completed, publications_landed, marker)
     let mut table: Vec<(usize, bool, usize, bool)> = Vec::new();
     let mut polls_to_complete = None;
@@ -979,6 +983,7 @@ async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191(
 /// watcher marker still unset.
 #[tokio::test]
 async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver =
         TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1).with_body("chunk ".repeat(1_200));
     let (ctx, state) = driver.parts();
@@ -1007,6 +1012,7 @@ async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191()
 
 #[tokio::test]
 async fn resume_pin_delivery_epilogue_stamps_only_current_incarnation() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for case in ["same", "stale", "missing", "cancelled"] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
         let (mut ctx, state) = driver.parts();

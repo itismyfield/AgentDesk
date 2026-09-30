@@ -275,6 +275,7 @@ async fn delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
 
 #[tokio::test(flavor = "current_thread")]
 async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_current_anchor() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::outbound::delivery_record as dr;

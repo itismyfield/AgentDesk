@@ -3,11 +3,11 @@
 use super::channel_policy::BootChannels;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
-/// Build switch for the O writer. False keeps every intake worker and health reason as before.
-pub(crate) const O_TUI_WRITER: bool = false;
+/// Build switch for the O writer. With no channel in the boot list, intake and health stay as before.
+pub(crate) const O_TUI_WRITER: bool = true;
 
 /// Degraded reason a non-gateway node carries for each provider whose writer channels only the
-/// gateway may serve, or whose intake it refuses.
+/// gateway may serve.
 pub(crate) const TUI_OUTPUT_REQUIRES_GATEWAY: &str = "tui_output_requires_gateway";
 
 /// How this process holds the Discord gateway for one provider.
@@ -16,16 +16,6 @@ pub(crate) enum HostRole {
     Gateway,
     Runner,
     Standby,
-}
-
-/// Providers whose TUI output the O writer delivers; other providers keep their intake everywhere.
-fn writes_tui_output(provider: &str) -> bool {
-    let provider = provider.trim();
-    provider.eq_ignore_ascii_case("claude") || provider.eq_ignore_ascii_case("codex")
-}
-
-pub(crate) fn intake_worker_allowed(o_tui_writer: bool, provider: &str, role: HostRole) -> bool {
-    !o_tui_writer || role == HostRole::Gateway || !writes_tui_output(provider)
 }
 
 /// How many of `provider`'s boot writer channels this node leaves to the gateway; `None` when
@@ -55,42 +45,6 @@ pub(crate) fn gateway_only_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ROLES: [HostRole; 3] = [HostRole::Gateway, HostRole::Runner, HostRole::Standby];
-    const PROVIDERS: [&str; 5] = ["claude", "codex", "gemini", "opencode", "Claude "];
-
-    #[test]
-    fn switch_off_keeps_every_intake_worker() {
-        for role in ROLES {
-            for provider in PROVIDERS {
-                assert!(
-                    intake_worker_allowed(false, provider, role),
-                    "{provider} {role:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn switch_on_refuses_tui_intake_off_the_gateway_only() {
-        for provider in PROVIDERS {
-            assert!(intake_worker_allowed(true, provider, HostRole::Gateway));
-        }
-        for role in [HostRole::Runner, HostRole::Standby] {
-            for provider in ["claude", "codex", "Claude "] {
-                assert!(
-                    !intake_worker_allowed(true, provider, role),
-                    "{provider} {role:?}"
-                );
-            }
-            for provider in ["gemini", "opencode"] {
-                assert!(
-                    intake_worker_allowed(true, provider, role),
-                    "{provider} {role:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn only_a_non_gateway_role_leaves_writer_channels_to_the_gateway() {

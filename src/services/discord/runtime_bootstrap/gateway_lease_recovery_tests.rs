@@ -1042,3 +1042,91 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
         .await
         .expect("drop gateway reap database");
 }
+
+const O_WRITER_CHILD: &str = "ADK_TEST_O_WRITER_SELF_ID";
+
+/// The published self id is set once per process, so the case runs in a child where nothing has
+/// published it yet and no instance id comes from the environment.
+fn in_unpublished_child(name: &str) -> bool {
+    if std::env::var_os(O_WRITER_CHILD).is_some() {
+        return true;
+    }
+    // Without PostgreSQL the child cannot run; fail here with the reason every PG test gives.
+    crate::db::postgres::postgres_test_database_url_base()
+        .expect("POSTGRES_TEST_DATABASE_URL_BASE required for db::auto_queue tests");
+    let root = tempfile::tempdir().unwrap();
+    let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &qualified, "--nocapture", "--test-threads=1"])
+        .env(O_WRITER_CHILD, "1")
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .env_remove("AGENTDESK_INSTANCE_ID")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    false
+}
+
+async fn o_writer_session(pool: &sqlx::PgPool, key: &str, channel: &str, instance: &str) {
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, channel_id, instance_id)
+         VALUES ($1, 'claude', 'idle', $2, $3)",
+    )
+    .bind(key)
+    .bind(channel)
+    .bind(instance)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn activation_facts_use_only_the_published_self_id_pg() {
+    if !in_unpublished_child("activation_facts_use_only_the_published_self_id_pg") {
+        return;
+    }
+    use crate::services::tui_o::writer::host::HostIo;
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let (own, foreign) = (6_470_001, 6_470_002);
+    o_writer_session(&pool, "own", &own.to_string(), "node-self").await;
+    o_writer_session(&pool, "foreign", &foreign.to_string(), "node-runner").await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let host = super::o_writer_host::test_host::over(shared, std::time::Duration::from_millis(300));
+
+    let unpublished = host
+        .activation_facts(own, crate::services::tui_o::shadow::ShadowProvider::Claude)
+        .await;
+    assert!(
+        matches!(&unpublished, Err(detail) if detail.contains("instance id")),
+        "an unpublished id is not replaced by a fallback: {unpublished:?}"
+    );
+    crate::services::cluster::node_registry::SELF_INSTANCE_ID
+        .set("node-self".into())
+        .unwrap();
+    let facts = host
+        .activation_facts(own, crate::services::tui_o::shadow::ShadowProvider::Claude)
+        .await;
+    assert_eq!(
+        facts.unwrap(),
+        crate::services::tui_o::writer::activation::ActivationFacts::default(),
+        "its own session"
+    );
+    let facts = host
+        .activation_facts(
+            foreign,
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+        )
+        .await;
+    assert_eq!(facts.unwrap().runner_sessions, 1, "another node's session");
+
+    pool.close().await;
+    fixture.drop().await;
+}

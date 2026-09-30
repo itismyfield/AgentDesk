@@ -113,6 +113,7 @@ fn synthetic_bridge_handoff_fixture(
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
