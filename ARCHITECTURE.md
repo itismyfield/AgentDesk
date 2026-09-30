@@ -538,6 +538,7 @@ src/
 │   ├── claude/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
+│   │   ├── c1_teardown_tests.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── stream_result.rs
 │   │   └── tui_session_launch.rs
@@ -663,6 +664,7 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
+│   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
 │   │   ├── process_session_launch.rs
 │   │   └── tui_session_launch.rs
@@ -1717,6 +1719,8 @@ src/
 │   │   ├── turn_finalizer.rs
 │   │   ├── turn_lease.rs
 │   │   ├── turn_lease_tests.rs
+│   │   ├── turn_teardown_clearance.rs
+│   │   ├── turn_teardown_clearance_tests.rs
 │   │   ├── turn_view_reconciler.rs
 │   │   ├── voice_acknowledgement.rs
 │   │   ├── voice_background_driver.rs
@@ -2164,6 +2168,8 @@ src/
 │   ├── provider_output_guard.rs
 │   ├── provider_output_guard_tests.rs
 │   ├── provider_runtime.rs
+│   ├── provider_teardown.rs
+│   ├── provider_teardown_tests.rs
 │   ├── queue.rs
 │   ├── qwen.rs
 │   ├── qwen_tmux_wrapper.rs

@@ -114,6 +114,7 @@ src/services/discord/turn_bridge/resume_pin_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
+src/services/discord/turn_teardown_clearance_tests.rs
 src/services/discord/watchers/dispatched_origin_ghost_tests.rs
 src/services/discord/watchers/lifecycle/restore.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs
@@ -266,6 +267,7 @@ services::discord::turn_bridge::resume_pin_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
+services::discord::turn_teardown_clearance::tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
 services::dispatches::wait_queue::tests
@@ -1072,6 +1074,8 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests::backgr
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_prefers_voice_turn_link_by_dispatch_id_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::rehydrate_preserves_remaining_ttl_for_aged_rows_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::voice_turn_link_playback_lookup_falls_back_to_announce_message_pg
+services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg
+services::discord::turn_teardown_clearance::tests::a_turn_is_cleared_only_by_the_row_its_writer_posted_pg
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::active_dispatch_delivery_unique_key_allows_one_concurrent_reserved_row
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::claim_delivery_guard_shadow_writes_one_reserved_event
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::delivery_finalize_notified_anchor_survives_bookkeeping_failure

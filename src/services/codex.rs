@@ -1,6 +1,8 @@
 mod process_session_launch;
 use process_session_launch::execute_streaming_local_process_codex;
 
+#[cfg(test)]
+mod c1_teardown_tests;
 #[cfg(unix)]
 mod followup_reader;
 #[cfg(unix)]
@@ -34,6 +36,7 @@ use crate::services::provider::{
     fold_read_output_result, is_readonly_tool_policy, register_child_pid, spawn_cancel_watchdog,
     tmux_followup_fallback_after_read_error,
 };
+use crate::services::provider_teardown::TeardownClearance;
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     insert_process_session, process_session_is_alive, process_session_probe,
@@ -42,6 +45,7 @@ use crate::services::session_backend::{
 };
 #[cfg(unix)]
 use crate::services::{
+    provider_teardown::{report_tmux_death, teardown_tmux},
     session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool},
     tmux_diagnostics::{
         record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
@@ -1206,6 +1210,7 @@ pub fn execute_command_streaming(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
+    teardown: Option<&TeardownClearance>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     model: Option<&str>,
@@ -1324,6 +1329,7 @@ pub fn execute_command_streaming(
                     sender,
                     cancel_token,
                     tmux_name,
+                    teardown,
                     report_channel_id,
                     report_provider,
                     developer_instructions.as_deref(),
@@ -1346,6 +1352,7 @@ pub fn execute_command_streaming(
                 sender,
                 cancel_token,
                 tmux_name,
+                teardown,
                 report_channel_id,
                 report_provider,
                 developer_instructions.as_deref(),
@@ -1353,6 +1360,8 @@ pub fn execute_command_streaming(
                 force_fresh_provider_session,
             );
         }
+        #[cfg(not(unix))]
+        let _ = teardown;
         // ProcessBackend fallback for Codex (no tmux or non-unix)
         log_codex_runtime_kind(
             "codex.execute_command_streaming",
@@ -1676,6 +1685,7 @@ fn execute_streaming_local_tui_tmux(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
+    teardown: Option<&TeardownClearance>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     developer_instructions: Option<&str>,
@@ -1733,6 +1743,7 @@ fn execute_streaming_local_tui_tmux(
             sender,
             cancel_token,
             tmux_session_name,
+            teardown,
             report_channel_id,
             report_provider,
             developer_instructions,
@@ -2159,6 +2170,7 @@ fn execute_streaming_local_tmux(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
+    teardown: Option<&TeardownClearance>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     developer_instructions: Option<&str>,
@@ -2219,21 +2231,9 @@ fn execute_streaming_local_tmux(
         )? {
             FollowupResult::Delivered => return Ok(()),
             FollowupResult::RecreateSession { error } => {
-                record_codex_tmux_termination(
-                    tmux_session_name,
-                    "codex_provider",
-                    "followup_failed_recreate",
-                    &format!("followup failed, recreating: {error}"),
-                    None,
-                );
-                record_tmux_exit_reason(
-                    tmux_session_name,
-                    &format!("followup failed, recreating: {}", error),
-                );
-                crate::services::platform::tmux::kill_session(
-                    tmux_session_name,
-                    &format!("followup failed, recreating: {}", error),
-                );
+                let reason = format!("followup failed, recreating: {error}");
+                let code = "followup_failed_recreate";
+                teardown_tmux(teardown, tmux_session_name, "codex_provider", code, &reason)?;
                 // Fall through to new session creation below
             }
         }
@@ -2263,20 +2263,10 @@ fn execute_streaming_local_tmux(
             "live Codex tmux session {tmux_session_name} was selected for reuse but wrapper I/O is unavailable; refusing stale cleanup/recreate"
         ));
     } else if session_exists {
-        let cleanup_reason =
+        let cleanup =
             codex_wrapper_existing_session_termination_reason(force_fresh_provider_session);
-        record_codex_tmux_termination(
-            tmux_session_name,
-            "codex_provider",
-            cleanup_reason.reason_code,
-            cleanup_reason.reason_text,
-            None,
-        );
-        record_tmux_exit_reason(tmux_session_name, cleanup_reason.reason_text);
-        crate::services::platform::tmux::kill_session(
-            tmux_session_name,
-            cleanup_reason.reason_text,
-        );
+        let (code, reason) = (cleanup.reason_code, cleanup.reason_text);
+        teardown_tmux(teardown, tmux_session_name, "codex_provider", code, reason)?;
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
@@ -2398,11 +2388,14 @@ fn execute_streaming_local_tmux(
             });
         }
         crate::services::provider::ReadOutputResult::SessionDied { offset } => {
-            record_codex_tmux_termination(
+            let reason = "codex tmux session ended before turn completion";
+            // A kept session is not reported dead; the turn still ends with `Done`.
+            let _ = report_tmux_death(
+                teardown,
                 tmux_session_name,
                 "codex_provider",
                 "session_died",
-                "codex tmux session ended before turn completion",
+                reason,
                 Some(offset),
             );
             let _ = sender.send(StreamMessage::Done {
@@ -3411,6 +3404,7 @@ mod remote_dispatch_gate_tests {
             None,
             Some(&profile),
             tmux_session_name,
+            None,
             None,
             None,
             None,
