@@ -29,6 +29,7 @@ pub(super) struct RecoveryRetryState<'a> {
     pub(super) new_session_id: &'a mut Option<String>,
     pub(super) new_raw_provider_session_id: &'a mut Option<String>,
     pub(super) inflight_state: &'a mut InflightTurnState,
+    pub(super) auto_retry: &'a mut AutoRetry,
 }
 
 #[rustfmt::skip]
@@ -75,14 +76,7 @@ pub(super) async fn handle_recovery_retry(
         // as scheduling resolves (≤ 120s safety net inside helper).
         // A recovery turn with no anchored user message (user_msg_id == 0)
         // has no message to retry-with-history against; a kept session skips it too.
-        if let Some(user_msg_id) = user_msg_id.filter(|_| reset.cleared()) {
-            spawn_retry_with_history_with_release(
-                gateway.clone(),
-                channel_id,
-                user_msg_id,
-                user_text_owned.clone(),
-            );
-        }
+        state.auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, user_text_owned);
         // Replace placeholder with recovery notice (don't delete — avoids visual gap)
         let _ = gateway
             .edit_message(

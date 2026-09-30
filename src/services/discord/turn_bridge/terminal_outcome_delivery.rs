@@ -159,6 +159,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     #[allow(unused_mut)]
     let mut bridge_should_emit_completion = true;
     let inflight_generation = inflight_state.born_generation;
+    let mut auto_retry = AutoRetry::default();
 
     if may_publish
         && !(admitted.is_some() && inflight_state.requires_pinned_terminal_recovery())
@@ -195,6 +196,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 new_session_id: &mut new_session_id,
                 new_raw_provider_session_id: &mut new_raw_provider_session_id,
                 inflight_state: &mut inflight_state,
+                auto_retry: &mut auto_retry,
             },
         )
         .await;
@@ -295,14 +297,7 @@ pub(super) async fn run_terminal_outcome_delivery(
             // #2452 H6: explicit completion path — see helper docs.
             // Skip retry-with-history when the recovery turn has no anchored
             // user message (user_msg_id == 0), or when the host guard kept the session.
-            if let Some(user_msg_id) = user_msg_id.filter(|_| reset.cleared()) {
-                spawn_retry_with_history_with_release(
-                    gateway.clone(),
-                    channel_id,
-                    user_msg_id,
-                    user_text_owned.clone(),
-                );
-            }
+            auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, &user_text_owned);
             full_response = String::new(); // Suppress error message to user
         }
 
@@ -326,7 +321,6 @@ pub(super) async fn run_terminal_outcome_delivery(
                 claude_tui_followup_busy_readiness_timeout,
                 rx_disconnected,
                 turn_start,
-                recovery_retry,
                 review_dispatch_warning: &review_dispatch_warning,
                 watcher_owner_channel_id,
                 tmux_last_offset,
@@ -345,6 +339,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 preserve_inflight_for_cleanup_retry: &mut preserve_inflight_for_cleanup_retry,
                 bridge_skip_holder_owns_inflight: &mut bridge_skip_holder_owns_inflight,
                 claude_tui_busy_requeue_pending: &mut claude_tui_busy_requeue_pending,
+                auto_retry: &mut auto_retry,
             },
         )
         .await;
@@ -882,6 +877,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         bridge_skip_holder_owns_inflight,
         terminal_delivery_committed,
         resume_failure_detected,
+        auto_retry,
         terminal_empty_response_notice,
         terminal_full_replay_cleanup_msg_ids,
         response_sent_offset,

@@ -48,7 +48,7 @@ direct_discord_sends = [
   "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
   # #4230 S10: existing recovery-notice direct gateway edit moved verbatim from
   # terminal_outcome_delivery.rs to the recovery_retry child handler.
-  "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs#direct_discord_sends:912eabdb5dce46d2",
+  "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs#direct_discord_sends:13fc84e18fb6e477",
   # #3560: footer-mode migration reconcile — edits a pre-default-ON *separate*
   # status panel to a migration notice before dropping its handle (behaviorally
   # the same direct resume-notice edit already allowlisted in mod.rs; extracted

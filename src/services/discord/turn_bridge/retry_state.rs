@@ -382,10 +382,47 @@ pub(super) enum RetryReset {
     KeptByHostGuard,
 }
 
-impl RetryReset {
-    /// Only a cleared session may be retried; a kept one gets no retry either.
-    pub(super) fn cleared(self) -> bool {
-        self == Self::Cleared
+/// What the auto-retry resets of one turn did. Only the scheduling point records it,
+/// so the empty-sink handoff and the completion session clear read what really happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AutoRetry {
+    queued: bool,
+    kept_by_host_guard: bool,
+}
+
+impl AutoRetry {
+    /// Queues retry-with-history only for a cleared session with a user message to retry.
+    pub(super) fn schedule(
+        &mut self,
+        reset: RetryReset,
+        gateway: &Arc<dyn gateway::TurnGateway>,
+        channel_id: ChannelId,
+        user_msg_id: Option<MessageId>,
+        user_text: &str,
+    ) {
+        match (reset, user_msg_id) {
+            (RetryReset::KeptByHostGuard, _) => self.kept_by_host_guard = true,
+            (RetryReset::Cleared, Some(user_msg_id)) => {
+                spawn_retry_with_history_with_release(
+                    gateway.clone(),
+                    channel_id,
+                    user_msg_id,
+                    user_text.to_string(),
+                );
+                self.queued = true;
+            }
+            (RetryReset::Cleared, None) => {}
+        }
+    }
+
+    /// A retry-with-history was queued and takes over this turn's inflight row.
+    pub(super) fn queued(self) -> bool {
+        self.queued
+    }
+
+    /// The host guard kept a session, so its provider session id must survive the turn.
+    pub(super) fn kept_session(self) -> bool {
+        self.kept_by_host_guard
     }
 }
 
