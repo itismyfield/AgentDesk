@@ -223,6 +223,50 @@ pub(crate) async fn drain(registry: &super::health::HealthRegistry) {
     }
 }
 
+/// Whether a retained episode may belong to `channel`, read without taking record locks; a record
+/// that does not parse counts, since its channel cannot be ruled out.
+pub(in crate::services::discord) fn retains_channel(channel: u64) -> Result<bool, String> {
+    retains_channel_at(&root()?, channel)
+}
+
+fn retains_channel_at(root: &Path, channel: u64) -> Result<bool, String> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let encoded = match fs::read_to_string(&path) {
+            Ok(encoded) => encoded,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let record = serde_json::from_str::<Record>(&encoded).ok();
+        let Some(record) = record.filter(Record::valid) else {
+            return Ok(true);
+        };
+        let payload = &record.payload;
+        let ids = [
+            "/channel_id",
+            "/watcher_owner_channel_id",
+            "/local/channel_id",
+            "/local/watcher_owner_channel_id",
+            "/local/logical_channel_id",
+        ];
+        if ids
+            .iter()
+            .any(|id| payload.pointer(id).and_then(Value::as_u64) == Some(channel))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 pub(in crate::services::discord) async fn drain_for_test<F, Fut>(resume: F) -> Result<usize, String>
 where

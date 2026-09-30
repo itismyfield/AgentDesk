@@ -10418,6 +10418,42 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/db/o_channel_activation.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8f644d2b8a03a97107b803435e0622ddf8ec2553eac342ab3864fd9c41cb72d3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_activation.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:975d5a2a1f8f0516dd905e3660ec05cc2899999cb5fadc90454f511c2937742c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_activation.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a77bebf44c58092be3f284dc6026abf99f3ca831da841bea2ac1ca30bcfa46af"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_activation.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:412de74a3064ba6bc73631a7e58e28528dd15502b68bf86e85414ac561a35c2c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/db/postgres.rs",
       "api": "sqlx::query",
       "symbol": "query",

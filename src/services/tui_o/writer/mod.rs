@@ -1,6 +1,7 @@
 //! The O writer: posts each transcript unit piece to its TUI channel once, only while the gateway
 //! is Owned and the channel's delivery lease is held, and settles unclear results from history.
 
+pub mod activation;
 pub mod actor;
 pub mod binding;
 pub mod confirm;

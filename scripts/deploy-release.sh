@@ -999,6 +999,18 @@ _rollback_would_revert_o_writer() {
     return 0
 }
 
+_external_artifact_would_skip_o_writer() {
+    # Returns 0 (refuse) when this source may have the O writer on and the binary
+    # would come from AGENTDESK_DEPLOY_BINARY: only this source's own build is
+    # known to carry its switch, which the manifest then records for rollback.
+    local value
+    [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 1
+    value="$(_source_o_tui_writer)"
+    [ "$value" != "false" ] || return 1
+    echo "✗ O writer switch is ${value} in this source; AGENTDESK_DEPLOY_BINARY is refused — deploy a build of this source" >&2
+    return 0
+}
+
 # #3858: restore the last-known-good release binary and restart the service.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
@@ -2115,11 +2127,13 @@ else
 fi
 
 # Build the release binary from the current workspace by default so deploy
-# always ships code compiled from the current HEAD. When a validated external
-# artifact is provided explicitly, keep the existing override behavior.
+# always ships code compiled from the current HEAD. An explicit external artifact
+# keeps the override behavior only while this source's O writer switch is false.
 _ensure_dashboard_dependencies
 _check_repo_remote_freshness
-if [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+if _external_artifact_would_skip_o_writer; then
+    exit 1
+elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
 else
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"

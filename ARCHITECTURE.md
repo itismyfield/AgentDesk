@@ -185,6 +185,7 @@ src/
 │   ├── kanban.rs
 │   ├── meetings.rs
 │   ├── mod.rs
+│   ├── o_channel_activation.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs
@@ -1988,6 +1989,7 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
 │   │   │   ├── binding.rs
