@@ -724,7 +724,9 @@ fn closed_code_tokens(prod: &str) -> Option<String> {
     let chars: Vec<char> = prod.chars().collect();
     let (mut out, mut i) = (String::new(), 0);
     while i < chars.len() {
-        match literal_end(&chars, i) {
+        // Only these characters can open a comment or literal.
+        let opens = matches!(chars[i], '/' | '"' | 'r' | '\'');
+        match opens.then(|| literal_end(&chars, i)).flatten() {
             Some(end) if end > chars.len() => return None,
             Some(end) => {
                 out.push_str(if chars[i] == '/' { " " } else { "\"\"" });
@@ -747,14 +749,14 @@ fn code_tokens(prod: &str) -> String {
 
 /// Byte ranges of the `use` declarations in token-only code.
 fn use_spans(code: &str) -> Vec<std::ops::Range<usize>> {
-    let keyword = regex::Regex::new(r"\buse\b").unwrap();
-    keyword
-        .find_iter(code)
-        .filter(|found| !code[..found.start()].ends_with("r#"))
-        .map(|found| {
-            let end = code[found.end()..].find(';');
-            found.start()..end.map_or(code.len(), |k| found.end() + k)
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices("use")
+        .map(|(start, _)| (start, start + 3))
+        .filter(|&(start, end)| {
+            let before = &code[..start];
+            !before.ends_with(ident) && !before.ends_with("r#") && !code[end..].starts_with(ident)
         })
+        .map(|(start, end)| start..code[end..].find(';').map_or(code.len(), |k| end + k))
         .collect()
 }
 
@@ -810,10 +812,23 @@ fn use_tree(tokens: &[&str], i: &mut usize, mut path: Vec<String>, out: &mut Vec
 
 /// Every name the `use` declarations of token-only code bind.
 fn use_leaves(code: &str) -> Vec<UseLeaf> {
-    let token = regex::Regex::new(r"::|[{},*;]|(?:r#)?\w+").unwrap();
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
     let mut leaves = Vec::new();
     for span in use_spans(code) {
-        let tokens: Vec<&str> = token.find_iter(&code[span]).map(|t| t.as_str()).collect();
+        let (text, mut tokens) = (&code[span], Vec::new());
+        let mut rest = text.trim_start();
+        while let Some(first) = rest.chars().next() {
+            let len = if rest.starts_with("::") {
+                2
+            } else if rest.starts_with("r#") || ident(first) {
+                let body = rest.strip_prefix("r#").unwrap_or(rest);
+                rest.len() - body.len() + body.find(|c: char| !ident(c)).unwrap_or(body.len())
+            } else {
+                first.len_utf8()
+            };
+            tokens.push(&rest[..len]);
+            rest = rest[len..].trim_start();
+        }
         // Token 0 is the `use` keyword itself.
         use_tree(&tokens, &mut 1, Vec::new(), &mut leaves);
     }
@@ -960,6 +975,7 @@ fn item_uses(code: &str, name: &str) -> (usize, Vec<String>) {
 /// Other names `item` is reachable by, with the file binding each: `use … as`,
 /// `type … =` and re-exports, followed through the module each path names.
 fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, String)> {
+    let type_alias = regex::Regex::new(r"\btype\s+(\w+)\b[^=;]*=([^;]*)").unwrap();
     let mut found: Vec<(String, String)> = Vec::new();
     loop {
         let before = found.len();
@@ -969,11 +985,11 @@ fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, S
                 let (Some(last), Some(binds)) = (leaf.path.last(), &leaf.binds) else {
                     continue;
                 };
-                let from = absolute_path(&file.module, &leaf.path[..leaf.path.len() - 1]);
+                let from = || absolute_path(&file.module, &leaf.path[..leaf.path.len() - 1]);
                 let reaches = (last == item && binds != item)
                     || found
                         .iter()
-                        .any(|(name, at)| name == last && files[at].module == from);
+                        .any(|(name, at)| name == last && files[at].module == from());
                 if reaches && binds != "_" {
                     fresh.push(binds.clone());
                 }
@@ -983,13 +999,15 @@ fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, S
                 .filter(|(_, at)| at == relative)
                 .map(|(name, _)| name.as_str())
                 .chain([item]);
-            for name in local.filter(|name| file.code.contains(*name)) {
-                let alias = regex::Regex::new(&format!(
-                    r"\btype\s+(\w+)\b[^=;]*=[^;]*\b{}\b",
-                    regex::escape(name)
-                ))
-                .unwrap();
-                fresh.extend(alias.captures_iter(&file.code).map(|c| c[1].to_string()));
+            for name in local.filter(|name| file.code.contains(*name) && file.code.contains("type"))
+            {
+                let named = |rhs: &str| !word_uses(rhs, name).is_empty();
+                fresh.extend(
+                    type_alias
+                        .captures_iter(&file.code)
+                        .filter(|c| named(&c[2]))
+                        .map(|c| c[1].to_string()),
+                );
             }
             for name in fresh {
                 if !found.contains(&(name.clone(), relative.clone())) {
@@ -1026,7 +1044,7 @@ fn guarded_item_violations(
         let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
         for (relative, file) in &files {
             let mut used = word_uses(&file.code, needle).len();
-            let mut named = word.is_match(&file.code);
+            let mut named = file.code.contains(needle) && word.is_match(&file.code);
             for (name, at) in &aliases {
                 let module = &files[at].module;
                 let bare = file.sees_bare(at == relative, module);
@@ -1083,12 +1101,13 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
                     }
             })
         });
-        let pathed = variant.captures_iter(&file.code).any(|found| {
-            let name = found.get(1).unwrap();
-            let mut path = qualifier(&file.code, name.start());
-            path.push(name.as_str().to_string());
-            kind_at(&path, path.len() - 1)
-        });
+        let pathed = file.code.contains("Herdr")
+            && variant.captures_iter(&file.code).any(|found| {
+                let name = found.get(1).unwrap();
+                let mut path = qualifier(&file.code, name.start());
+                path.push(name.as_str().to_string());
+                kind_at(&path, path.len() - 1)
+            });
         if imported || pathed {
             violations.push(format!("{relative}: HostKind::Herdr import"));
         }
