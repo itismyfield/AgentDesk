@@ -140,6 +140,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
   --skip services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
   --skip services::dispatches::wait_queue::tests
+  --skip services::herdr_launch::tests
   --skip services::maintenance::jobs::db_retention::tests
   --skip services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
   --skip services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_pg_tests
@@ -469,6 +470,7 @@ NON_PG_FILTER_REPLAY=(
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries
   services::dispatches::wait_queue::tests::wake_query_preserves_fifo_ordering
   services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
+  services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
   services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::no_pg_is_noop_even_with_managed_orphans
   services::message_outbox::postgres_source_contract_tests::typed_outbox_core_preserves_cancel_at_the_observation_site
   services::message_outbox::postgres_source_contract_tests::typed_outbox_outcomes_fold_to_the_legacy_option_contract

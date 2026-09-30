@@ -42,6 +42,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_host/herdr_host_tests.rs",
         "src/services/claude_tui/hosting/host_draft_tests.rs",
         "src/services/session_host/herdr/transport_tests.rs",
+        "src/services/herdr_launch_tests.rs",
+        "src/services/discord/execution_identity/herdr_observation_tests.rs",
         "src/services/discord/tmux_output_stream/tests/compact_summary_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests/compact_summary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/compact_summary_tests.rs",

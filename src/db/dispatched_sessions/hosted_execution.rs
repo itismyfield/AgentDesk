@@ -340,6 +340,18 @@ pub(crate) async fn install_pending_pg(
     compare_and_set_pg(pool, observed, &next).await
 }
 
+/// Fill the pane location the create call answered with, only for the same Pending nonce.
+pub(crate) async fn record_pane_location_pg(
+    pool: &PgPool,
+    observed: &HostedObservation,
+    owner: &HostedOwner,
+    execution_nonce: &str,
+    location: HostedLocation,
+) -> Result<HostedCasOutcome, HostedTransitionError> {
+    let next = plan_fill(&observed.record, owner, execution_nonce, location, None)?;
+    compare_and_set_pg(pool, observed, &next).await
+}
+
 /// Fill the pane location and launch evidence once, only for the same Pending nonce.
 pub(crate) async fn record_launch_evidence_pg(
     pool: &PgPool,
@@ -349,13 +361,13 @@ pub(crate) async fn record_launch_evidence_pg(
     location: HostedLocation,
     expected: ExpectedExecution,
 ) -> Result<HostedCasOutcome, HostedTransitionError> {
-    let current = same_execution(&observed.record, owner, execution_nonce)?;
-    if current.state != HostedState::Pending {
-        return Err(HostedTransitionError::NotAllowed(Some(current.state)));
-    }
-    let mut next = current.clone();
-    fill_once(&mut next.location, location)?;
-    fill_once(&mut next.expected, expected)?;
+    let next = plan_fill(
+        &observed.record,
+        owner,
+        execution_nonce,
+        location,
+        Some(expected),
+    )?;
     compare_and_set_pg(pool, observed, &next).await
 }
 
@@ -425,6 +437,25 @@ fn same_execution<'a>(
         return Err(HostedTransitionError::NonceMismatch);
     }
     Ok(current)
+}
+
+fn plan_fill(
+    current: &HostedRecord,
+    owner: &HostedOwner,
+    execution_nonce: &str,
+    location: HostedLocation,
+    expected: Option<ExpectedExecution>,
+) -> Result<HostedExecution, HostedTransitionError> {
+    let current = same_execution(current, owner, execution_nonce)?;
+    if current.state != HostedState::Pending {
+        return Err(HostedTransitionError::NotAllowed(Some(current.state)));
+    }
+    let mut next = current.clone();
+    fill_once(&mut next.location, location)?;
+    if let Some(expected) = expected {
+        fill_once(&mut next.expected, expected)?;
+    }
+    Ok(next)
 }
 
 fn fill_once<T: PartialEq>(slot: &mut Option<T>, value: T) -> Result<(), HostedTransitionError> {
@@ -645,8 +676,8 @@ impl CleanupRow {
     }
 }
 
-/// Judges an explicit delete, marker files included, before any row lock is taken.
-/// A row cleanup must keep refuses the delete instead of reporting zero rows.
+/// Judges an explicit delete, marker files included, with no row lock held. A row
+/// cleanup must keep refuses the delete instead of reporting zero rows.
 pub(crate) async fn judge_session_delete_pg(
     pool: &PgPool,
     session_key: &str,
@@ -657,14 +688,49 @@ pub(crate) async fn judge_session_delete_pg(
     let Some((session_id, _)) = resolved else {
         return Ok(None);
     };
-    let row = load_cleanup_row_pg(pool, session_id).await?;
-    if row.as_ref().is_some_and(|row| !row.deletable()) {
-        return Err(format!(
-            "session {session_id} keeps a live, unowned or unreadable hosted execution record \
-             or a non-tmux host marker"
-        ));
+    let Some(row) = load_cleanup_row_pg(pool, session_id).await? else {
+        return Ok(None);
+    };
+    refuse_kept_row(&row)?;
+    wait_out_row_lock_pg(pool, session_key).await?;
+    // A marker written while another session held the lock is judged here, outside it.
+    match load_cleanup_row_pg(pool, session_id).await? {
+        None => Ok(None),
+        Some(current) if current != row => Err(changed_after_check(session_id)),
+        Some(current) => refuse_kept_row(&current).map(|()| Some(current)),
     }
-    Ok(row)
+}
+
+fn refuse_kept_row(row: &CleanupRow) -> Result<(), String> {
+    if row.deletable() {
+        return Ok(());
+    }
+    Err(format!(
+        "session {} keeps a live, unowned or unreadable hosted execution record \
+         or a non-tmux host marker",
+        row.id
+    ))
+}
+
+fn changed_after_check(session_id: i64) -> String {
+    format!("session {session_id} changed after its hosted execution check; retry the delete")
+}
+
+/// Takes the delete's row lock and drops it at once: the wait for any holder ends here.
+async fn wait_out_row_lock_pg(pool: &PgPool, session_key: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin session delete lock wait: {error}"))?;
+    crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
+        &mut tx,
+        session_key,
+    )
+    .await
+    .map_err(|error| format!("resolve session delete locator: {error:?}"))?;
+    tx.rollback()
+        .await
+        .map_err(|error| format!("end session delete lock wait: {error}"))
 }
 
 /// Deletes a row the caller has locked only if it still reads exactly as judged.
@@ -677,9 +743,7 @@ pub(crate) async fn delete_locked_session_pg(
         return Ok(0);
     };
     if judged != Some(&current) {
-        return Err(format!(
-            "session {session_id} changed after its hosted execution check; retry the delete"
-        ));
+        return Err(changed_after_check(session_id));
     }
     sqlx::query(
         "DELETE FROM sessions

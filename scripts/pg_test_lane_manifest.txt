@@ -119,6 +119,7 @@ src/services/discord/watchers/lifecycle/restore_tests.rs
 src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
 src/services/dispatches/wait_queue.rs
+src/services/herdr_launch_tests.rs
 src/services/maintenance/jobs/db_retention.rs
 src/services/maintenance/jobs/worktree_orphan_sweep.rs
 src/services/message_outbox.rs
@@ -266,6 +267,7 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
 services::dispatches::wait_queue::tests
+services::herdr_launch::tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
 services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_pg_tests
@@ -430,6 +432,7 @@ db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cas_writes
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cleanup_keeps_null_rows_with_a_non_tmux_host_marker_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_judges_markers_before_the_row_lock_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_refuses_live_and_unknown_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_sees_a_marker_written_during_its_lock_wait_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_lookup_resolves_alias_and_canonical_tuple_to_one_row_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_keeps_live_unknown_and_changed_rows_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg
@@ -1075,6 +1078,10 @@ services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_s
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
+services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
+services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
+services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
+services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_job_reports_intake_outbox_candidates_without_deleting

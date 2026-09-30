@@ -741,6 +741,9 @@ src/
 │   │   │   │   └── token.rs
 │   │   │   ├── exact_lease.rs
 │   │   │   └── source_epoch_observer.rs
+│   │   ├── execution_identity/
+│   │   │   ├── herdr_observation.rs
+│   │   │   └── herdr_observation_tests.rs
 │   │   ├── footer_view_reconciler/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
@@ -2112,6 +2115,8 @@ src/
 │   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
+│   ├── herdr_launch.rs
+│   ├── herdr_launch_tests.rs
 │   ├── issue_announcements.rs
 │   ├── kakao.rs
 │   ├── kakao_message.rs
