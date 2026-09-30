@@ -5,7 +5,8 @@ use crate::services::claude_tui::hook_server::adoption_retry::{
 };
 use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
 use crate::services::tui_prompt_dedupe::pending::{
-    ExactPathWait, PendingRestore, last_restore_outcome, reset_restore_outcomes_for_tests,
+    ExactPathWait, PendingRestore, expire_channel_mapping_for_tests, last_restore_outcome,
+    reset_restore_outcomes_for_tests,
 };
 use crate::services::tui_prompt_dedupe::{
     claude_session_rotation_for_tmux, register_launched_tmux_runtime_binding,
@@ -383,4 +384,83 @@ fn a_file_less_restored_b_gives_way_to_the_next_session_with_a_file() {
     pane.expect_bound(&c);
     pane.rehydrate();
     pane.expect_bound(&c);
+}
+
+#[test]
+fn a_restored_b_whose_channel_mapping_expired_still_logs_and_adopts_a_file_less_c() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_526, false);
+    pane.restart();
+    let b_path = pane.touch(&pane.b);
+    let bound = PendingRestore::BoundFromLedger {
+        pending_seq: 2,
+        exact_wait: None,
+    };
+    assert_eq!(pane.rehydrate(), Some(bound.clone()), "B restored");
+
+    // The idle reader keeps B's runtime binding fresh; only the channel mapping outlives its TTL.
+    expire_channel_mapping_for_tests(&pane.tmux);
+    assert_eq!(dedupe::owner_channel_for_tmux_session(&pane.tmux), None);
+    assert_eq!(pane.rehydrate(), Some(bound), "B kept on the next pass");
+    pane.expect_bound(&pane.b);
+
+    let c = uuid();
+    let clear = serde_json::json!({
+        "session_id": c, "source": "clear", "transcript_path": pane.path(&c),
+    });
+    let status = ingress.claude_hook("SessionStart", &pane.a, &clear, Some(&uuid()));
+    assert_eq!(status, 202, "/clear to a file-less C is acknowledged");
+    assert_eq!(
+        pending_lines(pane.channel, &c),
+        1,
+        "C is Pending in the log"
+    );
+    assert_eq!(
+        deferred_adoption_count(),
+        1,
+        "C waits in the adoption queue"
+    );
+
+    let newer = std::fs::metadata(&b_path).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(60);
+    let c_path = pane.touch(&c);
+    let c_file = std::fs::File::options().write(true).open(c_path).unwrap();
+    c_file.set_modified(newer).unwrap();
+    retry_deferred_claude_adoptions();
+    pane.expect_bound(&c);
+}
+
+#[test]
+fn a_restored_b_whose_transcript_is_unreadable_still_refuses_the_next_session() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_527, false);
+    pane.restart();
+    // B's path exists but cannot be read; only a missing file counts as older than every candidate.
+    std::os::unix::fs::symlink(pane.path(&pane.b), pane.path(&pane.b)).unwrap();
+    let waiting = pane.rehydrate();
+    assert!(
+        matches!(
+            waiting,
+            Some(PendingRestore::BoundFromLedger {
+                exact_wait: Some(_),
+                ..
+            })
+        ),
+        "{waiting:?}"
+    );
+
+    let c = uuid();
+    pane.touch(&c);
+    let clear = serde_json::json!({
+        "session_id": c, "source": "clear", "transcript_path": pane.path(&c),
+    });
+    let status = ingress.claude_hook("SessionStart", &pane.a, &clear, Some(&uuid()));
+    assert_eq!(status, 425, "an unreadable B is not skipped as missing");
+    pane.expect_bound(&pane.b);
 }

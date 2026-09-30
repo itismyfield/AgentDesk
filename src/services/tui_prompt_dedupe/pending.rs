@@ -368,15 +368,28 @@ pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding)
     )
 }
 
-/// The bound transcript's mtime for the newer-candidate check; `Some(None)` for a restored binding
-/// still waiting for its file, which any existing candidate follows.
+/// The bound transcript's mtime for the newer-candidate check; `Some(None)` for a binding this
+/// incarnation's restore bound before its file exists, which any existing candidate follows.
 pub(crate) fn bound_transcript_mtime(
     tmux_session: &str,
     binding: &TuiRuntimeBinding,
 ) -> Option<Option<SystemTime>> {
+    let this_incarnation = || {
+        let memo = outcomes()
+            .get(tmux_session)
+            .and_then(|((_, n, _), _)| n.clone());
+        let current = observe_spawn_nonce_marker(tmux_session);
+        matches!(current, SpawnNonceMarker::Known(n) if memo.as_deref() == Some(n.as_str()))
+    };
     match std::fs::metadata(&binding.output_path).and_then(|m| m.modified()) {
         Ok(mtime) => Some(Some(mtime)),
-        Err(_) if awaits_exact_path(tmux_session, binding) => Some(None),
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                && awaits_exact_path(tmux_session, binding)
+                && this_incarnation() =>
+        {
+            Some(None)
+        }
         Err(_) => None,
     }
 }
@@ -405,13 +418,17 @@ pub(crate) fn restore_claude_pane(
         .ok()
         .map(|rx| *rx.borrow());
     let key = (channel_id, nonce, last_seq);
-    if let Some((memo, outcome)) = outcomes().get(tmux_session)
-        && *memo == key
-        && last_seq.is_some()
-        && outcome.memo()
-        && (bound || !outcome.skips_launch_refresh())
-    {
-        return Some(outcome.clone());
+    let memoized = outcomes()
+        .get(tmux_session)
+        .filter(|(memo, outcome)| {
+            *memo == key
+                && last_seq.is_some()
+                && outcome.memo()
+                && (bound || !outcome.skips_launch_refresh())
+        })
+        .map(|(_, outcome)| outcome.clone());
+    if let Some(outcome) = memoized {
+        return Some(kept_channel(tmux_session, channel_id, outcome));
     }
     let records = records_strict(channel_id);
     let register = |session: &str, transcript: &Path, launch_session: &str| {
@@ -471,7 +488,26 @@ pub(crate) fn restore_claude_pane(
         }
     };
     note(tmux_session, key, &outcome);
-    Some(outcome)
+    Some(kept_channel(tmux_session, channel_id, outcome))
+}
+
+/// A binding the pass keeps still needs its channel mapping, or a later hook's Pending is never logged.
+fn kept_channel(tmux_session: &str, channel_id: u64, outcome: PendingRestore) -> PendingRestore {
+    let kept =
+        outcome.skips_launch_refresh() && runtime_binding_for_tmux_session(tmux_session).is_some();
+    if kept && channel_id != 0 {
+        let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
+        state.purge_expired();
+        let recorded_at = std::time::Instant::now();
+        let mapping = super::TimedValue {
+            value: channel_id,
+            recorded_at,
+        };
+        state
+            .channel_by_tmux
+            .insert(tmux_session.to_owned(), mapping);
+    }
+    outcome
 }
 
 fn note(tmux_session: &str, key: MemoKey, outcome: &PendingRestore) {
@@ -499,6 +535,16 @@ fn note(tmux_session: &str, key: MemoKey, outcome: &PendingRestore) {
 #[cfg(test)]
 pub(crate) fn reset_restore_outcomes_for_tests() {
     outcomes().clear();
+}
+
+/// Ages the pane's channel mapping past its TTL while its runtime binding stays fresh.
+#[cfg(test)]
+pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
+    let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let aged = std::time::Instant::now() - super::SESSION_MAPPING_TTL;
+    if let Some(mapping) = state.channel_by_tmux.get_mut(tmux_session) {
+        mapping.recorded_at = aged - std::time::Duration::from_secs(1);
+    }
 }
 
 #[cfg(all(test, unix))]
