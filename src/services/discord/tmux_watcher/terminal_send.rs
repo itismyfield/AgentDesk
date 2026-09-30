@@ -185,6 +185,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     source_authority: WatcherSourceAuthority,
     start: u64,
     end: u64,
+    body_claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
 ) -> WatcherShortReplaceResult {
     let delivery_identity = super::terminal_long_chunks::watcher_delivery_identity(
         source_authority.generation_mtime_ns,
@@ -200,17 +201,12 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     let delivery_mutation = std::sync::Mutex::new(None);
     let landed_stale = std::sync::atomic::AtomicBool::new(false);
     let holder = LeaseHolder::Watcher { instance_id };
-    // Self-heal like the legacy acquire (tmux_watcher.rs:5964): reclaim an EXPIRED
-    // prior holder before the controller's acquire (a stale dead lease must not make
-    // this acquire lose and B2-skip a deliverable range).
+    // Reclaim an expired prior holder first, so a dead lease cannot make this acquire
+    // lose and skip a deliverable range.
     cell.reclaim_if_expired(lease_now_ms());
     let heartbeat = WatcherPostHeartbeat { cell: cell.clone() };
-    // Identity-gated advance: INLINE before any post-send await (I1). For the cut-over
-    // set `lifecycle_stage_paused` is always false (TUI-gated turns excluded), so the
-    // legacy path advances IFF `relay_ok` — i.e. on confirmed transport. The controller
-    // invokes this ONLY on confirmed transport (never Transient/Unknown), so it runs
-    // the REAL `advance_watcher_confirmed_end` to `end` (the legacy `watcher_lease_end`)
-    // and returns `true` → Delivered.
+    // Identity-gated advance, inline before any post-send await: the controller calls it
+    // only on confirmed transport, advancing to `end` and returning `true` (Delivered).
     let advance = |range: (u64, u64)| -> bool {
         debug_assert_eq!(range, (start, end));
         let Some(mutation) = super::terminal_long_chunks::begin_watcher_delivery_mutation(
@@ -282,6 +278,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
+            body_claim,
         },
         Some(&revalidate_after_edit_failure),
     )
@@ -429,6 +426,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
     response_sent_offset: usize,
     single_message_panel_footer_mode: bool,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
+    body_claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
     locals: WatcherShortReplaceLocals<'_>,
 ) {
     // Live path: the real `DiscordGateway` (the seam the ON-path test fakes).
@@ -454,6 +452,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         source_authority,
         range.0,
         range.1,
+        body_claim,
     )
     .await;
     if let WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } = result {

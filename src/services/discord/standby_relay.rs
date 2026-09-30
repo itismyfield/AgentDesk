@@ -37,6 +37,7 @@ use super::inflight::{
 use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 
 fn standby_short_replace_should_cutover(formatted: &str) -> bool {
     !formatted.is_empty()
@@ -53,6 +54,7 @@ pub(in crate::services::discord) struct StandbyRelayTurnBinding {
     dispatch_id: Option<String>,
     session_key: Option<String>,
     turn_start_offset: Option<u64>,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
 }
 
 impl StandbyRelayTurnBinding {
@@ -62,6 +64,7 @@ impl StandbyRelayTurnBinding {
             dispatch_id: state.dispatch_id.clone(),
             session_key: state.session_key.clone(),
             turn_start_offset: state.turn_start_offset,
+            runtime_kind: state.runtime_kind,
         }
     }
 
@@ -225,16 +228,25 @@ pub(super) async fn run_standby_relay(
         }
 
         if let Some(result_text) = pending_result_text.as_deref() {
-            let delivered = deliver_response(
-                &http,
-                channel_id,
-                placeholder_msg_id,
-                &shared,
-                &provider,
-                &turn_binding,
-                result_text,
-            )
-            .await;
+            let send = || {
+                let text = result_text;
+                let binding = &turn_binding;
+                deliver_response(
+                    &http,
+                    channel_id,
+                    placeholder_msg_id,
+                    &shared,
+                    &provider,
+                    binding,
+                    text,
+                )
+            };
+            // The relay claims the channel as it posts; O taking it meanwhile ends the relay.
+            let claim = (!result_text.trim().is_empty())
+                .then(|| BodyClaim::new(channel_id.get(), turn_binding.runtime_kind));
+            let Ok(BodySend::Sent(delivered)) = claim_then_send(claim, send).await else {
+                return;
+            };
             if delivered {
                 complete_standby_inflight_state(
                     &provider,
@@ -794,6 +806,7 @@ async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?
             advance: None,
             // No heartbeat (no lease to renew).
             heartbeat: None,
+            body_claim: None,
         },
     )
     .await;

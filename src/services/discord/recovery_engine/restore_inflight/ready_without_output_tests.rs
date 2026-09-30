@@ -564,6 +564,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                         MessageId::new(41),
                         &text,
                         context,
+                        None,
                     )
                     .await.into()
                 }
@@ -1073,6 +1074,7 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
                         MessageId::new(state.current_msg_id),
                         &text,
                         Some(context),
+                        None,
                     )
                     .await;
                     assert!(matches!(outcome, RecoveryRelayOutcome::Delivered));
@@ -1443,6 +1445,7 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                                 MessageId::new(state.current_msg_id),
                                 &text,
                                 context,
+                                None,
                             )
                             .await;
                             CapturedRecoveryDelivery {

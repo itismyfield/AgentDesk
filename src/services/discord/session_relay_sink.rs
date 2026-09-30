@@ -58,6 +58,7 @@ use self::task_notification_context::ensure_card_and_route;
 use self::terminal_handoff::SessionRelayDeliveryOutcome;
 use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
 use super::task_notification_delivery::{ResponseDeliveryClaim, ResponseDeliveryClaimOutcome};
+use crate::services::tui_o::cutover::{IdentityError, claim_then_send};
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
 const IDLE_JSONL_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -647,10 +648,10 @@ impl SessionBoundDiscordRelaySink {
         let channel_id = delivery.channel_id;
         // Resolve an unknown destination before formatting; ownership gates only the body below.
         if channel_id == 0 {
-            crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id, None)
+            crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id, None)
                 .map_err(|error| {
-                    RelaySinkError::Transient(format!("TUI output identity held: {error}"))
-                })?;
+                RelaySinkError::Transient(format!("TUI output identity held: {error}"))
+            })?;
         }
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
@@ -886,8 +887,9 @@ impl SessionBoundDiscordRelaySink {
             );
             return Ok(SessionRelayDeliveryOutcome::Delivered);
         }
-        // O posts this body: consume the range without transport or delivery evidence.
-        if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+        // O posts this body: consume the range without transport or delivery evidence. Ownership
+        // is only read here; each route below claims at its own transport.
+        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
             channel_id,
             Some(&delivery.session_name),
         )
@@ -903,6 +905,10 @@ impl SessionBoundDiscordRelaySink {
             );
             return Ok(SessionRelayDeliveryOutcome::Delivered);
         }
+        let body_claim = crate::services::tui_o::cutover::BodyClaim::tmux(
+            channel_id,
+            Some(&delivery.session_name),
+        );
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {
@@ -928,6 +934,7 @@ impl SessionBoundDiscordRelaySink {
                         trace: &trace,
                         range: (start, end),
                         delivered_total: &self.delivered_total,
+                        body_claim: Some(body_claim),
                     },
                 )
                 .await;
@@ -939,7 +946,7 @@ impl SessionBoundDiscordRelaySink {
                     None
                 };
             if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
-                let (message_ids, chunk_anchor_receipt) =
+                let send = || {
                     journal::send_long_chunks_with_anchor_receipt(
                         gateway,
                         &http,
@@ -948,7 +955,9 @@ impl SessionBoundDiscordRelaySink {
                         &relay_text,
                         &shared,
                     )
-                    .await?;
+                };
+                let (message_ids, chunk_anchor_receipt) =
+                    claimed_body_send(claim_then_send(Some(body_claim), send).await)??;
                 if let Some(gateway) = gateway {
                     let _ = gateway.delete_message(channel, msg_id).await;
                 } else {
@@ -1002,23 +1011,23 @@ impl SessionBoundDiscordRelaySink {
             #[cfg(not(test))]
             let mut last_chunk_anchor = None;
             let mut edit_anchor_receipt = None;
-            let replace_outcome = if let Some(gateway) = gateway {
-                gateway
-                    .replace_message_with_outcome(channel, msg_id, &relay_text)
+            let (http_ref, shared_ref, text) = (&http, &shared, relay_text.as_str());
+            let (anchor, receipt) = (&mut last_chunk_anchor, &mut edit_anchor_receipt);
+            let replace = move || async move {
+                if let Some(gateway) = gateway {
+                    gateway
+                        .replace_message_with_outcome(channel, msg_id, text)
+                        .await
+                } else {
+                    formatting::replace_long_message_raw_with_outcome_returning_receipt(
+                        http_ref, channel, msg_id, text, shared_ref, anchor, receipt,
+                    )
                     .await
-            } else {
-                formatting::replace_long_message_raw_with_outcome_returning_receipt(
-                    &http,
-                    channel,
-                    msg_id,
-                    &relay_text,
-                    &shared,
-                    &mut last_chunk_anchor,
-                    &mut edit_anchor_receipt,
-                )
-                .await
-                .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())
+                }
             };
+            let replace_outcome =
+                claimed_body_send(claim_then_send(Some(body_claim), replace).await)?;
             match replace_outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
@@ -1154,9 +1163,25 @@ impl SessionBoundDiscordRelaySink {
                 &trace,
                 sink_lease_guard.as_ref(),
                 sink_delivery_ctx,
+                body_claim,
             )
             .await
         }
+    }
+}
+
+/// A claimed body send's own result; O owning the channel or a held identity sent nothing.
+fn claimed_body_send<T>(
+    sent: Result<crate::services::tui_o::cutover::BodySend<T>, IdentityError>,
+) -> Result<T, RelaySinkError> {
+    match sent {
+        Ok(crate::services::tui_o::cutover::BodySend::Sent(sent)) => Ok(sent),
+        Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => Err(RelaySinkError::Transient(
+            "O owns this channel's body".to_string(),
+        )),
+        Err(error) => Err(RelaySinkError::Transient(format!(
+            "TUI output identity held: {error}"
+        ))),
     }
 }
 

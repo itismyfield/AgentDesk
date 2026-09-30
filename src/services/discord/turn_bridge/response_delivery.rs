@@ -77,6 +77,15 @@ pub(super) fn terminal_delivery_response_after_offset(
     delivery_response
 }
 
+/// Whether a terminal delivery sends no assistant answer (nothing, or only a notice), normalized
+/// as delivery does. Such a delivery only reads body ownership; one sending an answer claims it.
+pub(super) fn no_answer(full_response: &str, response_sent_offset: usize, delivery: &str) -> bool {
+    delivery.trim().is_empty()
+        || terminal_delivery_response_after_offset(full_response, response_sent_offset, None)
+            .trim()
+            .is_empty()
+}
+
 pub(super) fn done_result_requires_full_terminal_replay(
     full_response: &str,
     result: &str,

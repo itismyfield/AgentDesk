@@ -24,28 +24,140 @@ pub(crate) enum IdentityError {
     },
 }
 
+/// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Use {
+    /// A pending adoption is released: Legacy takes the channel for this process.
+    Body,
+    /// A pending adoption reads as Legacy and stays pending.
+    Peek,
+}
+
+/// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy. Callers
+/// outside it are pinned with their reason in the writer census.
 pub(crate) fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, || kind)
+    decide(channel_id, Use::Body, || kind)
 }
 
 pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, || {
-        session.and_then(|session| {
-            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
-                .map(|binding| binding.runtime_kind)
-                .or_else(|| crate::services::tmux_common::resolve_tmux_runtime_kind_marker(session))
-        })
+    decide(channel_id, Use::Body, || session_kind(session))
+}
+
+/// For diagnostics and lifecycle checks that send no body: a pending adoption stays pending.
+pub(crate) fn peek_o_owns_tui_output_for_channel(
+    channel_id: u64,
+    kind: Option<RuntimeHandoffKind>,
+) -> Result<bool, IdentityError> {
+    decide(channel_id, Use::Peek, || kind)
+}
+
+pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
+    channel_id: u64,
+    session: Option<&str>,
+) -> Result<bool, IdentityError> {
+    decide(channel_id, Use::Peek, || session_kind(session))
+}
+
+/// Where a Legacy body goes, with how the destination's runtime kind is found.
+#[derive(Clone, Copy)]
+pub(crate) struct BodyClaim<'a> {
+    channel_id: u64,
+    kind: KindOf<'a>,
+    direct: bool,
+}
+
+#[derive(Clone, Copy)]
+enum KindOf<'a> {
+    Known(Option<RuntimeHandoffKind>),
+    Tmux(Option<&'a str>),
+}
+
+impl<'a> BodyClaim<'a> {
+    pub(crate) fn new(channel_id: u64, kind: Option<RuntimeHandoffKind>) -> Self {
+        let kind = KindOf::Known(kind);
+        Self {
+            channel_id,
+            kind,
+            direct: true,
+        }
+    }
+
+    pub(crate) fn tmux(channel_id: u64, session: Option<&'a str>) -> Self {
+        let kind = KindOf::Tmux(session);
+        Self {
+            channel_id,
+            kind,
+            direct: true,
+        }
+    }
+
+    /// A caller without a direct gateway cannot skip for O, so an O-owned channel is held.
+    pub(crate) fn direct(self, direct: bool) -> Self {
+        Self { direct, ..self }
+    }
+
+    fn claim(self) -> Result<bool, IdentityError> {
+        let owned = match self.kind {
+            KindOf::Known(kind) => o_owns_tui_output_for_channel(self.channel_id, kind),
+            KindOf::Tmux(session) => o_owns_tui_output_for_channel_tmux(self.channel_id, session),
+        }?;
+        if owned && !self.direct {
+            return Err(IdentityError::NonDirectGateway.hold(self.channel_id));
+        }
+        Ok(owned)
+    }
+}
+
+/// What became of a body offered to [`claim_then_send`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BodySend<T> {
+    /// O owns the channel, so nothing was sent.
+    OwnedByO,
+    Sent(T),
+}
+
+impl<T> BodySend<Result<T, String>> {
+    /// The send's own result, with O owning the channel or a held identity as a failed send.
+    pub(crate) fn flatten(sent: Result<Self, IdentityError>) -> Result<T, String> {
+        match sent {
+            Ok(Self::Sent(result)) => result,
+            Ok(Self::OwnedByO) => Err("O owns this channel's body".to_string()),
+            Err(error) => Err(format!("TUI output identity held: {error}")),
+        }
+    }
+}
+
+/// The one place a Legacy body ends a pending adoption: claim, then send at once unless O owns
+/// the channel. Callers settle guards and no-ops on a peek first; `None` sends without a claim.
+pub(crate) async fn claim_then_send<T, F: std::future::Future<Output = T>>(
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Result<BodySend<T>, IdentityError> {
+    if let Some(claim) = claim
+        && claim.claim()?
+    {
+        return Ok(BodySend::OwnedByO);
+    }
+    Ok(BodySend::Sent(send().await))
+}
+
+fn session_kind(session: Option<&str>) -> Option<RuntimeHandoffKind> {
+    session.and_then(|session| {
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+            .map(|binding| binding.runtime_kind)
+            .or_else(|| crate::services::tmux_common::resolve_tmux_runtime_kind_marker(session))
     })
 }
 
 fn decide(
     channel_id: u64,
+    usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     let enabled = super::writer_enabled();
@@ -53,7 +165,7 @@ fn decide(
         return Ok(false);
     }
     let evaluate = |snapshot: Option<&BootChannels>| {
-        decide_with_snapshot(enabled, snapshot, channel_id, resolve_kind)
+        decide_with_snapshot(enabled, snapshot, channel_id, usage, resolve_kind)
     };
     #[cfg(test)]
     let result = super::test_override::with_channels(evaluate);
@@ -77,6 +189,7 @@ fn decide_with_snapshot(
     enabled: bool,
     snapshot: Option<&BootChannels>,
     channel_id: u64,
+    usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
@@ -99,12 +212,16 @@ fn decide_with_snapshot(
             actual: kind,
         });
     }
-    Ok(channel_policy::owns_output(
-        enabled,
-        snapshot.channels(),
-        channel_id,
-        Some(kind),
-    ))
+    let selected =
+        channel_policy::owns_output(enabled, snapshot.channels(), channel_id, Some(kind));
+    // Only a committed (or held) adoption is O's; off the home a selected channel has none.
+    let Some(candidate) = snapshot.candidate(channel_id).filter(|_| selected) else {
+        return Ok(false);
+    };
+    Ok(match usage {
+        Use::Body => candidate.claim(channel_id),
+        Use::Peek => candidate.peek().owned(),
+    })
 }
 
 #[cfg(test)]

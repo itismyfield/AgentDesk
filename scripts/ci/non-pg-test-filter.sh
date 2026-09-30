@@ -110,6 +110,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
@@ -159,6 +160,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
   --skip services::pipeline_override::pipeline_override_pg_tests
   --skip services::pipeline_routes::tests
+  --skip services::routines::agent_executor::reliability::tests
   --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
@@ -487,6 +489,12 @@ NON_PG_FILTER_REPLAY=(
   services::pipeline_routes::tests::persistence_sql_includes_backoff_column
   services::pipeline_routes::tests::stage_json_absent_backoff_is_null
   services::pipeline_routes::tests::stage_json_emits_backoff_field
+  services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
+  services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
+  services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
+  services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
+  services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
+  services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence
   services::routines::session_control::tests::fallback_tmux_channel_name_preserves_thread_suffix
   services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label
   services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel

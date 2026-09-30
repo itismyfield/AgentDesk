@@ -25376,6 +25376,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/host_key_derivation_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:27311813ba084461e513f151e5122ce2048a309e0bdff0803c895c23acb713f9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/host_key_derivation_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9fd6b2b6a62dbddeb35539bc80ae889ee384ea7b2850f28c464f511dddd09dee"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/idle_detector.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",

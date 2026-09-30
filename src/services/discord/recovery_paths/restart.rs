@@ -501,7 +501,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     let kind = (anchor.panel_channel_id == state.channel_id)
         .then_some(state.runtime_kind)
         .flatten();
-    match crate::services::tui_o::cutover::o_owns_tui_output_for_channel(
+    match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
         anchor.panel_channel_id,
         kind,
     ) {
@@ -599,15 +599,24 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
             (anchor.panel_channel_id, anchor.panel_msg_id),
         )
         .with_record_channel_id(record_channel_id);
-    let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
+    // Only the repost's POST claims the channel, after every refusal above and its fresh-send lease.
+    let claim = crate::services::tui_o::cutover::BodyClaim::new(anchor.panel_channel_id, kind);
+    let repost = super::super::recovery_engine::relay_recovered_body_to_placeholder(
         http,
         shared,
         anchor_channel_id,
         None,
         terminal_text,
         Some(&recovery_context),
-    )
-    .await;
+        Some(claim),
+    );
+    let outcome = match repost.await {
+        Ok(crate::services::tui_o::cutover::BodySend::Sent(outcome)) => outcome,
+        Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {
+            return AnchorRepostOutcome::NotReposted;
+        }
+        Err(_) => return AnchorRepostOutcome::RefusedPreserveRow,
+    };
 
     // #3918: the answer reached Discord — record the durable idempotency marker
     // NOW, before the caller's `dispose_*` clears the row, so that if the clear

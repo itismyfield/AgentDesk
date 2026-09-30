@@ -4076,6 +4076,7 @@ mod watcher_short_replace_controller {
             },
             START,
             END,
+            None,
         )
         .await
     }
@@ -4106,6 +4107,7 @@ mod watcher_short_replace_controller {
             },
             START,
             END,
+            None,
         )
         .await
     }
@@ -4580,6 +4582,7 @@ mod watcher_short_replace_controller {
                     acquire_failure_mode: toc::AcquireFailureMode::Transient,
                     advance: Some(&advance),
                     heartbeat: None,
+                    body_claim: None,
                 },
             )
             .await;

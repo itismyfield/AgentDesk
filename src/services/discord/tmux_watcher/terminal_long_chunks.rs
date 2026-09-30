@@ -10,6 +10,7 @@ use crate::services::discord::tmux::WatcherDeliveryTarget;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
 
@@ -261,6 +262,7 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
     source_authority: WatcherSourceAuthority,
     start: u64,
     end: u64,
+    body_claim: Option<BodyClaim<'_>>,
 ) -> WatcherLongChunksResult {
     let delivery_identity = watcher_delivery_identity(
         source_authority.generation_mtime_ns,
@@ -331,6 +333,7 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
+            body_claim,
         },
     )
     .await;
@@ -419,6 +422,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
     session_bound_fallback_uses_full_body: bool,
     frozen_rollover_msg_ids: &mut Vec<MessageId>,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
+    body_claim: Option<BodyClaim<'_>>,
     locals: WatcherLongChunksLocals<'_>,
 ) {
     let gateway = crate::services::discord::gateway::DiscordGateway::new(
@@ -443,6 +447,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
         source_authority,
         range.0,
         range.1,
+        body_claim,
     )
     .await;
     if let WatcherLongChunksResult::Outcome(outcome) = outcome {
@@ -482,13 +487,20 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_legacy(
     watcher_long_chunk_anchor_receipt: &mut Option<
         crate::services::discord::outbound::DiscordTransportReceipt,
     >,
+    body_claim: Option<BodyClaim<'_>>,
     locals: WatcherLongChunksLocals<'_>,
 ) {
-    match crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
-        http, channel_id, msg_id, relay_text, shared,
-    )
-    .await
-    .and_then(|receipts| {
+    let send = || {
+        crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
+            http, channel_id, msg_id, relay_text, shared,
+        )
+    };
+    let Ok(BodySend::Sent(sent)) = claim_then_send(body_claim, send).await else {
+        // Nothing was sent: O owns the channel or its identity is held.
+        *locals.relay_ok = false;
+        return;
+    };
+    match sent.and_then(|receipts| {
         crate::services::discord::formatting::message_ids_from_receipts(receipts.clone())
             .map(|message_ids| (message_ids, receipts))
     }) {

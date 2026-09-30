@@ -19,10 +19,10 @@ SPEC = importlib.util.spec_from_file_location("tui_o_writer_census", SCRIPT)
 census = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(census)
 
-CUT_FILE = """pub fn deliver(ch: u64) {
-    if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&s) { return; }
-    send_channel_message(ch, "body");
-}
+SEND = 'send_channel_message(ch, "body")'
+CUT_FILE = f"""pub fn deliver(ch: u64) {{
+    cutover::claim_then_send(Some(claim), || {SEND});
+}}
 """
 EVID_FILE = """pub fn read_receipt() -> bool { lookup_receipt() }
 """
@@ -33,9 +33,10 @@ MAPS = {
     "EXPECTED_PRIMITIVES": {"sink.rs": {"send_channel_message*": 1}},
     "CENSUS": {"sink.rs": ("W20", "CUT_D")},
     "EXPECTED_GATES": {
-        "src/services/discord/sink.rs": 1,
+        "src/services/discord/sink.rs": ("deliver:claim",),
     },
     "R_EVID": ("src/services/discord/outbound/delivery_record.rs",),
+    "RAW_CLAIM_SITES": {},
 }
 
 
@@ -78,10 +79,93 @@ class CensusGateTests(unittest.TestCase):
 
     def test_removing_the_gate_from_a_cut_file_fails_even_with_updated_counts(self) -> None:
         self.write("src/services/discord/sink.rs", CUT_FILE.replace(
-            "    if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&s) { return; }\n", ""
+            f"cutover::claim_then_send(Some(claim), || {SEND})", SEND
         ))
         self.maps["EXPECTED_GATES"] = {}
-        self.assert_fails_with("census: CUT_D row W20 has no gate in src/services/discord/sink.rs")
+        self.assert_fails_with("census: CUT_D row W20 has no claim gate in src/services/discord/sink.rs")
+
+    def test_a_body_gate_swapped_for_a_peek_fails_with_or_without_updated_counts(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE.replace(
+            f"cutover::claim_then_send(Some(claim), || {SEND})",
+            f"if cutover::peek_o_owns_tui_output_for_tmux_session(&s) {{ return; }} {SEND}",
+        ))
+        self.assert_fails_with(
+            "gate sites: src/services/discord/sink.rs has ['deliver:peek'], expected ['deliver:claim']"
+        )
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:peek",)
+        self.assert_fails_with("census: CUT_D row W20 has no claim gate in src/services/discord/sink.rs")
+
+    def test_a_peek_turned_into_a_claim_fails_the_pins(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { peek_o_owns_tui_output_for_channel(k, None) }\n")
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "probe:peek")
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { o_owns_tui_output_for_channel(k, None) }\n")
+        self.assert_fails_with("has ['deliver:claim', 'probe:claim'], expected ['deliver:claim', 'probe:peek']")
+
+    def test_gates_trading_roles_within_a_file_fail_with_unchanged_counts(self) -> None:
+        paired = (
+            "pub fn deliver(ch: u64, body: bool) {\n"
+            "    let owns = if body { NO_BODY } else { BODY };\n"
+            "    if owns(ch).unwrap_or(true) { return; }\n"
+            "    send_channel_message(ch, \"body\");\n"
+            "}\n"
+            "fn probe(ch: u64) -> bool { CHECK(ch) }\n"
+        )
+        def tree(no_body, body, check):
+            return paired.replace("NO_BODY", no_body).replace("BODY", body).replace("CHECK", check)
+        claim, peek = "o_owns_tui_output_for_channel", "peek_o_owns_tui_output_for_channel"
+        self.maps["RAW_CLAIM_SITES"] = {"src/services/discord/sink.rs": ("deliver",)}
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = (
+            "deliver:peek", "deliver:claim", "probe:peek"
+        )
+        self.write("src/services/discord/sink.rs", tree(peek, claim, peek))
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+        swaps = {
+            "branches swapped": tree(claim, peek, peek),
+            "claim moved to another fn": tree(peek, peek, claim),
+        }
+        for label, text in swaps.items():
+            with self.subTest(swap=label):
+                self.write("src/services/discord/sink.rs", text)
+                self.assert_fails_with("gate sites: src/services/discord/sink.rs has")
+
+    def test_a_raw_claim_outside_the_helper_fails_even_with_updated_pins(self) -> None:
+        early = (
+            "fn early(ch: u64) -> bool {\n"
+            "    if cutover::o_owns_tui_output_for_channel(ch, None).unwrap_or(true) { return false; }\n"
+            "    true\n"
+            "}\n"
+        )
+        self.write("src/services/discord/sink.rs", CUT_FILE + early)
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "early:claim")
+        self.assert_fails_with(
+            "raw claim: src/services/discord/sink.rs claims in early outside claim_then_send"
+        )
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn early(ch: u64) { candidate.claim(ch); }\n")
+        self.assert_fails_with("claims in early outside claim_then_send")
+        self.maps["RAW_CLAIM_SITES"] = {"src/services/discord/sink.rs": ("early",)}
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+
+    def test_a_tui_o_claim_is_seen_whatever_its_receiver_chain_or_path(self) -> None:
+        for raw in (
+            "adoption.claim(ch);",
+            "snapshot.candidate(ch).unwrap().claim(ch);",
+            "Candidate::claim(&adoption, ch);",
+            "let invoke = Candidate::claim; invoke(&adoption, ch);",
+            "channels.map(Candidate::claim);",
+        ):
+            with self.subTest(raw=raw):
+                self.write("src/services/tui_o/early.rs", f"fn early(ch: u64) {{ {raw} }}\n")
+                self.assert_fails_with(
+                    "raw claim: src/services/tui_o/early.rs claims in early outside claim_then_send"
+                )
+
+    def test_a_stale_raw_claim_exception_fails(self) -> None:
+        self.maps["RAW_CLAIM_SITES"] = {"src/services/discord/sink.rs": ("early",)}
+        self.assert_fails_with("raw claim: stale RAW_CLAIM_SITES entry src/services/discord/sink.rs early")
 
     def test_undecided_target_fails(self) -> None:
         for target in ("TBD", "?", "COV:TBD"):
@@ -90,15 +174,19 @@ class CensusGateTests(unittest.TestCase):
                 self.assert_fails_with(f"census: sink.rs has undecided target {target!r}")
 
     def test_helper_in_r_evid_file_fails_even_with_updated_counts(self) -> None:
-        self.write("src/services/discord/outbound/delivery_record.rs",
-                   "pub fn read_receipt() -> bool { o_owns_tui_output(kind) || lookup_receipt() }\n")
-        self.maps["EXPECTED_GATES"]["src/services/discord/outbound/delivery_record.rs"] = 1
-        self.assert_fails_with("gate: cutover helper in R-EVID file src/services/discord/outbound/delivery_record.rs")
+        for kind, helper in (("claim", "o_owns_tui_output"), ("peek", "peek_o_owns_tui_output")):
+            with self.subTest(kind=kind):
+                self.write("src/services/discord/outbound/delivery_record.rs",
+                           f"pub fn read_receipt() -> bool {{ {helper}(kind) || lookup_receipt() }}\n")
+                self.maps["EXPECTED_GATES"]["src/services/discord/outbound/delivery_record.rs"] = (
+                    f"read_receipt:{kind}",
+                )
+                self.assert_fails_with("gate: cutover helper in R-EVID file src/services/discord/outbound/delivery_record.rs")
 
     def test_gate_count_change_needs_the_map_in_the_same_change(self) -> None:
-        self.write("src/services/discord/sink.rs", CUT_FILE + "fn g() -> bool { bridge_o_body_cut_decision(k, true) }\n")
-        self.assert_fails_with("gate: src/services/discord/sink.rs has 2x, expected 1x")
-        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = 2
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn g() { claim_then_send(c, s); }\n")
+        self.assert_fails_with("has ['deliver:claim', 'g:claim'], expected ['deliver:claim']")
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "g:claim")
         ok, message = self.run_gate()
         self.assertTrue(ok, message)
 

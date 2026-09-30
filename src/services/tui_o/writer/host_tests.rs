@@ -1,4 +1,5 @@
 use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{self, test_override};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
@@ -43,6 +44,7 @@ struct TestIo {
     alarms: Raised,
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
+    custody: Mutex<Result<bool, String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -55,6 +57,7 @@ impl TestIo {
             alarms: Raised::default(),
             calls: Mutex::default(),
             facts: Mutex::new(Ok(ActivationFacts::default())),
+            custody: Mutex::new(Ok(false)),
             on_facts: Mutex::default(),
         })
     }
@@ -102,6 +105,16 @@ impl HostIo for TestIo {
         let facts = self.facts.lock().unwrap().clone();
         async move { facts }
     }
+
+    fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<bool, String> {
+        self.custody.lock().unwrap().clone()
+    }
+}
+
+/// This thread's adoption of a selected channel.
+fn adoption(channel: u64) -> Adoption {
+    let candidate = |boot: Option<&BootChannels>| boot.unwrap().candidate(channel).unwrap().peek();
+    test_override::with_channels(candidate)
 }
 
 fn root(harness: &Harness) -> PathBuf {
@@ -224,8 +237,14 @@ fn nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel() {
     assert!(start(ShadowProvider::Claude, true, unprepared).is_empty());
     drop(off);
     drop(selected);
-    let _empty = test_override::force_channels(&[]);
+    let empty = test_override::force_channels(&[]);
     assert!(start(ShadowProvider::Claude, true, unprepared).is_empty());
+    drop(empty);
+    let _foreign = test_override::force_foreign(&[(CHANNEL, ClaudeTui)], "home");
+    assert!(
+        start(ShadowProvider::Claude, true, unprepared).is_empty(),
+        "off the O home"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -404,11 +423,12 @@ fn start_host(
 async fn a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses() {
     let (harness, path) = fresh(startup);
     harness.gate.acquired();
-    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     let tasks = start_host(&harness, &io, &ready);
     polls(3).await;
     assert_eq!(io.alarms.halted(), []);
+    assert_eq!(adoption(CHANNEL), Adoption::Committed);
     let era = harness.store.read_era().unwrap().unwrap();
     assert_eq!(era.initial_channels, [CHANNEL]);
     let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
@@ -502,7 +522,7 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
         ),
         (
             "Legacy retains delivery custody",
-            facts(|f| f.legacy_custody = true),
+            facts(|_| ()),
             startup,
             b"",
             true,
@@ -524,9 +544,10 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
         let (harness, path) = fresh(event);
         append(&path, body);
         harness.gate.acquired();
-        let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+        let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
         let io = TestIo::over(&harness);
         *io.facts.lock().unwrap() = facts;
+        *io.custody.lock().unwrap() = Ok(why.starts_with("Legacy"));
         let ready = Arc::new(Readiness::default());
         host(&harness, &io, pg, &ready);
         polls(3).await;
@@ -542,6 +563,13 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
             !ready.is_ready(CHANNEL) && harness.port.posts().is_empty(),
             "{why}"
         );
+        // Nothing was written, so Legacy keeps the channel; without a lease nothing was decided.
+        let left = if pg {
+            Adoption::Released
+        } else {
+            Adoption::Pending
+        };
+        assert_eq!(adoption(CHANNEL), left, "{why}");
     }
 }
 
@@ -560,7 +588,7 @@ async fn missing_or_damaged_store_state_holds_instead_of_a_first_init() {
         OTHER,
         &empty(source_id_for("s2", &path).unwrap()),
     );
-    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui), (OTHER, ClaudeTui)]);
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui), (OTHER, ClaudeTui)]);
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     assert_eq!(host(&harness, &io, true, &ready), 2);
     polls(3).await;
@@ -568,6 +596,7 @@ async fn missing_or_damaged_store_state_holds_instead_of_a_first_init() {
     let held = |channel, why: &str| halted.iter().any(|(c, d)| *c == channel && d.contains(why));
     assert!(held(CHANNEL, "era channel has no init"), "{halted:?}");
     assert!(held(OTHER, "store files but no init"), "{halted:?}");
+    assert_eq!(adoption(OTHER), Adoption::Held, "store files keep O's hold");
     assert!(!init_path(&harness, CHANNEL).exists() && !orphan.exists());
     assert!(
         !io.calls().contains(&("facts", CHANNEL)),
@@ -628,7 +657,7 @@ async fn a_writer_that_stops_takes_no_work_before_its_next_poll() {
 async fn a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again() {
     let (harness, _) = fresh(startup);
     harness.gate.acquired();
-    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     let gate = Arc::clone(&harness.gate);
     *io.on_facts.lock().unwrap() = Some(Box::new(move || gate.lost()));

@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 #[path = "fixtures/o_writer.rs"]
 mod writer;
 
+#[path = "o_adoption_e2e_tests.rs"]
+mod adoption;
+
 const BODY: &str = "동일한 응답 본문 — delivered by O";
 const CHILD: &str = "ADK_O_DELIVERY_E2E_CHILD";
 
@@ -434,7 +437,8 @@ async fn run_canary_pair(selected: &[u64]) {
         .map(|&c| (c, RuntimeHandoffKind::ClaudeTui))
         .collect();
     // A canary list is injected; the empty case relies on what the boot install left.
-    let _selected = (!selected.is_empty()).then(|| cutover::test_override::force_channels(&owned));
+    let _selected =
+        (!selected.is_empty()).then(|| cutover::test_override::force_candidates(&owned));
     let io = TestHost::new(legs.iter().map(|leg| (leg.channel, leg.source())));
     let gate = Arc::new(OwnershipGate::default());
     gate.acquired();

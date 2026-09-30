@@ -16,7 +16,7 @@ pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
     seed_session_row, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
-    KeyedTeardown, clear_channel_session, keyed_teardown,
+    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup,
 };
 #[cfg(test)]
 mod invariant_test_capture;

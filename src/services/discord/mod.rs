@@ -21,6 +21,7 @@ pub(crate) mod formatting;
 mod gateway;
 mod gateway_voice_queue;
 pub(crate) mod health;
+pub(crate) mod host_key_derivation;
 pub(crate) mod host_teardown_gate;
 pub(crate) mod http;
 mod idle_detector;

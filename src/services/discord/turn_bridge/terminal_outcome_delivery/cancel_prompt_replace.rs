@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::foreign_terminal_handoff::cancelled_terminal_response;
 use super::*;
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
+use crate::services::tui_o::cutover::{BodySend, claim_then_send};
 
 pub(super) enum CancelPromptReplaceMessage {
     Cancelled,
@@ -185,10 +186,13 @@ pub(super) async fn handle_cancel_prompt_replace(
         // channel the WATCHER uses (a reused watcher can own a channel != this
         // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
         // B2) instead of both delivering = duplicate.
-        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
-            channel_id, &inflight_state,
-            gateway.can_deliver_directly(),
-        );
+        // Only a replace showing unsent partial text claims the channel; a bare "[Stopped]" never does.
+        let direct = gateway.can_deliver_directly();
+        let o_body_cut =
+            terminal_controller_cutover::bridge_o_body_peek_decision(channel_id, &inflight_state, direct);
+        let partial = response_portion_after_offset(&full_response, response_sent_offset);
+        let body_claim = (!partial.trim().is_empty())
+            .then(|| terminal_controller_cutover::bridge_body_claim(channel_id, &inflight_state, direct));
         let identity_held = o_body_cut.is_err();
         let o_body_cut = o_body_cut.unwrap_or(false);
         let stop_lease_acquire = if o_body_cut || identity_held {
@@ -235,9 +239,12 @@ pub(super) async fn handle_cancel_prompt_replace(
                 channel_id,
                 current_msg_id,
                 inflight_state.tmux_session_name.as_deref(),
-                gateway
-                    .replace_message_with_outcome(channel_id, current_msg_id, &terminal_response)
+                BodySend::flatten(
+                    claim_then_send(body_claim, || {
+                        gateway.replace_message_with_outcome(channel_id, current_msg_id, &terminal_response)
+                    })
                     .await,
+                ),
                 dispatch_id.as_deref(),
                 adk_session_key.as_deref(),
                 Some(turn_id.as_str()),

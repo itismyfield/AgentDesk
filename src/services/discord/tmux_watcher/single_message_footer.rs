@@ -1,6 +1,7 @@
 //! #3089 S1 single-message status-panel footer helpers for the tmux watcher.
 
 use super::*;
+use crate::services::tui_o::cutover::BodyClaim;
 
 pub(super) fn make_owner(
     identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
@@ -231,12 +232,14 @@ async fn complete_watcher_single_message_terminal_no_footer(
     terminal_msg_id: Option<serenity::MessageId>,
     provider: &ProviderKind,
     terminal_text: &str,
+    body_claim: BodyClaim<'_>,
 ) -> bool {
     let Some(msg_id) = terminal_msg_id else {
         return true;
     };
     crate::services::discord::footer_view_reconciler::note_footer_suppressed_for_tui_mirror(
-        crate::services::discord::footer_view_reconciler::FooterViewWriter::watcher(shared, http),
+        crate::services::discord::footer_view_reconciler::FooterViewWriter::watcher(shared, http)
+            .claiming(body_claim),
         channel_id,
         Some(msg_id),
         provider,
@@ -259,9 +262,11 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
     indicator: &str,
     background: bool,
     background_agent_pending: bool,
+    body_claim: BodyClaim<'_>,
 ) -> bool {
     crate::services::discord::footer_view_reconciler::note_turn_completed_footer(
-        crate::services::discord::footer_view_reconciler::FooterViewWriter::watcher(shared, http),
+        crate::services::discord::footer_view_reconciler::FooterViewWriter::watcher(shared, http)
+            .claiming(body_claim),
         channel_id,
         terminal_msg_id,
         owner,
@@ -335,6 +340,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
     // status-panel branch, mirroring the sink completion guard. Inert on the
     // default-OFF path (always false).
     two_message_status_panel_generation_superseded: bool,
+    body_claim: BodyClaim<'_>,
 ) {
     if single_message_panel_footer_mode {
         let fallback_target =
@@ -362,6 +368,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 target_msg_id,
                 provider,
                 target_text,
+                body_claim,
             )
             .await;
         } else {
@@ -387,6 +394,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 indicator,
                 completion_background,
                 background_agent_pending,
+                body_claim,
             )
             .await;
         }

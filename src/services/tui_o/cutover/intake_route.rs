@@ -1,5 +1,6 @@
 //! Intake for an O-owned channel runs only where that channel's writer can take it: the gateway
-//! hosting a resumed actor while it holds the lease. Every other channel routes as before.
+//! hosting a resumed actor while it holds the lease. A new placement is also held off the O home
+//! and ends a pending adoption on it. Every other channel routes as before.
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
@@ -22,6 +23,23 @@ pub(crate) fn route_text(provider: &str, channel: &str) -> IntakeRoute {
     route_parsed(provider, || channel.parse().ok())
 }
 
+/// For a new placement rather than a claim: a selected channel is held off the O home, and on it a
+/// pending adoption is released before routing as `route` does.
+pub(crate) fn route_for_placement(provider: &str, channel: u64) -> IntakeRoute {
+    placed(provider, Some(channel))
+}
+
+pub(crate) fn route_text_for_placement(provider: &str, channel: &str) -> IntakeRoute {
+    placed(provider, channel.parse().ok())
+}
+
+fn placed(provider: &str, channel: Option<u64>) -> IntakeRoute {
+    if let Err(detail) = super::claim_for_placement(channel) {
+        return IntakeRoute::Hold(detail);
+    }
+    route_parsed(provider, || channel)
+}
+
 /// O-owned channels this process must not claim for `provider`, as stored in intake rows.
 pub(crate) fn held_channels(provider: &str) -> Vec<String> {
     let owned = super::owned_channels();
@@ -32,17 +50,16 @@ pub(crate) fn held_channels(provider: &str) -> Vec<String> {
     owned.iter().filter_map(held).collect()
 }
 
+/// A known destination reads only its own adoption, so another channel's adoption in progress
+/// never delays it; an unknown one is held once any channel is O-owned.
 fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> IntakeRoute {
-    let owned = super::owned_channels();
-    if owned.is_empty() {
-        return IntakeRoute::Unselected;
-    }
-    let Some(channel) = channel() else {
-        return IntakeRoute::Hold("intake destination channel is unknown".into());
-    };
-    match owned.iter().find(|(owned, _)| *owned == channel) {
-        Some(&(channel, kind)) => judge(provider, channel, kind),
-        None => IntakeRoute::Unselected,
+    match channel() {
+        Some(channel) => match super::owned_kind(channel) {
+            Some(kind) => judge(provider, channel, kind),
+            None => IntakeRoute::Unselected,
+        },
+        None if super::owned_channels().is_empty() => IntakeRoute::Unselected,
+        None => IntakeRoute::Hold("intake destination channel is unknown".into()),
     }
 }
 

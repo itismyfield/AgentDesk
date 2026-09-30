@@ -9,6 +9,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::inflight::opt_message_id;
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend};
 
 struct PreparedWatcherTaskResponse {
     claim: task_delivery::ResponseDeliveryClaimOutcome,
@@ -403,17 +404,27 @@ pub(super) async fn apply_watcher_task_response(
                         );
                         let card_transport =
                             task_delivery::DiscordTaskCardTransport::new(shared.clone());
-                        let send_result =
-                            task_delivery::send_task_response_chunks_with_card_repair(
-                                shared.pg_pool.as_ref(),
-                                &prepared.clients,
-                                &card_transport,
-                                &response_transport,
-                                &prepared.event,
-                                claim.clone(),
-                                relay_text,
-                            )
-                            .await;
+                        // The response is the body: its first chunk post claims the channel.
+                        let body = BodyClaim::tmux(channel_id.get(), Some(tmux_session_name));
+                        let claimed = task_delivery::claim_at_post(&response_transport, body);
+                        let sent = task_delivery::send_task_response_chunks_with_card_repair(
+                            shared.pg_pool.as_ref(),
+                            &prepared.clients,
+                            &card_transport,
+                            &claimed,
+                            &prepared.event,
+                            claim.clone(),
+                            relay_text,
+                        )
+                        .await;
+                        let send_result = match claimed.settle(sent) {
+                            Ok(BodySend::Sent(result)) => result,
+                            Ok(BodySend::OwnedByO) | Err(_) => {
+                                Err(task_delivery::ResponseChunkDeliveryError::Transient(
+                                    "O owns this channel's body".to_string(),
+                                ))
+                            }
+                        };
                         let send_result = match send_result {
                             Ok((messages, rebound)) => {
                                 claim = rebound;
@@ -524,3 +535,7 @@ pub(super) async fn apply_watcher_task_response(
         external_input_lease_consumed_by_relay,
     }
 }
+
+#[cfg(test)]
+#[path = "task_response_authority_tests.rs"]
+mod tests;

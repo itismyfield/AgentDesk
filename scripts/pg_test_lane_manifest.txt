@@ -89,6 +89,7 @@ src/services/discord/commands/control.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
+src/services/discord/host_key_derivation_tests.rs
 src/services/discord/idle_recap_interaction.rs
 src/services/discord/inflight/host_recovery_guard_keyed_tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
@@ -135,6 +136,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/routines/agent_executor/reliability.rs
 src/services/routines/session_control.rs
 src/services/scheduled_messages/context_snapshot.rs
 src/services/scheduled_messages/postgres_tests.rs
@@ -243,6 +245,7 @@ services::discord::commands::control::clear_persist_failure_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
+services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
 services::discord::inflight::host_recovery_guard::keyed_tests
@@ -292,6 +295,7 @@ services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
+services::routines::agent_executor::reliability::tests
 services::routines::session_control::tests
 services::scheduled_messages::context_snapshot::postgres_tests
 services::scheduled_messages::postgres_tests
@@ -904,6 +908,8 @@ services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_ale
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
+services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
+services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
@@ -945,6 +951,7 @@ services::discord::runtime_bootstrap::gateway_handback_integration_tests::backen
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_the_configured_home_id_and_local_starts_hold_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
@@ -1171,6 +1178,7 @@ services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_p
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
 services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
