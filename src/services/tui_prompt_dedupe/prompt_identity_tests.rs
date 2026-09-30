@@ -4,9 +4,8 @@ use super::*;
 const CLAUDE: &str = "claude";
 const RECENT_PLUS: Duration = Duration::from_secs(31);
 
-/// Holds the dedupe lock and a receiver subscribed before the first observation,
-/// so every published `(source_event_id, prompt)` for this pane is counted. Each
-/// published event is announced as a successful relay would, right after it.
+/// Holds the dedupe lock and a receiver subscribed before the first observation, so
+/// every published event is counted and then announced as a successful relay would.
 struct Pane {
     tmux: String,
     session: String,

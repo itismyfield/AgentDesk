@@ -1348,7 +1348,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── prompt_identity_e2e.rs
+│   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   └── stale_resume_retry_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
