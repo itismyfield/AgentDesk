@@ -113,6 +113,7 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutp
     pub(in crate::services::discord::turn_bridge) bridge_skip_holder_owns_inflight: bool,
     pub(in crate::services::discord::turn_bridge) terminal_delivery_committed: bool,
     pub(in crate::services::discord::turn_bridge) resume_failure_detected: bool,
+    pub(in crate::services::discord::turn_bridge) auto_retry: AutoRetry,
     pub(in crate::services::discord::turn_bridge) terminal_empty_response_notice: Option<String>,
     pub(in crate::services::discord::turn_bridge) terminal_full_replay_cleanup_msg_ids:
         Vec<MessageId>,

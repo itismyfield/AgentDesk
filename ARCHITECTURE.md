@@ -735,6 +735,7 @@ src/
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── text_commands.rs
+│   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── delivery_lease_cell/
@@ -867,6 +868,7 @@ src/
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
+│   │   │   ├── host_recovery_guard_keyed_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1443,6 +1445,7 @@ src/
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   └── rowless_receipt_tests.rs
 │   │   │   │   ├── empty_response_recovery/
