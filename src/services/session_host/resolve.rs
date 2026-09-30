@@ -7,6 +7,8 @@ use super::process_host::ProcessHost;
 use super::tmux_host::TmuxHost;
 use super::traits::InteractiveSessionHost;
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 /// Host-kind evidence the caller already read at its own site. The resolver
 /// performs no lookups, so each site keeps its probe order and timeouts.
@@ -148,6 +150,27 @@ impl SessionTargetEvidence {
             process_registry_hit: false,
             name_conflict: None,
         }
+    }
+
+    /// Reads the `.host_kind` marker under the matched key's tmux name, the name the
+    /// launch writes it under and session cleanup reads it by. Without a key it stays unread.
+    pub(crate) fn with_host_marker(mut self) -> Self {
+        let Some(key) = self.session_key.as_deref() else {
+            return self;
+        };
+        self.host_marker = match tmux_name_from_session_key(key) {
+            None => HostWitness::Absent,
+            Some(name) => match read_host_kind_marker(&name) {
+                HostKindMarker::Absent => HostWitness::Absent,
+                HostKindMarker::Known(kind) => HostWitness::Known {
+                    kind,
+                    target: matches!(kind, HostKind::Tmux | HostKind::Process).then_some(name),
+                },
+                HostKindMarker::Unrecognized(raw) => HostWitness::Unrecognized(raw),
+                HostKindMarker::ReadFailed(error) => HostWitness::ReadFailed(error),
+            },
+        };
+        self
     }
 }
 
@@ -1097,5 +1120,88 @@ mod tests {
                 assert_eq!(verdict, admitted, "{label} via {input:?}");
             }
         }
+    }
+
+    #[test]
+    fn host_marker_on_disk_replaces_the_tmux_vote_and_conflicts_with_another_host() {
+        use crate::services::tmux_common::{host_marker, session_temp_path};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let name = "AgentDesk-claude-marker-resolve";
+        let session_key = format!("claude/h/mac-mini:{name}");
+        let read = |evidence: SessionTargetEvidence| {
+            let evidence = SessionTargetEvidence {
+                session_key: Some(session_key.clone()),
+                ..evidence
+            }
+            .with_host_marker();
+            resolve(key(&session_key), evidence).host
+        };
+        let tui_row = SessionTargetEvidence {
+            session_name: Some(name.to_string()),
+            inflight_runtime_kind: Some(R::ClaudeTui),
+            runtime_kind_marker: Some(R::ClaudeTui),
+            ..absent()
+        };
+        assert_eq!(
+            read(tui_row.clone()),
+            target(
+                HostKind::Tmux,
+                TargetSource::Legacy(DurableRuntimeKind),
+                name
+            ),
+            "no marker keeps the legacy reading"
+        );
+
+        host_marker::record_tmux_host_marker(name);
+        assert_eq!(
+            read(tui_row.clone()),
+            target(HostKind::Tmux, TargetSource::HostMarker, name)
+        );
+        let other_host = [
+            SessionTargetEvidence {
+                inflight_locator: witness(HostKind::Tmux, Some("AgentDesk-claude-other")),
+                ..tui_row.clone()
+            },
+            SessionTargetEvidence {
+                inflight_locator: witness(HostKind::Process, None),
+                ..tui_row.clone()
+            },
+            SessionTargetEvidence {
+                process_registry_hit: true,
+                ..tui_row.clone()
+            },
+        ];
+        for evidence in other_host {
+            assert!(
+                matches!(read(evidence.clone()), TargetHost::Conflict { .. }),
+                "{evidence:?}"
+            );
+        }
+
+        std::fs::write(session_temp_path(name, "host_kind"), "herdr").unwrap();
+        let herdr = read(tui_row.clone());
+        assert_eq!(
+            herdr,
+            TargetHost::Unknown(UnknownHost::MissingTarget(HostKind::Herdr)),
+            "a TUI runtime kind must not turn a non-tmux marker into tmux"
+        );
+        for (written, label) in [("zellij", "a future host"), ("", "a truncated marker")] {
+            std::fs::write(session_temp_path(name, "host_kind"), written).unwrap();
+            assert!(
+                matches!(
+                    read(tui_row.clone()),
+                    TargetHost::Unknown(UnknownHost::Unreadable {
+                        source: TargetSource::HostMarker,
+                        ..
+                    })
+                ),
+                "{label} is Unknown, never the legacy tmux reading"
+            );
+        }
+        let keyless = SessionTargetEvidence::unread().with_host_marker();
+        assert!(
+            matches!(keyless.host_marker, HostWitness::ReadFailed(_)),
+            "without a key the marker stays unread"
+        );
     }
 }

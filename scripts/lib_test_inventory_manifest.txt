@@ -1558,6 +1558,7 @@ services::claude::local_tmux_lifecycle_tests::routine_binding_clear_starts_fresh
 services::claude::process_session_launch::tests::account_switch_drops_only_the_resume_argument_and_its_token
 services::claude::simple_launch_env_tests::simple_command_clears_an_inherited_absolute_compact_window
 services::claude::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
+services::claude::tui_session_launch::host_marker_tests::claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_mark_still_launches
 services::claude::tui_session_launch::tests::binding_context_t7_claude_launch_fails_before_tmux
 services::claude_command::chokepoint_guard_tests::claude_binaries_are_not_raw_spawned_outside_the_chokepoint
 services::claude_command::chokepoint_guard_tests::raw_spawn_guard_flags_foreign_spawns_and_exempts_the_chokepoint
@@ -3701,6 +3702,8 @@ services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::c
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::divergent_claude_e_response_is_non_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::stale_claude_e_stamp_cannot_overwrite_newer_runtime_or_process_group
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
+services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
+services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::claude_tui_runtime_stamp_accepts_none_to_projects_output_path
@@ -9258,6 +9261,7 @@ services::session_host::resolve::tests::herdr_host_for_without_endpoint_fails_ex
 services::session_host::resolve::tests::herdr_record_outlives_marker_and_inflight_loss
 services::session_host::resolve::tests::herdr_tui_runtime_kinds_without_host_evidence_stay_non_herdr
 services::session_host::resolve::tests::host_for_returns_the_host_of_that_kind
+services::session_host::resolve::tests::host_marker_on_disk_replaces_the_tmux_vote_and_conflicts_with_another_host
 services::session_host::resolve::tests::kind_hint_maps_every_runtime_kind
 services::session_host::resolve::tests::missing_or_blank_session_name_is_unknown_even_with_evidence
 services::session_host::resolve::tests::no_evidence_is_unknown_not_a_tmux_default
