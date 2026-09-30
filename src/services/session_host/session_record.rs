@@ -1,6 +1,5 @@
 //! Sessions-row witness for the target resolver. Only a found row with no hosted
 //! record proves a legacy session; a missing row, a failed read or a trace never does.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::model::HostKind;
 use super::resolve::HostWitness;

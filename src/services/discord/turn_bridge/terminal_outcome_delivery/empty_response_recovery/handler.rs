@@ -52,7 +52,6 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct 
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) rx_disconnected: bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) turn_start:
         std::time::Instant,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) recovery_retry: bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) review_dispatch_warning:
         &'a Option<String>,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) watcher_owner_channel_id:
@@ -90,6 +89,8 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct 
         &'a mut bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_busy_requeue_pending:
         &'a mut bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) auto_retry:
+        &'a mut AutoRetry,
 }
 
 /// #5938 r2 P1-1: adopt a body re-read from the tmux OUTPUT FILE.
@@ -163,7 +164,6 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
         ctx.claude_tui_followup_busy_readiness_timeout;
     let rx_disconnected = ctx.rx_disconnected;
     let turn_start = ctx.turn_start;
-    let recovery_retry = ctx.recovery_retry;
     let review_dispatch_warning = ctx.review_dispatch_warning;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let tmux_last_offset = ctx.tmux_last_offset;
@@ -181,6 +181,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
     let mut preserve_inflight_for_cleanup_retry = *state.preserve_inflight_for_cleanup_retry;
     let mut bridge_skip_holder_owns_inflight = *state.bridge_skip_holder_owns_inflight;
     let mut claude_tui_busy_requeue_pending = *state.claude_tui_busy_requeue_pending;
+    let auto_retry = &mut *state.auto_retry;
 
     match message {
         EmptyResponseRecoveryMessage::ResumeFailureAlreadyHandled => {}
@@ -254,7 +255,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
                     channel_id
                 );
-                reset_session_for_auto_retry(
+                let reset = reset_session_for_auto_retry(
                     &shared_owned,
                     channel_id,
                     &cancel_token,
@@ -266,7 +267,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                 )
                 .await;
                 // #2452 H6: explicit completion path — see helper docs.
-                if let Some(user_msg_id) = user_msg_id {
+                if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
                     spawn_retry_with_history_with_release(
                         gateway.clone(),
                         channel_id,
@@ -292,7 +293,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                         "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
                         channel_id
                     );
-                    reset_session_for_auto_retry(
+                    let reset = reset_session_for_auto_retry(
                         &shared_owned,
                         channel_id,
                         &cancel_token,
@@ -304,7 +305,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     )
                     .await;
                     // #2452 H6: explicit completion path — see helper.
-                    if let Some(user_msg_id) = user_msg_id {
+                    if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
                         spawn_retry_with_history_with_release(
                             gateway.clone(),
                             channel_id,
@@ -340,7 +341,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                             turn_start.elapsed().as_secs(),
                             channel_id
                         );
-                        reset_session_for_auto_retry(
+                        let reset = reset_session_for_auto_retry(
                             &shared_owned,
                             channel_id,
                             &cancel_token,
@@ -352,7 +353,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                         )
                         .await;
                         // #2452 H6: explicit completion path.
-                        if let Some(user_msg_id) = user_msg_id {
+                        if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
                             spawn_retry_with_history_with_release(
                                 gateway.clone(),
                                 channel_id,
@@ -414,8 +415,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
             tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
         }
 
-        let resume_retry_queued =
-            (recovery_retry || resume_failure_detected) && user_msg_id.is_some();
+        let resume_retry_queued = auto_retry.queued();
         let mut delivery_response = terminal_delivery_response_after_offset(
             &full_response,
             response_sent_offset,

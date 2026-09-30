@@ -4,6 +4,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use super::*;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;
@@ -147,6 +148,7 @@ async fn guarded_bridge_rollover_edit<G: TurnGateway + ?Sized>(
     message_id: MessageId,
     unsent_response: &str,
     frozen_chunk: &str,
+    claim: Option<BodyClaim<'_>>,
 ) -> Result<GuardedRolloverEditOutcome, String> {
     use crate::services::provider_output_guard::{
         ProviderOutputVerdict, inspect_provider_streaming_rollover, safe_blocked_body,
@@ -154,9 +156,13 @@ async fn guarded_bridge_rollover_edit<G: TurnGateway + ?Sized>(
 
     match inspect_provider_streaming_rollover(provider, unsent_response, frozen_chunk) {
         ProviderOutputVerdict::Clean => {
-            TurnGateway::edit_message(gateway, channel_id, message_id, frozen_chunk)
-                .await
-                .map(|()| GuardedRolloverEditOutcome::Clean)
+            let freeze =
+                || TurnGateway::edit_message(gateway, channel_id, message_id, frozen_chunk);
+            match claim_then_send(claim, freeze).await {
+                Ok(BodySend::Sent(edit)) => edit.map(|()| GuardedRolloverEditOutcome::Clean),
+                // O took the channel or its identity is held: keep the frame, like a held one.
+                Ok(BodySend::OwnedByO) | Err(_) => Ok(GuardedRolloverEditOutcome::Held),
+            }
         }
         ProviderOutputVerdict::Hold { kind } => {
             tracing::warn!(
@@ -524,14 +530,15 @@ pub(super) async fn run_bridge_stream_tick(
         status_panel_dirty = false;
     }
     // O posts this body: consume streamed bytes so no anchor, rollover or edit carries them.
-    // Only a tick with unsent body text may end a pending adoption; an empty one just reads it.
-    let o_body_decision =
-        if response_portion_after_offset(&full_response, response_sent_offset).is_empty() {
-            super::terminal_controller_cutover::bridge_o_body_peek_decision
-        } else {
-            super::terminal_controller_cutover::bridge_o_body_cut_decision
-        };
-    let o_body_cut = o_body_decision(channel_id, &inflight_state, gateway.can_deliver_directly());
+    // Only a write that shows unsent assistant text claims the channel, as it is sent.
+    let direct = gateway.can_deliver_directly();
+    let o_body_cut = super::terminal_controller_cutover::bridge_o_body_peek_decision(
+        channel_id,
+        &inflight_state,
+        direct,
+    );
+    let body_claim =
+        super::terminal_controller_cutover::bridge_body_claim(channel_id, &inflight_state, direct);
     let body_held = o_body_cut.unwrap_or(true);
     if o_body_cut == Ok(true) {
         response_sent_offset = full_response.len();
@@ -657,6 +664,7 @@ pub(super) async fn run_bridge_stream_tick(
                 current_msg_id,
                 raw_current_portion,
                 &plan.frozen_chunk,
+                Some(body_claim),
             )
             .await
             {
@@ -877,14 +885,15 @@ pub(super) async fn run_bridge_stream_tick(
             && pending_long_running_open_after_state_save.is_none()
             && pending_long_running_retarget_after_state_save.is_none()
         {
-            let edit_ok = TurnGateway::edit_message(
-                gateway.as_ref(),
-                channel_id,
-                current_msg_id,
-                &stable_display_text,
-            )
-            .await
-            .is_ok();
+            let edit = || {
+                let text = &stable_display_text;
+                TurnGateway::edit_message(gateway.as_ref(), channel_id, current_msg_id, text)
+            };
+            let claim = (!raw_current_portion.trim().is_empty()).then_some(body_claim);
+            let edit_ok = matches!(
+                claim_then_send(claim, edit).await,
+                Ok(BodySend::Sent(Ok(())))
+            );
             last_status_edit = tokio::time::Instant::now();
             if edit_ok {
                 first_answer_relayed |= !raw_current_portion.is_empty();
@@ -1128,6 +1137,7 @@ pub(super) mod provider_output_guard_tests {
     use super::*;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::GatewayFuture;
+    use crate::services::tui_o::channel_policy::SinkOp;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -1135,17 +1145,15 @@ pub(super) mod provider_output_guard_tests {
         pub(in crate::services::discord::turn_bridge) sends: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) edits: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) deletes: Mutex<Vec<u64>>,
-        /// When set, the adoption each send or edit found, read at the moment it was made.
-        pub(in crate::services::discord::turn_bridge) adoption:
-            Option<crate::services::tui_o::channel_policy::Candidate>,
-        pub(in crate::services::discord::turn_bridge) seen:
-            Mutex<Vec<crate::services::tui_o::channel_policy::Adoption>>,
+        /// When set, every send or edit is checked against the watched adoption as it is made.
+        pub(in crate::services::discord::turn_bridge) check:
+            Option<crate::services::tui_o::channel_policy::BodyCheck>,
     }
 
     impl CapturingGateway {
-        fn observe(&self) {
-            if let Some(candidate) = &self.adoption {
-                self.seen.lock().expect("seen lock").push(candidate.peek());
+        fn observe(&self, channel: ChannelId, op: SinkOp, content: &str) {
+            if let Some(check) = &self.check {
+                check.sink(channel.get(), op, content);
             }
         }
     }
@@ -1153,10 +1161,10 @@ pub(super) mod provider_output_guard_tests {
     impl TurnGateway for CapturingGateway {
         fn send_message<'a>(
             &'a self,
-            _channel_id: ChannelId,
+            channel_id: ChannelId,
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<MessageId, String>> {
-            self.observe();
+            self.observe(channel_id, SinkOp::Post, _content);
             self.sends
                 .lock()
                 .expect("sends lock")
@@ -1166,11 +1174,11 @@ pub(super) mod provider_output_guard_tests {
 
         fn edit_message<'a>(
             &'a self,
-            _channel_id: ChannelId,
+            channel_id: ChannelId,
             _message_id: MessageId,
             content: &'a str,
         ) -> GatewayFuture<'a, Result<(), String>> {
-            self.observe();
+            self.observe(channel_id, SinkOp::Patch, content);
             self.edits
                 .lock()
                 .expect("edits lock")
@@ -1180,10 +1188,11 @@ pub(super) mod provider_output_guard_tests {
 
         fn replace_message_with_outcome<'a>(
             &'a self,
-            _channel_id: ChannelId,
+            channel_id: ChannelId,
             _message_id: MessageId,
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            self.observe(channel_id, SinkOp::Patch, _content);
             Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
         }
 
@@ -1422,6 +1431,7 @@ pub(super) mod provider_output_guard_tests {
             MessageId::new(1),
             blocked,
             blocked,
+            None,
         )
         .await
         .expect("blocked edit");
@@ -1442,6 +1452,7 @@ pub(super) mod provider_output_guard_tests {
             MessageId::new(1),
             "safe prefix [SYSTEM NOTIF",
             "safe prefix [SYSTEM NOTIF",
+            None,
         )
         .await
         .expect("held edit");

@@ -567,3 +567,20 @@ fn mark_response_chunk_ambiguous_memory(
         Some(Utc::now() + chrono::Duration::seconds(AMBIGUOUS_BACKOFF_SECONDS));
     Ok(())
 }
+
+/// Moves a memory chunk's POST start into the past, so its retry must reconcile history first.
+#[cfg(test)]
+pub(in super::super) fn backdate_response_chunk_post_for_test(
+    claim: &ResponseDeliveryClaim,
+    chunk_index: usize,
+    seconds: i64,
+) {
+    let mut rows = MEMORY_CHUNKS.lock().unwrap();
+    let row = rows.get_mut(&memory_key(claim, chunk_index)).unwrap();
+    let ResponseChunkJournal::Posting(posting) = &mut row.journal else {
+        panic!("only a posting chunk has a POST start");
+    };
+    posting.post_started_at = posting
+        .post_started_at
+        .map(|at| at - chrono::Duration::seconds(seconds));
+}

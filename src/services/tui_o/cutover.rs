@@ -12,8 +12,9 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 mod channel_gate;
 pub(crate) mod intake_route;
 pub(crate) use channel_gate::{
-    IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
-    peek_o_owns_tui_output_for_channel, peek_o_owns_tui_output_for_channel_tmux,
+    BodyClaim, BodySend, IdentityError, claim_then_send, o_owns_tui_output_for_channel,
+    o_owns_tui_output_for_channel_tmux, peek_o_owns_tui_output_for_channel,
+    peek_o_owns_tui_output_for_channel_tmux,
 };
 
 /// Whether the writer switch is on; test builds may turn it on or off per thread.

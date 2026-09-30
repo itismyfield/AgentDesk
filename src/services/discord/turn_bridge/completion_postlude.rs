@@ -63,6 +63,8 @@ pub(super) async fn run_completion_postlude(
     let bridge_relay_delegated_to_watcher = state.bridge_relay_delegated_to_watcher;
     let is_prompt_too_long = state.is_prompt_too_long;
     let resume_failure_detected = state.resume_failure_detected;
+    // A session the host guard kept on auto-retry keeps its provider session id.
+    let resume_clears_session = resume_failure_detected && !state.auto_retry.kept_session();
     let recovery_retry = state.recovery_retry;
     let rx_disconnected = state.rx_disconnected;
     let tmux_handed_off = state.tmux_handed_off;
@@ -295,7 +297,7 @@ pub(super) async fn run_completion_postlude(
                 session,
                 capture_memory_settings.backend,
                 is_prompt_too_long,
-                resume_failure_detected,
+                resume_clears_session,
                 terminal_session_reset_required,
                 should_record_final_turn,
             ) {

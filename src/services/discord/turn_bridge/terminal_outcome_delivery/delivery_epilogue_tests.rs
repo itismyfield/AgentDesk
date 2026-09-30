@@ -15,8 +15,11 @@ use std::{
 };
 
 use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::GatewayFuture};
+use crate::services::tui_o::channel_policy::SinkOp;
 use tracing_subscriber::fmt::MakeWriter;
 
+#[cfg(all(test, unix))]
+mod recovery_retry_guard_tests;
 #[cfg(unix)]
 mod rowless_receipt_tests;
 
@@ -360,9 +363,17 @@ struct DriverGateway {
     published_bodies: Arc<Mutex<Vec<String>>>,
     replace: ReplaceBehaviour,
     yields_per_call: usize,
+    /// When set, each send, edit or replace is checked against the watched adoption on entry.
+    check: Arc<std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>>,
 }
 
 impl DriverGateway {
+    fn sink(&self, channel: ChannelId, op: SinkOp, content: &str) {
+        if let Some(check) = self.check.get() {
+            check.sink(channel.get(), op, content);
+        }
+    }
+
     fn observe(&self, call: DriverCall) {
         self.observations
             .lock()
@@ -377,10 +388,11 @@ impl DriverGateway {
 impl TurnGateway for DriverGateway {
     fn send_message<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         self.observe(DriverCall::Send);
+        self.sink(channel_id, SinkOp::Post, _content);
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
         let bodies = self.published_bodies.clone();
@@ -408,11 +420,12 @@ impl TurnGateway for DriverGateway {
 
     fn edit_message<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
         self.observe(DriverCall::Edit);
+        self.sink(channel_id, SinkOp::Patch, _content);
         let yields = self.yields_per_call;
         Box::pin(async move {
             Yields(yields).await;
@@ -435,11 +448,12 @@ impl TurnGateway for DriverGateway {
 
     fn replace_message_with_outcome<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
         self.observe(DriverCall::Replace);
+        self.sink(channel_id, SinkOp::Patch, _content);
         let (yields, behaviour) = (self.yields_per_call, self.replace);
         let completed = Arc::clone(&self.completed_publications);
         let bodies = self.published_bodies.clone();
@@ -534,6 +548,7 @@ struct TerminalDeliveryDriver {
     observations: Arc<Mutex<Vec<DriverObservation>>>,
     completed_publications: Arc<AtomicUsize>,
     published_bodies: Arc<Mutex<Vec<String>>>,
+    body_check: Arc<std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>>,
     inflight: InflightTurnState,
     body: String,
     _temp: tempfile::TempDir,
@@ -596,6 +611,7 @@ impl TerminalDeliveryDriver {
         let observations = Arc::new(Mutex::new(Vec::new()));
         let completed_publications = Arc::new(AtomicUsize::new(0));
         let published_bodies = Arc::new(Mutex::new(Vec::new()));
+        let body_check = Arc::new(std::sync::OnceLock::new());
         let gateway: Arc<dyn TurnGateway> = Arc::new(DriverGateway {
             chain_locally: true,
             direct: true,
@@ -605,6 +621,7 @@ impl TerminalDeliveryDriver {
             published_bodies: published_bodies.clone(),
             replace,
             yields_per_call,
+            check: body_check.clone(),
         });
 
         Self {
@@ -614,6 +631,7 @@ impl TerminalDeliveryDriver {
             observations,
             completed_publications,
             published_bodies,
+            body_check,
             inflight,
             body: DRIVER_BODY.to_string(),
             _temp: temp,
@@ -1206,6 +1224,7 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
             published_bodies: driver.published_bodies.clone(),
             replace: ReplaceBehaviour::Edited,
             yields_per_call: 0,
+            check: driver.body_check.clone(),
         });
         driver.inflight.runtime_kind =
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
@@ -1473,16 +1492,19 @@ async fn o_delegated_cancelled_partial_body_is_not_replaced() {
     }
 }
 
-/// A terminal or /stop with no text to publish leaves a pending adoption; one that publishes the
-/// body ends it, and Legacy shows that body once.
+/// A terminal or /stop with no answer to publish (empty, whitespace or TUI chrome only) leaves a
+/// pending adoption; one that publishes the body ends it first, and Legacy shows that body once.
 #[tokio::test]
 async fn only_a_terminal_or_stop_with_text_ends_a_pending_adoption() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-    use crate::services::tui_o::channel_policy::Adoption;
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
     use crate::services::tui_o::cutover::test_override;
     for (cancelled, body) in [
         (false, ""),
+        (false, " \n"),
+        (false, "No response requested."),
         (true, ""),
+        (true, " \n"),
         (false, DRIVER_BODY),
         (true, DRIVER_BODY),
     ] {
@@ -1492,28 +1514,68 @@ async fn only_a_terminal_or_stop_with_text_ends_a_pending_adoption() {
         crate::services::discord::inflight::save_inflight_state(&driver.inflight)
             .expect("seed the TUI-kind row");
         let _candidates = test_override::force_candidates(&[(DRIVER_CHANNEL_ID, ClaudeTui)]);
-        let adoption = test_override::with_channels(|boot| {
-            boot.unwrap().candidate(DRIVER_CHANNEL_ID).cloned()
-        })
-        .unwrap();
+        let check = BodyCheck::watch(DRIVER_CHANNEL_ID, DRIVER_BODY);
+        driver.body_check.set(check.clone()).unwrap();
         let (mut ctx, state) = driver.parts();
         ctx.cancelled = cancelled;
         tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
             .await
             .expect("terminal outcome delivery must not hang");
         let shown = driver.published_bodies.lock().unwrap().clone();
-        let with_body = !body.is_empty();
-        let case = format!("cancelled={cancelled} body={with_body}: {shown:?}");
+        let with_body = body == DRIVER_BODY;
+        let case = format!("cancelled={cancelled} body={body:?}: {shown:?}");
+        check.assert_settled();
         let expected = if with_body {
             Adoption::Released
         } else {
             Adoption::Pending
         };
-        assert_eq!(adoption.peek(), expected, "{case}");
+        assert_eq!(check.adoption(), expected, "{case}");
         let bodies = shown
             .iter()
             .filter(|shown| shown.contains(DRIVER_BODY))
             .count();
         assert_eq!(bodies, usize::from(with_body), "{case}");
     }
+}
+
+/// A terminal whose delivery lease another holder keeps sends no body, so a pending adoption
+/// stays pending.
+#[tokio::test]
+async fn a_terminal_that_loses_its_delivery_lease_leaves_a_pending_adoption() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    driver.inflight.runtime_kind = Some(ClaudeTui);
+    driver.inflight.turn_start_offset = Some(0);
+    crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+        .expect("seed the TUI-kind row");
+    let _candidates = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+        DRIVER_CHANNEL_ID,
+        ClaudeTui,
+    )]);
+    let check = BodyCheck::watch(DRIVER_CHANNEL_ID, DRIVER_BODY);
+    driver.body_check.set(check.clone()).unwrap();
+    let channel = ChannelId::new(DRIVER_CHANNEL_ID);
+    let generation = driver.shared.restart.current_generation;
+    let key = bridge_delivery_lease_key_for_inflight(channel, generation, &driver.inflight);
+    let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 7 };
+    let deadline = crate::services::discord::lease_now_ms() + 60_000;
+    let cell = driver.shared.delivery_lease(channel);
+    assert!(
+        cell.try_acquire(key, holder, 0, 64, deadline),
+        "another holder takes the lease"
+    );
+    let (mut ctx, state) = driver.parts();
+    ctx.tmux_last_offset = Some(64);
+    tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("terminal outcome delivery must not hang");
+    let shown = driver.published_bodies.lock().unwrap().clone();
+    assert!(
+        !shown.iter().any(|body| body.contains(DRIVER_BODY)),
+        "{shown:?}"
+    );
+    check.assert_settled();
+    assert_eq!(check.adoption(), Adoption::Pending);
 }

@@ -2160,17 +2160,21 @@ async fn maybe_recover_completed_stale_leak(
         return false;
     }
     // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
-    // A held identity also resends nothing; only a resend with a body may end a pending adoption.
+    // A held identity also resends nothing; only a resending pass may end a pending adoption.
     let kind = (state.channel_id == channel_id.get())
         .then_some(state.runtime_kind)
         .flatten();
-    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
-        != Ok(false)
-    {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
-        );
+    let o_holds = |gate: fn(u64, _) -> Result<bool, _>| {
+        let held = gate(channel_id.get(), kind) != Ok(false);
+        if held {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                "stale-leak recovery skipped: O owns or holds this channel's TUI body"
+            );
+        }
+        held
+    };
+    if o_holds(crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel) {
         return false;
     }
     let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);
@@ -2284,7 +2288,6 @@ async fn maybe_recover_completed_stale_leak(
         None
     };
 
-    let mut wrote_any_chunk = false;
     if confirmed_chunks == 0 {
         let Some(current_message) = current_message.as_ref() else {
             tracing::warn!(
@@ -2311,7 +2314,15 @@ async fn maybe_recover_completed_stale_leak(
             );
             return false;
         }
-
+    }
+    // Claimed only here, before the first edit or post; a confirm-only pass reads the adoption.
+    if confirmed_chunks < chunks.len()
+        && o_holds(crate::services::tui_o::cutover::o_owns_tui_output_for_channel)
+    {
+        return false;
+    }
+    let mut wrote_any_chunk = false;
+    if confirmed_chunks == 0 {
         // Edit the original placeholder to chunk 0. If Discord commits the edit
         // but the client observes an error/crash, the next pass derives
         // `confirmed_chunks == 1` from the live message and continues with chunk
@@ -6646,11 +6657,15 @@ mod post_cancel_drain_tests {
 #[cfg(test)]
 mod o_stale_leak_cut_tests {
     use super::super::HealthRegistry;
+    use super::leak_recovery_ledger::{
+        LeakRecoveryLedgerIdentity, leak_recovery_record_confirmed_chunk,
+        leak_recovery_unrelayed_range, render_leak_recovery_delivery,
+    };
     use super::maybe_recover_completed_stale_leak;
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
-    use crate::services::tui_o::channel_policy::Adoption;
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
     use crate::services::tui_o::cutover::test_override;
     use poise::serenity_prelude::ChannelId;
 
@@ -6708,6 +6723,21 @@ mod o_stale_leak_cut_tests {
         connections
     }
 
+    /// Records the first `confirmed` chunks of the turn's recovery as already delivered.
+    fn seed_ledger(state: &InflightTurnState, v2: bool, confirmed: usize) -> usize {
+        let (start, end) = leak_recovery_unrelayed_range(&state.full_response, 0).unwrap();
+        let text =
+            render_leak_recovery_delivery(&state.full_response, start, v2, &ProviderKind::Claude);
+        let chunks = crate::services::discord::formatting::split_message(&text.unwrap());
+        let identity =
+            LeakRecoveryLedgerIdentity::new(&ProviderKind::Claude, state, start, end, &chunks);
+        for index in 0..confirmed.min(chunks.len()) {
+            leak_recovery_record_confirmed_chunk(&identity, index, 9_433_100 + index as u64)
+                .unwrap();
+        }
+        chunks.len()
+    }
+
     /// A watcher-owned turn whose answer never reached its placeholder, as the leak detector sees it.
     async fn recover(case: &str) {
         let mut state: InflightTurnState = serde_json::from_value(serde_json::json!({
@@ -6720,10 +6750,20 @@ mod o_stale_leak_cut_tests {
             "started_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00"
         }))
         .unwrap();
+        if case == "pending-resend" {
+            state.full_response = "leaked answer line\n".repeat(200);
+        }
         // A silent turn resends nothing, so it must leave a pending adoption as it found it.
         state.silent_turn = case == "pending-silent";
         crate::services::discord::inflight::save_inflight_state(&state).unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
+        let v2 = shared.ui.status_panel_v2_enabled;
+        // A prior pass delivered every chunk (or only the first) but stopped before the offset.
+        match case {
+            "pending-confirmed" => assert_eq!(seed_ledger(&state, v2, usize::MAX), 1),
+            "pending-resend" => assert!(seed_ledger(&state, v2, 1) > 1),
+            _ => {}
+        }
         shared
             .http
             .cached_bot_token
@@ -6735,25 +6775,33 @@ mod o_stale_leak_cut_tests {
             "o" => vec![(CHANNEL, RuntimeHandoffKind::ClaudeTui)],
             _ => Vec::new(),
         };
-        let _owned = match case {
-            "pending" | "pending-silent" => {
-                test_override::force_candidates(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)])
-            }
-            _ => test_override::force_channels(&owned),
+        let pending = case.starts_with("pending");
+        let _owned = if pending {
+            test_override::force_candidates(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)])
+        } else {
+            test_override::force_channels(&owned)
         };
-        let adoption = test_override::with_channels(|boot| boot?.candidate(CHANNEL).cloned());
+        let check = pending.then(|| BodyCheck::watch(CHANNEL, "leaked answer"));
         let channel = ChannelId::new(CHANNEL);
         let recovered =
             maybe_recover_completed_stale_leak(&registry, &ProviderKind::Claude, &shared, channel);
-        assert!(!recovered.await, "no Discord answers in this child");
-        let expected = match case {
-            "pending" => Some(Adoption::Released),
-            "pending-silent" => Some(Adoption::Pending),
-            _ => None,
+        // Only the confirm-only pass succeeds here: it sends nothing and persists the offset.
+        assert_eq!(recovered.await, case == "pending-confirmed", "{case}");
+        let Some(check) = check else {
+            return;
         };
-        if let Some(expected) = expected {
-            assert_eq!(adoption.map(|adoption| adoption.peek()), Some(expected));
+        if case == "pending-resend" {
+            // Its continuation POST reached only the parent's counting proxy, no content sink.
+            assert_eq!(check.adoption(), Adoption::Released);
+            return;
         }
+        check.assert_settled();
+        assert_eq!(check.adoption(), Adoption::Pending, "{case}");
+        // A confirm-only pass settles the turn as a delivery would; the others leave the row alone.
+        let row =
+            crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, CHANNEL);
+        let kept = (case != "pending-confirmed").then_some(0);
+        assert_eq!(row.map(|row| row.response_sent_offset), kept, "{case}");
     }
 
     #[tokio::test]
@@ -6769,7 +6817,16 @@ mod o_stale_leak_cut_tests {
         assert_eq!(discord_connections("pending-silent"), 0);
         assert!(
             discord_connections("pending") > 0,
-            "a pending adoption ends before Legacy tries its resend"
+            "a failed live-message read resends nothing and keeps the adoption pending"
+        );
+        assert_eq!(
+            discord_connections("pending-confirmed"),
+            0,
+            "confirm-only pass"
+        );
+        assert!(
+            discord_connections("pending-resend") > 0,
+            "a pending adoption ends before Legacy tries its continuation resend"
         );
     }
 }

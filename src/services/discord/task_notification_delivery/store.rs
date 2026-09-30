@@ -29,6 +29,8 @@ pub(super) use missing_card_replacement::{
 };
 use terminal_footer::record_footer_only_pg;
 
+#[cfg(test)]
+pub(super) use response_chunks::backdate_response_chunk_post_for_test;
 pub(super) use response_chunks::{
     PreparedResponseChunk, ResponseChunkJournal, ResponseChunkPrepareError, confirm_response_chunk,
     mark_response_chunk_ambiguous, mark_response_chunk_posting, prepare_response_chunk,

@@ -2310,3 +2310,346 @@ async fn hosted_execution_cas_writes_only_the_observed_value_and_nonce_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// Waits until a statement from another connection matching `pattern` blocks on a lock.
+async fn await_lock_wait(pool: &PgPool, pattern: &str) {
+    let waiting = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE $1)",
+            )
+            .bind(pattern)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .unwrap_or_else(|_| panic!("no statement blocked on a lock: {pattern}"));
+}
+
+/// The same record with its schema spelled `1.0`: jsonb-equal, but it decodes as Unknown.
+fn respelled(raw: Value) -> Value {
+    let mut raw = raw;
+    raw["schema"] = json!(1.0);
+    assert!(matches!(
+        HostedRecord::decode(Some(&raw)),
+        HostedRecord::Unknown(_)
+    ));
+    raw
+}
+
+async fn set_raw_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, key: &str, raw: Value) {
+    sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
+        .bind(key)
+        .bind(raw)
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn hosted_execution_explicit_delete_judges_markers_before_the_row_lock_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let name = |n: &str| format!("AgentDesk-claude-lock-{n}");
+    let key = |n: &str| format!("test-host:{}", name(n));
+    insert_session(&pool, &key("traced"), "idle", None).await;
+    let marker = crate::services::tmux_common::session_temp_path(&name("traced"), "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+
+    // A traced row is refused while another session still holds its row lock.
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM sessions WHERE session_key = $1 FOR UPDATE")
+        .bind(key("traced"))
+        .fetch_all(&mut *lock)
+        .await
+        .unwrap();
+    let traced = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        delete_session_by_key_pg(&pool, &key("traced")),
+    )
+    .await
+    .expect("marker judgement must not wait for the row lock");
+    assert!(traced.is_err_and(|error| error.contains("hosted execution")));
+    lock.rollback().await.unwrap();
+
+    // A row judged deletable is deleted only if it still reads as judged under the lock.
+    for (index, n) in ["legacy", "other-owner", "respelled"]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = format!("410{index}");
+        let retired = wire(&record(&owner(&channel), "n1", HostedState::Retired));
+        insert_session(&pool, &key(n), "idle", None).await;
+        let change = match n {
+            "legacy" => None,
+            "other-owner" => Some(wire(&record(&owner_other(), "n1", HostedState::Retired))),
+            _ => Some(respelled(retired.clone())),
+        };
+        if change.is_some() {
+            set_identity(&pool, &key(n), &channel).await;
+            set_raw(&pool, &key(n), Some(retired)).await;
+        }
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM sessions WHERE session_key = $1 FOR UPDATE")
+            .bind(key(n))
+            .fetch_all(&mut *lock)
+            .await
+            .unwrap();
+        let (task_pool, task_key) = (pool.clone(), key(n));
+        let delete =
+            tokio::spawn(async move { delete_session_by_key_pg(&task_pool, &task_key).await });
+        await_lock_wait(&pool, "%FOR UPDATE%").await;
+        if let Some(change) = change.clone() {
+            set_raw_in(&mut lock, &key(n), change).await;
+        }
+        lock.commit().await.unwrap();
+        let result = delete.await.unwrap();
+        match change {
+            None => assert_eq!(result.map(|r| r.deleted), Ok(1), "{n}"),
+            Some(change) => {
+                assert!(result.is_err_and(|e| e.contains("changed")), "{n}");
+                assert_eq!(raw_of(&pool, &key(n)).await, Some(change), "{n}");
+            }
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn hosted_execution_explicit_delete_sees_a_marker_written_during_its_lock_wait_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let name = "AgentDesk-claude-lock-marker-only";
+    let key = format!("test-host:{name}");
+    insert_session(&pool, &key, "idle", None).await;
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM sessions WHERE session_key = $1 FOR UPDATE")
+        .bind(&key)
+        .fetch_all(&mut *lock)
+        .await
+        .unwrap();
+    let (task_pool, task_key) = (pool.clone(), key.clone());
+    let delete = tokio::spawn(async move { delete_session_by_key_pg(&task_pool, &task_key).await });
+    await_lock_wait(&pool, "%FOR UPDATE%").await;
+    // Only the marker changes; the row and its aliases read exactly as first judged.
+    let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+    lock.commit().await.unwrap();
+
+    let result = delete.await.unwrap();
+    assert!(result.is_err_and(|error| error.contains("non-tmux host marker")));
+    assert_eq!(remaining_keys(&pool).await, [key]);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn hosted_execution_bulk_cleanup_rechecks_contended_rows_and_rolls_back_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (index, n) in [
+        "a-legacy",
+        "b-other-owner",
+        "c-respelled",
+        "d-retired",
+        "e-legacy",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_session(&pool, n, "disconnected", None).await;
+        if !n.ends_with("legacy") {
+            let channel = format!("420{index}");
+            set_identity(&pool, n, &channel).await;
+            let retired = record(&owner(&channel), "n1", HostedState::Retired);
+            set_raw(&pool, n, Some(wire(&retired))).await;
+        }
+    }
+    // Two judged rows change while the bulk DELETE waits on their row locks.
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT id FROM sessions WHERE session_key IN ('b-other-owner', 'c-respelled') FOR UPDATE",
+    )
+    .fetch_all(&mut *lock)
+    .await
+    .unwrap();
+    let task_pool = pool.clone();
+    let bulk = tokio::spawn(async move { cleanup_disconnected_sessions_pg(&task_pool).await });
+    await_lock_wait(&pool, "DELETE FROM sessions%").await;
+    let other = wire(&record(&owner_other(), "n1", HostedState::Retired));
+    set_raw_in(&mut lock, "b-other-owner", other).await;
+    let spelled = respelled(wire(&record(&owner("4202"), "n1", HostedState::Retired)));
+    set_raw_in(&mut lock, "c-respelled", spelled).await;
+    lock.commit().await.unwrap();
+    assert_eq!(bulk.await.unwrap(), Ok(3));
+    assert_eq!(
+        remaining_keys(&pool).await,
+        ["b-other-owner", "c-respelled"]
+    );
+
+    // A DELETE that fails after an earlier one in the batch leaves every row in place.
+    insert_session(&pool, "f-legacy", "disconnected", None).await;
+    insert_session(&pool, "g-poison", "disconnected", None).await;
+    sqlx::query(
+        "CREATE FUNCTION test_poison_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF OLD.session_key = 'g-poison' THEN RAISE EXCEPTION 'poisoned delete'; END IF;
+             RETURN OLD;
+         END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_poison_delete BEFORE DELETE ON sessions
+         FOR EACH ROW EXECUTE FUNCTION test_poison_delete()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let failed = cleanup_disconnected_sessions_pg(&pool).await;
+    assert!(failed.is_err_and(|error| error.contains("poisoned delete")));
+    assert_eq!(
+        remaining_keys(&pool).await,
+        ["b-other-owner", "c-respelled", "f-legacy", "g-poison"]
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn hosted_execution_cas_treats_a_respelled_record_as_changed_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = "1479671301387059500";
+    let key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-spelled";
+    seed_canonical(&pool, key, channel).await;
+    let owner = owner(channel);
+    set_raw(&pool, key, Some(wire(&pending(&owner, "n1")))).await;
+    let observed = observe(&pool, key).await;
+    assert!(matches!(observed.record, HostedRecord::Known(_)));
+
+    let spelled = respelled(wire(&pending(&owner, "n1")));
+    set_raw(&pool, key, Some(spelled.clone())).await;
+    assert!(matches!(
+        observe(&pool, key).await.record,
+        HostedRecord::Unknown(_)
+    ));
+    assert_eq!(
+        retire_pg(&pool, &observed, &owner, "n1").await,
+        Ok(HostedCasOutcome::Stale)
+    );
+    assert_eq!(raw_of(&pool, key).await, Some(spelled));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let name = |n: &str| format!("AgentDesk-claude-gch-{n}");
+    let key = |n: &str| format!("test-host:{}", name(n));
+    let names = [
+        "legacy",
+        "pending",
+        "bound",
+        "unknown",
+        "traced",
+        "then-bound",
+        "then-unknown",
+        "then-respelled",
+    ];
+    for (index, n) in names.into_iter().enumerate() {
+        let channel = format!("430{index}");
+        let thread = format!("15006283718294285{index:02}");
+        insert_session(&pool, &key(n), "idle", Some(&thread)).await;
+        set_identity(&pool, &key(n), &channel).await;
+        let owner = owner(&channel);
+        let raw = match n {
+            "pending" => Some(wire(&record(&owner, "n1", HostedState::Pending))),
+            "bound" => Some(wire(&record(&owner, "n1", HostedState::Bound))),
+            "unknown" => Some(future_schema(&owner)),
+            "then-respelled" => Some(wire(&record(&owner, "n1", HostedState::Retired))),
+            _ => None,
+        };
+        set_raw(&pool, &key(n), raw).await;
+    }
+    let marker = crate::services::tmux_common::session_temp_path(&name("traced"), "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+
+    // Rows that gain a record or a new spelling while their tmux is probed.
+    let owner_at = |n: &str| {
+        owner(&format!(
+            "430{}",
+            names.iter().position(|m| *m == n).unwrap()
+        ))
+    };
+    let changes: std::collections::HashMap<String, Value> = [
+        (
+            "then-bound",
+            wire(&record(&owner_at("then-bound"), "n2", HostedState::Bound)),
+        ),
+        ("then-unknown", future_schema(&owner_at("then-unknown"))),
+        (
+            "then-respelled",
+            respelled(wire(&record(
+                &owner_at("then-respelled"),
+                "n1",
+                HostedState::Retired,
+            ))),
+        ),
+    ]
+    .into_iter()
+    .map(|(n, raw)| (key(n), raw))
+    .collect();
+    let probed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let deleted = gc_stale_thread_sessions_with_probe_pg(&pool, |probe_key| {
+        let (pool, probed, change) = (
+            pool.clone(),
+            probed.clone(),
+            changes.get(&probe_key).cloned(),
+        );
+        async move {
+            probed.lock().unwrap().push(probe_key.clone());
+            if let Some(raw) = change {
+                set_raw(&pool, &probe_key, Some(raw)).await;
+            }
+            SessionPresence::Missing
+        }
+    })
+    .await;
+    assert_eq!(deleted, [key("legacy")]);
+    let mut probed = probed.lock().unwrap().clone();
+    probed.sort();
+    let mut expected: Vec<String> = ["legacy", "then-bound", "then-respelled", "then-unknown"]
+        .map(key)
+        .into();
+    expected.sort();
+    assert_eq!(
+        probed, expected,
+        "only rows judged legacy or retired reach the tmux probe"
+    );
+    let mut kept: Vec<String> = names
+        .iter()
+        .filter(|n| **n != "legacy")
+        .map(|n| key(n))
+        .collect();
+    kept.sort();
+    assert_eq!(remaining_keys(&pool).await, kept);
+    pool.close().await;
+    db.drop().await;
+}

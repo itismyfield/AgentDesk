@@ -151,18 +151,20 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
         task_notification_kind,
         Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
     );
-    // Withhold body footers for O ownership or unresolved selected identities. Only a footer
-    // with a target message rewrites the body and may end a pending adoption; none just reads it.
-    let o_owns = if terminal_target.is_some() || placeholder_msg_id.is_some() {
-        crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux
-    } else {
-        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux
-    };
+    // Withhold body footers for O ownership or unresolved selected identities. A footer edit that
+    // shows assistant text claims the channel as it is sent; chrome-only and no-op edits never do.
+    let session = tmux_session_name.clone();
     if single_message_panel_footer_mode
-        && o_owns(channel_id.get(), tmux_session_name.as_deref()).unwrap_or(true)
+        && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+            channel_id.get(),
+            session.as_deref(),
+        )
+        .unwrap_or(true)
     {
         return;
     }
+    let body_claim =
+        crate::services::tui_o::cutover::BodyClaim::tmux(channel_id.get(), session.as_deref());
     let background_agent_pending = sniff_background_agent_pending(tmux_session_name).await;
     complete_watcher_terminal_footer_or_status_panel(
         http,
@@ -183,6 +185,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
         turn_is_external_input_for_session,
         turn_is_non_managed_tui_mirror,
         two_message_status_panel_generation_superseded,
+        body_claim,
     )
     .await;
 }

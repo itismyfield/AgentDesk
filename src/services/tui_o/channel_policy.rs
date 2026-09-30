@@ -14,9 +14,12 @@ use crate::services::tui_o::alarm::AlarmRouter;
 use crate::services::tui_o::writer::WriterAlarm;
 
 mod adoption;
-#[cfg(test)]
-pub(crate) use adoption::stored;
 pub(crate) use adoption::{Adoption, Candidate, Site};
+#[cfg(test)]
+pub(crate) use adoption::{
+    body_check::{BodyCheck, SinkOp},
+    stored,
+};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BootChannels {

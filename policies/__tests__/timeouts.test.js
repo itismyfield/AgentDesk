@@ -573,18 +573,28 @@ test("timeouts dispatch maintenance module re-enqueues unnotified pending dispat
   ]);
 });
 
-test("timeouts active monitor normalizes typed liveness without exec", () => {
-  for (const [value, expected] of [["live", "live"], ["dead", "dead"], ["unknown", "unknown"], [true, "unknown"], [null, "unknown"], ["other", "unknown"], [new Error("probe"), "unknown"]]) {
+test("timeouts active monitor normalizes the full-key host observation without exec", () => {
+  const sessionKey = "claude/tok/mac-mini:AgentDesk-claude-x";
+  for (const [value, expected, reason] of [
+    [{ state: "live", tmux_name: "t" }, "live", undefined],
+    [{ state: "dead", tmux_name: "t" }, "dead", undefined],
+    [{ state: "unknown", reason: "herdr" }, "unknown", "herdr"],
+    [{ state: "other" }, "unknown", "unknown"],
+    [null, "unknown", "unknown"],
+    [new Error("probe"), "unknown", "error: Error: probe"]
+  ]) {
     const { policy, state } = loadPolicy("policies/timeouts.js", {
-      sessionHasLivePane(name) {
-        assert.equal(name, "test-pane");
+      sessionHost(key) {
+        assert.equal(key, sessionKey);
         if (value instanceof Error) throw value;
         return value;
       }
     });
-    assert.equal(policy._tmuxPaneLiveness("test-pane"), expected);
-    assert.equal(policy._tmuxPaneLiveness("  "), "unknown");
-    assert.deepEqual(state.sessionLivenessCalls, ["test-pane"]);
+    const host = policy._sessionHost(sessionKey);
+    assert.equal(host.state, expected);
+    assert.equal(host.reason, reason);
+    assert.equal(policy._sessionHost("  ").state, "unknown");
+    assert.deepEqual(state.timeoutHostObservations, [sessionKey]);
     assert.equal(state.execCalls.length, 0);
   }
 });
@@ -634,6 +644,7 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
           session_key: sessionKey,
           agent_id: "agent-1",
           active_dispatch_id: "dispatch-1",
+          active_turn_nonce: null,
           last_heartbeat: "2026-04-29 10:00:00"
         }
       ]
@@ -647,9 +658,10 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
 
   assert.equal(state.deadlockAlerts.length, 0);
   assert.equal(state.httpPosts.length, 0);
-  assert.deepEqual(toPlain(state.timeoutMarkSessionIdleCalls), [
-    { sessionKey, options: { clear_active_dispatch_id: false } }
-  ]);
+  assert.deepEqual(toPlain(state.timeoutRepairCalls), [{ sessionKey, request: {
+    session_id: 1, active_dispatch_id: "dispatch-1", active_turn_nonce: null, observed: "live",
+    fail_dispatch: false, fail_reason: "", clear_active_dispatch_id: false
+  } }]);
 });
 
 test("S7 active monitor exempts synthetic turns without force-kill or repeated logs", () => {
@@ -678,7 +690,7 @@ test("S7 active monitor exempts synthetic turns without force-kill or repeated l
       assert.equal(state.kv.has(key), false);
       assert.equal(state.httpPosts.length, 0);
       assert.equal(state.timeoutTerminationRecords.length, 0);
-      assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
+      assert.equal(state.timeoutRepairCalls.length, 0);
     }
   }
 });
@@ -1055,7 +1067,7 @@ test("timeouts idle-kill module does not count live-activity guard skips toward 
   assert.doesNotMatch(state.logs.error.join("\n"), /tmux was alive but kill failed/);
 });
 
-test("timeouts idle-kill module does not count provider busy or unknown skips toward budget", () => {
+test("timeouts idle-kill module does not count provider busy, unknown or host-refused skips toward budget", () => {
   const guardKeys = [
     "provider:AgentDesk-claude-guard-1",
     "provider:AgentDesk-claude-guard-2",
@@ -1082,6 +1094,7 @@ test("timeouts idle-kill module does not count provider busy or unknown skips to
       { match: (sql) => sql.includes("WHERE status = 'idle'") && sql.includes("active_dispatch_id IS NOT NULL") && sql.includes("INTERVAL '24 hours'"), result: [] }
     ]),
     httpPost(url) {
+      if (url.includes("guard-2")) return { ok: false, refused: true, reason: "herdr_unsupported" };
       return url.includes("live-after-guard")
         ? { ok: true, tmux_was_alive: true, tmux_killed: true }
         : { ok: true, tmux_was_alive: true, tmux_killed: false, skipped_provider_activity_guard: true };
@@ -1093,7 +1106,8 @@ test("timeouts idle-kill module does not count provider busy or unknown skips to
   assert.equal(state.httpPosts.length, 4);
   assert.ok(state.httpPosts.some((p) => p.url.includes("live-after-guard")));
   assert.match(state.logs.info.join("\n"), /provider idle state not proven/);
-  assert.doesNotMatch(state.logs.error.join("\n"), /tmux was alive but kill failed/);
+  assert.match(state.logs.warn.join("\n"), /refused by host guard for provider:AgentDesk-claude-guard-2 \(herdr_unsupported/);
+  assert.doesNotMatch(state.logs.error.join("\n"), /tmux was alive but kill failed|kill-tmux API failed/);
 });
 
 test("timeouts idle-kill module counts genuine kill failures (tmux alive but kill failed) toward budget", () => {
@@ -1247,52 +1261,79 @@ test("active monitor preserves productive turns beyond four and six hours", () =
     assert.equal(state.httpPosts.length, 0, "productive turn must not be killed or require extension");
     assert.equal(state.kv.has(key), false);
     assert.equal(state.timeoutTerminationRecords.length, 0);
-    assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
+    assert.equal(state.timeoutRepairCalls.length, 0);
     }
   }
 });
 
 
-test("active monitor defers unknown in both loops and refreshes its tick cache", () => {
-  for (const liveness of ["live", "dead", "unknown"]) {
-    for (const hasInflight of [false, true]) {
-      const sessionKey = "provider:__proto__";
-      const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: "pending" };
-      let observation = liveness;
-      const { policy, state } = loadPolicy("policies/timeouts.js", {
-        sessionHasLivePane() { return observation; },
-        inflights: hasInflight ? [{
-          session_key: sessionKey, tmux_session_name: "__proto__", provider: "codex",
-          channel_id: "test-channel", dispatch_id: "d1", request_owner_user_id: 1,
-          started_at: timestampMinutesAgo(45), updated_at: timestampMinutesAgo(35)
-        }] : [],
-        timeouts: { staleWorkingSessions: [row], deadlockCandidates: [row] }
-      });
-      const key = "deadlock_check:" + sessionKey;
-      state.kv.set(key, "preserved");
-      policy._section_I();
-      const defer = liveness === "unknown";
-      const recover = !defer && (liveness === "dead" || !hasInflight);
-      assert.equal(state.dispatchMarkFailedCalls.length, recover ? 1 : 0);
-      assert.deepEqual(toPlain(state.timeoutMarkSessionIdleCalls), recover ? [
-        { sessionKey, options: { clear_active_dispatch_id: true } },
-        { sessionKey, options: { clear_active_dispatch_id: false } }
-      ] : []);
-      assert.equal(state.kv.has(key), defer);
-      assert.equal(state.logs.warn.filter((line) => line.includes("Pane liveness unknown")).length, defer ? 1 : 0);
-      assert.deepEqual(state.sessionLivenessCalls, ["__proto__"]);
-      assert.equal(state.execCalls.length, 0);
-      assert.equal(state.sessionKillCalls.length, 0);
-      assert.equal(state.httpPosts.length, 0);
-      assert.equal(state.timeoutTerminationRecords.length, 0);
-      assert.equal(state.timeoutInactiveCounterCleanups, 1);
-      assert.equal(state.timeoutClearFreshCounterCalls.length, 1);
-      assert.equal(state.timeoutHistoryCleanupCalls.length, 1);
-      observation = "dead";
-      policy._section_I();
-      assert.deepEqual(state.sessionLivenessCalls, ["__proto__", "__proto__"]);
-      assert.equal(state.dispatchMarkFailedCalls.length, (recover ? 1 : 0) + 1);
-      assert.equal(state.kv.has(key), false);
-    }
+test("active monitor defers every unresolved host in both loops and refreshes its tick cache", () => {
+  const observations = [
+    { state: "live" }, { state: "dead" },
+    ...["probe_failed", "herdr", "host_unknown", "host_conflict", "row_conflict", "session_missing", "lookup_failed"]
+      .map((reason) => ({ state: "unknown", reason }))
+  ];
+  const cases = observations.flatMap((observed) => [false, true].flatMap((hasInflight) =>
+    (observed.state === "dead" ? ["pending", "dispatched", "completed"] : ["pending"])
+      .map((dispatchStatus) => ({ observed, hasInflight, dispatchStatus }))));
+  for (const { observed, hasInflight, dispatchStatus } of cases) {
+    const sessionKey = "claude/tok/mac-mini:__proto__";
+    const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: dispatchStatus, active_turn_nonce: "turn-1" };
+    let observation = observed;
+    const { policy, state } = loadPolicy("policies/timeouts.js", {
+      sessionHost() { return Object.assign({ session_id: 7, tmux_name: "__proto__" }, observation); },
+      inflights: hasInflight ? [{
+        session_key: sessionKey, tmux_session_name: "__proto__", provider: "codex",
+        channel_id: "test-channel", dispatch_id: "d1", request_owner_user_id: 1,
+        started_at: timestampMinutesAgo(45), updated_at: timestampMinutesAgo(35)
+      }] : [],
+      timeouts: { staleWorkingSessions: [row], deadlockCandidates: [row] }
+    });
+    const key = "deadlock_check:" + sessionKey;
+    state.kv.set(key, "preserved");
+    policy._section_I();
+    const defer = observed.state === "unknown";
+    const recover = !defer && (observed.state === "dead" || !hasInflight);
+    const repair = (stale) => ({ sessionKey, request: {
+      session_id: 7, active_dispatch_id: "d1", active_turn_nonce: "turn-1", observed: observed.state,
+      fail_dispatch: stale && dispatchStatus !== "completed",
+      fail_reason: stale ? "Stale working session recovery — no active tmux session after 10min" : "",
+      clear_active_dispatch_id: stale
+    } });
+    const label = JSON.stringify(observed) + " inflight=" + hasInflight + " dispatch=" + dispatchStatus;
+    assert.deepEqual(toPlain(state.timeoutRepairCalls), recover ? [repair(true), repair(false)] : [], label);
+    assert.equal(state.dispatchMarkFailedCalls.length, 0, label);
+    assert.equal(state.kv.has(key), defer, label);
+    assert.equal(state.logs.warn.filter((line) => line.includes("(" + observed.reason + "); deferring")).length, defer ? 1 : 0, label);
+    assert.deepEqual(state.timeoutHostObservations, [sessionKey], label);
+    assert.equal(state.execCalls.length, 0);
+    assert.equal(state.sessionKillCalls.length, 0);
+    assert.equal(state.httpPosts.length, 0);
+    assert.equal(state.timeoutTerminationRecords.length, 0);
+    assert.equal(state.timeoutInactiveCounterCleanups, 1);
+    assert.equal(state.timeoutClearFreshCounterCalls.length, 1);
+    assert.equal(state.timeoutHistoryCleanupCalls.length, 1);
+    observation = { state: "dead" };
+    policy._section_I();
+    assert.deepEqual(state.timeoutHostObservations, [sessionKey, sessionKey], label);
+    assert.equal(state.timeoutRepairCalls.length, (recover ? 2 : 0) + 2, label);
+    assert.equal(state.kv.has(key), false, label);
   }
+});
+
+test("active monitor reports a repair the facade refused without an idle log", () => {
+  const sessionKey = "claude/tok/mac-mini:AgentDesk-claude-swapped";
+  const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: "pending" };
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    sessionHost() { return { state: "dead", session_id: 7, tmux_name: "AgentDesk-claude-swapped" }; },
+    timeouts: {
+      staleWorkingSessions: [row], deadlockCandidates: [row],
+      repairStaleSession() { return { ok: true, repaired: false, deferred: "row_changed" }; }
+    }
+  });
+  policy._section_I();
+  assert.equal(state.timeoutRepairCalls.length, 2);
+  assert.equal(state.logs.warn.filter((line) => line.includes("Repair deferred (row_changed)")).length, 2);
+  assert.equal(state.logs.info.filter((line) => line.includes("→ idle")).length, 0);
+  assert.equal(state.logs.warn.filter((line) => line.includes("Failed stale dispatch")).length, 0);
 });

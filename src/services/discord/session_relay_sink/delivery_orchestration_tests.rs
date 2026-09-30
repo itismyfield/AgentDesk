@@ -1,6 +1,7 @@
 use super::tests::{inflight_with_identity_offset, matched, terminal_frame_offset};
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::tui_o::channel_policy::SinkOp;
 
 #[path = "o_delivery_e2e_tests.rs"]
 mod o_delivery_e2e_tests;
@@ -707,6 +708,8 @@ struct RelayContractFakeGateway {
     send_calls: AtomicU64,
     sent_contents: Mutex<Vec<String>>,
     on_transport: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// When set, each send or replace is checked against the watched adoption on entry.
+    check: std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>,
 }
 
 impl RelayContractFakeGateway {
@@ -719,6 +722,7 @@ impl RelayContractFakeGateway {
             send_calls: AtomicU64::new(0),
             sent_contents: Mutex::new(Vec::new()),
             on_transport: None,
+            check: std::sync::OnceLock::new(),
         }
     }
 
@@ -732,10 +736,13 @@ impl RelayContractFakeGateway {
 impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway {
     fn send_message<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         content: &'a str,
     ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
+            if let Some(check) = self.check.get() {
+                check.sink(channel_id.get(), SinkOp::Post, content);
+            }
             self.send_calls.fetch_add(1, Ordering::AcqRel);
             self.sent_contents.lock().unwrap().push(content.to_string());
             if let Some(on_transport) = &self.on_transport {
@@ -759,7 +766,7 @@ impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway
 
     fn replace_message_with_outcome<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _message_id: MessageId,
         _content: &'a str,
     ) -> crate::services::discord::gateway::GatewayFuture<
@@ -767,6 +774,9 @@ impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway
         Result<ReplaceLongMessageOutcome, String>,
     > {
         Box::pin(async move {
+            if let Some(check) = self.check.get() {
+                check.sink(channel_id.get(), SinkOp::Patch, _content);
+            }
             self.replace_calls.fetch_add(1, Ordering::AcqRel);
             if let Some(on_transport) = &self.on_transport {
                 on_transport();

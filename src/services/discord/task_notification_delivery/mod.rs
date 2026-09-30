@@ -30,7 +30,7 @@ pub(super) use gateway::{
 #[cfg(test)]
 pub(in crate::services::discord) use response_chunks::send_task_response_chunks;
 pub(in crate::services::discord) use response_chunks::{
-    DiscordResponseChunkTransport, ResponseChunkDeliveryError,
+    DiscordResponseChunkTransport, ResponseChunkDeliveryError, claim_at_post,
     send_task_response_chunks_with_card_repair,
 };
 

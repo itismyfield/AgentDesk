@@ -489,6 +489,21 @@ pub(super) async fn enqueue_headless_delivery(
     run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await
 }
 
+/// Enqueues under `claim`; O owning the channel or a held identity enqueues nothing and the
+/// turn stays preserved for retry.
+pub(super) async fn enqueue_claimed_headless_delivery(
+    claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
+    arguments: HeadlessDeliveryArguments<'_>,
+) -> HeadlessDeliveryOutcome {
+    use crate::services::tui_o::cutover::{BodySend, claim_then_send};
+    match claim_then_send(claim, || enqueue_headless_delivery(arguments)).await {
+        Ok(BodySend::Sent(outcome)) => outcome,
+        Ok(BodySend::OwnedByO) | Err(_) => HeadlessDeliveryOutcome::Ambiguous {
+            surfaced_error: Some("TUI output identity held".to_string()),
+        },
+    }
+}
+
 #[cfg(test)]
 #[path = "headless_delivery/production_seam_tests.rs"]
 mod production_seam_tests;

@@ -54,6 +54,7 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeState {
     pub(in crate::services::discord::turn_bridge) bridge_relay_delegated_to_watcher: bool,
     pub(in crate::services::discord::turn_bridge) is_prompt_too_long: bool,
     pub(in crate::services::discord::turn_bridge) resume_failure_detected: bool,
+    pub(in crate::services::discord::turn_bridge) auto_retry: AutoRetry,
     pub(in crate::services::discord::turn_bridge) recovery_retry: bool,
     pub(in crate::services::discord::turn_bridge) rx_disconnected: bool,
     pub(in crate::services::discord::turn_bridge) tmux_handed_off: bool,

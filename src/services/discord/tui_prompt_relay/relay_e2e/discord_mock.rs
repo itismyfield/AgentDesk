@@ -1,7 +1,7 @@
 //! Mock Discord transport for the relay e2e harness: a loopback REST + gateway
 //! server, and a real `serenity::Context` pointed at it.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
@@ -25,10 +25,21 @@ const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 /// Minted message id to `(reply_to, latest content)`.
 type MintedMessages = std::collections::BTreeMap<u64, (Option<u64>, String)>;
 
+/// How the mock answers a non-placeholder POST.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord::tui_prompt_relay) enum NoteAnswer {
+    Create,
+    /// 403: Discord refused it, so no message exists.
+    Refuse,
+    /// Creates the message but answers after the client's timeout, so the client
+    /// cannot tell whether it was sent.
+    Stall,
+}
+
 /// Counters and gates over the mock's message endpoint. A `"..."` body is the
 /// relay's placeholder post, which the harness uses as its dispatch witness;
-/// the first one parks until released so a second turn can queue behind an
-/// occupied mailbox.
+/// the first one parks until released (unless `park_first_placeholder` is off)
+/// so a second turn can queue behind an occupied mailbox.
 ///
 /// `unhandled` records every request that reached the 404 fallback, so a
 /// production call the mock cannot answer fails an assertion instead of
@@ -39,6 +50,13 @@ pub(super) struct DiscordMockState {
     pub(super) local_note_posts: Arc<AtomicUsize>,
     pub(super) first_placeholder_arrived: Arc<Notify>,
     pub(super) release_first_placeholder: Arc<Notify>,
+    pub(super) park_first_placeholder: Arc<AtomicBool>,
+    pub(super) note_answer: Arc<Mutex<NoteAnswer>>,
+    /// When set, the next non-placeholder POST waits for `release_held_note`
+    /// after signalling `note_held`, then answers with `note_answer`.
+    pub(super) hold_next_note: Arc<AtomicBool>,
+    pub(super) note_held: Arc<Notify>,
+    pub(super) release_held_note: Arc<Notify>,
     pub(super) unhandled: Arc<Mutex<Vec<String>>>,
     /// Channel history `GET /messages` pages over. Empty until a scenario
     /// seeds it, which is the "nothing to catch up" answer.
@@ -56,6 +74,11 @@ impl DiscordMockState {
             local_note_posts: Arc::new(AtomicUsize::new(0)),
             first_placeholder_arrived: Arc::new(Notify::new()),
             release_first_placeholder: Arc::new(Notify::new()),
+            park_first_placeholder: Arc::new(AtomicBool::new(true)),
+            note_answer: Arc::new(Mutex::new(NoteAnswer::Create)),
+            hold_next_note: Arc::new(AtomicBool::new(false)),
+            note_held: Arc::new(Notify::new()),
+            release_held_note: Arc::new(Notify::new()),
             unhandled: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
@@ -247,6 +270,20 @@ async fn get_channel(Path(_channel_id): Path<u64>) -> Json<Value> {
     Json(private_channel_json())
 }
 
+fn mint_message(state: &DiscordMockState, payload: &Value, content: &str) -> Response {
+    let id = state.next_response_id.fetch_add(1, Ordering::SeqCst);
+    let reply_to = payload
+        .pointer("/message_reference/message_id")
+        .and_then(Value::as_str)
+        .and_then(|id| id.parse().ok());
+    state
+        .messages
+        .lock()
+        .expect("mock messages")
+        .insert(id, (reply_to, content.to_string()));
+    (StatusCode::OK, Json(discord_message_json(id, content))).into_response()
+}
+
 async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Body>) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
@@ -272,7 +309,7 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .to_string();
         if content == "..." {
             let index = state.placeholder_posts.fetch_add(1, Ordering::SeqCst);
-            if index == 0 {
+            if index == 0 && state.park_first_placeholder.load(Ordering::SeqCst) {
                 state.first_placeholder_arrived.notify_waiters();
                 state.release_first_placeholder.notified().await;
                 return (
@@ -283,19 +320,22 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             }
         } else {
             state.local_note_posts.fetch_add(1, Ordering::SeqCst);
+            if state.hold_next_note.swap(false, Ordering::SeqCst) {
+                state.note_held.notify_one();
+                state.release_held_note.notified().await;
+            }
+            let answer = *state.note_answer.lock().expect("note answer");
+            if answer == NoteAnswer::Refuse {
+                let refusal = json!({"message": "Missing Access", "code": 50001});
+                return (StatusCode::FORBIDDEN, Json(refusal)).into_response();
+            }
+            if answer == NoteAnswer::Stall {
+                let created = mint_message(&state, &payload, &content);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                return created;
+            }
         }
-        let id = state.next_response_id.fetch_add(1, Ordering::SeqCst);
-        let reply_to = payload
-            .pointer("/message_reference/message_id")
-            .and_then(Value::as_str)
-            .and_then(|id| id.parse().ok());
-        let message = (reply_to, content.clone());
-        state
-            .messages
-            .lock()
-            .expect("mock messages")
-            .insert(id, message);
-        return (StatusCode::OK, Json(discord_message_json(id, &content))).into_response();
+        return mint_message(&state, &payload, &content);
     }
 
     // `catch_up` reads this before it can reach its dedup branch; an unseeded

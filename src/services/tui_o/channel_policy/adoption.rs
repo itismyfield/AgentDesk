@@ -5,6 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+#[cfg(test)]
+pub(crate) mod body_check;
+
 use crate::services::tui_o::store::OStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,15 +30,24 @@ impl Adoption {
 
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
-pub(crate) struct Candidate(Arc<Mutex<Adoption>>);
+pub(crate) struct Candidate {
+    state: Arc<Mutex<Adoption>>,
+    /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
+    #[cfg(test)]
+    bodiless: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Candidate {
     pub(crate) fn new(state: Adoption) -> Self {
-        Self(Arc::new(Mutex::new(state)))
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            #[cfg(test)]
+            bodiless: Arc::default(),
+        }
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Adoption> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Read without deciding anything, for callers that carry no body.
@@ -45,10 +57,12 @@ impl Candidate {
 
     /// Whether O owns the channel for a body Legacy would otherwise send; a pending adoption is
     /// released first, so O never starts under a body Legacy already took.
-    pub(crate) fn claim(&self, channel: u64) -> bool {
+    pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
         let mut state = self.lock();
         if *state == Adoption::Pending {
             *state = Adoption::Released;
+            #[cfg(test)]
+            body_check::note_release(self);
             tracing::info!(channel, "[tui_o] Legacy took the channel before O adoption");
         }
         state.owned()

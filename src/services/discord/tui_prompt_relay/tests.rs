@@ -856,6 +856,7 @@ async fn task_notification_status_only_preserves_existing_turn_request_anchor() 
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     };
 
     relay_observed_prompt(&shared, prompt).await;
@@ -1818,6 +1819,7 @@ fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPr
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     }
 }
 
@@ -2609,6 +2611,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     };
     let lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -2681,6 +2684,7 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
                 crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             ssh_direct_observation_generation:
                 crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+            hook_prompt_id: None,
         };
     let lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -2742,6 +2746,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     };
     let repeat_lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -4707,6 +4712,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert_eq!(
@@ -4784,6 +4790,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert_eq!(decision.injected_class, InjectedPromptClass::HumanTuiDirect);
@@ -5210,6 +5217,7 @@ fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
             prompt_start_offset: compact.len() as u64,
             line_end_offset: (compact.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5272,6 +5280,7 @@ fn claude_idle_transcript_scan_relays_prompt_appended_after_compaction_anchor() 
             prompt_start_offset: anchored,
             line_end_offset: anchored + fresh_prompt.len() as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5307,6 +5316,7 @@ fn claude_idle_transcript_scan_preserves_normal_growth() {
             prompt_start_offset: before.len() as u64,
             line_end_offset: (before.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5334,6 +5344,7 @@ fn claude_idle_transcript_rotation_lookback_still_observes_new_file_prompt() {
             prompt_start_offset: before.len() as u64,
             line_end_offset: (before.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5519,6 +5530,7 @@ fn claude_idle_transcript_scan_finds_user_prompt_and_stops_at_prompt_end() {
             prompt_start_offset: before.len() as u64,
             line_end_offset: (before.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
     assert_eq!(
@@ -5546,6 +5558,7 @@ fn claude_idle_transcript_scan_ignores_meta_user_prompt() {
             prompt_start_offset: (meta.len() + synthetic.len()) as u64,
             line_end_offset: (meta.len() + synthetic.len() + prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5587,6 +5600,7 @@ fn claude_idle_transcript_scan_for_last_prompt_selects_newest_in_window() {
             prompt_start_offset: 0,
             line_end_offset: old_prompt.len() as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
     // Last-prompt scan returns the just-typed prompt instead.
@@ -5597,6 +5611,7 @@ fn claude_idle_transcript_scan_for_last_prompt_selects_newest_in_window() {
             prompt_start_offset: (old_prompt.len() + old_answer.len()) as u64,
             line_end_offset: (old_prompt.len() + old_answer.len() + new_prompt.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }
@@ -5640,6 +5655,7 @@ fn claude_idle_transcript_scan_for_last_prompt_returns_complete_then_catches_nex
             prompt_start_offset: 0,
             line_end_offset: prompt.len() as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 
@@ -5655,6 +5671,7 @@ fn claude_idle_transcript_scan_for_last_prompt_returns_complete_then_catches_nex
             prompt_start_offset: prompt.len() as u64,
             line_end_offset: (prompt.len() + next.len()) as u64,
             entry_id: None,
+            prompt_id: None,
         }
     );
 }

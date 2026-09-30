@@ -461,7 +461,7 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
         preserve_inflight_for_cleanup_retry: output.preserve_inflight_for_cleanup_retry,
         tmux_last_offset: Some(64), watcher_owner_channel_id: channel_id,
         bridge_relay_delegated_to_watcher: false, is_prompt_too_long: false,
-        resume_failure_detected: false, recovery_retry: false, rx_disconnected: false,
+        resume_failure_detected: false, auto_retry: output.auto_retry, recovery_retry: false, rx_disconnected: false,
         tmux_handed_off: false, bridge_output_owner: None,
         terminal_delivery_committed: output.terminal_delivery_committed,
         terminal_session_reset_required: false, transcript_events: Vec::new(),
@@ -1216,5 +1216,68 @@ async fn o_delegated_foreign_custody_follows_destination_membership() {
         if posts == 0 {
             assert!(driver.observations().is_empty(), "{name}: no Discord write");
         }
+    }
+}
+
+/// Custody whose chunk was acknowledged before the resume settles without posting and leaves a
+/// pending adoption; custody that still posts its body ends the adoption first and posts once.
+#[tokio::test]
+async fn only_a_foreign_custody_that_posts_ends_a_pending_adoption() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+    for acknowledged in [true, false] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+        let held = bridge_delivery_lease_for_inflight(
+            &driver.shared,
+            ctx.watcher_owner_channel_id,
+            driver.shared.restart.current_generation,
+            &state.inflight_state,
+            ctx.tmux_last_offset,
+        );
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("successor".into());
+        inflight::save_inflight_state(&successor).unwrap();
+        ctx.bridge_output_owner = None;
+        let output = run(ctx, state).await;
+        run_postlude(&driver, output, false, false).await;
+        drop(held);
+        let _pending = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+            DRIVER_CHANNEL_ID,
+            CodexTui,
+        )]);
+        let check = BodyCheck::watch(DRIVER_CHANNEL_ID, DRIVER_BODY);
+        driver.body_check.set(check.clone()).unwrap();
+        let settled = crate::services::discord::terminal_delivery_custody::drain_for_test(
+            |mut payload, checkpoint| {
+                let (shared, gateway) = (driver.shared.clone(), driver.gateway.clone());
+                payload["watcher_owner_channel_id"] = DRIVER_CHANNEL_ID.into();
+                if acknowledged {
+                    payload["delivery_receipts"] = serde_json::json!([DRIVER_CURRENT_MSG_ID]);
+                }
+                async move {
+                    let outcome =
+                        super::super::foreign_terminal_handoff::resume_payload_with_gateway(
+                            &shared,
+                            gateway.as_ref(),
+                            &mut payload,
+                            &checkpoint,
+                        )
+                        .await;
+                    (payload, outcome)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled, 1, "acknowledged={acknowledged}");
+        check.assert_settled();
+        let expected = if acknowledged {
+            (0, Adoption::Pending)
+        } else {
+            (1, Adoption::Released)
+        };
+        let seen = (driver.completed_publications(), check.adoption());
+        assert_eq!(seen, expected, "acknowledged={acknowledged}");
     }
 }

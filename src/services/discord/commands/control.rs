@@ -151,32 +151,6 @@ pub(in crate::services::discord) fn reset_managed_process_session(session_name: 
     reset
 }
 
-#[cfg(unix)]
-fn recreate_tmux_session(session_name: &str, reset_source: &str) -> bool {
-    if !crate::services::platform::tmux::has_session(session_name) {
-        return false;
-    }
-    crate::services::tmux_diagnostics::record_tmux_exit_reason(
-        session_name,
-        &format!("hard reset via {reset_source}"),
-    );
-    let killed = crate::services::platform::tmux::kill_session(
-        session_name,
-        &format!("hard reset via {reset_source}"),
-    );
-    if killed {
-        // #892: delete persistent + legacy session temp files so the next
-        // turn starts from a clean slate in the canonical location.
-        crate::services::tmux_common::cleanup_session_temp_files(session_name);
-    }
-    killed
-}
-
-#[cfg(not(unix))]
-fn recreate_tmux_session(_session_name: &str, _reset_source: &str) -> bool {
-    false
-}
-
 async fn resolve_session_key_for_clear(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -280,7 +254,14 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
             }
         }
         if recreate_tmux {
-            recreate_tmux_session(name, reset_source);
+            super::tmux_recreate::recreate_channel_tmux(
+                shared,
+                provider,
+                channel_id,
+                name,
+                reset_source,
+            )
+            .await;
         }
     }
 

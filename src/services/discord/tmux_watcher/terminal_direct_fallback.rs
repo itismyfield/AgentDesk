@@ -20,6 +20,7 @@ use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 
 pub(in crate::services::discord) use super::terminal_delivery_types::WatcherDirectFallbackLocals;
 
@@ -57,6 +58,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     external_input_lease_generation_before_relay: Option<u64>,
     prompt_anchor_present_before_relay: bool,
     ssh_direct_pending: bool,
+    body_claim: Option<BodyClaim<'_>>,
     locals: WatcherDirectFallbackLocals<'_>,
 ) -> bool {
     let WatcherDirectFallbackLocals {
@@ -202,6 +204,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                             session_bound_fallback_uses_full_body,
                             &mut *watcher_streaming_rollover_frozen_msg_ids,
                             inflight_before_relay.as_ref(),
+                            body_claim,
                             terminal_long_chunks::WatcherLongChunksLocals {
                                 relay_ok: &mut relay_ok,
                                 direct_send_delivered: &mut direct_send_delivered,
@@ -236,6 +239,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                             inflight_before_relay.as_ref(),
                             &mut long_chunk_anchor_msg_id,
                             &mut long_chunk_anchor_receipt,
+                            body_claim,
                             terminal_long_chunks::WatcherLongChunksLocals {
                                 relay_ok: &mut relay_ok,
                                 direct_send_delivered: &mut direct_send_delivered,
@@ -290,6 +294,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         response_sent_offset,
                         single_message_panel_footer_mode,
                         inflight_before_relay.as_ref(),
+                        body_claim,
                         terminal_send::WatcherShortReplaceLocals {
                             relay_ok: &mut relay_ok,
                             direct_send_delivered: &mut direct_send_delivered,
@@ -311,28 +316,29 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     )
                     .await;
                 } else {
-                    // #3805 P1: capture the tail continuation chunk (id +
-                    // its own text) so the completion footer re-anchors onto
-                    // it instead of stranding on the edited chunk 0.
+                    // Capture the tail continuation chunk (id and text) so the completion
+                    // footer re-anchors onto it instead of the edited chunk 0.
                     let expected_transcript = crate::services::discord::outbound::delivery_record::capture_edit_failure_transcript_identity(
                         shared,
                         tmux_session_name,
                     );
                     let mut last_chunk_anchor = None;
-                    // #5071 T1 S3a: receipt for whichever message each arm records
-                    // as its anchor — tail continuation on edit, first chunk on
-                    // the edit-failure fallback.
+                    // Receipt of each arm's anchor: tail chunk on edit, first chunk on fallback.
                     let mut edit_anchor_receipt = None;
-                    let replace_outcome = replace_long_message_raw_deferred_returning_receipt(
-                        &http,
-                        channel_id,
-                        msg_id,
-                        &relay_text,
-                        &shared,
-                        &mut last_chunk_anchor,
-                        &mut edit_anchor_receipt,
-                    )
-                    .await;
+                    let (anchor, receipt) = (&mut last_chunk_anchor, &mut edit_anchor_receipt);
+                    let text = relay_text.as_str();
+                    let replace = move || {
+                        // Moved in whole, so the send may keep them for as long as it runs.
+                        let (anchor, receipt) = (anchor, receipt);
+                        replace_long_message_raw_deferred_returning_receipt(
+                            http, channel_id, msg_id, text, shared, anchor, receipt,
+                        )
+                    };
+                    let Ok(BodySend::Sent(replace_outcome)) =
+                        claim_then_send(body_claim, replace).await
+                    else {
+                        return false; // Nothing sent: O owns the channel or its identity is held.
+                    };
                     enum WatcherDeferredReplaceOutcome {
                         Replace(ReplaceLongMessageOutcome),
                         AlreadyCommittedAfterEditFailure { edit_error: String },
@@ -676,83 +682,77 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     watcher_lease_turn.user_msg_id,
                     watcher_lease_start,
                 );
-                // The rollback sender makes chunk failure all-or-nothing
-                // before a rewind. A timeout after Discord accepts a POST
-                // is still inherently ambiguous, so classification and the
-                // attempt cap below remain the backstop.
-                match crate::services::discord::formatting::send_long_message_raw_with_reference_rollback_returning_receipts(
-                            &http,
-                            channel_id,
-                            rollback_anchor_msg_id,
-                            &relay_text,
-                            &shared,
-                            prompt_anchor_reference,
-                        )
-                        .await
-                        .and_then(|receipts| {
-                            crate::services::discord::formatting::message_ids_from_receipts(
-                                receipts.clone(),
-                            )
-                            .map(|message_ids| (message_ids, receipts))
-                        })
-                        {
-                            Ok((message_ids, receipts)) => {
-                                *tui_direct_anchor_or_lease_present_for_lifecycle |=
-                                    prompt_anchor.is_some();
-                                external_input_lease_consumed_by_relay =
-                                    external_input_lease_before_relay || prompt_anchor.is_some();
-                                direct_send_delivered = true;
-                                // #4911 R10: the placeholderless fresh send is a
-                                // confirmed terminal delivery like the edit arms, so
-                                // it must carry a delivery proof. Without it the
-                                // outer commit takes the proof-less
-                                // `AdvancedWithoutProof` branch: the frontier moves
-                                // but no DeliveredCommit / receipt / ledger entry /
-                                // #4081 fingerprint is written, which is exactly the
-                                // missing-fingerprint precondition #4911 replays on.
-                                *watcher_terminal_delivery_proof =
-                                    Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
-                                        anchor_msg_id: message_ids.last().copied(),
-                                        // D4.3: the frontier commits the tail chunk.
-                                        receipt: receipts.last().cloned(),
-                                        raw_body: direct_terminal_response.to_string(),
-                                    });
-                                if let Some(msg_id) = message_ids.last().copied() {
-                                    let tail = crate::services::discord::formatting::split_message(
-                                        &relay_text,
-                                    )
+                // The rollback sender makes chunk failure all-or-nothing before a rewind; an
+                // accepted POST that times out stays ambiguous, left to the attempt cap below.
+                let send = || {
+                    crate::services::discord::formatting::send_long_message_raw_with_reference_rollback_returning_receipts(
+                        &http,
+                        channel_id,
+                        rollback_anchor_msg_id,
+                        &relay_text,
+                        &shared,
+                        prompt_anchor_reference,
+                    )
+                };
+                let Ok(BodySend::Sent(sent)) = claim_then_send(body_claim, send).await else {
+                    return false; // Nothing was sent: O owns the channel or its identity is held.
+                };
+                match sent.and_then(|receipts| {
+                    crate::services::discord::formatting::message_ids_from_receipts(
+                        receipts.clone(),
+                    )
+                    .map(|message_ids| (message_ids, receipts))
+                }) {
+                    Ok((message_ids, receipts)) => {
+                        *tui_direct_anchor_or_lease_present_for_lifecycle |=
+                            prompt_anchor.is_some();
+                        external_input_lease_consumed_by_relay =
+                            external_input_lease_before_relay || prompt_anchor.is_some();
+                        direct_send_delivered = true;
+                        // A confirmed fresh send carries a delivery proof like the edit arms;
+                        // without one the commit advances with no receipt or fingerprint.
+                        *watcher_terminal_delivery_proof =
+                            Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
+                                anchor_msg_id: message_ids.last().copied(),
+                                // D4.3: the frontier commits the tail chunk.
+                                receipt: receipts.last().cloned(),
+                                raw_body: direct_terminal_response.to_string(),
+                            });
+                        if let Some(msg_id) = message_ids.last().copied() {
+                            let tail =
+                                crate::services::discord::formatting::split_message(&relay_text)
                                     .pop()
                                     .unwrap_or_else(|| relay_text.clone());
-                                    remember_watcher_completion_footer_terminal_target(
-                                        single_message_panel_footer_mode,
-                                        &mut *completion_footer_terminal_target,
-                                        msg_id,
-                                        &tail,
-                                    );
-                                }
-                                *tui_direct_anchor_terminal_body_visible = true;
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts}] 👁 ✓ relayed terminal response (new message) channel {} ({} chars, prompt_anchor_message_id={:?})",
-                                    channel_id.get(),
-                                    relay_text.len(),
-                                    prompt_anchor_reference.map(|(_, message_id)| message_id.get())
-                                );
-                            }
-                            Err(e) => {
-                                info_watcher_failed_relay(e.as_ref());
-                                let plan = watcher_send_failure_plan_warned(
-                                    classify_watcher_send_failure(e.as_ref()),
-                                    WatcherNoRewindWarnSite::PlaceholderlessFull,
-                                    &watcher_provider,
-                                    channel_id,
-                                    &tmux_session_name,
-                                    e.as_ref(),
-                                );
-                                relay_ok = plan.relay_ok;
-                                *retry_terminal_delivery_from_offset = plan.retry_offset;
-                            }
+                            remember_watcher_completion_footer_terminal_target(
+                                single_message_panel_footer_mode,
+                                &mut *completion_footer_terminal_target,
+                                msg_id,
+                                &tail,
+                            );
                         }
+                        *tui_direct_anchor_terminal_body_visible = true;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 ✓ relayed terminal response (new message) channel {} ({} chars, prompt_anchor_message_id={:?})",
+                            channel_id.get(),
+                            relay_text.len(),
+                            prompt_anchor_reference.map(|(_, message_id)| message_id.get())
+                        );
+                    }
+                    Err(e) => {
+                        info_watcher_failed_relay(e.as_ref());
+                        let plan = watcher_send_failure_plan_warned(
+                            classify_watcher_send_failure(e.as_ref()),
+                            WatcherNoRewindWarnSite::PlaceholderlessFull,
+                            &watcher_provider,
+                            channel_id,
+                            &tmux_session_name,
+                            e.as_ref(),
+                        );
+                        relay_ok = plan.relay_ok;
+                        *retry_terminal_delivery_from_offset = plan.retry_offset;
+                    }
+                }
             }
         }
     }

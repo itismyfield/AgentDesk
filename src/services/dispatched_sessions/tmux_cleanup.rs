@@ -1,4 +1,4 @@
-//! Tmux-only cleanup, with owner forwarding and conservative idle guards.
+//! Tmux-only cleanup of legacy tmux sessions, with owner forwarding and conservative idle guards.
 
 use axum::{
     Json,
@@ -103,25 +103,26 @@ pub(super) async fn kill_tmux_session_impl(
     }
     let effective_provider_name = provider_name.or(session_provider.as_deref());
 
+    // The owner checks the host before its first probe or write, whatever the reason.
+    let host = crate::services::tmux_turn_liveness::cleanup_host::confirm_legacy_tmux_key_pg(
+        pool,
+        session_key,
+    )
+    .await;
+    if let Err(refusal) = host {
+        tracing::warn!(
+            session_key,
+            preserved_reason = refusal.reason(),
+            reason,
+            "kill-tmux: not a legacy tmux session; tmux, row and selectors left untouched"
+        );
+        return preserved_without_probe(pool, session_key, &tmux_name, refusal.reason()).await;
+    }
     let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
     let tmux_presence = crate::services::platform::tmux::session_presence(&tmux_name);
-    if (reason_is_idle_cleanup || minimum_idle_minutes.is_some())
-        && tmux_presence == crate::services::platform::tmux::SessionPresence::ProbeFailed
-    {
-        record_idle_cleanup_preserved(pool, session_key, &tmux_name, "tmux_probe_failed", None)
-            .await;
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "ok": true,
-                "tmux_killed": false,
-                "tmux_was_alive": null,
-                "tmux_session_name": tmux_name,
-                "session_row_preserved": true,
-                "skipped_provider_activity_guard": true,
-                "preserved_reason": "tmux_probe_failed",
-            })),
-        );
+    // A failed probe is not a missing session: no kill and no disconnected row.
+    if tmux_presence == crate::services::platform::tmux::SessionPresence::ProbeFailed {
+        return preserved_without_probe(pool, session_key, &tmux_name, "tmux_probe_failed").await;
     }
     let tmux_was_alive = tmux_presence == crate::services::platform::tmux::SessionPresence::Present;
     let mut idle_decision_last_seen_nanos = None;
@@ -435,6 +436,28 @@ pub(super) async fn kill_tmux_session_impl(
             "session_row_disconnected": session_row_disconnected,
             "resumable": resumable,
             "active_dispatch_id": active_dispatch_id,
+        })),
+    )
+}
+
+/// Kill-tmux answer when nothing was probed or changed; idle-kill does not count it.
+async fn preserved_without_probe(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    tmux_name: &str,
+    preserved_reason: &'static str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    record_idle_cleanup_preserved(pool, session_key, tmux_name, preserved_reason, None).await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "tmux_killed": false,
+            "tmux_was_alive": null,
+            "tmux_session_name": tmux_name,
+            "session_row_preserved": true,
+            "skipped_provider_activity_guard": true,
+            "preserved_reason": preserved_reason,
         })),
     )
 }

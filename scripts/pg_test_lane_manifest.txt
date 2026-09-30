@@ -34,6 +34,7 @@ src/engine/ops/config_ops.rs
 src/engine/ops/db_ops.rs
 src/engine/ops/kanban_ops.rs
 src/engine/ops/message_ops.rs
+src/engine/ops/timeouts_ops/host_repair_tests.rs
 src/github/sync.rs
 src/high_risk_recovery.rs
 src/reconcile.rs
@@ -87,6 +88,7 @@ src/services/discord/commands/control.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/idle_recap_interaction.rs
+src/services/discord/inflight/host_recovery_guard_keyed_tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
@@ -99,6 +101,7 @@ src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
+src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/terminal_delivery_custody/pg_tests.rs
@@ -108,13 +111,16 @@ src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
 src/services/discord/turn_bridge/intake_settlement/tests.rs
 src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/turn_bridge/resume_pin_tests.rs
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/watchers/dispatched_origin_ghost_tests.rs
+src/services/discord/watchers/lifecycle/restore.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs
 src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
 src/services/dispatches/wait_queue.rs
+src/services/herdr_launch_tests.rs
 src/services/maintenance/jobs/db_retention.rs
 src/services/maintenance/jobs/worktree_orphan_sweep.rs
 src/services/message_outbox.rs
@@ -174,6 +180,7 @@ engine::ops::config_ops::tests
 engine::ops::db_ops::tests
 engine::ops::kanban_ops::tests
 engine::ops::message_ops::tests
+engine::ops::timeouts_ops::host_repair::tests
 github::sync::terminal_open_alert_tests
 high_risk_recovery
 reconcile::dispatch_delivery_reconcile_tests
@@ -231,6 +238,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
+services::discord::inflight::host_recovery_guard::keyed_tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
@@ -242,10 +250,12 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
+services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
@@ -253,11 +263,13 @@ services::discord::turn_bridge::headless_delivery::production_seam_tests
 services::discord::turn_bridge::intake_settlement::tests
 services::discord::turn_bridge::recovery_text::tests
 services::discord::turn_bridge::resume_pin_tests
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
 services::dispatches::wait_queue::tests
+services::herdr_launch::tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
 services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_pg_tests
@@ -416,11 +428,16 @@ db::dispatched_session_canonical_identity::pg_tests::canonical_identity_resolver
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_safe_legacy_promotion_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_scheduled_legacy_row_is_not_promoted_as_ordinary_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_bulk_cleanup_keeps_live_and_unknown_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_bulk_cleanup_rechecks_contended_rows_and_rolls_back_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cas_treats_a_respelled_record_as_changed_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cas_writes_only_the_observed_value_and_nonce_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cleanup_keeps_null_rows_with_a_non_tmux_host_marker_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_judges_markers_before_the_row_lock_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_refuses_live_and_unknown_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_sees_a_marker_written_during_its_lock_wait_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_lookup_resolves_alias_and_canonical_tuple_to_one_row_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_keeps_live_unknown_and_changed_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg
 db::dispatched_session_rebind_override::tests::health_rebind_override_upserts_selectors_with_recorded_at_guard_pg
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_preserves_provider_selectors
@@ -614,6 +631,12 @@ engine::ops::kanban_ops::tests::set_status_raw_pg_blocks_when_review_entered_at_
 engine::ops::kanban_ops::tests::set_status_raw_pg_matches_intent_reference_across_matrix
 engine::ops::kanban_ops::tests::set_status_raw_pg_windows_rework_over_stale_pass
 engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
+engine::ops::timeouts_ops::host_repair::tests::legacy_row_repairs_match_the_base_policy_writes_pg
+engine::ops::timeouts_ops::host_repair::tests::non_legacy_rows_defer_without_probe_write_or_tmux_command_pg
+engine::ops::timeouts_ops::host_repair::tests::repair_after_a_new_turn_on_the_same_row_writes_nothing_pg
+engine::ops::timeouts_ops::host_repair::tests::repair_after_the_row_changed_since_observation_writes_nothing_pg
+engine::ops::timeouts_ops::host_repair::tests::section_i_defers_herdr_rows_and_repairs_legacy_rows_pg
+engine::ops::timeouts_ops::host_repair::tests::session_command_api_reaches_tmux_only_for_legacy_rows_pg
 github::sync::terminal_open_alert_tests::enqueue_terminal_open_alert_pg_dedupes_within_ttl
 github::sync::terminal_open_alert_tests::pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window
 github::sync::terminal_open_alert_tests::pg_stale_candidate_selection_excludes_custom_terminal_status
@@ -661,6 +684,7 @@ server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture
 server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
 server::routes::campaigns::tests::postgres_ledger_round_trips_a_document_past_the_axum_default_limit_pg
 server::routes::dispatched_sessions::tests::idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
+server::routes::dispatched_sessions::tests::kill_tmux_route_checks_the_host_before_any_probe_or_write_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
@@ -870,6 +894,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
+services::discord::inflight::host_recovery_guard::keyed_tests::keyed_teardown_admits_only_a_found_legacy_row_pg
 services::discord::inflight::removal::custody_notice_tests::a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::a_failed_notice_row_is_enqueued_again_by_the_next_boot_pg
 services::discord::inflight::removal::custody_notice_tests::a_root_reading_the_dm_session_readdresses_an_unclaimed_notice_pg
@@ -930,6 +955,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
+services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::legacy_null_channel_id_single_row_is_reused
@@ -979,6 +1005,7 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::release_that_takes_no_session_row_reports_no_consumed_ghost
+services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::startup_cleanup_runs_only_after_the_host_guard_admits_the_stored_rows_pg
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::interactive_restore_without_dispatch_is_untouched
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::restored_dispatch_does_not_clobber_concurrently_linked_turn
@@ -1032,6 +1059,8 @@ services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminde
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_cancelled_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::session_died_recovery_retries_only_a_session_the_host_guard_admits_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
@@ -1059,6 +1088,10 @@ services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_s
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
+services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
+services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
+services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
+services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_job_reports_intake_outbox_candidates_without_deleting
@@ -1185,6 +1218,7 @@ services::stale_turn_reconciler::tests::stale_busy_candidates_reconcile_only_aft
 services::stale_turn_reconciler::tests::stale_candidate_cas_rejects_heartbeat_move_and_is_non_latching_pg
 services::stale_turn_reconciler::tests::transport_unknown_warrant_vetoes_the_destructive_apply_and_reachable_releases_it_pg
 services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg
+services::tmux_turn_liveness::tests_pg::cleanup_host_never_reads_a_missing_or_unreadable_lookup_as_legacy_pg
 services::tmux_turn_liveness::tests_pg::idle_cleanup_preserves_approval_and_background_children_pg
 services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg
 voice::announce_meta::tests::durable_handoff_concurrent_consumers_yield_exactly_one_claim
