@@ -1140,6 +1140,8 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
         (SESSION_RECORD, 1),
+        // Dormant Herdr launch: names the host for the pane location and its marker.
+        ("src/services/herdr_launch.rs", 2),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",

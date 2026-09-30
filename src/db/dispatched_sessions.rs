@@ -2777,7 +2777,7 @@ pub(crate) async fn delete_session_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<DeleteSessionResult, String> {
-    // Marker files are read before the row lock; the locked delete re-checks the judged row.
+    // Markers are judged unlocked, also after any lock holder leaves; the delete re-checks the row.
     let judged = hosted_execution::judge_session_delete_pg(pool, session_key).await?;
     let mut tx = pool
         .begin()
