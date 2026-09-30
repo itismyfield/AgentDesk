@@ -33,28 +33,42 @@ impl Pane {
     }
 
     fn hook(&mut self, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
-        let observation = observe_prompt_by_provider_session_with_prompt_id_at(
+        let observation = self.hook_before_its_post(prompt_id, prompt);
+        self.announce_published();
+        observation
+    }
+
+    /// Observes a hook whose announcement POST has no result until `settle`.
+    fn hook_before_its_post(&self, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
+        observe_prompt_by_provider_session_with_prompt_id_at(
             CLAUDE,
             &self.session,
             prompt,
             prompt_id,
             Utc::now(),
-        );
+        )
+    }
+
+    fn scan(&mut self, uuid: &str, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
+        let observation = self.scan_before_any_post(uuid, prompt_id, prompt);
         self.announce_published();
         observation
     }
 
-    fn scan(&mut self, uuid: &str, prompt_id: Option<&str>, prompt: &str) -> PromptObservation {
-        let observation = observe_prompt_by_tmux_with_row_ids_at(
+    fn scan_before_any_post(
+        &self,
+        uuid: &str,
+        prompt_id: Option<&str>,
+        prompt: &str,
+    ) -> PromptObservation {
+        observe_prompt_by_tmux_with_row_ids_at(
             CLAUDE,
             &self.tmux,
             prompt,
             Some(uuid),
             prompt_id,
             Utc::now(),
-        );
-        self.announce_published();
-        observation
+        )
     }
 
     fn age(&self, by: Duration) {
@@ -62,10 +76,19 @@ impl Pane {
     }
 
     fn announce_published(&mut self) {
+        self.settle(true);
+    }
+
+    /// Answers every pending POST: sent (or may have been), or never sent.
+    fn settle(&mut self, announced: bool) {
         loop {
             match self.rx.try_recv() {
                 Ok(event) if event.tmux_session_name == self.tmux => {
-                    record_announced_prompt_id(&event);
+                    if announced {
+                        record_announced_prompt_id(&event);
+                    } else {
+                        withdraw_unannounced_prompt_id(&event);
+                    }
                     self.events.push((event.source_event_id, event.prompt));
                 }
                 Ok(_) => {}
@@ -193,6 +216,58 @@ fn a_known_row_with_other_text_still_makes_its_prompt_id_ambiguous() {
             hook_event("new text"),
             row_event("U_new", "new text"),
         ]
+    );
+}
+
+/// The inherited row arrives while the hook's announcement POST is still open.
+#[test]
+fn a_row_read_before_the_announcement_result_still_makes_its_prompt_id_ambiguous() {
+    let mut pane = Pane::new("conflict-before-result");
+    pane.scan("U_old", Some("P_old"), "old text");
+    pane.age(RECENT_PLUS);
+    pane.hook_before_its_post(Some("P_fork"), "new text");
+    assert_eq!(
+        pane.scan_before_any_post("U_old", Some("P_fork"), "old text"),
+        PromptObservation::SuppressedReplayedEntry
+    );
+    pane.settle(true);
+    assert_eq!(
+        check_relayed_prompt_id(CLAUDE, &pane.tmux, "P_fork", "new text"),
+        PromptIdMatch::Ambiguous
+    );
+    pane.age(RECENT_PLUS);
+    assert_eq!(
+        pane.scan("U_new", Some("P_fork"), "new text"),
+        PromptObservation::PublishedSshDirect
+    );
+    assert_eq!(
+        pane.published(),
+        vec![
+            row_event("U_old", "old text"),
+            hook_event("new text"),
+            row_event("U_new", "new text"),
+        ]
+    );
+}
+
+/// Until its POST result, the hook's id neither suppresses the row nor lends it its uuid.
+#[test]
+fn an_unannounced_prompt_id_leaves_the_row_to_the_content_window() {
+    let mut pane = Pane::new("unannounced");
+    pane.hook_before_its_post(Some("P"), "same text");
+    assert_eq!(
+        pane.scan_before_any_post("U", Some("P"), "same text"),
+        PromptObservation::SuppressedRecentDuplicate
+    );
+    pane.settle(false);
+    pane.age(RECENT_PLUS);
+    assert_eq!(
+        pane.scan("U", Some("P"), "same text"),
+        PromptObservation::PublishedSshDirect
+    );
+    assert_eq!(
+        pane.published(),
+        vec![hook_event("same text"), row_event("U", "same text")]
     );
 }
 

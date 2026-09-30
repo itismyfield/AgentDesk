@@ -376,3 +376,34 @@ async fn a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns() {
     )
     .await;
 }
+
+/// A relay that returned before its POST leaves no id behind, so the same hook sent
+/// again once the owner is back can suppress the scanner's row after its announcement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hook_resent_after_a_relay_without_a_post_is_announced_once() {
+    let tmux = "AgentDesk-claude-5845-resent-hook";
+    let session = "5845e2e0-0000-0000-0000-0000000000c9";
+    let (hook_tx, hook_rx) = broadcast::channel(8);
+    let setup = Setup {
+        owner: false,
+        ..READY
+    };
+    let (harness, relayed) = start(tmux, &[session], hook_rx, setup).await;
+    hook_tx
+        .send(hook_event(session))
+        .expect("observer subscribed");
+    wait_for_relays(&relayed, 1).await;
+
+    harness.attach_tmux_watcher(tmux, "prompt-identity.jsonl");
+    dedupe::age_observed_prompt_records_for_tests(PROVIDER_KEY, tmux, Duration::from_secs(31));
+    hook_tx
+        .send(hook_event(session))
+        .expect("observer subscribed");
+    wait_for_announcement(&harness).await;
+    assert_eq!(
+        scanner_sees_the_row(tmux),
+        dedupe::PromptObservation::SuppressedReplayedEntry
+    );
+    assert_eq!(settled_counts(&harness).await, (1, 1, 1));
+    drop(hook_tx);
+}
