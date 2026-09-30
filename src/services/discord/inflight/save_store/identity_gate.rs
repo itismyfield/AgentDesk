@@ -9,6 +9,8 @@ mod completion_preserve;
 mod guarded_read;
 #[path = "identity_gate/heartbeat.rs"]
 mod heartbeat;
+#[path = "identity_gate/host_locator.rs"]
+mod host_locator;
 #[path = "identity_gate/runtime_stamp.rs"]
 pub(in crate::services::discord::inflight) mod runtime_stamp;
 #[path = "identity_gate/stamp_merge.rs"]
@@ -29,6 +31,7 @@ use guarded_read::read_inflight_state_for_guarded_write;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
 #[cfg(test)]
 pub(in crate::services::discord::inflight) use heartbeat::touch_inflight_state_if_matches_identity_in_root;
+use host_locator::{copy_hosted_binding, hosted_binding, hosted_binding_write_admitted};
 pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
 pub(in crate::services::discord) use stamp_merge::GuardedStampTarget;
 use stamp_merge::{merge_forward_response_progress, merge_runtime_stamp_progress};
@@ -190,6 +193,9 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             durable_save_generation = on_disk.save_generation,
             "inflight identity-refresh save skipped because a same-turn writer advanced the durable row"
         );
+        return GuardedSaveOutcome::AuthorityPinned;
+    }
+    if !hosted_binding_write_admitted(&on_disk, &state) {
         return GuardedSaveOutcome::AuthorityPinned;
     }
 
