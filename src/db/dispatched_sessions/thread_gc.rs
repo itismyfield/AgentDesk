@@ -1,7 +1,9 @@
-//! Reclaim stale thread rows only after their locally owned tmux is missing.
+//! Reclaim stale thread rows only after their locally owned tmux is missing and
+//! their hosted execution record, if any, is retired.
 
 use sqlx::PgPool;
 
+use super::hosted_execution::HostedRecord;
 use crate::db::session_agent_resolution::parse_thread_channel_id_from_session_key;
 
 async fn backfill_legacy_thread_channel_ids_pg(pool: &PgPool) -> usize {
@@ -87,8 +89,8 @@ where
     Fut: std::future::Future<Output = crate::services::platform::tmux::SessionPresence>,
 {
     let _ = backfill_legacy_thread_channel_ids_pg(pool).await;
-    let candidates = match sqlx::query_scalar::<_, String>(
-        "SELECT session_key FROM sessions
+    let candidates = match sqlx::query_as::<_, (String, Option<serde_json::Value>)>(
+        "SELECT session_key, hosted_execution FROM sessions
          WHERE thread_channel_id IS NOT NULL
            AND status IN ('idle', 'disconnected', 'aborted')
            AND active_dispatch_id IS NULL
@@ -107,7 +109,11 @@ where
         }
     };
     let mut deleted = Vec::new();
-    for key in candidates {
+    for (key, hosted) in candidates {
+        // A pending, bound or unreadable hosted record is not a tmux session to reclaim.
+        if !HostedRecord::decode(hosted.as_ref()).deletable() {
+            continue;
+        }
         if !crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(pool, &key)
             .await
         {
@@ -125,12 +131,15 @@ where
                AND active_dispatch_id IS NULL
                AND COALESCE(active_children, 0) = 0
                AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour'
+               AND hosted_execution IS NOT DISTINCT FROM $2::JSONB
+               AND agentdesk_hosted_execution_deletable(hosted_execution)
                AND NOT EXISTS (
                    SELECT 1 FROM sessions child
                    WHERE child.parent_session_id = sessions.id AND child.closed_at IS NULL
                )",
         )
         .bind(&key)
+        .bind(hosted)
         .execute(pool)
         .await;
         if removed.is_ok_and(|result| result.rows_affected() > 0) {

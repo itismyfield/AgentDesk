@@ -119,6 +119,8 @@ src/
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
+│   │   ├── hosted_execution.rs
+│   │   ├── hosted_execution_tests.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs

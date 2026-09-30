@@ -68,6 +68,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/calendar_sync/postgres_tests.rs",
         "src/db/campaigns/tests.rs",
         "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
+        "src/db/dispatched_sessions/hosted_execution_tests.rs",
         "src/db/dispatched_sessions/tests.rs",
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
         "src/db/prompt_manifests/tests.rs",
