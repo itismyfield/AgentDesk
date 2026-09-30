@@ -185,7 +185,16 @@ pub(super) async fn handle_cancel_prompt_replace(
         // channel the WATCHER uses (a reused watcher can own a channel != this
         // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
         // B2) instead of both delivering = duplicate.
-        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
+        // Only a stop that carries unsent partial text may end a pending adoption; "[Stopped]" reads it.
+        let o_body_decision = if response_portion_after_offset(&full_response, response_sent_offset)
+            .trim()
+            .is_empty()
+        {
+            terminal_controller_cutover::bridge_o_body_peek_decision
+        } else {
+            terminal_controller_cutover::bridge_o_body_cut_decision
+        };
+        let o_body_cut = o_body_decision(
             channel_id, &inflight_state,
             gateway.can_deliver_directly(),
         );

@@ -364,12 +364,16 @@ pub(super) async fn run_terminal_outcome_delivery(
             &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
-        // Resolve body ownership before committing or publishing a terminal response.
-        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
-            channel_id,
-            &inflight_state,
-            can_deliver_directly,
-        );
+        // Resolve body ownership before committing or publishing a terminal response. Only a turn
+        // with unsent answer text may end a pending adoption; a silent one or a notice reads it.
+        let unsent =
+            terminal_delivery_response_after_offset(&full_response, response_sent_offset, None);
+        let o_body_decision = if silent_turn_handled || unsent.trim().is_empty() {
+            terminal_controller_cutover::bridge_o_body_peek_decision
+        } else {
+            terminal_controller_cutover::bridge_o_body_cut_decision
+        };
+        let o_body_cut = o_body_decision(channel_id, &inflight_state, can_deliver_directly);
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
