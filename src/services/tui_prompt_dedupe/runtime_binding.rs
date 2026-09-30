@@ -133,14 +133,9 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    publish_runtime_binding(
-        authority,
-        binding,
-        None,
-        CauseSource::Observed,
-        Record::Stat,
-    )
-    .is_some_and(Persisted::published)
+    let cause = CauseSource::Observed;
+    publish_runtime_binding(authority, binding, None, cause, Record::Stat)
+        .is_some_and(Persisted::published)
 }
 
 /// Launch paths let the execution's context name the cause of a new source.
@@ -161,8 +156,7 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
         .is_some_and(Persisted::published)
 }
 
-/// Persists the binding event first; if that fails the binding is not published (`None`), nor when
-/// the pane's pin refused it (`Some` of an unpublished outcome).
+/// Persists the binding event first; nothing is published on failure (`None`) or when a pin refuses.
 fn publish_runtime_binding(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
@@ -232,18 +226,12 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    register_rehydrated_under_source_authority(
-        authority,
-        provider,
-        channel_id,
-        binding,
-        Record::Stat,
-    )
-    .is_some_and(Persisted::published)
+    let record = Record::Stat;
+    register_rehydrated_under_source_authority(authority, provider, channel_id, binding, record)
+        .is_some_and(Persisted::published)
 }
 
-/// `None` when nothing was published; otherwise what the record left in the log, published only when
-/// `Persisted::published` says so.
+/// `None` when nothing was published; otherwise what the record left, published only if it says so.
 fn register_rehydrated_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
