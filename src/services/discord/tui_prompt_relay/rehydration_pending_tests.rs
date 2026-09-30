@@ -533,3 +533,23 @@ fn a_restored_b_whose_transcript_is_unreadable_still_refuses_the_next_session() 
     assert_eq!(status, 425, "an unreadable B is not skipped as missing");
     pane.expect_bound(&pane.b);
 }
+
+#[test]
+fn a_deferred_b_outlives_a_poll_that_finds_its_channel_mapping_lapsed() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_529, true);
+    let seeded = PendingRestore::Seeded { pending_seq: 2 };
+    assert_eq!(pane.rehydrate(), Some(seeded), "the pass maps the pane");
+
+    // The poll runs before the pass renews the mapping, so it can find the mapping lapsed.
+    expire_channel_mapping_for_tests(&pane.tmux);
+    retry_deferred_claude_adoptions();
+    assert_eq!(deferred_adoption_count(), 1, "B keeps its place");
+    pane.rehydrate();
+    let mapped = dedupe::owner_channel_for_tmux_session(&pane.tmux);
+    assert_eq!(mapped, Some(pane.channel), "the pass restored the mapping");
+    pane.adopt_newer(&pane.b, &pane.a);
+}

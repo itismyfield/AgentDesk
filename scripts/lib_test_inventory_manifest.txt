@@ -6833,6 +6833,7 @@ services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_bi
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_launch_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_corrupt_log_keeps_the_pass_from_registering_launch_a
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_deferred_b_outlives_a_poll_that_finds_its_channel_mapping_lapsed
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_gives_way_to_the_next_session_with_a_file
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_waits_for_its_own_file_and_never_a_newer_one
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pending_b_behind_an_existing_launch_a_is_seeded_after_a_is_registered
