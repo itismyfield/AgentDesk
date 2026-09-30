@@ -31,6 +31,7 @@ async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {
 // Kills M8: transport errors must escape instead of folding into NotDelivered.
 #[tokio::test]
 async fn relay_deliver_propagates_injected_transport_error() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let channel_id = 44_002;
@@ -76,6 +77,7 @@ async fn relay_deliver_propagates_injected_transport_error() {
 // Kills M10 and anchor-drop: persisted proof stays Delivered and records the tail anchor.
 #[tokio::test]
 async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     if std::env::var_os("ADK_5927_RELAY_FIXTURE_CHILD").is_none() {
         let qualified = format!(
             "{}::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof",
@@ -501,6 +503,7 @@ async fn native_codex_restart_sink_fixture() {
 // Kills M11: stale proof must remain distinguishable from Delivered before public folding.
 #[tokio::test]
 async fn relay_deliver_observes_landed_stale_proof() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let channel_id = 44_004;
@@ -567,6 +570,7 @@ async fn relay_deliver_observes_landed_stale_proof() {
 
 #[tokio::test]
 async fn relay_deliver_observes_landed_unrecorded_proof() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let channel_id = 44_005;
@@ -820,62 +824,55 @@ impl SessionBoundDiscordRelaySink {
     }
 }
 
-// An unknown destination reaches the sink as a held error before typed IDs or transport are used.
+// With a non-empty writer list, an unknown destination is held before typed IDs or transport.
 #[tokio::test]
 async fn writer_channel_unknown_destination_is_held_before_transport() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 
-    for selected in [true, false] {
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("temp runtime root");
-        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
-        let binding = matched("0");
-        let registry = Arc::new(HealthRegistry::new());
-        registry
-            .register(
-                ProviderKind::Claude.as_str().to_string(),
-                crate::services::discord::make_shared_data_for_tests(),
-            )
-            .await;
-        let gateway = Arc::new(RelayContractFakeGateway::edited());
-        let mut sink = SessionBoundDiscordRelaySink::new(registry);
-        sink.test_gateway = Some(gateway.clone());
-        let payload = concat!(
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"unknown destination body\"}]}}\n",
-            "{\"type\":\"result\",\"result\":\"unknown destination body\"}\n"
-        );
-        let terminal = terminal_frame_offset(
-            &binding,
-            payload,
-            1,
-            256,
-            0,
-            "2026-09-29T00:00:00Z",
-            Some(0),
-        );
-        let channels = if selected {
-            vec![(44_011, ClaudeTui)]
-        } else {
-            Vec::new()
-        };
-        let _o = crate::services::tui_o::cutover::test_override::force_channels(&channels);
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("temp runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    let binding = matched("0");
+    let registry = Arc::new(HealthRegistry::new());
+    registry
+        .register(
+            ProviderKind::Claude.as_str().to_string(),
+            crate::services::discord::make_shared_data_for_tests(),
+        )
+        .await;
+    let gateway = Arc::new(RelayContractFakeGateway::edited());
+    let mut sink = SessionBoundDiscordRelaySink::new(registry);
+    sink.test_gateway = Some(gateway.clone());
+    let payload = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"unknown destination body\"}]}}\n",
+        "{\"type\":\"result\",\"result\":\"unknown destination body\"}\n"
+    );
+    let terminal = terminal_frame_offset(
+        &binding,
+        payload,
+        1,
+        256,
+        0,
+        "2026-09-29T00:00:00Z",
+        Some(0),
+    );
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(44_011, ClaudeTui)]);
 
-        let error = sink
-            .deliver(&terminal)
-            .await
-            .expect_err("unknown destination must be held");
+    let error = sink
+        .deliver(&terminal)
+        .await
+        .expect_err("unknown destination must be held");
 
-        assert!(
-            matches!(&error, RelaySinkError::Transient(reason)
-            if reason == "TUI output identity held: Discord destination channel is unknown"),
-            "the real parser-to-sink boundary must preserve the identity failure: {error:?}"
-        );
-        assert_eq!(gateway.send_calls.load(Ordering::Acquire), 0);
-        assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 0);
-        assert!(
-            crate::services::tui_o::alarm::health_reasons()
-                .iter()
-                .any(|reason| reason == "tui_o:halted:0"),
-            "the unknown destination hold must remain visible in process health"
-        );
-    }
+    assert!(
+        matches!(&error, RelaySinkError::Transient(reason)
+        if reason == "TUI output identity held: Discord destination channel is unknown"),
+        "the real parser-to-sink boundary must preserve the identity failure: {error:?}"
+    );
+    assert_eq!(gateway.send_calls.load(Ordering::Acquire), 0);
+    assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 0);
+    assert!(
+        crate::services::tui_o::alarm::health_reasons()
+            .iter()
+            .any(|reason| reason == "tui_o:halted:0"),
+        "the unknown destination hold must remain visible in process health"
+    );
 }

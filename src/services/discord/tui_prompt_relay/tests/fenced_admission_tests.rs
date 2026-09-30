@@ -319,6 +319,7 @@ async fn answer(seen: Written, uri: Uri, body: Bytes) -> Json<Value> {
 /// written once; a committed terminal or another turn's appended body is not.
 #[test]
 fn released_dormant_resumption_writes_only_its_own_undelivered_tail_once() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     run(|output| async move {
         let (http, bodies) = discord().await;
         let shared = make_shared_data_for_tests();

@@ -4,6 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "receipt_handoff",
@@ -116,6 +117,7 @@ async fn exact_receipt_rowless_terminal_cancellation_settles_work_before_postlud
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "receipt_cleanup_retry",
@@ -180,6 +182,7 @@ async fn exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_55
 
 #[tokio::test]
 async fn exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "receipt_child_retry",

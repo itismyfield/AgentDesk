@@ -144,3 +144,44 @@ async fn idle_cleanup_preserves_approval_and_background_children_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn cleanup_host_never_reads_a_missing_or_unreadable_lookup_as_legacy_pg() {
+    use super::cleanup_host::{
+        CleanupHostRefusal, confirm_legacy_tmux_channel_pg, confirm_legacy_tmux_key_pg,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let key = "test-host:AgentDesk-claude-host-check";
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status) VALUES ($1, 'claude', 'idle')",
+    )
+    .bind(key)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(confirm_legacy_tmux_key_pg(&pool, key).await, Ok(()));
+    // Downstream steps refuse a missing row too, so only this check proves Missing is no legacy answer.
+    let missing = "test-host:AgentDesk-claude-host-gone";
+    assert_eq!(
+        confirm_legacy_tmux_key_pg(&pool, missing).await,
+        Err(CleanupHostRefusal::RowMissing)
+    );
+    assert_eq!(
+        confirm_legacy_tmux_key_pg(&pool, " ").await,
+        Err(CleanupHostRefusal::LookupFailed)
+    );
+    let channel = |session_key: Option<&str>| {
+        let session_key = session_key.map(str::to_string);
+        confirm_legacy_tmux_channel_pg(&pool, "claude", "discord_host", "4500", move || session_key)
+    };
+    assert_eq!(
+        channel(Some(missing)).await,
+        Err(CleanupHostRefusal::RowMissing)
+    );
+    assert_eq!(channel(None).await, Err(CleanupHostRefusal::RowMissing));
+    assert_eq!(channel(Some(key)).await, Ok(key.to_string()));
+    pool.close().await;
+    db.drop().await;
+}

@@ -81,6 +81,11 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
     let exact = format!("{module}::{submodule}::{test}");
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
+        // The empty writer list unless the case names its own; later envs win.
+        .env(
+            crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+            "[]",
+        )
         .envs(envs.iter().copied())
         .env(CHILD, "1")
         .env("AGENTDESK_ROOT_DIR", root.path())

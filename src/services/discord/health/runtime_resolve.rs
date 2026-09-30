@@ -657,3 +657,27 @@ mod direct_meeting_candidate_tests {
         assert!(!super::unbound_single_runtime_allowed(&shared).await);
     }
 }
+
+/// A lone runtime with REST credentials, registered under `provider`, that an intake worker
+/// resolves as any channel's owner.
+#[cfg(test)]
+pub(crate) mod owner_runtime_for_tests {
+    use super::super::HealthRegistry;
+    use crate::services::discord::{SharedData, make_shared_data_for_tests};
+    use std::sync::Arc;
+
+    pub(crate) async fn registered(provider: &str) -> (Arc<HealthRegistry>, Arc<SharedData>) {
+        let registry = Arc::new(HealthRegistry::new());
+        let mut shared = make_shared_data_for_tests();
+        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        shared
+            .http
+            .cached_bot_token
+            .set("test-token".into())
+            .unwrap();
+        registry
+            .register(provider.into(), Arc::clone(&shared))
+            .await;
+        (registry, shared)
+    }
+}

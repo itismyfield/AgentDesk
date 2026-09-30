@@ -6642,3 +6642,113 @@ mod post_cancel_drain_tests {
         );
     }
 }
+
+/// Stale-leak recovery on a channel whose TUI body O posts: detection stays, nothing is resent.
+#[cfg(test)]
+mod o_stale_leak_cut_tests {
+    use super::super::HealthRegistry;
+    use super::maybe_recover_completed_stale_leak;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+    use crate::services::tui_o::cutover::test_override;
+    use poise::serenity_prelude::ChannelId;
+
+    const CASE: &str = "ADK_TEST_O_STALE_LEAK_CASE";
+    const CHANNEL: u64 = 9_433_001;
+
+    /// Runs `case` in a child whose HTTP goes through a local listener and counts the connections
+    /// it opened: a Legacy resend must reach Discord's REST API first.
+    fn discord_connections(case: &str) -> usize {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let stdout = root.path().join("stdout");
+        let name = concat!(
+            "services::discord::health::recovery::o_stale_leak_cut_tests::",
+            "o_delegated_stale_leak_recovery_resends_nothing"
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CASE, case)
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .envs(
+                [
+                    "HTTPS_PROXY",
+                    "HTTP_PROXY",
+                    "ALL_PROXY",
+                    "https_proxy",
+                    "http_proxy",
+                ]
+                .map(|key| (key, &proxy)),
+            )
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .stdout(std::fs::File::create(&stdout).unwrap())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut connections = 0;
+        let status = loop {
+            while listener.accept().is_ok() {
+                connections += 1;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        while listener.accept().is_ok() {
+            connections += 1;
+        }
+        let stdout = std::fs::read_to_string(stdout).unwrap();
+        assert!(status.success(), "{case}: {stdout}");
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+        connections
+    }
+
+    /// A watcher-owned turn whose answer never reached its placeholder, as the leak detector sees it.
+    async fn recover(case: &str) {
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9, "provider": "claude", "channel_id": CHANNEL, "channel_name": "adk-cc",
+            "request_owner_user_id": 7, "user_msg_id": 9_433_010, "current_msg_id": 9_433_011,
+            "current_msg_len": 0, "user_text": "prompt", "source": "text", "session_id": "session",
+            "tmux_session_name": "AgentDesk-claude-adk-cc", "output_path": "/tmp/o-leak.jsonl",
+            "input_fifo_path": null, "last_offset": 0, "full_response": "leaked answer body",
+            "response_sent_offset": 0, "relay_owner_kind": "watcher", "runtime_kind": "claude_tui",
+            "started_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00"
+        }))
+        .unwrap();
+        crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared
+            .http
+            .cached_bot_token
+            .set("Bot o-leak".into())
+            .unwrap();
+        let registry = HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
+        let owned = match case {
+            "o" => vec![(CHANNEL, RuntimeHandoffKind::ClaudeTui)],
+            _ => Vec::new(),
+        };
+        let _owned = test_override::force_channels(&owned);
+        let channel = ChannelId::new(CHANNEL);
+        let recovered =
+            maybe_recover_completed_stale_leak(&registry, &ProviderKind::Claude, &shared, channel);
+        assert!(!recovered.await, "no Discord answers in this child");
+    }
+
+    #[tokio::test]
+    async fn o_delegated_stale_leak_recovery_resends_nothing() {
+        if let Ok(case) = std::env::var(CASE) {
+            return recover(&case).await;
+        }
+        assert_eq!(discord_connections("o"), 0, "O owns the channel's body");
+        assert!(
+            discord_connections("legacy") > 0,
+            "an unselected channel still tries its Legacy resend"
+        );
+    }
+}

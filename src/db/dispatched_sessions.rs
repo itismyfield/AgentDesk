@@ -2777,6 +2777,8 @@ pub(crate) async fn delete_session_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<DeleteSessionResult, String> {
+    // Marker files are read before the row lock; the locked delete re-checks the judged row.
+    let judged = hosted_execution::judge_session_delete_pg(pool, session_key).await?;
     let mut tx = pool
         .begin()
         .await
@@ -2789,7 +2791,9 @@ pub(crate) async fn delete_session_by_key_pg(
         .await
         .map_err(|error| format!("resolve session delete locator: {error:?}"))?;
     let deleted = match session_id {
-        Some(session_id) => hosted_execution::delete_locked_session_pg(&mut tx, session_id).await?,
+        Some(session_id) => {
+            hosted_execution::delete_locked_session_pg(&mut tx, session_id, judged.as_ref()).await?
+        }
         None => 0,
     };
     tx.commit()

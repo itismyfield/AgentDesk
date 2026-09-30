@@ -419,11 +419,15 @@ db::dispatched_session_canonical_identity::pg_tests::canonical_identity_resolver
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_safe_legacy_promotion_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_scheduled_legacy_row_is_not_promoted_as_ordinary_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_bulk_cleanup_keeps_live_and_unknown_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_bulk_cleanup_rechecks_contended_rows_and_rolls_back_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cas_treats_a_respelled_record_as_changed_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cas_writes_only_the_observed_value_and_nonce_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cleanup_keeps_null_rows_with_a_non_tmux_host_marker_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_judges_markers_before_the_row_lock_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_refuses_live_and_unknown_rows_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_lookup_resolves_alias_and_canonical_tuple_to_one_row_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_keeps_live_unknown_and_changed_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg
 db::dispatched_session_canonical_identity::tests::old_body_cannot_reassign_an_existing_locator
 db::dispatched_session_canonical_identity::tests::resolver_fails_closed_when_evidence_disagrees
 db::dispatched_session_canonical_identity::tests::resolver_order_accepts_matching_exact_alias_and_canonical_evidence
@@ -495,6 +499,7 @@ db::intake_outbox::migration_pg_tests::intake_outbox_status_check_rejects_unreco
 db::intake_outbox::migration_pg_tests::intake_outbox_touch_updated_at_trigger_advances_on_update
 db::intake_outbox::migration_pg_tests::intake_outbox_unique_message_attempt_blocks_duplicate_attempt_no
 db::intake_outbox::migration_pg_tests::migration_0080_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase
+db::intake_outbox::postgres_tests::a_claim_holding_no_channel_runs_the_original_two_parameter_statement
 db::intake_outbox::postgres_tests::cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution
 db::intake_outbox::postgres_tests::claim_pending_for_target_filters_by_row_provider
 db::intake_outbox::postgres_tests::claim_pending_for_target_filters_by_target_instance_id
@@ -1065,6 +1070,7 @@ server::routes::discord::tests::snowflake_or_none_rejects_injection_attempts
 server::routes::discord::tests::thread_parent_id_extracts_discord_thread_parent
 server::routes::discord::tests::thread_parent_id_ignores_regular_channels
 server::routes::dispatched_sessions::tests::idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
+server::routes::dispatched_sessions::tests::kill_tmux_route_checks_the_host_before_any_probe_or_write_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_allows_active_statuses
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_rejects_terminal_statuses
@@ -2113,7 +2119,10 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
+services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
+services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
+services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::intake_worker::tests::fence_between_open_check_and_active_registration_rejects_late_tick
 services::cluster::intake_worker::tests::intake_request_from_row_handles_null_request_owner_name
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_numeric_channel_id
@@ -3144,6 +3153,7 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_zero_id_owned_inflight
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
+services::discord::health::recovery::o_stale_leak_cut_tests::o_delegated_stale_leak_recovery_resends_nothing
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
 services::discord::health::recovery::post_cancel_drain_tests::drain_restores_disk_queue_and_role_override
 services::discord::health::recovery::post_cancel_drain_tests::queue_truth_drain_distinguishes_unreachable_from_empty
@@ -5432,6 +5442,7 @@ services::discord::runtime_bootstrap::gateway_lease::tests::preferred_node_recog
 services::discord::runtime_bootstrap::gateway_lease::tests::self_id_is_read_from_config_not_from_the_bootstrap_race
 services::discord::runtime_bootstrap::gateway_lease::tests::standby_retry_delay_stays_inside_thirty_to_sixty_seconds
 services::discord::runtime_bootstrap::gateway_lease::tests::yields_only_to_a_preferred_node_that_wants_this_gateway
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
@@ -5561,8 +5572,11 @@ services::discord::session_identity::tests::legacy_parser_preserves_last_colon_t
 services::discord::session_identity::tests::parses_legacy_session_key
 services::discord::session_identity::tests::parses_namespaced_session_key
 services::discord::session_identity::tests::rejects_missing_or_empty_parts
+services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delegated_idle_range_is_consumed_once_without_transport_or_evidence
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::a_canary_channel_posts_only_through_o_and_its_legacy_neighbour_only_through_legacy
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::an_empty_writer_list_leaves_both_channels_to_legacy
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::claude_consumed_body_reaches_o_transport_once
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::codex_consumed_body_reaches_o_transport_once
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::task_consumed_body_reaches_o_transport_once
@@ -9488,6 +9502,7 @@ services::tmux_diagnostics::tests::probe_tmux_session_exists_truth_table
 services::tmux_diagnostics::tests::process_backend_stopped_error_forces_recreate
 services::tmux_turn_liveness::idle_cleanup_tests::idle_cleanup_preserves_busy_unknown_and_approval_waiting_provider
 services::tmux_turn_liveness::idle_cleanup_tests::idle_cleanup_uses_native_provider_state_even_when_relay_is_absent_or_stale
+services::tmux_turn_liveness::tests_pg::cleanup_host_never_reads_a_missing_or_unreadable_lookup_as_legacy_pg
 services::tmux_turn_liveness::tests_pg::idle_cleanup_preserves_approval_and_background_children_pg
 services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg
 services::tmux_wrapper::stderr_redaction_tests::redacted_stderr_line_masks_assignment_secret
@@ -9533,6 +9548,7 @@ services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
+services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
@@ -9623,8 +9639,6 @@ services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
-services::tui_o::topology::tests::switch_off_keeps_every_intake_worker
-services::tui_o::topology::tests::switch_on_refuses_tui_intake_off_the_gateway_only
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -9638,8 +9652,10 @@ services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor
+services::tui_o::writer::tests::actor::host_start::a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
+services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init

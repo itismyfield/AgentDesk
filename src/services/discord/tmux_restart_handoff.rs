@@ -628,6 +628,7 @@ mod o_cut_tests {
     /// restart marker; flag off or an unlisted destination still carries the saved body.
     #[tokio::test(flavor = "current_thread")]
     async fn o_delegated_restart_handoff_keeps_only_the_marker() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         with_isolated_runtime_root(|| async move {
             let shared = crate::services::discord::make_shared_data_for_tests();
             let handoff_contents = |channel: u64| {

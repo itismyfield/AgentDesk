@@ -614,7 +614,8 @@ src/
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
-│   │   │   └── o_route_tests.rs
+│   │   │   ├── o_route_tests.rs
+│   │   │   └── test_executor.rs
 │   │   ├── machine_resources/
 │   │   │   ├── gpu/
 │   │   │   │   ├── macos.rs
@@ -1657,6 +1658,7 @@ src/
 │   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
+│   │   ├── session_idle_cleanup_tests.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -1963,6 +1965,7 @@ src/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── blob.rs
@@ -1976,6 +1979,8 @@ src/
 │   │   ├── channel_policy/
 │   │   │   └── tests.rs
 │   │   ├── cutover/
+│   │   │   ├── channel_gate/
+│   │   │   │   └── tests.rs
 │   │   │   ├── channel_gate.rs
 │   │   │   └── intake_route.rs
 │   │   ├── shadow/
