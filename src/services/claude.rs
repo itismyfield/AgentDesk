@@ -22,7 +22,8 @@ use crate::services::claude_compact_context::{
 };
 #[cfg(unix)]
 use crate::services::claude_tui::hosting::{
-    ClaudeTuiWarmFollowupOutcome, emit_claude_tui_zero_harvest, try_claude_tui_warm_followup,
+    ClaudeTuiWarmFollowupOutcome, FollowupHost, emit_claude_tui_zero_harvest,
+    try_claude_tui_warm_followup,
 };
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
@@ -1799,7 +1800,7 @@ fn execute_streaming_local_tui_tmux(
             prompt,
             sender.clone(),
             cancel_token.clone(),
-            tmux_session_name,
+            &FollowupHost::legacy_tmux(tmux_session_name),
             report_channel_id,
         ) {
             ClaudeTuiWarmFollowupOutcome::Terminal(result) => return result,

@@ -40,6 +40,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/pipeline_routes/stage_validation_tests.rs",
         "src/services/tui_o/channel_policy/tests.rs",
         "src/services/session_host/herdr_host_tests.rs",
+        "src/services/claude_tui/hosting/host_draft_tests.rs",
         "src/services/session_host/herdr/transport_tests.rs",
         "src/services/discord/tmux_output_stream/tests/compact_summary_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests/compact_summary_tests.rs",

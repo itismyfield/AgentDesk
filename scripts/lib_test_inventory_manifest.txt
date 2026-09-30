@@ -1776,9 +1776,11 @@ services::claude_tui::hook_server_memento_tests::pending_retry_is_cross_session_
 services::claude_tui::hook_server_memento_tests::stale_relay_stop_emits_no_ephemeral_signal_and_does_not_advance_memento
 services::claude_tui::hook_server_memento_tests::stop_hook_active_suppresses_memento_flush
 services::claude_tui::hook_server_memento_tests::stop_without_pending_memento_search_stays_observational
+services::claude_tui::host_input::tests::a_mounted_dialog_is_never_ready_even_after_clear
 services::claude_tui::host_input::tests::a_send_that_may_have_landed_is_indeterminate_and_nothing_follows
 services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_never_ready
 services::claude_tui::host_input::tests::compact_literal_failure_never_sends_enter
+services::claude_tui::host_input::tests::draft_cleanup_follows_a_stop_only_on_a_confirmed_tmux_session
 services::claude_tui::host_input::tests::every_mutation_passes_the_gate_and_a_refusal_stops_before_enter
 services::claude_tui::host_input::tests::non_tmux_targets_send_nothing_and_are_never_recreated
 services::claude_tui::host_input::tests::steering_submit_keeps_the_legacy_tmux_key_order
@@ -1788,6 +1790,10 @@ services::claude_tui::hosting::followup_support::busy_followup_notice_tests::bus
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_retry_is_silent
 services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests::detects_stuck_followup_prompt_even_when_generic_draft_heuristic_ignores_footer
 services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests::ignores_submitted_discord_history_prompt
+services::claude_tui::hosting::host_draft::tests::tf2_hosts_without_input_stop_before_any_host_call
+services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_clear_then_submits_once
+services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_recreates_only_after_retiring_the_session
+services::claude_tui::hosting::host_draft::tests::tf2_swap_stop_or_lingering_draft_never_recreates
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests::followup_wait_requeue_requires_timeout_error
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests::followup_wait_requeue_respects_emergency_opt_out
 services::claude_tui::input::active_turn_wait_extension_tests::extends_only_when_pane_alive_and_turn_active_within_ceiling
@@ -9202,6 +9208,7 @@ services::session_host::herdr::transport::tests::herdr_socket_unclear_replies_ne
 services::session_host::herdr::wire::tests::herdr_line_frame_bounds_and_partial_frames
 services::session_host::herdr::wire::tests::herdr_wire_matches_the_vendored_schema
 services::session_host::herdr::wire::tests::herdr_write_failure_reports_bytes_already_sent
+services::session_host::herdr_host::tests::claude_warm_followup_reaches_tmux_only_through_the_executor
 services::session_host::herdr_host::tests::herdr_capture_maps_scroll_back_and_rejects_truncation
 services::session_host::herdr_host::tests::herdr_complete_snapshot_decides_present_or_missing
 services::session_host::herdr_host::tests::herdr_endpoint_requires_every_field_and_an_absolute_socket
