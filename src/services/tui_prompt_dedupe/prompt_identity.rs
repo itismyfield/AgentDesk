@@ -83,9 +83,8 @@ pub(super) fn check_relayed_prompt_id(
     }
 }
 
-/// Holds a published hook's `prompt_id` unannounced so a conflicting row read
-/// before the POST result still marks it ambiguous. A present id keeps its first
-/// record, record time and observer; other text only marks it ambiguous.
+/// Holds a published hook's `prompt_id` unannounced so a row read before the POST
+/// result can mark it ambiguous; a present id keeps its first record.
 pub(super) fn record_observed_hook_prompt_id(
     provider: &str,
     tmux_session_name: &str,
