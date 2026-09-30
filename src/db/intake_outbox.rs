@@ -583,21 +583,38 @@ pub(crate) async fn claim_pending_for_target_except(
 ) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let candidate: Option<i64> = sqlx::query_scalar(
-        "SELECT io.id FROM intake_outbox io
-         WHERE io.target_instance_id = $1
-           AND io.status = 'pending'
-           AND io.provider = $2
-           AND NOT (io.channel_id = ANY($3::TEXT[]))
-         ORDER BY io.created_at ASC
-         LIMIT 1
-         FOR UPDATE OF io SKIP LOCKED",
-    )
-    .bind(target_instance_id)
-    .bind(provider)
-    .bind(held_channels)
-    .fetch_optional(&mut *tx)
-    .await?;
+    // With nothing held the claim runs the original statement and bindings unchanged.
+    let candidate: Option<i64> = if held_channels.is_empty() {
+        sqlx::query_scalar(
+            "SELECT io.id FROM intake_outbox io
+             WHERE io.target_instance_id = $1
+               AND io.status = 'pending'
+               AND io.provider = $2
+             ORDER BY io.created_at ASC
+             LIMIT 1
+             FOR UPDATE OF io SKIP LOCKED",
+        )
+        .bind(target_instance_id)
+        .bind(provider)
+        .fetch_optional(&mut *tx)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            "SELECT io.id FROM intake_outbox io
+             WHERE io.target_instance_id = $1
+               AND io.status = 'pending'
+               AND io.provider = $2
+               AND NOT (io.channel_id = ANY($3::TEXT[]))
+             ORDER BY io.created_at ASC
+             LIMIT 1
+             FOR UPDATE OF io SKIP LOCKED",
+        )
+        .bind(target_instance_id)
+        .bind(provider)
+        .bind(held_channels)
+        .fetch_optional(&mut *tx)
+        .await?
+    };
 
     let Some(id) = candidate else {
         tx.commit().await?;
@@ -1779,6 +1796,49 @@ mod postgres_tests {
             .await
             .expect("read max");
         assert_eq!(max, 2);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Parameter types of each claim candidate statement the server prepared on the connection.
+    async fn prepared_claim_parameters(pool: &PgPool) -> Vec<Vec<String>> {
+        let mut prepared: Vec<Vec<String>> = sqlx::query_scalar(
+            "SELECT parameter_types::TEXT[] FROM pg_prepared_statements
+             WHERE statement LIKE '%SKIP LOCKED%' AND statement NOT LIKE '%pg_prepared%'",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("read prepared statements");
+        prepared.sort();
+        prepared
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_claim_holding_no_channel_runs_the_original_two_parameter_statement() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(1).await;
+        seed_default_test_agent(&pool).await;
+        let older = insert_pending(&pool, &payload("ch-held", "msg-A"), 1, None)
+            .await
+            .expect("seed row 1");
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        let newer = insert_pending(&pool, &payload("ch-open", "msg-B"), 1, None)
+            .await
+            .expect("seed row 2");
+        let (text, texts) = (["text", "text"], ["text", "text", "text[]"]);
+
+        let held = ["ch-held".to_string()];
+        let claimed = claim_pending_for_target_except(&pool, "worker-1", "claude", "o", &held);
+        assert_eq!(claimed.await.expect("claim").map(|row| row.id), Some(newer));
+        assert_eq!(prepared_claim_parameters(&pool).await, [texts]);
+        let claimed = claim_pending_for_target_except(&pool, "worker-1", "claude", "o", &[]);
+        assert_eq!(claimed.await.expect("claim").map(|row| row.id), Some(older));
+        assert_eq!(
+            prepared_claim_parameters(&pool).await,
+            [text.as_slice(), texts.as_slice()],
+            "with nothing held the original statement runs with its two bindings"
+        );
 
         pool.close().await;
         pg_db.drop().await;

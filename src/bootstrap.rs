@@ -45,8 +45,6 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         loaded.config
     };
 
-    crate::services::tui_o::channel_policy::install(&config)?;
-
     if let Err(error) = crate::services::mcp_config::sync_codex_mcp_servers(&config) {
         tracing::warn!("  [mcp] Failed to sync Codex MCP servers: {error}");
     }
@@ -92,4 +90,12 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     }
 
     Ok(BootstrapState { config })
+}
+
+/// Installs the process-lifetime snapshots from the final reconciled config.
+/// Every server entry calls this before HTTP, bots or intake start; an error must abort boot.
+pub(crate) fn install_boot_snapshots(config: &crate::config::Config) -> Result<()> {
+    crate::services::tui_o::channel_policy::install(config)?;
+    crate::services::provider_hosting::install_provider_hosting_config(config);
+    Ok(())
 }

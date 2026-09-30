@@ -48,6 +48,7 @@ async fn watcher_single_message_completion_footer_emits_background_agent_pending
 #[tokio::test]
 async fn watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending()
  {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for (pending, channel_raw) in [(true, 4_047_111), (false, 4_047_112)] {
         let http = std::sync::Arc::new(Http::new("Bot test-token"));
         let shared = crate::services::discord::make_shared_data_for_tests();

@@ -230,6 +230,7 @@ fn sa2_actual_postlude_rejects_foreign_or_stale_pg() {
 }
 
 fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let _lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());

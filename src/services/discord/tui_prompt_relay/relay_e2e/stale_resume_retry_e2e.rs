@@ -11,6 +11,13 @@ const RECOVERY_NOTICE: &str = "↻ 세션 복구 중... 잠시 후 자동으로 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once() {
+    let name = concat!(
+        module_path!(),
+        "::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
     let harness = RelayE2eHarness::start_with_provider(ProviderStub::StaleResumeThenSuccess).await;
     harness.cache_relay_transport();
 

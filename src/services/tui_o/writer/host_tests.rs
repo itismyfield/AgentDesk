@@ -43,6 +43,8 @@ struct TestIo {
     alarms: Raised,
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
+    /// Runs once while the next facts are read.
+    on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl TestIo {
@@ -53,6 +55,7 @@ impl TestIo {
             alarms: Raised::default(),
             calls: Mutex::default(),
             facts: Mutex::new(Ok(ActivationFacts::default())),
+            on_facts: Mutex::default(),
         })
     }
 
@@ -93,6 +96,9 @@ impl HostIo for TestIo {
         _provider: ShadowProvider,
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
         self.calls.lock().unwrap().push(("facts", channel));
+        if let Some(hook) = self.on_facts.lock().unwrap().take() {
+            hook();
+        }
         let facts = self.facts.lock().unwrap().clone();
         async move { facts }
     }
@@ -580,4 +586,68 @@ async fn missing_or_damaged_store_state_holds_instead_of_a_first_init() {
         b"{\"channel\":"
     );
     assert_eq!(io.calls(), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_writer_that_stops_takes_no_work_before_its_next_poll() {
+    let (harness, path, source) = switched_over(&row("m0", "before the switch"));
+    let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source));
+    p5_log(harness._runtime.path(), CHANNEL, &startup);
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    harness.gate.acquired();
+    let _hosts = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert!(ready.accepts(CHANNEL));
+    harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Reply::Refused(403));
+    append(&path, &row("m1", "refused"));
+    for _ in 0..500 {
+        if !harness.port.posts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(harness.port.posts(), ["refused"]);
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(
+        io.alarms
+            .has(CHANNEL, &WriterAlarm::Blocked { status: 403 })
+    );
+    assert!(
+        !ready.accepts(CHANNEL),
+        "a stopped writer takes no work while its poll sleeps"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again() {
+    let (harness, _) = fresh(startup);
+    harness.gate.acquired();
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let gate = Arc::clone(&harness.gate);
+    *io.on_facts.lock().unwrap() = Some(Box::new(move || gate.lost()));
+    let _tasks = start_host(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(harness.store.read_era().unwrap(), None);
+    assert!(!harness.store.has_channel_dir(CHANNEL));
+    assert!(!ready.is_ready(CHANNEL) && !ready.accepts(CHANNEL));
+    assert_eq!(io.alarms.halted(), [], "a lost gate is waited on, not held");
+    harness.gate.acquired();
+    polls(3).await;
+    let facts = io
+        .calls()
+        .iter()
+        .filter(|call| **call == ("facts", CHANNEL))
+        .count();
+    assert_eq!(facts, 2, "the facts are read again once Owned");
+    let era = harness.store.read_era().unwrap().unwrap();
+    assert_eq!(era.initial_channels, [CHANNEL]);
+    assert!(ready.accepts(CHANNEL));
+    assert_eq!(io.alarms.halted(), []);
 }
