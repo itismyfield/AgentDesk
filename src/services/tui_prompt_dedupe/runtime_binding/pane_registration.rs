@@ -21,13 +21,13 @@ pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntime
     register_claude_pane_with(tmux, channel, binding, Record::Stat);
 }
 
-/// A restore names how the pane's binding is logged; see `Record`.
+/// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published.
 pub(crate) fn register_claude_pane_with(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
     record: Record,
-) {
+) -> Option<Persisted> {
     let key = pane_key(tmux);
     if let Some(launch) = binding
         .session_id
@@ -43,7 +43,8 @@ pub(crate) fn register_claude_pane_with(
     if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
         complete();
     }
-    finish_registration(&key, registered);
+    finish_registration(&key, registered.is_some());
+    registered
 }
 
 pub(crate) fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok: bool) {

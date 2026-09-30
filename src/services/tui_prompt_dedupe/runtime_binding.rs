@@ -3,8 +3,8 @@ use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 mod adopt_skip;
 mod claude_source;
 #[cfg(test)]
-pub(crate) use claude_source::AFTER_CHECK;
-pub(crate) use claude_source::Record;
+pub(crate) use claude_source::{AFTER_CHECK, after_check};
+pub(crate) use claude_source::{Persisted, Record};
 mod codex_hook;
 pub(crate) use codex_hook::{codex_tail_source_retired, observe_codex_hook};
 pub(crate) mod pane_registration;
@@ -140,6 +140,7 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
         CauseSource::Observed,
         Record::Stat,
     )
+    .is_some()
 }
 
 /// Launch paths let the execution's context name the cause of a new source.
@@ -156,23 +157,23 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
+    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat).is_some()
 }
 
-/// Persists the binding event first; if that fails the binding is not published.
+/// Persists the binding event first; if that fails the binding is not published (`None`).
 fn publish_runtime_binding(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
     channel_id: Option<u64>,
     cause: CauseSource,
     record: Record,
-) -> bool {
+) -> Option<Persisted> {
     let tmux_session_name = authority.session();
     if tmux_session_name.is_empty() || binding.output_path.trim().is_empty() {
-        return false;
+        return None;
     }
     if binding.relay_output_path().trim().is_empty() {
-        return false;
+        return None;
     }
     with_runtime_binding_state_under_source_authority(authority, |state| {
         let channel_id = channel_id.or_else(|| {
@@ -187,15 +188,19 @@ fn publish_runtime_binding(
             .map(|e| &e.value);
         let proposal =
             Proposal::for_binding(channel_id, tmux_session_name, &binding, replaced, cause);
-        if let Some(Err(error)) = proposal.map(|proposal| record.persist(&proposal)) {
-            tracing::error!(
-                tmux_session_name,
-                channel_id,
-                %error,
-                "binding event log append failed; runtime binding left unchanged"
-            );
-            return false;
-        }
+        let persisted = match proposal.map(|proposal| record.persist(&proposal)) {
+            Some(Err(error)) => {
+                tracing::error!(
+                    tmux_session_name,
+                    channel_id,
+                    %error,
+                    "binding event log append failed; runtime binding left unchanged"
+                );
+                return None;
+            }
+            Some(Ok(persisted)) => persisted,
+            None => record.unlogged(),
+        };
         state.runtime_by_tmux.insert(
             tmux_session_name.to_string(),
             TimedValue {
@@ -203,7 +208,7 @@ fn publish_runtime_binding(
                 recorded_at: Instant::now(),
             },
         );
-        true
+        Some(persisted)
     })
 }
 
@@ -231,15 +236,17 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
         binding,
         Record::Stat,
     )
+    .is_some()
 }
 
+/// `None` when nothing was published; otherwise what the record left in the log.
 fn register_rehydrated_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
     channel_id: u64,
     binding: TuiRuntimeBinding,
     record: Record,
-) -> bool {
+) -> Option<Persisted> {
     let provider = normalize_provider(provider);
     let tmux_session_name = authority.session();
     if provider.is_empty()
@@ -248,15 +255,12 @@ fn register_rehydrated_under_source_authority(
         || binding.output_path.trim().is_empty()
         || binding.relay_output_path().trim().is_empty()
     {
-        return false;
+        return None;
     }
-    #[rustfmt::skip]
-    let Some(binding) = codex_hook::restored_source(authority, &provider, channel_id, binding) else { return false };
+    let binding = codex_hook::restored_source(authority, &provider, channel_id, binding)?;
     let session_id = binding.session_id.clone();
     let cause = CauseSource::Observed;
-    if !publish_runtime_binding(authority, binding, Some(channel_id), cause, record) {
-        return false;
-    }
+    let persisted = publish_runtime_binding(authority, binding, Some(channel_id), cause, record)?;
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.channel_by_tmux.insert(
@@ -279,7 +283,7 @@ fn register_rehydrated_under_source_authority(
             },
         );
     }
-    true
+    Some(persisted)
 }
 
 /// Resolve and optionally replace one binding while its source authority stays held.

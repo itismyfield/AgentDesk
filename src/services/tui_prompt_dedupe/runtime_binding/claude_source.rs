@@ -21,15 +21,32 @@ pub(crate) enum Record {
     AwaitFirstRecord,
 }
 
+/// What a registration's record left in the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Persisted {
+    /// The log names the published source: a stat's record or the verified identity.
+    Logged,
+    /// Nothing verified was logged; the pane waits on its exact path and the next pass checks again.
+    AwaitingExact,
+}
+
 impl Record {
-    pub(crate) fn persist(&self, proposal: &Proposal) -> io::Result<()> {
+    pub(crate) fn persist(&self, proposal: &Proposal) -> io::Result<Persisted> {
         match self {
-            Self::Stat => binding_events::record_source(proposal),
+            Self::Stat => binding_events::record_source(proposal).map(|()| Persisted::Logged),
             // A file replaced since the check is left unlogged for the next check to judge.
             Self::Verified(source) if binding_events::codex::source_file_matches(source) => {
-                binding_events::record_verified(proposal, source)
+                binding_events::record_verified(proposal, source).map(|()| Persisted::Logged)
             }
-            Self::Verified(_) | Self::AwaitFirstRecord => Ok(()),
+            Self::Verified(_) | Self::AwaitFirstRecord => Ok(Persisted::AwaitingExact),
+        }
+    }
+
+    /// What publishing without a log leaves: only a stat has nothing further to wait for.
+    pub(crate) fn unlogged(&self) -> Persisted {
+        match self {
+            Self::Stat => Persisted::Logged,
+            Self::Verified(_) | Self::AwaitFirstRecord => Persisted::AwaitingExact,
         }
     }
 }
@@ -150,16 +167,12 @@ impl Candidate<'_> {
         }
         #[cfg(test)]
         after_check();
-        // The path must still name the file the check read; a replaced one waits for the next check.
-        let same_session = self.bound.session_id.as_deref() == Some(payload)
-            && self.bound.output_path == candidate;
-        let unchanged = binding_events::codex::source_file_matches(&source);
-        if !unchanged && !same_session {
+        // The path must still name the file the check read; a replaced one waits for the next check,
+        // the bound source too, which keeps its binding and cursor meanwhile.
+        if !binding_events::codex::source_file_matches(&source) {
             return wait(failure);
         }
-        let recorded = proposal
-            .filter(|_| unchanged)
-            .map(|p| binding_events::record_verified(p, &source));
+        let recorded = proposal.map(|p| binding_events::record_verified(p, &source));
         if let Some(Err(error)) = recorded {
             tracing::error!(
                 tmux,
@@ -235,12 +248,12 @@ fn refused(rejection: SourceRejection) -> Checked {
 
 #[cfg(test)]
 thread_local! {
-    /// Runs once between the check and the record it leads to.
+    /// Runs once between a check, a hook's or a restore's, and the record it leads to.
     pub(crate) static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
-pub(super) fn after_check() {
+pub(crate) fn after_check() {
     if let Some(seam) = AFTER_CHECK.with_borrow_mut(Option::take) {
         seam();
     }

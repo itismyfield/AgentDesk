@@ -390,9 +390,21 @@ pub(crate) fn record_source(proposal: &Proposal) -> io::Result<()> {
     commit(proposal, Plan::Stat).map(|_| ())
 }
 
+/// How a Pending judgment stands in the log once `record_pending` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingRecord {
+    Recorded,
+    /// A Pending for the same candidate was already logged.
+    AlreadyPending,
+}
+
 /// A candidate that has no verified transcript yet waits as a Pending, whether or not a file exists.
-pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<()> {
-    commit(proposal, Plan::ForcePending).map(|_| ())
+/// Only a matching Pending stands in for the record; a current source naming the candidate does not.
+pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
+    match commit(proposal, Plan::ForcePending)? {
+        true => Ok(PendingRecord::Recorded),
+        false => Ok(PendingRecord::AlreadyPending),
+    }
 }
 
 /// Records exactly `source`, the identity the check read; the path is not looked at again.
@@ -405,6 +417,17 @@ pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<b
     commit(proposal, Plan::Rejected(reason))
 }
 
+/// The pane's current source, when a verified record pinned it.
+pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
+    let mut pinned = None;
+    commit_with(channel_id, |writer| {
+        let pane = writer.panes.get(tmux_session).filter(|pane| pane.verified);
+        pinned = pane.and_then(|pane| pane.current.clone());
+        None
+    })?;
+    Ok(pinned)
+}
+
 /// The (dev, ino) a verified record pinned for the pane, if its current source is `path` of `session`.
 pub(crate) fn pinned_file(
     channel_id: u64,
@@ -412,23 +435,16 @@ pub(crate) fn pinned_file(
     session: &str,
     path: &str,
 ) -> io::Result<Option<crate::services::cluster::stream_relay::SourceFileIdentity>> {
-    let mut pinned = None;
-    commit_with(channel_id, |writer| {
-        let pane = writer.panes.get(tmux_session).filter(|pane| pane.verified);
-        let current = pane.and_then(|pane| pane.current.as_ref());
-        let current = current.filter(|c| c.session_id == session && c.path == Path::new(path));
-        #[cfg(unix)]
-        let pin = |c: &SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
-            dev: c.dev,
-            ino: c.ino,
-        };
-        #[cfg(not(unix))]
-        let pin =
-            |_: &SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable;
-        pinned = current.map(pin);
-        None
-    })?;
-    Ok(pinned)
+    let current = pinned_source(channel_id, tmux_session)?;
+    let current = current.filter(|c| c.session_id == session && c.path == Path::new(path));
+    #[cfg(unix)]
+    let pin = |c: SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+        dev: c.dev,
+        ino: c.ino,
+    };
+    #[cfg(not(unix))]
+    let pin = |_: SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable;
+    Ok(current.map(pin))
 }
 
 fn commit(proposal: &Proposal, mode: Plan) -> io::Result<bool> {
@@ -608,7 +624,17 @@ impl Writer {
         let pending = pending.filter(|e| pending_matches(e, session, p.path));
         // A verified source is no change only once its record is pinned and no Pending waits on it.
         let unsettled = matches!(mode, Plan::Verified(_)) && (!pane.verified || pending.is_some());
-        let (new, inherited) = if let Plan::Rejected(reason) = mode {
+        let (new, inherited) = if let Plan::ForcePending = mode {
+            if pending.is_some() {
+                return None;
+            }
+            let payload_transcript_path = p.payload_path();
+            let new = BindingTarget::Pending {
+                payload_session_id,
+                payload_transcript_path,
+            };
+            (new, None)
+        } else if let Plan::Rejected(reason) = mode {
             let judged = (payload_session_id.clone(), reason.to_owned());
             if pane.rejected.as_ref() == Some(&judged) {
                 return None;

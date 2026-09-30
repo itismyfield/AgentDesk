@@ -1,5 +1,5 @@
-//! Restores a pane's durable Pending binding after a restart, judged only from the strict log,
-//! the spawn-nonce marker, the launch transcript and what the Pending's transcript holds.
+//! Restores a pane's durable Pending, or its verified current source, after a restart, judged only
+//! from the strict log, the spawn-nonce marker, the launch transcript and what the transcript holds.
 
 use std::collections::HashMap;
 use std::io;
@@ -18,10 +18,10 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use crate::services::tui_prompt_dedupe::binding_events::{
     BindingCause, BindingEvent, BindingTarget, CauseSource, Corrupt, CorruptKind, HookSignal,
-    Proposal, SourceId, records_strict, subscribe_binding_events,
+    Proposal, SourceId, pinned_source, records_strict, subscribe_binding_events,
 };
 use crate::services::tui_prompt_dedupe::{
-    Record, TuiRuntimeBinding, pane_registration, register_provider_session,
+    Persisted, Record, TuiRuntimeBinding, pane_registration, register_provider_session,
     resolve_tmux_session_name, runtime_binding_for_tmux_session,
     runtime_binding_for_tmux_session_under_source_authority,
 };
@@ -66,6 +66,10 @@ pub(crate) enum PendingRestore {
     NotEligible(NotEligible),
     BlockedCorrupt(Corrupt),
     Unavailable(Unavailable),
+    /// The file a verified record `line` pinned was replaced or is gone; nothing is bound over it.
+    Anomaly {
+        line: u64,
+    },
 }
 
 impl PendingRestore {
@@ -73,7 +77,7 @@ impl PendingRestore {
     pub(crate) fn memo(&self) -> bool {
         match self {
             Self::BoundFromLedger { exact_wait, .. } => exact_wait.is_none(),
-            Self::BlockedCorrupt(_) | Self::Unavailable(_) => false,
+            Self::BlockedCorrupt(_) | Self::Unavailable(_) | Self::Anomaly { .. } => false,
             Self::HealthyNoPending | Self::Seeded { .. } | Self::NotEligible(_) => true,
         }
     }
@@ -88,6 +92,7 @@ impl PendingRestore {
             Self::Seeded { .. }
                 | Self::BoundFromLedger { .. }
                 | Self::BlockedCorrupt(_)
+                | Self::Anomaly { .. }
                 | Self::Unavailable(Unavailable::NotRegistered)
         )
     }
@@ -100,11 +105,12 @@ pub(crate) struct LaunchTranscript {
 }
 
 /// What the caller registered before the restore; hooks keep naming the launch session, so its
-/// alias to the pane is as necessary as the binding.
+/// alias to the pane is as necessary as the binding. `logged` is set when the log names the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Registration {
     pub binding: bool,
     pub command_alias: bool,
+    pub logged: bool,
 }
 
 impl Registration {
@@ -166,6 +172,7 @@ pub(crate) fn transcript_state(path: &Path, session: &str) -> TranscriptState {
 }
 
 /// Publish exactly `transcript` for `session_id` and map the launch session to the pane.
+/// `pending_seq` is the Pending, or the verified source record, the binding is restored from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExactBinding {
     pub pending_seq: u64,
@@ -181,9 +188,10 @@ impl ExactBinding {
         if !registered.complete() {
             return PendingRestore::Unavailable(Unavailable::NotRegistered);
         }
-        // A transcript that vanished after the judgment is waited for like one never written.
-        let exists = self.verified.is_some() && self.transcript.is_file();
-        let exact_wait = (!exists).then(|| ExactPathWait {
+        // Only a verified identity the registration logged settles the pane; a transcript replaced
+        // or gone after the judgment is waited for like one never written.
+        let settled = self.verified.is_some() && registered.logged;
+        let exact_wait = (!settled).then(|| ExactPathWait {
             session_id: self.session_id.clone(),
             transcript: self.transcript.clone(),
         });
@@ -274,6 +282,50 @@ fn fold<'a>(tmux_session: &str, records: &'a [BindingEvent]) -> Fold<'a> {
     state
 }
 
+/// The pane's latest record naming its bound source, a Source or a Resolved.
+fn current_record<'a>(
+    tmux_session: &str,
+    records: &'a [BindingEvent],
+) -> Option<(&'a BindingEvent, &'a SourceId)> {
+    let mut pane = records
+        .iter()
+        .rev()
+        .filter(|r| r.tmux_session == tmux_session && r.provider == "claude");
+    pane.find_map(|record| match &record.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
+            Some((record, source))
+        }
+        _ => None,
+    })
+}
+
+/// A verified current binds only while its path still names the pinned file; a replaced, missing
+/// or unreadable one is an anomaly, judged again next poll.
+fn pinned_exact(
+    pin: &SourceId,
+    (pending_seq, line): (u64, u64),
+    launch: &LaunchTranscript,
+    transcript_state: impl Fn(&Path, &str) -> TranscriptState,
+) -> RestoreStep {
+    match transcript_state(&pin.path, &pin.session_id) {
+        TranscriptState::Own(id) if id == *pin => RestoreStep::PublishExact(ExactBinding {
+            pending_seq,
+            session_id: pin.session_id.clone(),
+            transcript: pin.path.clone(),
+            launch_session_id: launch.session_id.clone(),
+            verified: Some(pin.clone()),
+        }),
+        _ => RestoreStep::Finished(PendingRestore::Anomaly { line }),
+    }
+}
+
+/// Whether `path` is a top-level transcript of `session` under the launch's projects root.
+fn under_launch_root(launch: &LaunchTranscript, path: &Path, session: &str) -> bool {
+    let root = launch.transcript.parent().and_then(Path::parent);
+    uuid::Uuid::parse_str(session).is_ok()
+        && root.is_some_and(|root| is_top_level_transcript(root, path, session))
+}
+
 /// A hook naming another session replaces a Pending; any other source replaces a Resolved.
 fn moved_on(record: &BindingEvent, source: &SourceId, live: &Candidate) -> bool {
     match live.resolved {
@@ -301,10 +353,11 @@ fn restored_hook(pending: &BindingEvent, path: Option<&str>) -> HookSignal {
 }
 
 /// First step of restoring `tmux_session`; a publish or seed reports its outcome only after the
-/// caller hands back what it registered.
+/// caller hands back what it registered. `pinned` is the writer's verified current source.
 pub(crate) fn judge_restore(
     tmux_session: &str,
     records: io::Result<Result<Vec<BindingEvent>, Corrupt>>,
+    pinned: Option<&SourceId>,
     marker: &SpawnNonceMarker,
     launch: Option<&LaunchTranscript>,
     launch_exists: impl Fn(&Path) -> bool,
@@ -317,10 +370,30 @@ pub(crate) fn judge_restore(
         Ok(Err(corrupt)) => return done(BlockedCorrupt(corrupt)),
         Ok(Ok(records)) => records,
     };
+    // The verified current, when these records still end on the source the writer pinned.
+    let verified = current_record(tmux_session, &records).filter(|(_, s)| pinned == Some(*s));
     let live = match fold(tmux_session, &records) {
-        Fold::Empty => return done(PendingRestore::HealthyNoPending),
-        Fold::Superseded => return done(Skip(NotEligible::Superseded)),
         Fold::Live(live) => live,
+        idle => {
+            // A source adopted without a Pending is restored only on its exact path in this execution.
+            let known = match marker {
+                SpawnNonceMarker::Known(nonce) => Some(nonce.as_str()),
+                _ => None,
+            };
+            let restorable = verified.zip(launch).filter(|((record, source), launch)| {
+                known.is_some()
+                    && record.execution_nonce.as_deref() == known
+                    && under_launch_root(launch, &source.path, &source.session_id)
+            });
+            return match (restorable, idle) {
+                (Some(((record, pin), launch)), _) => {
+                    let seq = (record.seq, record.seq);
+                    pinned_exact(pin, seq, launch, &transcript_state)
+                }
+                (None, Fold::Empty) => done(PendingRestore::HealthyNoPending),
+                (None, _) => done(Skip(NotEligible::Superseded)),
+            };
+        }
     };
     if live.rejected && live.resolved.is_none() {
         return done(Skip(NotEligible::Rejected));
@@ -349,11 +422,10 @@ pub(crate) fn judge_restore(
         done(BlockedCorrupt(Corrupt { line, kind }))
     };
     // The Pending names a top-level transcript under the launch's projects root, as hook checks do.
-    let root = launch.transcript.parent().and_then(Path::parent);
-    let transcript = live.path.map(PathBuf::from).filter(|path| {
-        uuid::Uuid::parse_str(live.session).is_ok()
-            && root.is_some_and(|root| is_top_level_transcript(root, path, live.session))
-    });
+    let transcript = live
+        .path
+        .map(PathBuf::from)
+        .filter(|path| under_launch_root(launch, path, live.session));
     let Some(transcript) = transcript else {
         return mismatch(live.pending.seq);
     };
@@ -374,6 +446,13 @@ pub(crate) fn judge_restore(
     if let Some((record, source)) = live.resolved {
         if source.path != transcript {
             return mismatch(record.seq);
+        }
+        // A pinned identity is kept; only a source never verified is checked afresh and pinned.
+        let pin = verified
+            .filter(|(_, pin)| pin.session_id == source.session_id && pin.path == source.path);
+        if let Some((_, pin)) = pin {
+            let seq = (live.pending.seq, record.seq);
+            return pinned_exact(pin, seq, launch, &transcript_state);
         }
         return exact(record.seq);
     }
@@ -488,40 +567,65 @@ fn restore_pane(
     if let Some(outcome) = memoized {
         return Some(outcome);
     }
-    let records = records_strict(channel_id);
+    let (records, pinned) = match pinned_source(channel_id, tmux_session) {
+        Ok(pinned) => (records_strict(channel_id), pinned),
+        Err(error) => (Err(error), None),
+    };
     let register = |session: &str, transcript: &Path, launch_session: &str, record: Record| {
         let target = |b: &TuiRuntimeBinding| {
             b.session_id.as_deref() == Some(session) && Path::new(&b.output_path) == transcript
         };
-        // A held binding keeps its read offsets and only gets its Resolved logged; any other is replaced.
+        #[cfg(test)]
+        crate::services::tui_prompt_dedupe::after_check();
+        // A held binding keeps its read offsets and only gets its record logged; any other is replaced.
         let held = with_tmux_source_authority(tmux_session, |authority| {
             let held = runtime_binding_for_tmux_session_under_source_authority(authority)?;
             let cause = CauseSource::Observed;
             let proposal =
                 Proposal::for_binding(Some(channel_id), tmux_session, &held, None, cause);
-            let persist = |proposal: Proposal| record.persist(&proposal);
-            target(&held).then(|| proposal.map_or(Ok(()), persist).is_ok())
+            let persist = |proposal: Proposal| record.persist(&proposal).ok();
+            target(&held).then(|| proposal.map_or(Some(record.unlogged()), persist))
         });
-        if held.is_none() {
-            let binding = bind(session, transcript);
-            pane_registration::register_claude_pane_with(tmux_session, channel_id, binding, record);
-        }
-        let binding = held.unwrap_or_else(|| {
-            runtime_binding_for_tmux_session(tmux_session).is_some_and(|b| target(&b))
-        });
+        let persisted = match held {
+            // A kept binding completes a registration an earlier pass left unready, as the pass would.
+            Some(persisted) => {
+                if persisted.is_some() {
+                    pane_registration::note_claude_pane_registration(
+                        tmux_session,
+                        Some(session),
+                        true,
+                    );
+                }
+                persisted
+            }
+            None => {
+                let binding = bind(session, transcript);
+                pane_registration::register_claude_pane_with(
+                    tmux_session,
+                    channel_id,
+                    binding,
+                    record,
+                )
+            }
+        };
+        let binding = persisted.is_some()
+            && runtime_binding_for_tmux_session(tmux_session).is_some_and(|b| target(&b));
         let alias = || resolve_tmux_session_name("claude", launch_session);
         if binding && alias().is_none() {
             register_provider_session("claude", launch_session, tmux_session);
         }
         let command_alias = alias().as_deref() == Some(tmux_session);
+        let logged = persisted == Some(Persisted::Logged);
         Registration {
             binding,
             command_alias,
+            logged,
         }
     };
     let outcome = match judge_restore(
         tmux_session,
         records,
+        pinned.as_ref(),
         &marker,
         launch.as_ref(),
         Path::is_file,
@@ -583,6 +687,11 @@ fn note(tmux_session: &str, key: MemoKey, outcome: &PendingRestore) {
             tmux_session,
             ?corrupt,
             "binding event log is corrupt; the pane keeps its current binding"
+        ),
+        PendingRestore::Anomaly { line } => tracing::error!(
+            tmux_session,
+            line,
+            "the pinned transcript was replaced; the pane is not bound over it"
         ),
         PendingRestore::Unavailable(why) => {
             tracing::warn!(
