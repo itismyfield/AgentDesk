@@ -503,6 +503,30 @@ fn a_seeded_pane_keeps_its_channel_and_refuses_a_file_less_c_until_the_pass_rest
 }
 
 #[test]
+fn a_pane_no_pass_mapped_still_acknowledges_a_file_less_hook_without_a_channel() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_530, true);
+    assert_eq!(
+        last_restore_outcome(&pane.tmux),
+        None,
+        "no pass reached the pane"
+    );
+
+    // No pass would restore this mapping, so a refusal would only stall the pane's hooks.
+    expire_channel_mapping_for_tests(&pane.tmux);
+    let c = uuid();
+    assert_eq!(
+        pane.clear_to(&ingress, &c, &uuid()),
+        202,
+        "C proceeds unlogged"
+    );
+    assert_eq!(pending_lines(pane.channel, &c), 0, "nothing logged for C");
+}
+
+#[test]
 fn a_restored_b_whose_transcript_is_unreadable_still_refuses_the_next_session() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();

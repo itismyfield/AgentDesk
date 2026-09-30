@@ -6836,6 +6836,7 @@ services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_deferred_b_outlives_a_poll_that_finds_its_channel_mapping_lapsed
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_gives_way_to_the_next_session_with_a_file
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_waits_for_its_own_file_and_never_a_newer_one
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pane_no_pass_mapped_still_acknowledges_a_file_less_hook_without_a_channel
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pending_b_behind_an_existing_launch_a_is_seeded_after_a_is_registered
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pending_b_is_bound_by_the_pass_when_launch_a_never_existed
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_resolved_b_stays_bound_over_launch_a_on_every_later_pass
