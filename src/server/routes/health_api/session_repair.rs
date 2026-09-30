@@ -1,11 +1,17 @@
+use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
 use crate::services::discord::{health, relay_recovery::unmeasured_tail_of};
 use crate::services::health_diagnostics::ChannelSessionState;
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::{
+    HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
+};
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use poise::serenity_prelude::ChannelId;
 use std::future::Future;
 
 pub(super) async fn with_session<E, F: Future<Output = Response>>(
@@ -98,6 +104,78 @@ pub(super) fn idle_tmux_admits(
         inflight_safe && !unrelayed_tail,
     );
     inflight_safe && no_unread_bytes && !unrelayed_tail
+}
+
+/// Refuses before the tmux probe or any clear unless the snapshot's tmux session has a
+/// found legacy sessions row with no marker or inflight trace of another host.
+pub(super) async fn host_refusal(
+    registry: Option<&HealthRegistry>,
+    channel_id: u64,
+    before: &impl serde::Serialize,
+    snapshot: &Option<health::WatcherStateSnapshot>,
+) -> Option<Response> {
+    let watched = snapshot.as_ref()?;
+    let provider = ProviderKind::from_str(&watched.provider)?;
+    let (registry, name) = (registry?, watched.tmux_session.as_deref()?);
+    let channel = ChannelId::new(channel_id);
+    let gate = channel_teardown(
+        registry,
+        &provider,
+        channel,
+        name,
+        None,
+        "stale_mailbox_repair",
+    );
+    if matches!(gate.await, ChannelTeardown::Cleared(_)) {
+        return None;
+    }
+    let reason = "the host guard admits only a found legacy tmux session";
+    Some(host_conflict(
+        "host_not_legacy_tmux",
+        reason,
+        before,
+        snapshot,
+    ))
+}
+
+/// Whether tmux reports the snapshot's session; a failed probe refuses instead of reading absent.
+pub(super) fn tmux_present(
+    before: &impl serde::Serialize,
+    snapshot: &Option<health::WatcherStateSnapshot>,
+) -> Result<bool, Response> {
+    let Some(name) = snapshot.as_ref().and_then(|s| s.tmux_session.as_deref()) else {
+        return Ok(false);
+    };
+    match TmuxHost.presence(HostSessionRef::tmux(name)) {
+        HostPresence::Present => Ok(true),
+        HostPresence::Missing => Ok(false),
+        HostPresence::ProbeFailed => {
+            let reason = "tmux presence probe failed";
+            Err(host_conflict("tmux_probe_failed", reason, before, snapshot))
+        }
+    }
+}
+
+fn host_conflict(
+    gate: &str,
+    reason: &str,
+    before: &impl serde::Serialize,
+    snapshot: &Option<health::WatcherStateSnapshot>,
+) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "ok": false,
+            "applied": false,
+            "skipped": true,
+            "fix_safety": crate::cli::doctor::contract::FixSafety::ExplicitRestartRequired,
+            "safety_gate": gate,
+            "skipped_reason": reason,
+            "post_repair_mailbox": before,
+            "post_repair_watcher_inflight": snapshot
+        })),
+    )
+        .into_response()
 }
 
 pub(super) fn tmux_refusal(

@@ -3,6 +3,7 @@ use crate::services::agent_recovery::{
     self, ChannelRecoveryStatus, DetectorSignal, ObserveInput, OperationPlan, PendingOperation,
 };
 use crate::services::discord::health::{self, HealthRegistry};
+use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::legacy_collapse::dead_only_if_dead_or_absent;
 use crate::services::session_host::{HostKind, HostSessionRef, host_for};
@@ -174,6 +175,13 @@ async fn fence_runtime(
         .snapshot_watcher_state_for_provider(provider, channel.get())
         .await
         .and_then(|snapshot| snapshot.tmux_session);
+    // Only a found legacy row may be force-killed; any other answer keeps the pending intent.
+    if let Some(name) = session.as_deref() {
+        let gate = channel_teardown(registry, provider, channel, name, None, "recovery_fence");
+        if !matches!(gate.await, ChannelTeardown::Cleared(_)) {
+            return false;
+        }
+    }
     let process_backend = session
         .as_deref()
         .is_some_and(|name| crate::services::session_backend::process_session_pid(name).is_some());

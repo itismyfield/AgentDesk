@@ -2,11 +2,58 @@ use super::*;
 
 use futures::future::BoxFuture;
 
+use super::host_teardown_gate::shared_teardown;
+use super::inflight::{KeyedTeardown, keyed_teardown};
+use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+use crate::services::session_host::{
+    HostLiveness, HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
+};
 use crate::services::tmux_common::current_tmux_owner_marker;
 use crate::services::tmux_diagnostics::{
-    probe_tmux_session_exists, record_tmux_exit_reason, tmux_session_has_live_pane,
+    probe_tmux_session_pane_liveness, record_tmux_exit_reason,
 };
+
+/// Host verdict the stale-busy heal takes before its first probe; `true` lets it go on.
+type HostGate = dyn for<'a> Fn(
+        &'a Arc<SharedData>,
+        &'a ProviderKind,
+        serenity::ChannelId,
+        &'a str,
+    ) -> BoxFuture<'a, bool>
+    + Send
+    + Sync;
+
+/// A found legacy row heals; so does a missing row with no other-host trace, as in main,
+/// because a routine session's row key is not built from its tmux name.
+fn keyed_host_gate<'a>(
+    shared: &'a Arc<SharedData>,
+    provider: &'a ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_name: &'a str,
+) -> BoxFuture<'a, bool> {
+    Box::pin(async move {
+        let caller = "stale_busy_heal";
+        let gate = shared_teardown(shared, provider, channel_id.get(), tmux_name, None, caller);
+        !matches!(gate.await, KeyedTeardown::Kept)
+    })
+}
+
+/// Only a confirmed missing session reads absent; a failed probe never finalizes a turn.
+fn absent_only_if_missing(presence: HostPresence) -> bool {
+    presence == HostPresence::Missing
+}
+
+fn tmux_session_not_missing(name: String) -> BoxFuture<'static, bool> {
+    Box::pin(async move {
+        let probe = move || TmuxHost.presence(HostSessionRef::tmux(&name));
+        let probe = tokio::task::spawn_blocking(probe);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+            Ok(Ok(presence)) => !absent_only_if_missing(presence),
+            _ => true,
+        }
+    })
+}
 
 /// The final race gate for stale-busy recovery. The first mailbox identity is
 /// captured before the yielding liveness probe; immediately before finalize we
@@ -116,6 +163,7 @@ async fn heal_stale_busy_mailbox_with_probe(
     trigger: &'static str,
     respect_watcher_authority: bool,
     probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
+    host_gate: &HostGate,
 ) -> bool {
     if !provider.uses_managed_tmux_backend() {
         return false;
@@ -139,6 +187,9 @@ async fn heal_stale_busy_mailbox_with_probe(
     else {
         return false;
     };
+    if !host_gate(shared, provider, channel_id, &observed_tmux_session_name).await {
+        return false;
+    }
 
     if probe(observed_tmux_session_name.clone()).await {
         return false;
@@ -186,10 +237,10 @@ pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
     _tmux_session_name: &str,
     trigger: &'static str,
 ) -> bool {
-    let probe = |name: String| -> BoxFuture<'static, bool> {
-        Box::pin(async move { probe_tmux_session_exists(&name).await })
-    };
-    heal_stale_busy_mailbox_with_probe(shared, provider, channel_id, trigger, false, &probe).await
+    let probe = tmux_session_not_missing;
+    let gate = keyed_host_gate;
+    heal_stale_busy_mailbox_with_probe(shared, provider, channel_id, trigger, false, &probe, &gate)
+        .await
 }
 
 /// Idle-channel half of #4485: unlike the legacy dead-session pass below,
@@ -199,6 +250,7 @@ pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
 async fn reap_stale_busy_mailboxes_with_probe(
     shared: &Arc<SharedData>,
     probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
+    host_gate: &HostGate,
 ) {
     let fallback_provider = shared.settings.read().await.provider.clone();
     let active_mailboxes = shared.mailboxes.snapshot_all().await;
@@ -242,16 +294,15 @@ async fn reap_stale_busy_mailboxes_with_probe(
             "periodic_reaper",
             true,
             probe,
+            host_gate,
         )
         .await;
     }
 }
 
 async fn reap_stale_busy_mailboxes(shared: &Arc<SharedData>) {
-    let probe = |name: String| -> BoxFuture<'static, bool> {
-        Box::pin(async move { probe_tmux_session_exists(&name).await })
-    };
-    reap_stale_busy_mailboxes_with_probe(shared, &probe).await;
+    let (probe, gate) = (tmux_session_not_missing, keyed_host_gate);
+    reap_stale_busy_mailboxes_with_probe(shared, &probe, &gate).await;
 }
 
 /// Kill orphan tmux sessions (AgentDesk-*) that don't map to any known channel.
@@ -270,8 +321,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
         _ => return,
     };
 
-    let mut protected_dispatch_orphans = Vec::new();
-    let orphans: Vec<String> = {
+    let candidates: Vec<String> = {
         let data = shared.core.lock().await;
         let mut result = Vec::new();
 
@@ -299,59 +349,81 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
             });
 
             if !has_owner {
-                let parsed_channel_name = parse_provider_and_channel_from_tmux_name(session_name)
-                    .as_ref()
-                    .map(|(_, ch_name)| ch_name.clone());
-
-                // #145: skip orphan cleanup for unified-thread sessions with active runs
-                if let Some(ref ch_name) = parsed_channel_name
-                    && crate::dispatch::is_unified_thread_channel_name_active(ch_name)
-                {
-                    continue;
-                }
-
-                // #181: Don't kill sessions with live processes in their pane.
-                // During restart, dispatch threads may not yet be registered in
-                // data.sessions (recover_orphan_pending_dispatches runs AFTER this).
-                // A tmux pane with a running process is proof the session is in use.
-                if tmux_session_has_live_pane(session_name) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!("  [{ts}]   skipped orphan (live pane): {}", session_name);
-                    continue;
-                }
-
-                if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-                    shared.pg_pool.as_ref(),
-                    &shared.token_hash,
-                    &provider,
-                    session_name,
-                    parsed_channel_name.as_deref(),
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    if protection.active_dispatch_id().is_some() {
-                        tracing::warn!(
-                            "  [{ts}] orphan cleanup: active dispatch owns dead session {} — {}",
-                            session_name,
-                            protection.log_reason()
-                        );
-                        protected_dispatch_orphans
-                            .push((session_name.to_string(), protection.clone()));
-                    } else {
-                        tracing::info!(
-                            "  [{ts}] ♻ orphan cleanup: preserving dispatch session {} — {}",
-                            session_name,
-                            protection.log_reason()
-                        );
-                        continue;
-                    }
-                }
-
                 result.push(session_name.to_string());
             }
         }
 
         result
     };
+    clean_orphan_sessions(shared, &provider, candidates).await;
+}
+
+/// Cleans the unowned sessions `cleanup_orphan_tmux_sessions` listed. An orphan has no
+/// channel, so no inflight row names it; its sessions row and marker still go to the guard.
+async fn clean_orphan_sessions(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    candidates: Vec<String>,
+) {
+    let mut protected_dispatch_orphans = Vec::new();
+    let mut orphans = Vec::new();
+    for session_name in candidates {
+        let session_name = session_name.as_str();
+        let parsed_channel_name = parse_provider_and_channel_from_tmux_name(session_name)
+            .as_ref()
+            .map(|(_, ch_name)| ch_name.clone());
+
+        // #145: skip orphan cleanup for unified-thread sessions with active runs
+        if let Some(ref ch_name) = parsed_channel_name
+            && crate::dispatch::is_unified_thread_channel_name_active(ch_name)
+        {
+            continue;
+        }
+
+        let teardown = shared_teardown(shared, provider, 0, session_name, None, "orphan_cleanup");
+        let teardown = teardown.await;
+        if matches!(teardown, KeyedTeardown::Kept) {
+            continue;
+        }
+
+        // #181: Don't kill sessions with live processes in their pane.
+        // During restart, dispatch threads may not yet be registered in
+        // data.sessions (recover_orphan_pending_dispatches runs AFTER this).
+        // A tmux pane with a running process is proof the session is in use.
+        // A failed probe is not proof of death either.
+        if probe_tmux_session_pane_liveness(session_name).await != PaneLiveness::DeadOrAbsent {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}]   skipped orphan (live pane): {}", session_name);
+            continue;
+        }
+
+        if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+            shared.pg_pool.as_ref(),
+            &shared.token_hash,
+            provider,
+            session_name,
+            parsed_channel_name.as_deref(),
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            if protection.active_dispatch_id().is_some() {
+                tracing::warn!(
+                    "  [{ts}] orphan cleanup: active dispatch owns dead session {} — {}",
+                    session_name,
+                    protection.log_reason()
+                );
+                protected_dispatch_orphans.push((session_name.to_string(), protection.clone()));
+            } else {
+                tracing::info!(
+                    "  [{ts}] ♻ orphan cleanup: preserving dispatch session {} — {}",
+                    session_name,
+                    protection.log_reason()
+                );
+                continue;
+            }
+        }
+
+        orphans.push((session_name.to_string(), teardown));
+    }
 
     for (session_name, protection) in &protected_dispatch_orphans {
         if super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
@@ -381,7 +453,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
         orphans.len()
     );
 
-    for name in &orphans {
+    for (name, teardown) in &orphans {
         let name_clone = name.clone();
         let killed = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -400,7 +472,12 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
         if killed {
             tracing::info!("  [{ts}]   killed orphan: {}", name);
             // Clean both persistent and legacy temp files.
-            crate::services::tmux_common::cleanup_session_temp_files(name);
+            match teardown {
+                KeyedTeardown::Cleared(session) => {
+                    crate::services::tmux_common::cleanup_cleared_session_temp_files(session)
+                }
+                _ => crate::services::tmux_common::cleanup_session_temp_files(name),
+            }
         }
     }
 }
@@ -413,7 +490,6 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
 
     let provider = shared.settings.read().await.provider.clone();
     let current_owner_marker = current_tmux_owner_marker();
-    let api_port = shared.api_port;
 
     // List all tmux sessions
     let output = match tokio::time::timeout(
@@ -448,165 +524,9 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             continue;
         }
 
-        // Skip sessions that have a live pane (actually working)
-        if tmux_session_has_live_pane(session_name) {
-            continue;
+        if reap_dead_session(shared, &provider, session_name, &reapable_fresh_sessions).await {
+            reaped += 1;
         }
-
-        // Skip sessions that already have an active watcher (watcher handles its own cleanup)
-        let channel_id_for_session = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .iter()
-                .find(|(_, s)| {
-                    s.channel_name
-                        .as_ref()
-                        .map(|ch| provider.build_tmux_session_name(ch) == session_name)
-                        .unwrap_or(false)
-                })
-                .map(|(ch, s)| (*ch, s.channel_name.clone()))
-        };
-
-        let Some((channel_id, channel_name)) = channel_id_for_session else {
-            // orphan — no channel mapping. #3877: if this dead session is a
-            // completed `fresh` routine's distinct session that escaped
-            // completion teardown, reap it now (backstop) instead of leaving it
-            // for the boot-only `cleanup_orphan_tmux_sessions`. The snapshot is
-            // only ever non-empty when a PG pool exists, so the pool guard here
-            // is a no-op in non-PG deployments and feeds the kill-time re-read.
-            if let Some(pool) = shared.pg_pool.as_ref()
-                && let Some(routine_id) = reapable_fresh_sessions.get(session_name)
-                && reap_fresh_routine_orphan(pool, session_name, routine_id).await
-            {
-                reaped += 1;
-            }
-            continue;
-        };
-
-        // If a watcher is attached, tmux liveness is the termination authority:
-        // the watcher observes pane death, clears the registry, and applies the
-        // same lifecycle/audit semantics as the live tail path.
-        if shared.tmux_watchers.contains_key(&channel_id) {
-            continue;
-        }
-
-        if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-            shared.pg_pool.as_ref(),
-            &shared.token_hash,
-            &provider,
-            session_name,
-            channel_name.as_deref(),
-        ) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            if super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
-                api_port,
-                &protection,
-                session_name,
-                "tmux_reaper",
-            )
-            .await
-            {
-                tracing::warn!(
-                    "  [{ts}] reaper: failed active dispatch for dead session {} — {}",
-                    session_name,
-                    protection.log_reason()
-                );
-            } else {
-                tracing::info!(
-                    "  [{ts}] ♻ reaper: preserving dispatch session {} — {}",
-                    session_name,
-                    protection.log_reason()
-                );
-                continue;
-            }
-        }
-
-        // Dead session with no watcher — report idle to DB and kill
-        let tmux_name =
-            provider.build_tmux_session_name(channel_name.as_deref().unwrap_or("unknown"));
-        let session_key = super::adk_session::build_namespaced_session_key(
-            &shared.token_hash,
-            &provider,
-            &tmux_name,
-        );
-
-        // Check if this is a thread session (channel name contains -t{15+digit})
-        let is_thread = channel_name
-            .as_deref()
-            .and_then(|n| {
-                let pos = n.rfind("-t")?;
-                let suffix = &n[pos + 2..];
-                (suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit())).then_some(())
-            })
-            .is_some();
-
-        // #145: unified-thread sessions should NOT be killed or deleted while
-        // the auto-queue run is still active — mark idle instead and skip kill.
-        let is_unified_active =
-            is_thread && crate::dispatch::is_unified_thread_channel_active(channel_id.get());
-
-        if is_thread && !is_unified_active {
-            // Dead/orphan thread sessions: remove the DB row entirely.
-            super::adk_session::delete_adk_session(&session_key, api_port).await;
-        } else {
-            // Fixed-channel sessions or active unified-thread: just mark idle
-            super::adk_session::post_adk_session_status(
-                Some(&session_key),
-                channel_name.as_deref(),
-                None,
-                "idle",
-                &provider,
-                None,
-                None,
-                None,
-                None,
-                channel_name
-                    .as_deref()
-                    .and_then(super::adk_session::parse_thread_channel_id_from_name),
-                Some(channel_id),
-                None,
-                api_port,
-            )
-            .await;
-        }
-
-        if is_unified_active {
-            // Don't kill unified-thread sessions — they'll be reused
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ♻ reaper: skipping kill for unified-thread session {session_name} — run still active"
-            );
-            continue;
-        }
-
-        // Kill the dead tmux session
-        let sess = session_name.to_string();
-        let kill_result = tokio::task::spawn_blocking(move || {
-            record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
-            crate::services::platform::tmux::kill_session_output(
-                &sess,
-                "reaper: dead session with no watcher",
-            )
-        })
-        .await;
-        match &kill_result {
-            Ok(Ok(o)) if !o.status.success() => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ reaper: tmux kill-session failed for {session_name}: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Ok(Err(e)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ reaper: tmux kill-session error for {session_name}: {e}"
-                );
-            }
-            _ => {}
-        }
-
-        reaped += 1;
     }
 
     if reaped > 0 {
@@ -620,6 +540,183 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
     process_unified_thread_kill_signals(shared).await;
 
     reap_orphan_tmux_wrapper_processes().await;
+}
+
+/// Reaps one listed dead session: the host guard reads the rows as stored before the
+/// dispatch failure, the idle report or delete, or the kill; a refusal skips all of them.
+async fn reap_dead_session(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    session_name: &str,
+    reapable_fresh_sessions: &std::collections::HashMap<String, String>,
+) -> bool {
+    let api_port = shared.api_port;
+    // Skip sessions that have a live pane (actually working); a failed probe is not death.
+    let pane = probe_tmux_session_pane_liveness(session_name).await;
+    if pane != PaneLiveness::DeadOrAbsent {
+        return false;
+    }
+
+    // Skip sessions that already have an active watcher (watcher handles its own cleanup)
+    let channel_id_for_session = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .iter()
+            .find(|(_, s)| {
+                s.channel_name
+                    .as_ref()
+                    .map(|ch| provider.build_tmux_session_name(ch) == session_name)
+                    .unwrap_or(false)
+            })
+            .map(|(ch, s)| (*ch, s.channel_name.clone()))
+    };
+
+    let Some((channel_id, channel_name)) = channel_id_for_session else {
+        // orphan — no channel mapping. #3877: if this dead session is a
+        // completed `fresh` routine's distinct session that escaped
+        // completion teardown, reap it now (backstop) instead of leaving it
+        // for the boot-only `cleanup_orphan_tmux_sessions`. The snapshot is
+        // only ever non-empty when a PG pool exists, so the pool guard here
+        // is a no-op in non-PG deployments and feeds the kill-time re-read.
+        return match reapable_fresh_sessions.get(session_name) {
+            Some(routine_id) => {
+                reap_fresh_routine_orphan(shared, provider, session_name, routine_id).await
+            }
+            None => false,
+        };
+    };
+
+    // If a watcher is attached, tmux liveness is the termination authority:
+    // the watcher observes pane death, clears the registry, and applies the
+    // same lifecycle/audit semantics as the live tail path.
+    if shared.tmux_watchers.contains_key(&channel_id) {
+        return false;
+    }
+    let observed = Some(HostLiveness::from(pane));
+    let caller = "dead_session_reaper";
+    let teardown = shared_teardown(
+        shared,
+        provider,
+        channel_id.get(),
+        session_name,
+        observed,
+        caller,
+    );
+    if matches!(teardown.await, KeyedTeardown::Kept) {
+        return false;
+    }
+
+    if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+        shared.pg_pool.as_ref(),
+        &shared.token_hash,
+        provider,
+        session_name,
+        channel_name.as_deref(),
+    ) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        if super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
+            api_port,
+            &protection,
+            session_name,
+            "tmux_reaper",
+        )
+        .await
+        {
+            tracing::warn!(
+                "  [{ts}] reaper: failed active dispatch for dead session {} — {}",
+                session_name,
+                protection.log_reason()
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] ♻ reaper: preserving dispatch session {} — {}",
+                session_name,
+                protection.log_reason()
+            );
+            return false;
+        }
+    }
+
+    // Dead session with no watcher — report idle to DB and kill
+    let tmux_name = provider.build_tmux_session_name(channel_name.as_deref().unwrap_or("unknown"));
+    let session_key =
+        super::adk_session::build_namespaced_session_key(&shared.token_hash, provider, &tmux_name);
+
+    // Check if this is a thread session (channel name contains -t{15+digit})
+    let is_thread = channel_name
+        .as_deref()
+        .and_then(|n| {
+            let pos = n.rfind("-t")?;
+            let suffix = &n[pos + 2..];
+            (suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit())).then_some(())
+        })
+        .is_some();
+
+    // #145: unified-thread sessions should NOT be killed or deleted while
+    // the auto-queue run is still active — mark idle instead and skip kill.
+    let is_unified_active =
+        is_thread && crate::dispatch::is_unified_thread_channel_active(channel_id.get());
+
+    if is_thread && !is_unified_active {
+        // Dead/orphan thread sessions: remove the DB row entirely.
+        super::adk_session::delete_adk_session(&session_key, api_port).await;
+    } else {
+        // Fixed-channel sessions or active unified-thread: just mark idle
+        super::adk_session::post_adk_session_status(
+            Some(&session_key),
+            channel_name.as_deref(),
+            None,
+            "idle",
+            provider,
+            None,
+            None,
+            None,
+            None,
+            channel_name
+                .as_deref()
+                .and_then(super::adk_session::parse_thread_channel_id_from_name),
+            Some(channel_id),
+            None,
+            api_port,
+        )
+        .await;
+    }
+
+    if is_unified_active {
+        // Don't kill unified-thread sessions — they'll be reused
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ♻ reaper: skipping kill for unified-thread session {session_name} — run still active"
+        );
+        return false;
+    }
+
+    // Kill the dead tmux session
+    let sess = session_name.to_string();
+    let kill_result = tokio::task::spawn_blocking(move || {
+        record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
+        crate::services::platform::tmux::kill_session_output(
+            &sess,
+            "reaper: dead session with no watcher",
+        )
+    })
+    .await;
+    match &kill_result {
+        Ok(Ok(o)) if !o.status.success() => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ reaper: tmux kill-session failed for {session_name}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        Ok(Err(e)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ reaper: tmux kill-session error for {session_name}: {e}");
+        }
+        _ => {}
+    }
+
+    true
 }
 
 /// (#3877) Builds the lookup the periodic reaper uses to collect a completed
@@ -675,10 +772,14 @@ async fn build_reapable_fresh_routine_sessions(
 /// re-probe pane liveness (must still be definitively dead). Only when BOTH still
 /// hold do we kill; otherwise we log the skip reason and preserve the session.
 async fn reap_fresh_routine_orphan(
-    pool: &sqlx::PgPool,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     session_name: &str,
     routine_id: &str,
 ) -> bool {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return false;
+    };
     let routine = match crate::services::routines::fresh_session_reaper::reread_routine(
         pool, routine_id,
     )
@@ -694,16 +795,34 @@ async fn reap_fresh_routine_orphan(
         }
     };
 
+    // The row the latest owning run recorded is the ownership proof; without one the
+    // channel-style key finds no row, so only the marker can refuse, as for an orphan.
+    let key = match routine_owned_session_key(pool, routine_id, session_name).await {
+        Some(owned) => owned,
+        None => super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            provider,
+            session_name,
+        ),
+    };
+    let caller = "fresh_routine_backstop";
+    let teardown = keyed_teardown(
+        Some(pool),
+        provider,
+        0,
+        Some(&key),
+        session_name,
+        None,
+        caller,
+    );
+    let teardown = teardown.await;
+    if matches!(teardown, KeyedTeardown::Kept) {
+        return false;
+    }
+
     // Re-probe pane liveness as a three-state answer: a transient probe failure
     // must NOT be mistaken for death (treated as "unknown ⇒ preserve").
-    let pane = {
-        let name = session_name.to_string();
-        tokio::task::spawn_blocking(move || {
-            crate::services::tmux_diagnostics::tmux_session_pane_liveness(&name)
-        })
-        .await
-        .unwrap_or(crate::services::platform::tmux::PaneLiveness::ProbeError)
-    };
+    let pane = probe_tmux_session_pane_liveness(session_name).await;
 
     if let Err(reason) =
         crate::services::routines::fresh_session_reaper::revalidate_fresh_orphan_before_kill(
@@ -737,13 +856,41 @@ async fn reap_fresh_routine_orphan(
     .unwrap_or(false);
 
     if killed {
-        crate::services::tmux_common::cleanup_session_temp_files(session_name);
+        match &teardown {
+            KeyedTeardown::Cleared(session) => {
+                crate::services::tmux_common::cleanup_cleared_session_temp_files(session)
+            }
+            _ => crate::services::tmux_common::cleanup_session_temp_files(session_name),
+        }
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 🪦 reaper backstop: reaped completed fresh routine orphan {session_name} (routine {routine_id}) (#3877)"
         );
     }
     killed
+}
+
+/// The full session key the routine's latest owning run recorded, when it names exactly
+/// `session_name`; a bare name or another session proves nothing.
+async fn routine_owned_session_key(
+    pool: &sqlx::PgPool,
+    routine_id: &str,
+    session_name: &str,
+) -> Option<String> {
+    let owned: Option<String> = sqlx::query_scalar(
+        "SELECT owned_tmux_session FROM routine_runs
+          WHERE routine_id = $1 AND owned_tmux_session IS NOT NULL
+          ORDER BY started_at DESC, id DESC
+          LIMIT 1",
+    )
+    .bind(routine_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    owned.filter(|key| {
+        super::session_identity::tmux_name_from_session_key(key).as_deref() == Some(session_name)
+    })
 }
 
 #[cfg(unix)]
@@ -917,6 +1064,15 @@ mod tests {
         }
     }
 
+    /// These tests exercise the probe and identity gates; the host guard has keyed tests.
+    fn admit_any_host<'a>(
+        _: &'a Arc<crate::services::discord::SharedData>,
+        _: &'a ProviderKind,
+        _: ChannelId,
+        _: &'a str,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { true })
+    }
     #[test]
     fn stale_busy_guard_preserves_respawned_or_reowned_turn() {
         let observed = MessageId::new(4_485_101);
@@ -1157,7 +1313,7 @@ agents:
             let is_live = name == expected_live_name;
             Box::pin(async move { is_live })
         };
-        reap_stale_busy_mailboxes_with_probe(&shared, &probe).await;
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe, &admit_any_host).await;
 
         assert_eq!(
             probed_names.lock().expect("probe names lock").as_slice(),
@@ -1283,7 +1439,7 @@ agents:
             let is_live = name == alive_name;
             Box::pin(async move { is_live })
         };
-        reap_stale_busy_mailboxes_with_probe(&shared, &probe).await;
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe, &admit_any_host).await;
 
         let probed = probed_names.lock().expect("probe names lock").clone();
         assert!(
@@ -1372,7 +1528,7 @@ agents:
                 .push(name.clone());
             Box::pin(async move { false })
         };
-        reap_stale_busy_mailboxes_with_probe(&shared, &probe).await;
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe, &admit_any_host).await;
 
         assert!(
             probed_names.lock().expect("probe names lock").is_empty(),
@@ -1495,36 +1651,19 @@ agents:
 }
 
 /// Kill tmux sessions flagged for cleanup by auto-queue.js after unified run completion.
-async fn process_unified_thread_kill_signals(_shared: &Arc<SharedData>) {
+async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
     let channels = tokio::task::spawn_blocking(crate::dispatch::drain_unified_thread_kill_signals)
         .await
         .unwrap_or_default();
 
     for thread_channel_id in channels {
-        // The kill signal carries the raw thread channel ID. Thread tmux sessions
-        // are named "{parent_channel_name}-t{thread_channel_id}{env_suffix}".
-        // We must find the matching tmux session by scanning for the exact suffix
-        // including env isolation to avoid killing sessions from other environments.
-        let env_suffix = crate::services::provider::tmux_env_suffix();
-        let full_suffix = format!("-t{thread_channel_id}{env_suffix}");
-        let suffix_c = full_suffix.clone();
-        let killed = tokio::task::spawn_blocking(move || {
-            let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
-            let names = crate::services::platform::tmux::list_session_names().ok()?;
-            for name in &names {
-                if name.starts_with(&prefix) && name.ends_with(&suffix_c) {
-                    record_tmux_exit_reason(name, "unified-thread run completed");
-                    crate::services::platform::tmux::kill_session(
-                        name,
-                        "unified-thread run completed",
-                    );
-                    return Some(name.clone());
-                }
-            }
-            None
-        })
-        .await
-        .unwrap_or(None);
+        let names =
+            tokio::task::spawn_blocking(crate::services::platform::tmux::list_session_names)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+        let killed = kill_unified_thread_session(shared, &thread_channel_id, &names).await;
 
         let ts = chrono::Local::now().format("%H:%M:%S");
         if let Some(name) = killed {
@@ -1533,4 +1672,38 @@ async fn process_unified_thread_kill_signals(_shared: &Arc<SharedData>) {
             );
         }
     }
+}
+
+/// Kills the listed session of one completed unified-thread run once the host guard
+/// admits it; the thread channel keys its sessions row and inflight row.
+async fn kill_unified_thread_session(
+    shared: &Arc<SharedData>,
+    thread_channel_id: &str,
+    names: &[String],
+) -> Option<String> {
+    // The kill signal carries the raw thread channel ID. Thread tmux sessions
+    // are named "{parent_channel_name}-t{thread_channel_id}{env_suffix}".
+    // We must find the matching tmux session by scanning for the exact suffix
+    // including env isolation to avoid killing sessions from other environments.
+    let env_suffix = crate::services::provider::tmux_env_suffix();
+    let full_suffix = format!("-t{thread_channel_id}{env_suffix}");
+    let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+    let name = names
+        .iter()
+        .find(|name| name.starts_with(&prefix) && name.ends_with(&full_suffix))?
+        .clone();
+    let (provider, _) = parse_provider_and_channel_from_tmux_name(&name)?;
+    let channel_id = thread_channel_id.parse::<u64>().ok()?;
+    let gate = shared_teardown(shared, &provider, channel_id, &name, None, "unified_kill");
+    if matches!(gate.await, KeyedTeardown::Kept) {
+        return None;
+    }
+    let target = name.clone();
+    tokio::task::spawn_blocking(move || {
+        record_tmux_exit_reason(&target, "unified-thread run completed");
+        crate::services::platform::tmux::kill_session(&target, "unified-thread run completed");
+    })
+    .await
+    .ok()?;
+    Some(name)
 }
