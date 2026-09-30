@@ -1,6 +1,5 @@
-//! A Claude prompt announced from its `UserPromptSubmit` hook, through the real
-//! relay and a mock Discord: the idle scanner's later row is matched by
-//! `prompt_id`, and an announcement Discord certainly never got leaves no match.
+//! Hook-announced Claude prompts through the real relay and a mock Discord: the
+//! idle scanner's row matches by `prompt_id` unless Discord certainly never got it.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
