@@ -235,9 +235,14 @@ struct TurnEnd {
 
 type ApiCalls = Arc<Mutex<Vec<(String, String)>>>;
 
-// A resume failure reported in the response output, driven through terminal delivery and
-// then the completion postlude with the same values the bridge threads between them.
-async fn resume_failure_turn(row: StoredRow, with_user_message: bool, api: &ApiCalls) -> TurnEnd {
+// A resume failure, reported in the output or found by the empty-response handler, driven
+// through terminal delivery and the completion postlude the way the bridge threads them.
+async fn resume_failure_turn(
+    row: StoredRow,
+    with_user_message: bool,
+    quick_exit: bool,
+    api: &ApiCalls,
+) -> TurnEnd {
     // The driver holds the shared test-env lock, which comes before the database lock.
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -291,8 +296,15 @@ async fn resume_failure_turn(row: StoredRow, with_user_message: bool, api: &ApiC
         .cancel_token
         .bind_unmanaged_session_name(DRIVER_TMUX_SESSION);
     state.adk_session_key = Some(key);
-    state.resume_failure_detected = true;
-    state.full_response = "No conversation found with session ID".to_string();
+    if quick_exit {
+        ctx.had_prior_session_id_at_turn_start = true;
+        ctx.session_handshake_seen = false;
+        ctx.rx_disconnected = true;
+        state.full_response = String::new();
+    } else {
+        state.resume_failure_detected = true;
+        state.full_response = "No conversation found with session ID".to_string();
+    }
     state.new_session_id = Some("sid-turn".to_string());
     state.new_raw_provider_session_id = Some("raw-turn".to_string());
     state.inflight_state.session_id = Some("sid-turn".to_string());
@@ -312,7 +324,7 @@ async fn resume_failure_turn(row: StoredRow, with_user_message: bool, api: &ApiC
         calls.iter().filter(|(path, _)| path == clear).count()
     };
     let terminal_clears = clears(api);
-    run_bridge_postlude(&driver, output).await;
+    run_bridge_postlude(&driver, output, quick_exit).await;
 
     let core_sid = shared.core.lock().await.sessions[&channel_id]
         .session_id
@@ -345,7 +357,7 @@ async fn resume_failure_turn(row: StoredRow, with_user_message: bool, api: &ApiC
 
 // Mirrors how the bridge hands terminal delivery's output to the completion postlude.
 #[rustfmt::skip]
-async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput) {
+async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, rx_disconnected: bool) {
     use super::super::super::{completion_postlude as postlude, guards};
     let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
     let (_, rx) = std::sync::mpsc::channel();
@@ -383,7 +395,7 @@ async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOu
         tmux_last_offset: None, watcher_owner_channel_id: channel_id,
         bridge_relay_delegated_to_watcher: false, is_prompt_too_long: false,
         resume_failure_detected: output.resume_failure_detected, recovery_retry: false,
-        rx_disconnected: false, tmux_handed_off: false, bridge_output_owner: None,
+        rx_disconnected, tmux_handed_off: false, bridge_output_owner: None,
         terminal_delivery_committed: output.terminal_delivery_committed,
         terminal_session_reset_required: false, transcript_events: Vec::new(),
         accumulated_input_tokens: 0, accumulated_cache_create_tokens: 0,
@@ -445,18 +457,20 @@ fn kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg()
         crate::services::discord::internal_api::init(port, None);
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let cleared = resume_failure_turn(StoredRow::Legacy, true, &api).await;
-        assert_eq!(cleared.requeued, 1, "{cleared:?}");
-        assert!(
-            cleared.continue_notice && !cleared.inflight_kept,
-            "{cleared:?}"
-        );
-        assert_eq!(cleared.core_sid, None, "{cleared:?}");
-        let (terminal, total) = cleared.db_clears;
-        assert!(terminal > 0 && total == 2 * terminal, "{cleared:?}");
+        for quick_exit in [false, true] {
+            let cleared = resume_failure_turn(StoredRow::Legacy, true, quick_exit, &api).await;
+            assert_eq!(cleared.requeued, 1, "{cleared:?}");
+            assert!(
+                cleared.continue_notice && !cleared.inflight_kept,
+                "{cleared:?}"
+            );
+            assert_eq!(cleared.core_sid, None, "{cleared:?}");
+            let (terminal, total) = cleared.db_clears;
+            assert!(terminal > 0 && total == 2 * terminal, "{cleared:?}");
+        }
 
         // The existing branch for a turn with no message to retry.
-        let no_retry = resume_failure_turn(StoredRow::Legacy, false, &api).await;
+        let no_retry = resume_failure_turn(StoredRow::Legacy, false, false, &api).await;
         assert_eq!(no_retry.requeued, 0, "{no_retry:?}");
         assert!(
             !no_retry.continue_notice && no_retry.inflight_kept,
@@ -464,18 +478,18 @@ fn kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg()
         );
         assert_eq!(no_retry.core_sid, None, "{no_retry:?}");
 
-        for row in [StoredRow::Bound, StoredRow::Missing] {
-            let kept = resume_failure_turn(row, true, &api).await;
+        for (row, quick_exit) in [
+            (StoredRow::Bound, false),
+            (StoredRow::Missing, false),
+            (StoredRow::Bound, true),
+        ] {
+            let kept = resume_failure_turn(row, true, quick_exit, &api).await;
+            let case = format!("{row:?} quick_exit={quick_exit}: {kept:?}");
             let branch = (kept.requeued, kept.continue_notice, kept.inflight_kept);
-            let no_retry_branch = (0, false, true);
-            assert_eq!(branch, no_retry_branch, "{row:?}: {kept:?}");
-            assert_eq!(
-                kept.core_sid.as_deref(),
-                Some("sid-turn"),
-                "{row:?}: {kept:?}"
-            );
-            assert_eq!(kept.db_clears, (0, 0), "{row:?}: {kept:?}");
-            assert!(kept.persisted_sid, "{row:?}: {kept:?}");
+            assert_eq!(branch, (0, false, true), "{case}");
+            assert_eq!(kept.core_sid.as_deref(), Some("sid-turn"), "{case}");
+            assert_eq!(kept.db_clears, (0, 0), "{case}");
+            assert!(kept.persisted_sid, "{case}");
         }
         server.abort();
     });
