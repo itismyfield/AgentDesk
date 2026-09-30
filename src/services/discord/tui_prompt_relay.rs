@@ -42,6 +42,8 @@ use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
 
+mod idle_tail_state;
+pub(in crate::services::discord) use self::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
     ClaudeIdleTranscriptScan, CodexIdleRolloutScan, claude_idle_compaction_reanchor,
@@ -232,14 +234,6 @@ const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(2);
 static SLASH_COMMAND_CONTROL_LAST_POSTED: LazyLock<
     Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-
-/// Whether a Claude idle response tail runs for the session, read without deciding anything.
-pub(in crate::services::discord) fn claude_idle_tail_running(tmux_session_name: &str) -> bool {
-    CLAUDE_IDLE_RESPONSE_TAILS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .contains(tmux_session_name)
-}
 
 struct ClaudeIdleTailGuard {
     tmux_session_name: String,

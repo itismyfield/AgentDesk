@@ -1383,6 +1383,7 @@ src/
 │   │   │   ├── claude_idle_tail.rs
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── idle_offset_resolution.rs
+│   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
