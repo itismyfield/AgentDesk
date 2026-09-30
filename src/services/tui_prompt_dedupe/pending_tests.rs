@@ -8,7 +8,7 @@ use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
 use crate::services::claude_tui::source_verify::SourceRejection;
 use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::binding_context::{
-    observe_spawn_nonce_marker, tests::fixture,
+    observe_spawn_nonce_marker, tests::fixture_after_shared_test_env_lock,
 };
 use crate::services::tui_prompt_dedupe::binding_events::{
     APPEND_FAULT, BINDING_EVENTS_DIR, forget_channel_for_tests, pinned_source, record_pending,
@@ -25,18 +25,23 @@ use std::fs;
 use std::sync::MutexGuard;
 
 /// Real writers on a scratch log root and spawn-marker root, with the dedupe state serialised.
+/// Fields drop in order: the env is restored while `TEST_LOCK` and then the env lock are held.
 struct Lane {
     root: tempfile::TempDir,
     dir: tempfile::TempDir,
+    _env: (tempfile::TempDir, [crate::config::TestEnvVarGuard; 2]),
     _rotations: MutexGuard<'static, ()>,
     _state: MutexGuard<'static, ()>,
-    _env: (tempfile::TempDir, [crate::config::TestEnvVarGuard; 2]),
+    _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 impl Lane {
     fn new() -> Self {
-        let env = fixture();
+        // Env lock, then `TEST_LOCK`, then the env change: a test holding `TEST_LOCK` never sees
+        // the runtime root, and so the source-authority key, move under it.
+        let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = fixture_after_shared_test_env_lock();
         let rotations = lock_claude_session_rotations_for_tests();
         let root = tempfile::tempdir().unwrap();
         set_test_root(Some(root.path()));
@@ -45,9 +50,10 @@ impl Lane {
         Self {
             root,
             dir,
+            _env: env,
             _rotations: rotations,
             _state: state,
-            _env: env,
+            _env_lock: env_lock,
         }
     }
 
@@ -1769,5 +1775,167 @@ mod verified_adoption {
         assert_eq!(observe(), IngressOutcome::Durable(DurableKind::Adopted));
         assert_eq!(bound(tmux), registered);
         assert_eq!(log(channel).len(), logged);
+    }
+
+    type Hook = std::rc::Rc<dyn Fn() -> AdoptionHttp>;
+
+    /// Runs `hook` at the restore's check-to-record seam; the slot holds its answer, or `None` when
+    /// the restore's authority held it off and it runs after the restore, as a waiting hook does.
+    fn hook_at_restore_seam(
+        hook: Hook,
+    ) -> std::rc::Rc<std::cell::RefCell<Option<Option<AdoptionHttp>>>> {
+        let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let seam_slot = slot.clone();
+        let seam = move || {
+            let mut answer = None;
+            let held_off = tc::source_authority_contention_key_for_tests(|| answer = Some(hook()));
+            *seam_slot.borrow_mut() = Some(answer.filter(|_| held_off.is_none()));
+        };
+        AFTER_CHECK.with_borrow_mut(|after| *after = Some(Box::new(seam)));
+        slot
+    }
+
+    /// The pane's bound source, its pin and its log's current all name `session`'s `path`, and no
+    /// record after `since` names `left` again.
+    fn settled_on(
+        channel: u64,
+        tmux: &str,
+        (session, path): (&str, &Path),
+        left: &str,
+        since: u64,
+    ) {
+        let binding = bound(tmux);
+        assert_eq!(binding.session_id.as_deref(), Some(session));
+        assert_eq!(binding.output_path, path.display().to_string());
+        forget_channel_for_tests(channel);
+        assert_eq!(
+            pinned_source(channel, tmux).unwrap(),
+            Some(source(session, path))
+        );
+        let records = log(channel);
+        let current = records.iter().rev().find_map(|r| match &r.new {
+            BindingTarget::Source(s) | BindingTarget::Resolved { source: s, .. } => Some(s),
+            _ => None,
+        });
+        assert_eq!(current.map(|s| s.session_id.as_str()), Some(session));
+        let back = records.iter().filter(|r| r.seq > since).any(|r| {
+            matches!(&r.new, BindingTarget::Source(s) | BindingTarget::Resolved { source: s, .. } if s.session_id == left)
+        });
+        assert!(!back, "nothing re-registers {left} after the adoption");
+    }
+
+    #[test]
+    fn a_hook_adopting_c_while_the_restore_rechecks_b_keeps_c_after_polls_and_a_restart() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b, c) = (7_790, "n2a-restore-hook-race", uuid(), uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, None);
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, None);
+        let clear_b = signal("session_start", Some("clear"), Some(&b_path));
+        assert_eq!(adopt(&a, &b, &clear_b), (None, None));
+        at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        // The first poll resolves B; the next one judges B again from the log's new seq.
+        let first = restore(channel, tmux, &a, &a_path);
+        assert!(
+            matches!(
+                first,
+                PendingRestore::BoundFromLedger {
+                    exact_wait: None,
+                    ..
+                }
+            ),
+            "{first:?}"
+        );
+        let resolved = log(channel).pop().unwrap().seq;
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&b_path)
+            .unwrap()
+            .set_modified(older)
+            .unwrap();
+        let c_path = at(home.path(), "-work-a", &c, Some(&first_row(&c)));
+        let clear_c = signal("session_start", Some("clear"), Some(&c_path));
+        let (ha, hc) = (a.clone(), c.clone());
+        let hook: Hook = std::rc::Rc::new(move || adopt_from_hook(&ha, &hc, &clear_c));
+        let seam = hook_at_restore_seam(hook.clone());
+
+        restore(channel, tmux, &a, &a_path);
+        let answer = seam
+            .borrow_mut()
+            .take()
+            .expect("the restore reached its record");
+        let answer = answer.unwrap_or_else(|| hook());
+        assert_eq!(answer, AdoptionHttp::Durable(DurableKind::Adopted));
+        settled_on(channel, tmux, (&c, &c_path), &b, resolved);
+
+        let polled = restore(channel, tmux, &a, &a_path);
+        assert!(
+            matches!(
+                polled,
+                PendingRestore::BoundFromLedger {
+                    exact_wait: None,
+                    ..
+                }
+            ),
+            "{polled:?}"
+        );
+        settled_on(channel, tmux, (&c, &c_path), &b, resolved);
+
+        restart(channel);
+        let restarted = restore(channel, tmux, &a, &a_path);
+        assert!(
+            matches!(
+                restarted,
+                PendingRestore::BoundFromLedger {
+                    exact_wait: None,
+                    ..
+                }
+            ),
+            "{restarted:?}"
+        );
+        settled_on(channel, tmux, (&c, &c_path), &b, resolved);
+    }
+
+    #[test]
+    fn a_hook_adopting_c_while_the_restore_publishes_an_unwritten_b_keeps_c() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b, c) = (7_795, "n2a-restore-await-race", uuid(), uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, None);
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, None);
+        let clear_b = signal("session_start", Some("clear"), Some(&b_path));
+        assert_eq!(adopt(&a, &b, &clear_b), (None, None));
+        let pending = log(channel).pop().unwrap().seq;
+        let c_path = at(home.path(), "-work-a", &c, Some(&first_row(&c)));
+        let clear_c = signal("session_start", Some("clear"), Some(&c_path));
+        let (ha, hc) = (a.clone(), c.clone());
+        let hook: Hook = std::rc::Rc::new(move || adopt_from_hook(&ha, &hc, &clear_c));
+        let seam = hook_at_restore_seam(hook.clone());
+
+        // B has no transcript yet, so the restore publishes it unverified, waiting on its path.
+        restore(channel, tmux, &a, &a_path);
+        let answer = seam
+            .borrow_mut()
+            .take()
+            .expect("the restore reached its record");
+        let answer = answer.unwrap_or_else(|| hook());
+        assert_eq!(answer, AdoptionHttp::Durable(DurableKind::Adopted));
+        settled_on(channel, tmux, (&c, &c_path), &b, pending);
+
+        let polled = restore(channel, tmux, &a, &a_path);
+        assert!(
+            matches!(
+                polled,
+                PendingRestore::BoundFromLedger {
+                    exact_wait: None,
+                    ..
+                }
+            ),
+            "{polled:?}"
+        );
+        settled_on(channel, tmux, (&c, &c_path), &b, pending);
     }
 }

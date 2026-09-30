@@ -2872,6 +2872,8 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
 // test fails if the acquisition is moved after the read.
 #[test]
 fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
+    // The authority key follows the runtime root env, so no other test may move it mid-probe.
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
