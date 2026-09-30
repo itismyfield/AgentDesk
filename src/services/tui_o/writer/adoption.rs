@@ -273,9 +273,8 @@ pub struct Snapshot {
     named: Vec<SourceId>,
 }
 
-/// Reads Legacy's cursor and pins every source the channel's `events` bind. The current one starts
-/// at that cursor, which must end a line after a closed turn, with only quiet records between
-/// Legacy's delivered frontier and it.
+/// Pins every source the channel's `events` bind; the current one starts at Legacy's cursor, after
+/// a closed turn and with only quiet records past Legacy's delivered frontier.
 pub fn pin(
     legacy: &dyn LegacyView,
     events: &[BindingEvent],
