@@ -648,7 +648,8 @@ pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
 /// deliberately limited to an existing ClaudeTui binding reached through the
 /// command UUID and to a real sibling transcript file. For a second or later
 /// continuation hop, the candidate must also be newer than the transcript
-/// currently bound to that pane. It never guesses across project directories.
+/// currently bound to that pane, unless that is a restored one not written yet.
+/// It never guesses across project directories.
 pub(crate) fn adopt_claude_continuation_session(
     command_session_id: &str,
     payload_session_id: &str,
@@ -681,13 +682,7 @@ fn adopt_continuation(
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     let command_key = PromptKey::new("claude", command_session_id);
-    *skip = Some(AdoptSkip::UnmappedCommandSession);
-    let tmux_session_name = state
-        .tmux_by_provider_session
-        .get(&command_key)?
-        .value
-        .clone();
-    let binding = state.runtime_by_tmux.get(&tmux_session_name)?;
+    let (tmux_session_name, binding) = AdoptSkip::bound_pane(&state, &command_key, skip)?;
     *skip = Some(AdoptSkip::NotClaudeTui);
     if binding.value.runtime_kind != RuntimeHandoffKind::ClaudeTui {
         return None;
@@ -712,7 +707,7 @@ fn adopt_continuation(
         cause: CauseSource::Hook(hook.cause()),
         hook: Some(hook),
     });
-    let unlogged = proposal.is_none().then_some(AdoptSkip::NoChannel);
+    let unlogged = AdoptSkip::unlogged(proposal.is_none(), &tmux_session_name, &candidate);
     *skip = unlogged;
     let audit = |result: std::io::Result<()>, kind: &str| {
         if let Err(error) = result {
@@ -723,7 +718,7 @@ fn adopt_continuation(
         tmux_session: tmux_session_name.clone(),
         error,
     };
-    if !new_output_path.is_file() {
+    if !new_output_path.is_file() || unlogged == Some(AdoptSkip::ChannelNotRestored) {
         // The candidate stays Pending in the log until its transcript exists; that record is the hook's ACK.
         *failure = proposal
             .as_ref()
@@ -737,14 +732,13 @@ fn adopt_continuation(
         && current_session_id != payload_session_id
     {
         *skip = Some(AdoptSkip::MtimeUnreadable);
-        let current_mtime = std::fs::metadata(&old_output_path)
-            .and_then(|metadata| metadata.modified())
-            .ok()?;
+        let current_mtime =
+            super::pending::bound_transcript_mtime(&tmux_session_name, &binding.value)?;
         let candidate_mtime = std::fs::metadata(&new_output_path)
             .and_then(|metadata| metadata.modified())
             .ok()?;
         *skip = unlogged;
-        if candidate_mtime <= current_mtime {
+        if current_mtime.is_some_and(|current| candidate_mtime <= current) {
             *skip = Some(AdoptSkip::OlderThanBound);
             let reject =
                 |p: &Proposal| binding_events::record_rejected(p, "older_than_bound_transcript");
