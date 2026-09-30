@@ -54,6 +54,7 @@ pub(crate) enum UnavailableReason {
     PaneRegistrationFailed,
     MtimeUnreadable,
     ChannelNotRestored,
+    RuntimeNotRestored,
 }
 
 impl IngressOutcome {
@@ -186,6 +187,7 @@ fn classify_skip(
         AdoptSkip::NoChannel => IngressOutcome::Proceed(ProceedReason::NoChannelLog),
         AdoptSkip::MtimeUnreadable => Unavailable(UnavailableReason::MtimeUnreadable),
         AdoptSkip::ChannelNotRestored => Unavailable(UnavailableReason::ChannelNotRestored),
+        AdoptSkip::RuntimeNotRestored => Unavailable(UnavailableReason::RuntimeNotRestored),
         AdoptSkip::PayloadNotUuid => NotApplicable(NotApplicableReason::PayloadNotUuid),
         AdoptSkip::NotClaudeTui => NotApplicable(NotApplicableReason::NotClaudeTui),
         AdoptSkip::MalformedBindingPath => NotApplicable(NotApplicableReason::MalformedBindingPath),

@@ -682,13 +682,7 @@ fn adopt_continuation(
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     let command_key = PromptKey::new("claude", command_session_id);
-    *skip = Some(AdoptSkip::UnmappedCommandSession);
-    let tmux_session_name = state
-        .tmux_by_provider_session
-        .get(&command_key)?
-        .value
-        .clone();
-    let binding = state.runtime_by_tmux.get(&tmux_session_name)?;
+    let (tmux_session_name, binding) = AdoptSkip::bound_pane(&state, &command_key, skip)?;
     *skip = Some(AdoptSkip::NotClaudeTui);
     if binding.value.runtime_kind != RuntimeHandoffKind::ClaudeTui {
         return None;
