@@ -42,7 +42,7 @@ impl Pane {
         let dir = a_path.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         if a_exists {
-            std::fs::write(&a_path, "{}\n").unwrap();
+            std::fs::write(&a_path, format!("{{\"sessionId\":\"{a}\"}}\n")).unwrap();
         }
         let context = BindingContext {
             schema: 1,
@@ -102,7 +102,7 @@ impl Pane {
 
     fn touch(&self, session: &str) -> PathBuf {
         let path = self.path(session);
-        std::fs::write(&path, "{}\n").unwrap();
+        std::fs::write(&path, format!("{{\"sessionId\":\"{session}\"}}\n")).unwrap();
         path
     }
 
@@ -621,4 +621,105 @@ fn a_deferred_b_outlives_a_poll_that_finds_its_channel_mapping_lapsed() {
     let mapped = dedupe::owner_channel_for_tmux_session(&pane.tmux);
     assert_eq!(mapped, Some(pane.channel), "the pass restored the mapping");
     pane.adopt_newer(&pane.b, &pane.a);
+}
+
+#[test]
+fn a_resume_into_another_worktree_is_bound_there_again_after_a_restart() {
+    use crate::services::tmux_common as tc;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let (tmux, channel, a, b) = (format!("restore-{}", uuid()), 7_532, uuid(), uuid());
+    let home = root.path().join("claude-home");
+    let _claude_home = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "CLAUDE_CONFIG_DIR",
+        &home,
+    );
+    let first = |path: &Path, session: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{{\"sessionId\":\"{session}\"}}\n")).unwrap();
+    };
+    let cwd = root.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path;
+    let a_path = transcript(&cwd, &a, None).unwrap();
+    first(&a_path, &a);
+    // B lives in another worktree's project directory of the same account.
+    let b_path = transcript(&root.path().join("other-worktree"), &b, None).unwrap();
+    first(&b_path, &b);
+    let context = BindingContext {
+        schema: 1,
+        provider: "claude".into(),
+        created_at: chrono::Utc::now(),
+        execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+        tmux_session: tmux.clone(),
+        channel_id: Some(channel),
+        owner_runtime_root: root.path().display().to_string(),
+        host: None,
+        expected_native_session_id: Some(a.clone()),
+        launch_mode: "fresh".into(),
+        provider_root: Some(home.clone()),
+    };
+    let prepared = PreparedIncarnation::create(context).unwrap();
+    let script = tc::session_temp_path(&tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);
+    std::fs::create_dir_all(Path::new(&script).parent().unwrap()).unwrap();
+    let exec = format!(
+        "cd '{}'\nexec 'claude' '--session-id' '{a}'\n",
+        cwd.display()
+    );
+    std::fs::write(&script, format!("{}{exec}", prepared.env_lines())).unwrap();
+    let hook = serde_json::json!({"hooks":{"Stop":[{"hooks":[{"command":format!("adk hook --session-id {a}")}]}]}});
+    let settings = tc::session_temp_path(&tmux, tc::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT);
+    std::fs::write(settings, hook.to_string()).unwrap();
+    let nonce = &prepared.context.execution_nonce;
+    std::fs::write(tc::session_temp_path(&tmux, "spawn_nonce"), nonce).unwrap();
+    VIEW.with_borrow_mut(|v| {
+        let (tmux, home, peers) = (tmux.clone(), home.clone(), Vec::new());
+        *v = Some(View {
+            tmux,
+            channel,
+            home,
+            peers,
+        })
+    });
+    dedupe::register_tmux_channel(&tmux, channel);
+    dedupe::register_provider_session("claude", &a, &tmux);
+    register_launched_tmux_runtime_binding(&tmux, claude(&a_path, &a));
+    let resume = serde_json::json!({
+        "session_id": b, "source": "resume", "transcript_path": b_path,
+    });
+    let status = ingress.claude_hook("SessionStart", &a, &resume, Some(&uuid()));
+    assert_eq!(status, 202, "B adopted at its own path");
+    let launch = std::fs::read_to_string(&script).unwrap();
+    assert!(launch.contains(&b), "the launch script now names B");
+    let bound_b = (b_path.display().to_string(), Some(b.clone()));
+    let bound =
+        || dedupe::runtime_binding_for_tmux_session(&tmux).map(|b| (b.output_path, b.session_id));
+    assert_eq!(bound(), Some(bound_b.clone()));
+
+    // A restart forgets every binding; the launch script's directory has no B.
+    forget_channel_for_tests(channel);
+    dedupe::reset_state_for_tests();
+    reset_deferred_adoptions_for_tests();
+    reset_restore_outcomes_for_tests();
+    dedupe::forget_hook_adopted_claude_session_id(&tmux);
+    dedupe::clear_claude_session_rotation(&tmux);
+    let logged = events(channel).len();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    super::super::rehydrate_claude_tui_pane(&shared, &tmux);
+
+    assert_eq!(
+        bound(),
+        Some(bound_b),
+        "B is bound at the other worktree's path"
+    );
+    assert!(matches!(
+        last_restore_outcome(&tmux),
+        Some(PendingRestore::BoundFromLedger {
+            exact_wait: None,
+            ..
+        })
+    ));
+    assert_eq!(events(channel).len(), logged, "nothing new logged");
 }

@@ -76,7 +76,7 @@ impl Tq {
             uuid::Uuid::new_v4().to_string(),
         );
         let a_path = dir.path().join(format!("{a}.jsonl"));
-        std::fs::write(&a_path, b"{}\n").unwrap();
+        std::fs::write(&a_path, format!("{{\"sessionId\":\"{a}\"}}\n")).unwrap();
         register_provider_session("claude", &a, tmux);
         register_tmux_channel(tmux, channel);
         register_tmux_runtime_binding(tmux, claude(&a_path, &a));
@@ -316,7 +316,7 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration, fault_off_a
         .await;
     // SessionStart clears A's feedback, so it is seeded after the clear.
     tq.seed_feedback().await;
-    std::fs::write(tq.b_path(), b"{}\n").unwrap();
+    std::fs::write(tq.b_path(), format!("{{\"sessionId\":\"{}\"}}\n", tq.b)).unwrap();
     let (registry_before, mut rx) = ((buffered(&tq.a), buffered(&tq.b)), tq.state.subscribe());
 
     APPEND_FAULT.with(|fault| fault.set(Some("write")));

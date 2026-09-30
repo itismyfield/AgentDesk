@@ -372,31 +372,30 @@ pub(crate) fn judge_restore(
     };
     // The verified current, when these records still end on the source the writer pinned.
     let verified = current_record(tmux_session, &records).filter(|(_, s)| pinned == Some(*s));
+    // With no Pending to restore, the verified current is restored on its exact path, but only in
+    // this execution; anything else keeps the outcome the log alone gives.
+    let known = match marker {
+        SpawnNonceMarker::Known(nonce) => Some(nonce.as_str()),
+        _ => None,
+    };
+    let restorable = verified.zip(launch).filter(|((record, source), launch)| {
+        known.is_some()
+            && record.execution_nonce.as_deref() == known
+            && under_launch_root(launch, &source.path, &source.session_id)
+    });
+    let current_or = |otherwise| match restorable {
+        Some(((record, pin), launch)) => {
+            pinned_exact(pin, (record.seq, record.seq), launch, &transcript_state)
+        }
+        None => done(otherwise),
+    };
     let live = match fold(tmux_session, &records) {
         Fold::Live(live) => live,
-        idle => {
-            // A source adopted without a Pending is restored only on its exact path in this execution.
-            let known = match marker {
-                SpawnNonceMarker::Known(nonce) => Some(nonce.as_str()),
-                _ => None,
-            };
-            let restorable = verified.zip(launch).filter(|((record, source), launch)| {
-                known.is_some()
-                    && record.execution_nonce.as_deref() == known
-                    && under_launch_root(launch, &source.path, &source.session_id)
-            });
-            return match (restorable, idle) {
-                (Some(((record, pin), launch)), _) => {
-                    let seq = (record.seq, record.seq);
-                    pinned_exact(pin, seq, launch, &transcript_state)
-                }
-                (None, Fold::Empty) => done(PendingRestore::HealthyNoPending),
-                (None, _) => done(Skip(NotEligible::Superseded)),
-            };
-        }
+        Fold::Empty => return current_or(PendingRestore::HealthyNoPending),
+        Fold::Superseded => return current_or(Skip(NotEligible::Superseded)),
     };
     if live.rejected && live.resolved.is_none() {
-        return done(Skip(NotEligible::Rejected));
+        return current_or(Skip(NotEligible::Rejected));
     }
     let resolved = live.resolved.map(|(record, _)| record);
     let nonces: Vec<_> = std::iter::once(live.pending)

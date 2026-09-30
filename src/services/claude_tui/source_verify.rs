@@ -395,6 +395,20 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        // The first complete line of each captured run's own transcript, as the CLI wrote it.
+        let shapes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hook_payload/claude-2.1.283.transcript-first-records.jsonl");
+        let first_records: std::collections::HashMap<String, String> =
+            std::fs::read_to_string(shapes)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let record = serde_json::from_str::<Value>(line).unwrap()["record"].clone();
+                    let session = record["sessionId"].as_str().unwrap().to_owned();
+                    (session, format!("{record}\n"))
+                })
+                .collect();
+        let mut replayed = std::collections::HashSet::new();
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("projects");
         // Captured paths are <claude home>/projects/<project>/<file>; replay them under a temp home.
@@ -434,7 +448,12 @@ mod tests {
                 let path = rebase(&payload["transcript_path"]);
                 let session = payload["session_id"].as_str().unwrap().to_string();
                 if event["transcript_exists_at_hook"] == true && !path.exists() {
-                    write(&path, &first_row(&session));
+                    // Sessions whose transcript was not captured, like the TUI's /clear target, get a
+                    // synthetic first line.
+                    let captured = first_records.get(&session).inspect(|_| {
+                        replayed.insert(session.clone());
+                    });
+                    write(&path, captured.map_or(&first_row(&session), |line| line));
                 }
                 payload["transcript_path"] = json!(path);
                 let parsed = ClaudeHookSource::from_payload(&payload).unwrap();
@@ -469,6 +488,11 @@ mod tests {
             );
             assert_eq!(history.last().unwrap().path, parsed.transcript_path);
         }
+        assert_eq!(
+            replayed.len(),
+            first_records.len(),
+            "every captured first line replayed"
+        );
     }
 
     #[test]
