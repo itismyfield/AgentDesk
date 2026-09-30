@@ -1658,7 +1658,9 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
-    const CALLS: &[(&str, &[(&str, usize, &str)])] = &[
+    // (file, calls there, why the call keeps the name)
+    type Listed = &'static [(&'static str, usize, &'static str)];
+    const CALLS: &[(&str, Listed)] = &[
         (
             "record_termination_for_tmux",
             &[
