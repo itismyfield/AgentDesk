@@ -17,6 +17,20 @@ pub(crate) enum AdoptSkip {
     OlderThanBound,
 }
 
+impl AdoptSkip {
+    /// Why a candidate logs nothing on a pane without a channel mapping; a file-less one on a pane
+    /// the rehydrate pass maps is refused until that pass restores the mapping.
+    pub(super) fn unlogged(no_channel: bool, tmux_session: &str, candidate: &str) -> Option<Self> {
+        let mapped_by_pass = || super::super::pending::last_restore_outcome(tmux_session).is_some();
+        let file_less = || !std::path::Path::new(candidate).is_file();
+        match no_channel {
+            true if file_less() && mapped_by_pass() => Some(Self::ChannelNotRestored),
+            true => Some(Self::NoChannel),
+            false => None,
+        }
+    }
+}
+
 type Explained = (Option<(String, String)>, Option<AdoptSkip>);
 
 /// `adopt_claude_continuation_session` plus the reason when nothing was adopted or logged.

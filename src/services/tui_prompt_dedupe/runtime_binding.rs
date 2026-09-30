@@ -713,7 +713,7 @@ fn adopt_continuation(
         cause: CauseSource::Hook(hook.cause()),
         hook: Some(hook),
     });
-    let unlogged = proposal.is_none().then_some(AdoptSkip::NoChannel);
+    let unlogged = AdoptSkip::unlogged(proposal.is_none(), &tmux_session_name, &candidate);
     *skip = unlogged;
     let audit = |result: std::io::Result<()>, kind: &str| {
         if let Err(error) = result {
@@ -724,13 +724,7 @@ fn adopt_continuation(
         tmux_session: tmux_session_name.clone(),
         error,
     };
-    if !new_output_path.is_file() {
-        // A pane the rehydrate pass maps gets its channel back next pass; until then there is no ACK.
-        if proposal.is_none() && super::pending::last_restore_outcome(&tmux_session_name).is_some()
-        {
-            *skip = Some(AdoptSkip::ChannelNotRestored);
-            return None;
-        }
+    if !new_output_path.is_file() || unlogged == Some(AdoptSkip::ChannelNotRestored) {
         // The candidate stays Pending in the log until its transcript exists; that record is the hook's ACK.
         *failure = proposal
             .as_ref()
