@@ -7,9 +7,6 @@ use super::*;
 
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;
-#[cfg(test)]
-#[path = "stream_tick/o_adoption_tests.rs"]
-mod o_adoption_tests;
 use guarded_persist::{
     GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
     dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,
@@ -1452,3 +1449,7 @@ pub(super) mod provider_output_guard_tests {
         assert_eq!(gateway.edits.lock().expect("edits lock").len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "stream_tick/o_adoption_tests.rs"]
+mod o_adoption_tests;
