@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
+use super::host_input;
 use crate::services::provider::{CancelToken, cancel_requested};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
@@ -378,17 +379,11 @@ pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
 }
 
 pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
-    let pane = crate::services::platform::tmux::capture_pane(
-        session_name,
-        PROMPT_READY_CAPTURE_SCROLLBACK,
-    );
-    prompt_readiness_snapshot_from_capture(
-        pane.as_deref(),
-        crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name),
-    )
+    let (pane, alive) = host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
+    prompt_readiness_snapshot_from_capture(pane.as_deref(), alive)
 }
 
-fn prompt_readiness_snapshot_from_capture(
+pub(super) fn prompt_readiness_snapshot_from_capture(
     pane: Option<&str>,
     tmux_pane_alive: bool,
 ) -> PromptReadinessSnapshot {
@@ -458,12 +453,11 @@ pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
     // The first call begins the mutation boundary. Even a transport/result error
     // can mean tmux partially typed the control, so nothing after this point is
     // retryable by this path.
-    let literal = match crate::services::platform::tmux::send_literal(session_name, "/compact") {
-        Ok(output) => output,
-        Err(_) => return CompactSubmitOutcome::AmbiguousAfterMutation,
-    };
-    if ensure_tmux_success(literal, &TuiInputAction::Literal("/compact".to_string())).is_err() {
-        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    let literal = [TuiInputAction::Literal("/compact".to_string())];
+    match host_input::run_legacy(session_name, &literal, None) {
+        host_input::InputRun::Applied => {}
+        host_input::InputRun::Refused(_) => return CompactSubmitOutcome::PreMutationRefused,
+        _ => return CompactSubmitOutcome::AmbiguousAfterMutation,
     }
     std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
 
@@ -483,11 +477,9 @@ pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
         return CompactSubmitOutcome::AmbiguousAfterMutation;
     }
 
-    let enter = match crate::services::platform::tmux::send_keys(session_name, &["Enter"]) {
-        Ok(output) => output,
-        Err(_) => return CompactSubmitOutcome::AmbiguousAfterMutation,
-    };
-    if ensure_tmux_success(enter, &TuiInputAction::Enter).is_err() {
+    if host_input::run_legacy(session_name, &[TuiInputAction::Enter], None)
+        != host_input::InputRun::Applied
+    {
         return CompactSubmitOutcome::AmbiguousAfterMutation;
     }
     std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
@@ -787,10 +779,8 @@ struct SelectorStateSnapshot {
 }
 
 fn selector_state_snapshot(session_name: &str) -> SelectorStateSnapshot {
-    let pane = crate::services::platform::tmux::capture_pane(
-        session_name,
-        PROMPT_READY_CAPTURE_SCROLLBACK,
-    );
+    let (pane, tmux_pane_alive) =
+        host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
     let selector_open = pane
         .as_deref()
         .is_some_and(crate::services::tmux_common::tmux_capture_indicates_claude_tui_selector_open);
@@ -800,9 +790,7 @@ fn selector_state_snapshot(session_name: &str) -> SelectorStateSnapshot {
         .unwrap_or_else(|| "<capture unavailable>".to_string());
     SelectorStateSnapshot {
         selector_open,
-        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-            session_name,
-        ),
+        tmux_pane_alive,
         capture_available: pane.is_some(),
         pane_tail,
     }
@@ -867,7 +855,7 @@ fn log_selector_never_opened(
 /// because one of the blocks is whitespace-only. A short post-paste settle
 /// eliminates the race in practice; the cost is one settle per multi-line
 /// turn.
-const POST_PASTE_BUFFER_SETTLE: Duration = Duration::from_millis(200);
+pub(super) const POST_PASTE_BUFFER_SETTLE: Duration = Duration::from_millis(200);
 
 /// #3880 (A1): settle delay between the last single-line `Literal` and the
 /// `Enter` that submits it. A single-line prompt plans as `Literal…(Enter)` with
@@ -878,7 +866,7 @@ const POST_PASTE_BUFFER_SETTLE: Duration = Duration::from_millis(200);
 /// draft (the submit never lands → 120s transcript timeout → tmux kill). A short
 /// settle before the Enter closes the race; the cost is one settle per
 /// single-line submit. Mirrors POST_PASTE_BUFFER_SETTLE in spirit and duration.
-const POST_LITERAL_SETTLE: Duration = Duration::from_millis(200);
+pub(super) const POST_LITERAL_SETTLE: Duration = Duration::from_millis(200);
 
 /// #3880 (A1): true when `current` is a `Literal` that is immediately followed
 /// by `Enter` — the exact single-line submit transition that needs the
@@ -886,7 +874,7 @@ const POST_LITERAL_SETTLE: Duration = Duration::from_millis(200);
 /// split for `send-keys`) do NOT settle between themselves; only the final
 /// `Literal → Enter` boundary does. Pure and lookahead-only so the settle wiring
 /// is unit-testable without a live tmux pane.
-fn literal_action_needs_post_settle(
+pub(super) fn literal_action_needs_post_settle(
     current: &TuiInputAction,
     next: Option<&TuiInputAction>,
 ) -> bool {
@@ -901,66 +889,7 @@ fn run_actions(
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
-    for (index, action) in actions.iter().enumerate() {
-        check_prompt_cancel(cancel_token)?;
-        let output = match action {
-            TuiInputAction::Literal(text) => {
-                crate::services::platform::tmux::send_literal(session_name, text)?
-            }
-            TuiInputAction::PasteBuffer(text) => {
-                let buffer_name = format!("agentdesk-tui-input-{}", uuid::Uuid::new_v4());
-                let load_output = crate::services::platform::tmux::load_buffer(&buffer_name, text)?;
-                ensure_tmux_success(load_output, action)?;
-                check_prompt_cancel(cancel_token)?;
-                let paste_output = crate::services::platform::tmux::paste_buffer(
-                    session_name,
-                    &buffer_name,
-                    true,
-                )?;
-                ensure_tmux_success(paste_output, action)?;
-                // #2730 settle: see POST_PASTE_BUFFER_SETTLE rationale above.
-                std::thread::sleep(POST_PASTE_BUFFER_SETTLE);
-                check_prompt_cancel(cancel_token)?;
-                continue;
-            }
-            TuiInputAction::Enter => {
-                crate::services::platform::tmux::send_keys(session_name, &["Enter"])?
-            }
-            TuiInputAction::Escape => {
-                crate::services::platform::tmux::send_keys(session_name, &["Escape"])?
-            }
-            TuiInputAction::CtrlU => {
-                crate::services::platform::tmux::send_keys(session_name, &["C-u"])?
-            }
-            TuiInputAction::ArrowLeft => {
-                crate::services::platform::tmux::send_keys(session_name, &["Left"])?
-            }
-            TuiInputAction::ArrowRight => {
-                crate::services::platform::tmux::send_keys(session_name, &["Right"])?
-            }
-            TuiInputAction::Backspace(count) => {
-                let mut remaining = *count;
-                while remaining > 0 {
-                    let batch = remaining.min(32);
-                    let keys = vec!["BSpace"; batch];
-                    let output = crate::services::platform::tmux::send_keys(session_name, &keys)?;
-                    ensure_tmux_success(output, action)?;
-                    remaining -= batch;
-                }
-                continue;
-            }
-        };
-        ensure_tmux_success(output, action)?;
-        // #3880 (A1): close the single-line Literal→Enter race on a re-mounting
-        // composer. Only the final `Literal` before an `Enter` settles (see
-        // literal_action_needs_post_settle); the PasteBuffer/Backspace arms
-        // `continue` above and never reach here.
-        if literal_action_needs_post_settle(action, actions.get(index + 1)) {
-            check_prompt_cancel(cancel_token)?;
-            std::thread::sleep(POST_LITERAL_SETTLE);
-        }
-    }
-    Ok(())
+    host_input::run_legacy(session_name, actions, cancel_token).into_legacy()
 }
 
 fn run_actions_with_submission_confirmation(
@@ -969,9 +898,13 @@ fn run_actions_with_submission_confirmation(
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let actions_contained_paste = actions_contain_paste_buffer(actions);
-    let result = run_actions(session_name, actions, cancel_token)
+    let run = host_input::run_legacy(session_name, actions, cancel_token);
+    let cleanup_may_follow =
+        host_input::InputTarget::legacy_tmux(session_name).keys_may_follow(&run);
+    let result = run
+        .into_legacy()
         .and_then(|()| confirm_prompt_submission_left_editor(session_name, cancel_token));
-    if should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
+    if cleanup_may_follow && should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
         clear_prompt_draft_before_error(session_name);
     }
     result
@@ -1139,7 +1072,7 @@ fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String>
     }
 }
 
-fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), String> {
+pub(super) fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
@@ -1807,7 +1740,7 @@ fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 
-fn prompt_marker_confirms_prompt_ready(
+pub(super) fn prompt_marker_confirms_prompt_ready(
     readiness: PromptReadinessKind,
     snapshot: &PromptReadinessSnapshot,
 ) -> bool {
@@ -2046,7 +1979,7 @@ fn transcript_idle_confirms_prompt_ready_without_capture(
     let Some(transcript_path) = transcript_path else {
         return false;
     };
-    if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name) {
+    if !host_input::legacy_pane_alive(session_name) {
         return false;
     }
     // #3880 (A2): an init-only / empty / freshly-rotated transcript also

@@ -281,6 +281,19 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
     provider: Option<&str>,
     identity: Option<CanonicalSessionIdentity<'_>>,
 ) -> Result<Option<String>, HookSessionUpsertError> {
+    resolve_session_row_pg(pool, Some(session_key), provider, identity)
+        .await
+        .map(|row| row.map(|(_, key)| key))
+}
+
+/// Same convergence rule as the key resolver; a `None` key resolves only by the
+/// exact canonical tuple.
+pub(crate) async fn resolve_session_row_pg(
+    pool: &PgPool,
+    session_key: Option<&str>,
+    provider: Option<&str>,
+    identity: Option<CanonicalSessionIdentity<'_>>,
+) -> Result<Option<(i64, String)>, HookSessionUpsertError> {
     let rows = sqlx::query(
         "SELECT id, session_key, source_rank
          FROM (
@@ -329,7 +342,7 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
         }
         resolved = Some((id, key));
     }
-    Ok(resolved.map(|(_, key)| key))
+    Ok(resolved)
 }
 
 async fn acquire_locator_lock(

@@ -37,8 +37,9 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind, subscribe_hook_events};
+use crate::services::claude_tui::host_input;
 use crate::services::claude_tui::input::validate_prompt_text;
-use crate::services::platform::tmux;
+use crate::services::session_host::HostKey;
 
 /// Hard ceiling on `claude_tui_wait` timeout so a misbehaving caller cannot
 /// pin a dcserver task indefinitely.
@@ -95,11 +96,11 @@ struct TmuxSendBackend;
 
 impl SendBackend for TmuxSendBackend {
     fn has_session(&self, session_name: &str) -> bool {
-        tmux::has_session(session_name)
+        host_input::legacy_present(session_name)
     }
 
     fn load_buffer(&self, buffer_name: &str, text: &str) -> Result<(), String> {
-        tmux::load_buffer(buffer_name, text).map(|_| ())
+        host_input::legacy_load_buffer(buffer_name, text).map(|_| ())
     }
 
     fn paste_buffer(
@@ -108,11 +109,17 @@ impl SendBackend for TmuxSendBackend {
         buffer_name: &str,
         delete: bool,
     ) -> Result<(), String> {
-        tmux::paste_buffer(session_name, buffer_name, delete).map(|_| ())
+        host_input::legacy_write(session_name, |transport| {
+            transport.paste_buffer(session_name, buffer_name, delete)
+        })
+        .map(|_| ())
     }
 
     fn send_enter(&self, session_name: &str) -> Result<(), String> {
-        tmux::send_keys(session_name, &["Enter"]).map(|_| ())
+        host_input::legacy_write(session_name, |transport| {
+            transport.send_keys(session_name, &[HostKey::Enter])
+        })
+        .map(|_| ())
     }
 }
 
@@ -1319,5 +1326,34 @@ mod tests {
         assert!(payload_contains(&payload, "gamma"));
         assert!(payload_contains(&payload, "delta"));
         assert!(!payload_contains(&payload, "epsilon"));
+    }
+
+    #[test]
+    fn tui_send_reaches_tmux_only_through_the_host_executor() {
+        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+        let guard = SpyGuard::install(SpyState::default());
+        let (status, body) =
+            handle_send_with_backend(send_request("한글\n둘째 줄", true), &TmuxSendBackend);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["submitted"], true);
+        assert_eq!(
+            guard.calls(),
+            [
+                "present",
+                "load:한글\n둘째 줄",
+                "paste:delete=true",
+                "keys:Enter"
+            ]
+        );
+        drop(guard);
+
+        let absent = SpyState {
+            absent: true,
+            ..SpyState::default()
+        };
+        let guard = SpyGuard::install(absent);
+        let (_, body) = handle_send_with_backend(send_request("x", true), &TmuxSendBackend);
+        assert_eq!(body.0["ok"], false);
+        assert_eq!(guard.calls(), ["present"]);
     }
 }

@@ -32,14 +32,22 @@ pub(in crate::services::discord) fn marker_witness(marker: HostKindMarker) -> Ho
     }
 }
 
-/// Adds what the inflight row carries. A tmux name that differs from the
-/// sessions row drops both, so no legacy name is guessed.
+/// Adds what the inflight row carries without overwriting what the caller read.
+/// A locator or tmux name that differs from an earlier reading is dropped, never guessed.
 pub(in crate::services::discord) fn with_inflight_row(
     mut evidence: SessionTargetEvidence,
     row: &InflightTurnState,
 ) -> SessionTargetEvidence {
-    evidence.inflight_locator = locator_witness(row.host_locator.as_ref());
-    evidence.durable_runtime_kind = row.runtime_kind.or(evidence.durable_runtime_kind);
+    let locator = locator_witness(row.host_locator.as_ref());
+    evidence.inflight_locator = match evidence.inflight_locator {
+        HostWitness::ReadFailed(_) => locator,
+        earlier if earlier == locator => locator,
+        earlier => HostWitness::Unrecognized(format!("{earlier:?} then {locator:?}")),
+    };
+    evidence.runtime_kind_unrecognized |= evidence
+        .inflight_runtime_kind
+        .is_some_and(|earlier| Some(earlier) != row.runtime_kind);
+    evidence.inflight_runtime_kind = row.runtime_kind;
     evidence.runtime_kind_unrecognized |= row.runtime_kind_unknown_on_disk;
     match (&evidence.session_name, &row.tmux_session_name) {
         (None, name) => evidence.session_name = name.clone(),
@@ -167,6 +175,85 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn caller_runtime_evidence_survives_the_inflight_row_merge() {
+        use RuntimeHandoffKind::{ClaudeTui, LegacyTmuxWrapper, ProcessBackend};
+        let tmux = || HostWitness::Known {
+            kind: HostKind::Tmux,
+            target: Some(TMUX_NAME.to_string()),
+        };
+        let herdr = PersistedHostLocator::Known(HostedRuntimeLocator {
+            execution_node: None,
+            host_kind: HostKind::Herdr,
+            host_session_id: "herdr-session-1".to_string(),
+            pane: Some("w1-1".to_string()),
+        });
+        let with_row_kind = |kind, locator| {
+            let mut state = row(locator);
+            state.runtime_kind = Some(kind);
+            state
+        };
+        let caller = |kind, record, marker| SessionTargetEvidence {
+            session_record: record,
+            host_marker: marker,
+            durable_runtime_kind: kind,
+            ..recorded(Some(TMUX_NAME))
+        };
+        let (absent, process) = (|| HostWitness::Absent, Some(ProcessBackend));
+        let conflicts = [
+            ("record", caller(process, tmux(), absent()), row(None)),
+            ("marker", caller(process, absent(), tmux()), row(None)),
+            (
+                "locator",
+                caller(Some(LegacyTmuxWrapper), absent(), absent()),
+                row(Some(herdr.clone())),
+            ),
+            (
+                "row vote",
+                caller(None, tmux(), absent()),
+                with_row_kind(ProcessBackend, None),
+            ),
+            (
+                "legacy votes",
+                caller(Some(ClaudeTui), absent(), absent()),
+                with_row_kind(ProcessBackend, None),
+            ),
+        ];
+        for (label, recorded, row) in conflicts {
+            let (host, verdict) = kill_verdict(recorded, row);
+            assert!(
+                matches!(host, TargetHost::Conflict { .. }),
+                "{label}: {host:?}"
+            );
+            assert_eq!(
+                verdict,
+                GuardVerdict::Refused(GuardRefusal::HostConflict),
+                "{label}"
+            );
+        }
+
+        let read_twice = SessionTargetEvidence {
+            inflight_locator: tmux(),
+            ..recorded(Some(TMUX_NAME))
+        };
+        let kind_read_twice = SessionTargetEvidence {
+            inflight_runtime_kind: process,
+            ..recorded(Some(TMUX_NAME))
+        };
+        for (evidence, row) in [(read_twice, row(Some(herdr))), (kind_read_twice, row(None))] {
+            let (host, verdict) = kill_verdict(evidence, row);
+            assert!(matches!(host, TargetHost::Unknown(_)), "{host:?}");
+            assert_eq!(verdict, GuardVerdict::Refused(GuardRefusal::UnknownHost));
+        }
+
+        let (host, verdict) = kill_verdict(caller(Some(ClaudeTui), absent(), absent()), row(None));
+        assert!(
+            matches!(&host, TargetHost::Known { kind: HostKind::Tmux, name, .. } if name == TMUX_NAME),
+            "agreeing kinds keep the legacy reading: {host:?}"
+        );
+        assert_eq!(verdict, GuardVerdict::Proceed);
     }
 
     #[test]

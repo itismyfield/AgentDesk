@@ -119,6 +119,8 @@ src/
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
+│   │   ├── hosted_execution.rs
+│   │   ├── hosted_execution_tests.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -559,6 +561,8 @@ src/
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
+│   │   │   ├── host_draft.rs
+│   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
 │   │   ├── session/
@@ -572,6 +576,7 @@ src/
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
 │   │   ├── hook_server_memento_tests.rs
+│   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── memento_feedback.rs
 │   │   ├── memento_writer_hook.rs

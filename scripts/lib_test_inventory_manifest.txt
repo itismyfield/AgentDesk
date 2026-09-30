@@ -418,6 +418,12 @@ db::dispatched_session_canonical_identity::pg_tests::canonical_identity_provider
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_resolver_requires_convergent_exact_alias_and_canonical_evidence_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_safe_legacy_promotion_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_scheduled_legacy_row_is_not_promoted_as_ordinary_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_bulk_cleanup_keeps_live_and_unknown_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cas_writes_only_the_observed_value_and_nonce_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_cleanup_keeps_null_rows_with_a_non_tmux_host_marker_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_explicit_delete_refuses_live_and_unknown_rows_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_lookup_resolves_alias_and_canonical_tuple_to_one_row_pg
+db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_keeps_live_unknown_and_changed_rows_pg
 db::dispatched_session_canonical_identity::tests::old_body_cannot_reassign_an_existing_locator
 db::dispatched_session_canonical_identity::tests::resolver_fails_closed_when_evidence_disagrees
 db::dispatched_session_canonical_identity::tests::resolver_order_accepts_matching_exact_alias_and_canonical_evidence
@@ -429,6 +435,7 @@ db::dispatched_sessions::dispatch_surface_tests::delivery_state_dispatched_not_w
 db::dispatched_sessions::dispatch_surface_tests::delivery_state_terminal_statuses_pass_through
 db::dispatched_sessions::dispatch_surface_tests::delivery_state_uppercase_status_is_normalized
 db::dispatched_sessions::dispatch_surface_tests::dispatch_type_label_covers_known_types
+db::dispatched_sessions::hosted_execution::tests::hosted_execution_decode_keeps_unreadable_payloads_unknown
 db::dispatched_sessions::recovery_identifier_tests::tmux_session_name_from_session_key_preserves_provider_prefixed_hosts
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_preserves_provider_selectors
@@ -1770,12 +1777,24 @@ services::claude_tui::hook_server_memento_tests::pending_retry_is_cross_session_
 services::claude_tui::hook_server_memento_tests::stale_relay_stop_emits_no_ephemeral_signal_and_does_not_advance_memento
 services::claude_tui::hook_server_memento_tests::stop_hook_active_suppresses_memento_flush
 services::claude_tui::hook_server_memento_tests::stop_without_pending_memento_search_stays_observational
+services::claude_tui::host_input::tests::a_mounted_dialog_is_never_ready_even_after_clear
+services::claude_tui::host_input::tests::a_send_that_may_have_landed_is_indeterminate_and_nothing_follows
+services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_never_ready
+services::claude_tui::host_input::tests::compact_literal_failure_never_sends_enter
+services::claude_tui::host_input::tests::draft_cleanup_follows_a_stop_only_on_a_confirmed_tmux_session
+services::claude_tui::host_input::tests::every_mutation_passes_the_gate_and_a_refusal_stops_before_enter
+services::claude_tui::host_input::tests::non_tmux_targets_send_nothing_and_are_never_recreated
+services::claude_tui::host_input::tests::steering_submit_keeps_the_legacy_tmux_key_order
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_keeps_legacy_done_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_reports_manual_resend_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_retry_emits_no_stream_frames
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_retry_is_silent
 services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests::detects_stuck_followup_prompt_even_when_generic_draft_heuristic_ignores_footer
 services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests::ignores_submitted_discord_history_prompt
+services::claude_tui::hosting::host_draft::tests::tf2_hosts_without_input_stop_before_any_host_call
+services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_clear_then_submits_once
+services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_recreates_only_after_retiring_the_session
+services::claude_tui::hosting::host_draft::tests::tf2_swap_stop_or_lingering_draft_never_recreates
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests::followup_wait_requeue_requires_timeout_error
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests::followup_wait_requeue_respects_emergency_opt_out
 services::claude_tui::input::active_turn_wait_extension_tests::extends_only_when_pane_alive_and_turn_active_within_ceiling
@@ -1976,6 +1995,7 @@ services::claude_tui::tui_relay::tests::try_claim_registry_match_skips_when_no_s
 services::claude_tui::tui_relay::tests::try_claim_registry_match_token_ignores_prompt_submit_payload
 services::claude_tui::tui_relay::tests::try_claim_registry_match_token_leaves_stop_for_later_wait
 services::claude_tui::tui_relay::tests::tui_send_holds_composer_lock_across_paste_and_enter
+services::claude_tui::tui_relay::tests::tui_send_reaches_tmux_only_through_the_host_executor
 services::claude_tui::tui_relay::tests::unrelated_event_does_not_match_stop
 services::claude_tui::tui_relay::tests::wait_request_not_before_defaults_to_none
 services::cluster::agent_execution_node::tests::validates_stable_node_identifiers_and_explicit_reset
@@ -3533,6 +3553,7 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
 services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
 services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
+services::discord::inflight::host_recovery_guard::tests::caller_runtime_evidence_survives_the_inflight_row_merge
 services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
 services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
@@ -8706,6 +8727,7 @@ services::provider::ready_input_prompt_tests::detects_codex_tui_prompt_for_codex
 services::provider::ready_input_prompt_tests::detects_provider_scoped_wrapper_ready_marker
 services::provider::ready_input_prompt_tests::detects_ready_banner
 services::provider::ready_input_prompt_tests::rejects_non_ready_capture
+services::provider::session_probe::tests::common_tmux_probe_keeps_polling_through_a_failed_probe
 services::provider::session_probe::tests::legacy_pane_override_and_typed_probe_share_one_answer
 services::provider::session_probe::tests::qwen_common_probe_keeps_the_legacy_tmux_alias_only
 services::provider::session_probe::tests::tmux_alive_and_missing_collapse_like_the_legacy_bool
@@ -9193,6 +9215,7 @@ services::session_host::herdr::transport::tests::herdr_socket_unclear_replies_ne
 services::session_host::herdr::wire::tests::herdr_line_frame_bounds_and_partial_frames
 services::session_host::herdr::wire::tests::herdr_wire_matches_the_vendored_schema
 services::session_host::herdr::wire::tests::herdr_write_failure_reports_bytes_already_sent
+services::session_host::herdr_host::tests::claude_warm_followup_reaches_tmux_only_through_the_executor
 services::session_host::herdr_host::tests::herdr_capture_maps_scroll_back_and_rejects_truncation
 services::session_host::herdr_host::tests::herdr_complete_snapshot_decides_present_or_missing
 services::session_host::herdr_host::tests::herdr_endpoint_requires_every_field_and_an_absolute_socket
@@ -9210,6 +9233,7 @@ services::session_host::herdr_host::tests::herdr_send_text_keeps_ambiguous_outco
 services::session_host::herdr_host::tests::herdr_unconfigured_host_fails_every_call_explicitly
 services::session_host::herdr_host::tests::herdr_working_dir_prefers_foreground_cwd
 services::session_host::herdr_host::tests::session_target_guard_has_no_production_caller
+services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead
@@ -9241,6 +9265,7 @@ services::session_host::resolve::tests::raw_name_reaches_tmux_only_with_legacy_t
 services::session_host::resolve::tests::single_vote_is_known_with_its_source
 services::session_host::resolve::tests::unreadable_or_future_witness_is_unknown_despite_legacy_tmux_votes
 services::session_host::tmux_host::tests::herdr_ref_never_reaches_a_tmux_probe
+services::session_host::tmux_host::tests::host_keys_use_the_legacy_tmux_key_names
 services::session_host::tmux_host::tests::mutation_outcome_follows_the_tmux_exit_status
 services::session_host::tmux_host::tests::probes_are_the_platform_probes
 services::session_resume::tests::completed_critical_section_cancels_its_watchdog

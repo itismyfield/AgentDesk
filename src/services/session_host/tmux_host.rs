@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::process::Output;
 
 use super::model::{
-    HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence, HostSessionRef,
+    HostCapabilities, HostError, HostKey, HostKind, HostLiveness, HostMutation, HostPresence,
+    HostSessionRef,
 };
 use super::traits::InteractiveSessionHost;
 use crate::services::platform::tmux;
@@ -21,7 +22,26 @@ fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError>
     }
 }
 
+/// tmux `send-keys` name of a host key.
+pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
+    match key {
+        HostKey::Enter => "Enter",
+        HostKey::Escape => "Escape",
+        HostKey::CtrlU => "C-u",
+        HostKey::CtrlE => "C-e",
+        HostKey::Left => "Left",
+        HostKey::Right => "Right",
+        HostKey::Backspace => "BSpace",
+    }
+}
+
 impl TmuxHost {
+    /// Raw `send-keys` output, so the caller keeps tmux's exit status and stderr.
+    pub(crate) fn send_host_keys(&self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
+        let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();
+        tmux::send_keys(session, &names)
+    }
+
     pub(crate) fn liveness_within(
         &self,
         session: HostSessionRef<'_>,
@@ -120,6 +140,22 @@ mod tests {
         assert_eq!(TmuxHost.liveness(blank), HostLiveness::DeadOrAbsent);
         assert_eq!(TmuxHost.kind(), HostKind::Tmux);
         assert!(TmuxHost.capabilities().interrupt);
+    }
+
+    #[test]
+    fn host_keys_use_the_legacy_tmux_key_names() {
+        let names = [
+            (HostKey::Enter, "Enter"),
+            (HostKey::Escape, "Escape"),
+            (HostKey::CtrlU, "C-u"),
+            (HostKey::CtrlE, "C-e"),
+            (HostKey::Left, "Left"),
+            (HostKey::Right, "Right"),
+            (HostKey::Backspace, "BSpace"),
+        ];
+        for (key, name) in names {
+            assert_eq!(tmux_key_name(key), name, "{key:?}");
+        }
     }
 
     #[cfg(unix)]
