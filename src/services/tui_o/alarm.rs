@@ -22,42 +22,89 @@ pub(crate) trait AlarmNotifier: Send + Sync {
     fn notify(&self, alert_channel: u64, text: String);
 }
 
-/// Degraded reasons raised by alarms, kept until the process restarts.
+/// Alarm reasons in two views: `raised` latches each first occurrence for the one operator
+/// message and stays as history; health reads only the conditions still in force.
 #[derive(Default)]
 pub(crate) struct AlarmHealth {
-    reasons: Mutex<BTreeSet<String>>,
+    raised: Mutex<BTreeSet<String>>,
+    active: Mutex<BTreeSet<String>>,
+    not_found: Mutex<HashMap<u64, VecDeque<Instant>>>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn within_window(hit: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(hit) < NOT_FOUND_WINDOW
 }
 
 impl AlarmHealth {
-    fn insert(&self, reason: String) -> bool {
-        self.reasons
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(reason)
+    /// True only for the first occurrence of `reason` in this process.
+    fn latch(&self, reason: &str) -> bool {
+        locked(&self.raised).insert(reason.to_string())
     }
 
-    pub(crate) fn reasons(&self) -> Vec<String> {
-        self.reasons
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .cloned()
-            .collect()
+    fn activate(&self, reason: &str) {
+        locked(&self.active).insert(reason.to_string());
+    }
+
+    /// Records one NotFound and reports whether the channel reached the threshold within the window.
+    fn record_not_found(&self, channel: u64, now: Instant) -> bool {
+        let mut not_found = locked(&self.not_found);
+        let hits = not_found.entry(channel).or_default();
+        while hits.front().is_some_and(|hit| !within_window(*hit, now)) {
+            hits.pop_front();
+        }
+        hits.push_back(now);
+        hits.len() >= NOT_FOUND_THRESHOLD
+    }
+
+    /// Only a pause ends on its own evidence; every other condition waits for an operator.
+    fn resume_gateway(&self, channel: u64) {
+        let reason = format!("tui_o:{}:{channel}", PAUSED_NO_GATEWAY);
+        locked(&self.active).remove(&reason);
+    }
+
+    /// Conditions in force at `now`; NotFound frequency is re-counted against the window here.
+    pub(crate) fn current_at(&self, now: Instant) -> Vec<String> {
+        let mut current = locked(&self.active).clone();
+        locked(&self.not_found).retain(|channel, hits| {
+            hits.retain(|hit| within_window(*hit, now));
+            if hits.len() >= NOT_FOUND_THRESHOLD {
+                current.insert(format!("tui_o:{NOT_FOUND_FREQUENT}:{channel}"));
+            }
+            !hits.is_empty()
+        });
+        current.into_iter().collect()
+    }
+
+    /// Every reason raised in this process, resolved or not.
+    #[cfg(test)]
+    fn history(&self) -> Vec<String> {
+        locked(&self.raised).iter().cloned().collect()
     }
 }
 
 static PROCESS_HEALTH: LazyLock<Arc<AlarmHealth>> = LazyLock::new(Arc::default);
 
-/// Alarm reasons for this process's health snapshot, as `tui_o:<kind>:<channel>`.
+/// Alarm conditions in force for this process's health snapshot, as `tui_o:<kind>:<channel>`.
 pub(crate) fn health_reasons() -> Vec<String> {
-    PROCESS_HEALTH.reasons()
+    PROCESS_HEALTH.current_at(Instant::now())
+}
+
+/// The channel's writer posted again under an owned gateway, so its pause is over.
+pub(crate) fn gateway_resumed(channel: u64) {
+    PROCESS_HEALTH.resume_gateway(channel);
 }
 
 /// Reason slug for an alarm; NotFound has none because only its frequency is an alarm.
 fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
     Some(match alarm {
         WriterAlarm::Blocked { .. } => "blocked",
-        WriterAlarm::PausedNoGateway => "paused_no_gateway",
+        WriterAlarm::PausedNoGateway => PAUSED_NO_GATEWAY,
         WriterAlarm::SchemaBlocked { .. } => "schema_blocked",
         WriterAlarm::LedgerViolation { .. } => "ledger_violation",
         WriterAlarm::Halted { .. } => "halted",
@@ -78,13 +125,13 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
 }
 
 const NOT_FOUND_FREQUENT: &str = "not_found_frequent";
+const PAUSED_NO_GATEWAY: &str = "paused_no_gateway";
 
 /// The writer's alarm sink: each (channel, kind) alarms once, NotFound only past its frequency.
 pub(crate) struct AlarmRouter {
     alert_channel: Option<u64>,
     notifier: Option<Arc<dyn AlarmNotifier>>,
     health: Arc<AlarmHealth>,
-    not_found: Mutex<HashMap<u64, VecDeque<Instant>>>,
 }
 
 impl AlarmRouter {
@@ -97,7 +144,6 @@ impl AlarmRouter {
             alert_channel,
             notifier,
             health,
-            not_found: Mutex::default(),
         }
     }
 
@@ -110,11 +156,14 @@ impl AlarmRouter {
 
     pub(crate) fn raise_at(&self, channel: u64, alarm: &WriterAlarm, now: Instant) {
         let kind = match alarm_kind(alarm) {
-            Some(kind) => kind,
-            None if self.not_found_crossed(channel, now) => NOT_FOUND_FREQUENT,
+            Some(kind) => {
+                self.health.activate(&format!("tui_o:{kind}:{channel}"));
+                kind
+            }
+            None if self.health.record_not_found(channel, now) => NOT_FOUND_FREQUENT,
             None => return,
         };
-        if !self.health.insert(format!("tui_o:{kind}:{channel}")) {
+        if !self.health.latch(&format!("tui_o:{kind}:{channel}")) {
             return;
         }
         tracing::warn!(channel, kind, ?alarm, "[tui_o] writer alarm");
@@ -133,23 +182,6 @@ impl AlarmRouter {
             alert_channel,
             format!("[tui_o] {kind} on channel {channel}: {alarm:?}"),
         );
-    }
-
-    /// Records one NotFound and reports whether the channel reached the threshold within the window.
-    fn not_found_crossed(&self, channel: u64, now: Instant) -> bool {
-        let mut not_found = self
-            .not_found
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let hits = not_found.entry(channel).or_default();
-        while hits
-            .front()
-            .is_some_and(|hit| now.saturating_duration_since(*hit) >= NOT_FOUND_WINDOW)
-        {
-            hits.pop_front();
-        }
-        hits.push_back(now);
-        hits.len() >= NOT_FOUND_THRESHOLD
     }
 }
 
@@ -238,7 +270,7 @@ mod tests {
         router.raise_at(FAILING, &halted, now);
         router.raise_at(FAILING, &halted, now);
         router.raise_at(7, &halted, now);
-        assert_eq!(health.reasons(), ["tui_o:halted:42", "tui_o:halted:7"]);
+        assert_eq!(health.history(), ["tui_o:halted:42", "tui_o:halted:7"]);
         let sent = sent(&recorder);
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert!(sent.iter().all(|(channel, _)| *channel == ALERT));
@@ -255,12 +287,12 @@ mod tests {
         // The first hit is exactly one window old, so it no longer counts.
         router.raise_at(FAILING, &not_found, start + NOT_FOUND_WINDOW);
         router.raise_at(7, &not_found, start + NOT_FOUND_WINDOW);
-        assert!(health.reasons().is_empty(), "{:?}", health.reasons());
+        assert!(health.history().is_empty(), "{:?}", health.history());
         assert!(sent(&recorder).is_empty());
 
         let third = start + NOT_FOUND_WINDOW + Duration::from_secs(59);
         router.raise_at(FAILING, &not_found, third);
-        assert_eq!(health.reasons(), ["tui_o:not_found_frequent:42"]);
+        assert_eq!(health.history(), ["tui_o:not_found_frequent:42"]);
         router.raise_at(FAILING, &not_found, third);
         assert_eq!(sent(&recorder).len(), 1);
     }
@@ -269,7 +301,7 @@ mod tests {
     fn an_alarm_is_never_sent_to_its_own_channel() {
         let (router, recorder, health) = router(Some(FAILING));
         router.raise_at(FAILING, &WriterAlarm::SpoolFull, Instant::now());
-        assert_eq!(health.reasons(), ["tui_o:spool_full:42"]);
+        assert_eq!(health.history(), ["tui_o:spool_full:42"]);
         assert!(sent(&recorder).is_empty());
     }
 
@@ -277,7 +309,7 @@ mod tests {
     fn without_an_alert_channel_or_notifier_alarms_stay_in_health() {
         let (router, recorder, health) = router(None);
         router.raise_at(FAILING, &WriterAlarm::PausedNoGateway, Instant::now());
-        assert_eq!(health.reasons(), ["tui_o:paused_no_gateway:42"]);
+        assert_eq!(health.history(), ["tui_o:paused_no_gateway:42"]);
         assert!(sent(&recorder).is_empty());
 
         let health = Arc::new(AlarmHealth::default());
@@ -287,6 +319,56 @@ mod tests {
             &WriterAlarm::Blocked { status: 403 },
             Instant::now(),
         );
-        assert_eq!(health.reasons(), ["tui_o:blocked:42"]);
+        assert_eq!(health.history(), ["tui_o:blocked:42"]);
+    }
+
+    #[test]
+    fn a_pause_ends_on_gateway_return_while_blocked_and_history_stay() {
+        let (router, recorder, health) = router(Some(ALERT));
+        let start = Instant::now();
+        router.raise_at(FAILING, &WriterAlarm::PausedNoGateway, start);
+        router.raise_at(FAILING, &WriterAlarm::Blocked { status: 403 }, start);
+        health.resume_gateway(FAILING);
+        let later = start + NOT_FOUND_WINDOW * 3;
+        assert_eq!(health.current_at(later), ["tui_o:blocked:42"]);
+
+        router.raise_at(FAILING, &WriterAlarm::PausedNoGateway, later);
+        assert_eq!(
+            health.current_at(later),
+            ["tui_o:blocked:42", "tui_o:paused_no_gateway:42"]
+        );
+        assert_eq!(
+            health.history(),
+            ["tui_o:blocked:42", "tui_o:paused_no_gateway:42"]
+        );
+        assert_eq!(
+            sent(&recorder).len(),
+            2,
+            "the latch still sends each kind once"
+        );
+    }
+
+    #[test]
+    fn not_found_frequency_clears_when_its_window_passes_without_new_events() {
+        let (router, recorder, health) = router(Some(ALERT));
+        let start = Instant::now();
+        let not_found = WriterAlarm::NotFound { serial: 1 };
+        for offset in 0..3 {
+            router.raise_at(FAILING, &not_found, start + Duration::from_secs(offset));
+        }
+        let frequent = ["tui_o:not_found_frequent:42"];
+        assert_eq!(health.current_at(start + Duration::from_secs(2)), frequent);
+        let last_moment = start + NOT_FOUND_WINDOW - Duration::from_secs(1);
+        assert_eq!(health.current_at(last_moment), frequent);
+        // The first hit leaves the window here and no event arrives to re-count it.
+        assert!(health.current_at(start + NOT_FOUND_WINDOW).is_empty());
+        assert_eq!(health.history(), frequent);
+
+        let again = start + NOT_FOUND_WINDOW * 2;
+        for offset in 0..3 {
+            router.raise_at(FAILING, &not_found, again + Duration::from_secs(offset));
+        }
+        assert_eq!(health.current_at(again + Duration::from_secs(2)), frequent);
+        assert_eq!(sent(&recorder).len(), 1);
     }
 }

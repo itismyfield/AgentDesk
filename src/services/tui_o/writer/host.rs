@@ -2,7 +2,7 @@
 //! O, creating a new channel's first store. A channel is ready only while its actor has resumed
 //! and the gateway is Owned.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -45,9 +45,16 @@ pub trait HostIo: Send + Sync + 'static {
 pub struct Readiness {
     hosted: Mutex<BTreeSet<u64>>,
     ready: Mutex<BTreeSet<u64>>,
+    live: Mutex<BTreeMap<u64, Live>>,
 }
 
-fn locked(set: &Mutex<BTreeSet<u64>>) -> MutexGuard<'_, BTreeSet<u64>> {
+/// What a hosted channel's readiness is derived from, kept so intake can read it directly.
+struct Live {
+    gate: Arc<OwnershipGate>,
+    resumed: watch::Receiver<bool>,
+}
+
+fn locked<T>(set: &Mutex<T>) -> MutexGuard<'_, T> {
     set.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -69,6 +76,21 @@ impl Readiness {
     fn claim(&self, channel: u64) -> bool {
         locked(&self.hosted).insert(channel)
     }
+
+    fn track(&self, channel: u64, gate: Arc<OwnershipGate>, resumed: watch::Receiver<bool>) {
+        locked(&self.live).insert(channel, Live { gate, resumed });
+    }
+
+    /// Ready and, read now rather than from the published flag that trails them, the gate is Owned
+    /// and the actor is still running resumed.
+    pub fn accepts(&self, channel: u64) -> bool {
+        let live = locked(&self.live);
+        let Some(live) = live.get(&channel).filter(|_| self.is_ready(channel)) else {
+            return false;
+        };
+        let owned = matches!(live.gate.current(), GatewayOwnership::Owned { .. });
+        owned && live.resumed.has_changed().is_ok() && *live.resumed.borrow()
+    }
 }
 
 static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
@@ -78,8 +100,8 @@ pub(crate) fn process_readiness() -> Arc<Readiness> {
 }
 
 /// Whether this process's writer can take work for `channel`; false for any channel O does not own.
-pub(crate) fn channel_ready(channel: u64) -> bool {
-    PROCESS.is_ready(channel)
+pub(crate) fn channel_accepts(channel: u64) -> bool {
+    PROCESS.accepts(channel)
 }
 
 /// What hosting needs once a channel is owned; built only then, so an off or empty writer takes nothing.
@@ -189,6 +211,7 @@ async fn host_channel<I: HostIo>(
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let spawned = actor::spawn_if_enabled(&config, writer, provider, bindings, stop, resumed_tx);
     let Some(actor) = spawned else { return };
+    readiness.track(channel, Arc::clone(&gate), resumed.clone());
     publish(channel, &readiness, gate.subscribe(), resumed, actor).await;
     drop(stop_tx);
 }

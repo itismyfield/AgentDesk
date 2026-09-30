@@ -218,6 +218,8 @@ _health_json_get_string_field() {
 }
 
 _health_json_get_string_array_csv() {
+  # Joins a top-level string array with commas after reading every element whole: an element
+  # holding a comma or control character, or an unparseable array, yields nothing at all.
   local health_json="$1"
   local key="$2"
   local raw
@@ -225,7 +227,11 @@ _health_json_get_string_array_csv() {
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
-    printf '%s' "$health_json" | jq -r "(.${key} // []) | join(\",\")" 2>/dev/null
+    printf '%s' "$health_json" | jq -r --arg key "$key" '
+      (.[$key] // []) as $a
+      | if ($a | type) == "array"
+          and all($a[]; type == "string" and all(explode[]; . >= 32 and . != 44))
+        then $a | join(",") else "" end' 2>/dev/null
     return
   fi
 
@@ -235,17 +241,89 @@ _health_json_get_string_array_csv() {
   # accepting reconcile-only reasons that jq — reading the ABSENT top-level array
   # as `[]` — correctly rejects.
   raw=$(_health_json_top_level_field_raw "$key" "$(_health_json_compact "$health_json")")
-  # Only a genuine top-level ARRAY value contributes reasons; anything else
-  # (absent key, null, scalar, object) is treated as an empty list, matching
-  # jq's `(.key // []) | join(",")` for our reason-list callers.
-  case "$raw" in
-    *\[*\]*) ;;
-    *) return 0 ;;
-  esac
-
-  printf '%s' "$raw" \
-    | sed -E 's/^[^[]*\[//; s/\]$//; s/"[[:space:]]*,[[:space:]]*"/,/g; s/^"//; s/"$//'
+  _health_json_string_array_csv "$raw"
 }
+
+_health_json_string_array_csv() (
+  # Pure-bash reader for one raw JSON array token with the same element rule as the jq path;
+  # anything but an array of such strings (absent, null, scalar, object) prints nothing.
+  export LC_ALL=C
+  local raw="$1" n i ch hex code low fmt expect=first in_string=0 elem="" out="" count=0
+  case "$raw" in \[*\]) ;; *) exit 0 ;; esac
+  raw="${raw:1:${#raw}-2}"
+  n=${#raw}
+  for (( i = 0; i < n; i++ )); do
+    ch="${raw:i:1}"
+    if [ "$in_string" -eq 1 ]; then
+      if [ "$ch" = '"' ]; then
+        in_string=0
+        expect=comma
+        [ "$count" -gt 0 ] && out+=","
+        out+="$elem"
+        count=$((count + 1))
+        continue
+      fi
+      if [ "$ch" = '\' ]; then
+        i=$((i + 1))
+        ch="${raw:i:1}"
+        case "$ch" in
+          '"'|'\'|/) ;;
+          u)
+            hex="${raw:i+1:4}"
+            case "$hex" in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;; *) exit 0 ;; esac
+            i=$((i + 4))
+            code=$((16#$hex))
+            # A surrogate pair joins into one code point; a lone low half reads as U+FFFD, as in jq.
+            if [ "$code" -ge 55296 ] && [ "$code" -lt 56320 ]; then
+              hex="${raw:i+1:6}"
+              case "$hex" in '\u'[dD][c-fC-F][0-9a-fA-F][0-9a-fA-F]) ;; *) exit 0 ;; esac
+              low=$((16#${hex:2}))
+              i=$((i + 6))
+              code=$((65536 + (code - 55296) * 1024 + low - 56320))
+            elif [ "$code" -ge 56320 ] && [ "$code" -lt 57344 ]; then
+              code=65533
+            fi
+            { [ "$code" -ge 32 ] && [ "$code" -ne 44 ]; } || exit 0
+            # UTF-8 bytes as printf octal escapes, the encoding jq prints the decoded element in.
+            if [ "$code" -lt 128 ]; then
+              fmt=$(printf '\\%03o' "$code")
+            elif [ "$code" -lt 2048 ]; then
+              fmt=$(printf '\\%03o\\%03o' $((192 | code >> 6)) $((128 | (code & 63))))
+            elif [ "$code" -lt 65536 ]; then
+              fmt=$(printf '\\%03o\\%03o\\%03o' $((224 | code >> 12)) \
+                $((128 | (code >> 6 & 63))) $((128 | (code & 63))))
+            else
+              fmt=$(printf '\\%03o\\%03o\\%03o\\%03o' $((240 | code >> 18)) \
+                $((128 | (code >> 12 & 63))) $((128 | (code >> 6 & 63))) $((128 | (code & 63))))
+            fi
+            printf -v ch "$fmt"
+            ;;
+          *) exit 0 ;;
+        esac
+      else
+        case "$ch" in [$'\001'-$'\037']) exit 0 ;; esac
+      fi
+      [ "$ch" = ',' ] && exit 0
+      elem+="$ch"
+      continue
+    fi
+    case "$ch" in
+      ' '|$'\t'|$'\r') ;;
+      '"')
+        [ "$expect" = comma ] && exit 0
+        in_string=1
+        elem=""
+        ;;
+      ',')
+        [ "$expect" = comma ] || exit 0
+        expect=value
+        ;;
+      *) exit 0 ;;
+    esac
+  done
+  { [ "$in_string" -eq 0 ] && [ "$expect" != value ]; } || exit 0
+  printf '%s' "$out"
+)
 
 _health_json_top_level_only() {
   # #4348 review finding #2: the jq-less field checks below must interrogate the
@@ -464,12 +542,38 @@ _health_json_reasons() {
   _health_json_get_string_array_csv "$health_json" "degraded_reasons"
 }
 
+_health_json_tui_gateway_verified_providers() {
+  # Providers every `tui_output_gateway_channels` entry verifies (worker/standby, complete,
+  # channels > 0), as an ERE alternation; the shared CSV reader keeps jq and jq-less alike.
+  local health_json="$1" csv entry name verified="" refused="" out=""
+  local entry_ere='^[a-z][a-z0-9_-]*:(worker|standby):complete:[1-9][0-9]*$'
+  csv=$(_health_json_get_string_array_csv "$health_json" "tui_output_gateway_channels" || true)
+  _health_json_reasons_csv_is_well_formed "$csv" || return 0
+  local IFS=','
+  for entry in $csv; do
+    name="${entry%%:*}"
+    if [[ "$entry" =~ $entry_ere ]] && [ "$name" != "unsupported" ]; then
+      verified="$verified,$name,"
+    else
+      refused="$refused,$name,"
+    fi
+  done
+  for entry in $csv; do
+    name="${entry%%:*}"
+    case "$refused" in *",$name,"*) continue ;; esac
+    case "|$out|" in *"|$name|"*) continue ;; esac
+    case "$verified" in *",$name,"*) out="${out:+$out|}$name" ;; esac
+  done
+  printf '%s' "$out"
+}
+
 _health_json_gateway_standby_only() {
-  local health_json="$1"
+  local health_json="$1" tui ere='^(gateway_standby|provider:[^:]+:gateway_standby'
   _health_json_field_is_true "$health_json" "server_up" || return 1
   _health_json_field_is_true "$health_json" "cluster_standby" || return 1
-  _health_json_degraded_reasons_all_match "$health_json" \
-    '^(gateway_standby|provider:[^:]+:(gateway_standby|tui_output_requires_gateway))$'
+  tui=$(_health_json_tui_gateway_verified_providers "$health_json")
+  [ -n "$tui" ] && ere="$ere|provider:($tui):tui_output_requires_gateway"
+  _health_json_degraded_reasons_all_match "$health_json" "$ere)\$"
 }
 
 _health_json_reconcile_only() {
@@ -623,25 +727,29 @@ _health_json_degraded_reasons_all_match() {
 }
 
 _health_json_deploy_nonblocking_ere() {
-  # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven.
+  # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven,
+  # $4 providers whose TUI gateway restriction the body verifies (alternation).
   # A relay verdict label cycles with placeholder state, so it cannot judge a
   # deploy (2026-09-07 measurement). A queue depth is backlog, so it only stops
   # counting for a deploy verdict. Standby tokens join the set only once the
-  # body proves the node is a standby. Everything else, including an
+  # body proves the node is a standby, and a TUI gateway reason only for a
+  # provider whose role the body verifies. Everything else, including an
   # unrecognised reason, blocks. No comma: the fallback splits on one.
   local ere='^(relay_verdict_[^,]+'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
-  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:(gateway_standby|tui_output_requires_gateway)"
+  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
+  [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
   printf '%s)$' "$ere"
 }
 
 _health_json_deploy_nonblocking_ere_for_body() {
   # The only way to build the accepted set: structural proof comes from the
   # body itself, so no caller can reconstruct a policy that drifts.
-  local health_json="$1" standby=0
+  local health_json="$1" standby=0 tui
   _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
-  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby"
+  tui=$(_health_json_tui_gateway_verified_providers "$health_json")
+  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui"
 }
 
 _health_json_deploy_blocking_reasons() {

@@ -334,6 +334,7 @@ src/
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
+│   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
@@ -601,12 +602,14 @@ src/
 │   │   │   ├── edge_case_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
-│   │   │   └── drain_tests.rs
+│   │   │   ├── drain_tests.rs
+│   │   │   └── o_route_tests.rs
 │   │   ├── machine_resources/
 │   │   │   ├── gpu/
 │   │   │   │   ├── macos.rs
@@ -849,6 +852,7 @@ src/
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── host_locator.rs
+│   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1914,6 +1918,7 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_tests.rs
 │   │   │   └── wire.rs
+│   │   ├── consumer_guard.rs
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── legacy_collapse.rs
@@ -1939,6 +1944,8 @@ src/
 │   │   ├── request.rs
 │   │   ├── runner.rs
 │   │   └── session.rs
+│   ├── termination_audit/
+│   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
@@ -1956,7 +1963,8 @@ src/
 │   │   ├── channel_policy/
 │   │   │   └── tests.rs
 │   │   ├── cutover/
-│   │   │   └── channel_gate.rs
+│   │   │   ├── channel_gate.rs
+│   │   │   └── intake_route.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
@@ -2012,6 +2020,8 @@ src/
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
+│   │   ├── pending.rs
+│   │   ├── pending_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs

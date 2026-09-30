@@ -619,6 +619,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
             .unwrap_or_else(|| serde_json::json!([])),
     );
     let expired_relay_ledgers = public_projection::expired_relay_ledgers(&json);
+    let tui_output_gateway_channels = public_projection::tui_output_gateway_channels(&json);
     let mut public = serde_json::json!({
         "ok": !degraded,
         "status": status,
@@ -658,6 +659,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(auto_queue_cleanup) = auto_queue_cleanup {
         public["auto_queue_cleanup"] = auto_queue_cleanup;
+    }
+    if !tui_output_gateway_channels.is_empty() {
+        public["tui_output_gateway_channels"] = tui_output_gateway_channels.into();
     }
     public
 }

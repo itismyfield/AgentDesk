@@ -667,3 +667,28 @@ async fn a_violation_recorded_while_running_stops_the_writer_before_the_next_pos
 
 #[path = "actor_tests.rs"]
 mod actor;
+
+#[tokio::test(start_paused = true)]
+async fn a_gateway_return_ends_the_pause_in_process_health() {
+    use crate::services::tui_o::alarm::{AlarmRouter, health_reasons};
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::a_gateway_return_ends_the_pause_in_process_health"
+    )) {
+        return;
+    }
+    let harness = Harness::new();
+    let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
+    let lease = Arc::clone(&harness.lease);
+    let router = AlarmRouter::for_process(None, None);
+    let mut writer = ChannelWriter::new(harness.channel(), gate, port, lease, router);
+    let paused = [format!("tui_o:paused_no_gateway:{CHANNEL}")];
+    assert_eq!(writer.deliver(&piece("m1", "a")).await, Step::NoGateway);
+    assert_eq!(health_reasons(), paused);
+    harness.gate.acquired();
+    assert_eq!(writer.deliver(&piece("m1", "a")).await, Step::Done);
+    assert!(health_reasons().is_empty(), "{:?}", health_reasons());
+    harness.gate.uncertain();
+    assert_eq!(writer.deliver(&piece("m2", "b")).await, Step::NoGateway);
+    assert_eq!(health_reasons(), paused);
+}

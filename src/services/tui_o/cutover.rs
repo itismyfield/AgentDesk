@@ -9,6 +9,7 @@ use super::channel_policy;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod channel_gate;
+pub(crate) mod intake_route;
 pub(crate) use channel_gate::{
     IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
@@ -33,6 +34,17 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, bool)> {
         channels.iter().map(judged).collect()
     };
     test_override::with_channels(evaluate)
+}
+
+/// The channels O owns with their boot kind; the snapshot is not read while the writer is off.
+fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
+    if !(O_TUI_WRITER || test_override::forced()) {
+        return Vec::new();
+    }
+    let owned = boot_ownership().into_iter().filter(|&(_, _, owned)| owned);
+    owned
+        .filter_map(|(channel, kind, _)| Some((channel, kind?)))
+        .collect()
 }
 
 #[cfg(not(test))]
@@ -171,6 +183,27 @@ pub(crate) mod test_override {
     pub(crate) fn force_off() -> ForceGuard {
         ForceGuard(FORCED.with(|cell| cell.replace(false)))
     }
+    thread_local! {
+        static INTAKE_ADMITTED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn intake_admitted() -> bool {
+        INTAKE_ADMITTED.with(Cell::get)
+    }
+
+    pub(crate) struct IntakeGuard(bool);
+
+    /// Acts as if the intake gate admitted TUI providers off the gateway, until dropped.
+    pub(crate) fn admit_intake() -> IntakeGuard {
+        IntakeGuard(INTAKE_ADMITTED.with(|cell| cell.replace(true)))
+    }
+
+    impl Drop for IntakeGuard {
+        fn drop(&mut self) {
+            INTAKE_ADMITTED.with(|cell| cell.set(self.0));
+        }
+    }
+
     // Registry-reset tests run concurrently, so binding-dependent fixtures use their own process.
     pub(crate) fn isolated_binding_case(name: &str) -> bool {
         const CHILD: &str = "ADK_TEST_O_BINDING_CASE";

@@ -103,6 +103,15 @@ fn root(harness: &Harness) -> PathBuf {
 }
 
 fn host(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -> usize {
+    hosted(harness, io, pg, ready).len()
+}
+
+fn hosted(
+    harness: &Harness,
+    io: &Arc<TestIo>,
+    pg: bool,
+    ready: &Arc<Readiness>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     p5::set_test_root(Some(harness._runtime.path()));
     let parts = || HostParts {
         io: Arc::clone(io),
@@ -110,7 +119,7 @@ fn host(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -
         gate: Arc::clone(&harness.gate),
         readiness: Arc::clone(ready),
     };
-    start(ShadowProvider::Claude, pg, parts).len()
+    start(ShadowProvider::Claude, pg, parts)
 }
 
 fn empty_init(channel: u64) -> Initialized {
@@ -169,6 +178,35 @@ async fn only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned(
     polls(1).await;
     assert!(!ready.is_ready(CHANNEL));
     assert_eq!(io.alarms.halted(), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_published_flag_alone_does_not_accept_work() {
+    let (harness, _, source) = switched_over(&row("m0", "before the switch"));
+    let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source));
+    p5_log(harness._runtime.path(), CHANNEL, &startup);
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    harness.gate.acquired();
+    let hosts = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert!(ready.is_ready(CHANNEL) && ready.accepts(CHANNEL));
+    harness.gate.lost();
+    assert!(
+        ready.is_ready(CHANNEL),
+        "the published flag still trails the gate"
+    );
+    assert!(!ready.accepts(CHANNEL), "a lost gate takes no work");
+    harness.gate.acquired();
+    polls(1).await;
+    assert!(ready.accepts(CHANNEL));
+    hosts.iter().for_each(|host| host.abort());
+    polls(3).await;
+    assert!(
+        ready.is_ready(CHANNEL),
+        "nothing cleared the flag once its host was gone"
+    );
+    assert!(!ready.accepts(CHANNEL), "an ended actor takes no work");
 }
 
 #[test]

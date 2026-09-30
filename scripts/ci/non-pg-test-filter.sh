@@ -97,9 +97,11 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_router_hook::capacity_tests
   --skip services::cluster::intake_router_hook::edge_case_tests
   --skip services::cluster::intake_router_hook::execution_requirement_tests
+  --skip services::cluster::intake_router_hook::o_route_tests
   --skip services::cluster::intake_router_hook::owner_record::tests
   --skip services::cluster::intake_router_hook::pg_tests
   --skip services::cluster::intake_worker::dispatch_stamp_tests
+  --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::catch_up::too_old_notice::tests
   --skip services::discord::commands::control::clear_persist_failure_tests
@@ -360,6 +362,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_each_unsafe_class
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
+  services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish

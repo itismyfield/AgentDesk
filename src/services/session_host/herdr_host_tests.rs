@@ -627,64 +627,8 @@ fn production_text(text: &str) -> (String, Vec<(String, Option<String>)>) {
     (out, test_mods)
 }
 
-// Dormant guard: no production code reaches a Herdr host. Owners may only name
-// Herdr items, never construct or route to one; everything else may not name them.
-#[test]
-fn herdr_items_have_no_production_caller() {
-    const OWNERS: &[(&str, usize)] = &[
-        ("src/services/session_host.rs", 0),
-        ("src/services/session_host/herdr_host.rs", 5),
-        ("src/services/session_host/herdr/model.rs", 1),
-        ("src/services/session_host/herdr/contract.rs", 0),
-        ("src/services/session_host/herdr/observe.rs", 0),
-        ("src/services/session_host/herdr/transport.rs", 0),
-        ("src/services/session_host/herdr/wire.rs", 0),
-        ("src/services/session_host/model.rs", 3),
-        ("src/services/session_host/resolve.rs", 1),
-        ("src/services/session_host/legacy_collapse.rs", 1),
-        ("src/services/session_host/tmux_host.rs", 0),
-        ("src/services/session_host/process_host.rs", 0),
-        ("src/services/discord/inflight/host_locator.rs", 1),
-    ];
-    const NEEDLES: &[&str] = &[
-        "HerdrHost",
-        "HerdrEndpoint",
-        "HerdrTransport",
-        "HerdrSocket",
-        "HostKind::Herdr",
-        "herdr_pane(",
-        "session_host::herdr",
-    ];
-    const ACTIVATIONS: &[&str] = &[
-        "host_for(HostKind::Herdr",
-        "HerdrHost::new(",
-        "HerdrHost::<",
-        "HerdrSocketTransport::new(",
-        "HerdrSocketTransport::<",
-    ];
-    // The host locator and `.host_kind` marker readers stay in their owners: nothing
-    // writes a locator or marker, and nothing reads one to choose a host.
-    const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
-    const MARKER: &str = "src/services/tmux_common/host_marker.rs";
-    const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
-    const READERS: &[(&str, &[&str])] = &[
-        ("PersistedHostLocator", &[LOCATOR, INFLIGHT_MODEL]),
-        (
-            "HostedRuntimeLocator",
-            &[
-                LOCATOR,
-                "src/services/session_host.rs",
-                "src/services/session_host/model.rs",
-            ],
-        ),
-        ("HostKind::from_persisted", &[LOCATOR, MARKER]),
-        ("HostKindMarker", &[MARKER]),
-        ("read_host_kind_marker", &[MARKER]),
-        ("host_marker::", &[]),
-        (".host_locator", &[]),
-        ("host_locator: Some", &[]),
-        ("host_locator:", &[INFLIGHT_MODEL]),
-    ];
+/// Production text of every non-test `src/**/*.rs`, keyed by repo-relative path.
+fn production_sources() -> BTreeMap<String, String> {
     let (probe, _) = production_text(
         "fn a() { b(\"}\"); }\n#[cfg(test)]\nmod t { const S: &str = \"{\"; }\nfn c() {}",
     );
@@ -726,9 +670,9 @@ fn herdr_items_have_no_production_caller() {
             files.insert(path, (text.len(), prod));
         }
     }
-    let (mut total, mut kept, mut violations) = (0, 0, Vec::new());
-    for (path, (len, prod)) in &files {
-        if test_files.contains(path) {
+    let (mut total, mut kept, mut sources) = (0, 0, BTreeMap::new());
+    for (path, (len, prod)) in files {
+        if test_files.contains(&path) {
             continue;
         }
         let relative = path
@@ -737,6 +681,89 @@ fn herdr_items_have_no_production_caller() {
             .to_string_lossy()
             .replace('\\', "/");
         (total, kept) = (total + len, kept + prod.len());
+        sources.insert(relative, prod);
+    }
+    assert!(
+        sources.len() > 100,
+        "source scan found only {} files",
+        sources.len()
+    );
+    assert!(
+        kept * 2 > total,
+        "test stripping kept only {kept} of {total} bytes"
+    );
+    sources
+}
+
+const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
+
+// Dormant guard: no production code reaches a Herdr host. Owners may only name
+// Herdr items, never construct or route to one; everything else may not name them.
+#[test]
+fn herdr_items_have_no_production_caller() {
+    const OWNERS: &[(&str, usize)] = &[
+        ("src/services/session_host.rs", 0),
+        ("src/services/session_host/herdr_host.rs", 5),
+        ("src/services/session_host/herdr/model.rs", 1),
+        ("src/services/session_host/herdr/contract.rs", 0),
+        ("src/services/session_host/herdr/observe.rs", 0),
+        ("src/services/session_host/herdr/transport.rs", 0),
+        ("src/services/session_host/herdr/wire.rs", 0),
+        ("src/services/session_host/model.rs", 3),
+        ("src/services/session_host/resolve.rs", 2),
+        ("src/services/session_host/consumer_guard.rs", 2),
+        ("src/services/session_host/legacy_collapse.rs", 1),
+        ("src/services/session_host/tmux_host.rs", 0),
+        ("src/services/session_host/process_host.rs", 0),
+        ("src/services/discord/inflight/host_locator.rs", 1),
+        (GUARD_ADAPTER, 1),
+    ];
+    const NEEDLES: &[&str] = &[
+        "HerdrHost",
+        "HerdrEndpoint",
+        "HerdrTransport",
+        "HerdrSocket",
+        "HostKind::Herdr",
+        "herdr_pane(",
+        "session_host::herdr",
+    ];
+    const ACTIVATIONS: &[&str] = &[
+        "host_for(HostKind::Herdr",
+        "HerdrHost::new(",
+        "HerdrHost::<",
+        "HerdrSocketTransport::new(",
+        "HerdrSocketTransport::<",
+    ];
+    // Nothing writes a host locator or `.host_kind` marker; only their owners and the
+    // dormant guard adapter read one. The termination owner holds a locator only as a warrant's target.
+    const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
+    const MARKER: &str = "src/services/tmux_common/host_marker.rs";
+    const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
+    const READERS: &[(&str, &[&str])] = &[
+        (
+            "PersistedHostLocator",
+            &[LOCATOR, INFLIGHT_MODEL, GUARD_ADAPTER],
+        ),
+        (
+            "HostedRuntimeLocator",
+            &[
+                LOCATOR,
+                "src/services/session_host.rs",
+                "src/services/session_host/model.rs",
+                "src/services/termination_audit/host_terminate.rs",
+            ],
+        ),
+        ("HostKind::from_persisted", &[LOCATOR, MARKER]),
+        ("HostKindMarker", &[MARKER, GUARD_ADAPTER]),
+        ("read_host_kind_marker", &[MARKER]),
+        ("host_marker::", &[GUARD_ADAPTER]),
+        (".host_locator", &[GUARD_ADAPTER]),
+        ("host_locator: Some", &[]),
+        ("host_locator:", &[INFLIGHT_MODEL, GUARD_ADAPTER]),
+    ];
+    let mut violations = Vec::new();
+    for (relative, prod) in &production_sources() {
+        let relative = relative.as_str();
         let owner = OWNERS.iter().find(|(owner, _)| *owner == relative);
         let named = match owner {
             Some(_) => Vec::new(),
@@ -755,7 +782,7 @@ fn herdr_items_have_no_production_caller() {
         violations.extend(
             READERS
                 .iter()
-                .filter(|(n, owners)| !owners.contains(&relative.as_str()) && prod.contains(*n))
+                .filter(|(n, owners)| !owners.contains(&relative) && prod.contains(*n))
                 .map(|(n, _)| format!("{relative}: {n}")),
         );
         let fields = prod.matches("host_locator:").count() - prod.matches("host_locator::").count();
@@ -768,16 +795,73 @@ fn herdr_items_have_no_production_caller() {
         }
     }
     assert!(
-        files.len() > 100,
-        "source scan found only {} files",
-        files.len()
+        violations.is_empty(),
+        "Herdr production caller: {violations:?}"
     );
+}
+
+// Dormant guard: the session target resolver and consumer guard have no production
+// caller. Their owners may only define them; nothing else may name them.
+#[test]
+fn session_target_guard_has_no_production_caller() {
+    const RESOLVE: &str = "src/services/session_host/resolve.rs";
+    const GUARD: &str = "src/services/session_host/consumer_guard.rs";
+    const ROOT: &str = "src/services/session_host.rs";
+    // Needle, files that may name it, and the calls allowed there beyond its `fn`.
+    const ITEMS: &[(&str, &[&str], usize)] = &[
+        ("resolve_session_target", &[RESOLVE, ROOT], 0),
+        ("resolve_target_host", &[RESOLVE], 1),
+        ("legacy_target_host", &[RESOLVE], 1),
+        ("guard_first_state_change", &[GUARD, ROOT], 0),
+        ("probe_for_policy", &[GUARD, ROOT], 0),
+        ("legacy_ref", &[RESOLVE, GUARD], 1),
+        ("with_inflight_row", &[GUARD_ADAPTER], 0),
+        ("locator_witness", &[GUARD_ADAPTER], 1),
+        ("marker_witness", &[GUARD_ADAPTER], 0),
+        ("ResolvedSessionTarget", &[RESOLVE, GUARD, ROOT], usize::MAX),
+        (
+            "SessionTargetEvidence",
+            &[RESOLVE, ROOT, GUARD_ADAPTER],
+            usize::MAX,
+        ),
+        ("SessionTargetInput", &[RESOLVE, ROOT], usize::MAX),
+        ("HostWitness", &[RESOLVE, ROOT, GUARD_ADAPTER], usize::MAX),
+        ("GuardVerdict", &[GUARD, ROOT], usize::MAX),
+        ("PolicyProbe", &[GUARD, ROOT], usize::MAX),
+        ("consumer_guard", &[ROOT], usize::MAX),
+        (
+            "host_recovery_guard",
+            &["src/services/discord/inflight.rs"],
+            usize::MAX,
+        ),
+    ];
+    let sources = production_sources();
+    let mut violations = Vec::new();
+    for (needle, owners, calls) in ITEMS {
+        for (relative, prod) in &sources {
+            let named = prod.matches(needle).count();
+            if named == 0 {
+                continue;
+            }
+            if !owners.contains(&relative.as_str()) {
+                violations.push(format!("{relative}: {needle}"));
+                continue;
+            }
+            let call = format!("{needle}(");
+            let used = prod.matches(&call).count() - prod.matches(&format!("fn {call}")).count();
+            if *calls != usize::MAX && used > *calls {
+                violations.push(format!("{relative}: {call} x{used} > {calls}"));
+            }
+        }
+    }
+    let guard = &sources[GUARD];
     assert!(
-        kept * 2 > total,
-        "test stripping kept only {kept} of {total} bytes"
+        guard.contains("fn guard_first_state_change(")
+            && sources[RESOLVE].contains("fn resolve_session_target("),
+        "source scan must see the guarded definitions"
     );
     assert!(
         violations.is_empty(),
-        "Herdr production caller: {violations:?}"
+        "session target guard production caller: {violations:?}"
     );
 }

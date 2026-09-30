@@ -11,6 +11,7 @@ mod herdr {
     pub(crate) mod transport;
     pub(crate) mod wire;
 }
+mod consumer_guard;
 mod herdr_host;
 pub(crate) mod legacy_collapse;
 mod model;
@@ -24,6 +25,20 @@ pub(crate) use model::{
     HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,
 };
 pub(crate) use process_host::ProcessHost;
-pub(crate) use resolve::{HostEvidence, host_for, resolve_host_kind};
+pub(crate) use resolve::{
+    HostEvidence, HostWitness, SessionTargetEvidence, host_for, resolve_host_kind,
+};
+// The target resolver and guard have no production consumer yet.
 pub(crate) use tmux_host::TmuxHost;
 pub(crate) use traits::InteractiveSessionHost;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use {
+    consumer_guard::{
+        AutomaticEffect, DeferReason, GuardRefusal, GuardVerdict, PolicyProbe, StateChange,
+        guard_first_state_change, probe_for_policy,
+    },
+    resolve::{
+        ResolvedSessionTarget, SessionTargetEvidenceSource, SessionTargetInput, TargetHost,
+        TargetSource, UnknownHost, resolve_session_target,
+    },
+};

@@ -54,7 +54,6 @@ use self::voice::voice_auto_join_provider_map;
 use self::voice::{run_bot_init_voice_workers, run_bot_rehydrate_voice_handoffs};
 #[allow(unused_imports)]
 use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
-use crate::services::tui_o::topology::HostRole;
 
 pub(crate) struct RunBotContext {
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -302,7 +301,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
         queued_recovery::restore_worker_queues(&shared, &provider).await;
-        run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Runner);
+        run_bot_maybe_spawn_intake_worker(&shared, &provider);
         run_startup_diagnostic_after_reconcile_barrier_for_provider(
             &provider,
             startup_reconcile_remaining,
@@ -362,7 +361,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
             #[cfg(unix)]
             spawns::run_bot_spawn_reachability_observation(&shared, &provider);
-            run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Standby);
+            run_bot_maybe_spawn_intake_worker(&shared, &provider);
             spawn_standby_gateway_retry(
                 shared.clone(),
                 token_hash.clone(),
@@ -387,7 +386,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
     #[cfg(unix)]
     spawns::run_bot_spawn_reachability_observation(&shared, &provider);
-    run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Gateway);
+    run_bot_maybe_spawn_intake_worker(&shared, &provider);
     crate::services::tui_o::shadow_host::spawn_if_enabled(boot_config.tui_o.as_ref());
     let pg_gateway = gateway_lease.is_some();
     o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
