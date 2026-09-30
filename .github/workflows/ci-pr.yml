@@ -617,6 +617,7 @@ jobs:
               - 'src/services/discord/destructive_cancel_gate.rs'
               - 'src/services/discord/health.rs'
               - 'src/services/discord/health/**'
+              - 'src/services/discord/host_teardown_gate/**'
               - 'src/services/discord/idle_recap.rs'
               - 'src/services/discord/idle_recap_interaction.rs'
               - 'src/services/discord/idle_relay_drift.rs'
