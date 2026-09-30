@@ -27882,7 +27882,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:4b0a92230a768514c9b6f8f3b1340a927102313f892c12360b85f97dd9cf4f3f"
+      "fingerprint": "sha256:881f7da0484c6dbe7d2182b64a357a631bc050c3622834ac2f21ebdd0480945b"
     },
     {
       "root": "src",
