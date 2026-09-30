@@ -13,7 +13,7 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wir
 use crate::services::discord::inflight::seed_session_row;
 use crate::services::provider::CancelToken;
 
-/// Counts retry-with-history scheduling and records the placeholder edits.
+/// Counts retry-with-history scheduling and records the placeholder edits and replacements.
 struct RetryCounter(Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>);
 
 impl TurnGateway for RetryCounter {
@@ -39,9 +39,10 @@ impl TurnGateway for RetryCounter {
         &'a self,
         _channel_id: ChannelId,
         _message_id: MessageId,
-        _content: &'a str,
+        content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
-        panic!("recovery retry must not replace a message")
+        self.1.lock().unwrap().push(content.to_string());
+        Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
     }
 
     fn schedule_retry_with_history<'a>(
@@ -213,6 +214,19 @@ async fn session_died_recovery_retries_only_a_session_the_host_guard_admits_pg()
     db.drop().await;
 }
 
+/// How the turn's resume failure surfaces to terminal delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trigger {
+    /// Reported in the output.
+    Reported,
+    /// A quick empty exit with no `Init` handshake.
+    QuickExit,
+    /// The session died during restart recovery.
+    RecoveryRetry,
+    /// An empty response whose output file holds the stale-resume result.
+    OutputFile,
+}
+
 /// The stored row behind the turn's own session key.
 #[derive(Clone, Copy, Debug)]
 enum StoredRow {
@@ -235,12 +249,12 @@ struct TurnEnd {
 
 type ApiCalls = Arc<Mutex<Vec<(String, String)>>>;
 
-// A resume failure, reported in the output or found by the empty-response handler, driven
-// through terminal delivery and the completion postlude the way the bridge threads them.
+// A resume failure from any trigger, driven through terminal delivery and the completion
+// postlude the way the bridge threads them.
 async fn resume_failure_turn(
     row: StoredRow,
     with_user_message: bool,
-    quick_exit: bool,
+    trigger: Trigger,
     api: &ApiCalls,
 ) -> TurnEnd {
     // The driver holds the shared test-env lock, which comes before the database lock.
@@ -296,14 +310,30 @@ async fn resume_failure_turn(
         .cancel_token
         .bind_unmanaged_session_name(DRIVER_TMUX_SESSION);
     state.adk_session_key = Some(key);
-    if quick_exit {
-        ctx.had_prior_session_id_at_turn_start = true;
-        ctx.session_handshake_seen = false;
-        ctx.rx_disconnected = true;
-        state.full_response = String::new();
-    } else {
-        state.resume_failure_detected = true;
-        state.full_response = "No conversation found with session ID".to_string();
+    match trigger {
+        Trigger::QuickExit => {
+            ctx.had_prior_session_id_at_turn_start = true;
+            ctx.session_handshake_seen = false;
+            ctx.rx_disconnected = true;
+            state.full_response = String::new();
+        }
+        Trigger::Reported => {
+            state.resume_failure_detected = true;
+            state.full_response = "No conversation found with session ID".to_string();
+        }
+        Trigger::RecoveryRetry => {
+            ctx.recovery_retry = true;
+            state.full_response = "partial".to_string();
+        }
+        Trigger::OutputFile => {
+            let path = std::env::temp_dir().join(format!("w2a-stale-{}.jsonl", std::process::id()));
+            let line =
+                r#"{"type":"result","is_error":true,"result":"Error: No conversation found"}"#;
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            state.inflight_state.output_path = Some(path.display().to_string());
+            state.inflight_state.last_offset = 0;
+            state.full_response = String::new();
+        }
     }
     state.new_session_id = Some("sid-turn".to_string());
     state.new_raw_provider_session_id = Some("raw-turn".to_string());
@@ -324,7 +354,7 @@ async fn resume_failure_turn(
         calls.iter().filter(|(path, _)| path == clear).count()
     };
     let terminal_clears = clears(api);
-    run_bridge_postlude(&driver, output, quick_exit).await;
+    run_bridge_postlude(&driver, output, trigger).await;
 
     let core_sid = shared.core.lock().await.sessions[&channel_id]
         .session_id
@@ -357,7 +387,8 @@ async fn resume_failure_turn(
 
 // Mirrors how the bridge hands terminal delivery's output to the completion postlude.
 #[rustfmt::skip]
-async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, rx_disconnected: bool) {
+async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, trigger: Trigger) {
+    let (rx_disconnected, recovery_retry) = (trigger == Trigger::QuickExit, trigger == Trigger::RecoveryRetry);
     use super::super::super::{completion_postlude as postlude, guards};
     let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
     let (_, rx) = std::sync::mpsc::channel();
@@ -394,7 +425,7 @@ async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOu
         preserve_inflight_for_cleanup_retry: output.preserve_inflight_for_cleanup_retry,
         tmux_last_offset: None, watcher_owner_channel_id: channel_id,
         bridge_relay_delegated_to_watcher: false, is_prompt_too_long: false,
-        resume_failure_detected: output.resume_failure_detected, recovery_retry: false,
+        resume_failure_detected: output.resume_failure_detected, recovery_retry,
         rx_disconnected, tmux_handed_off: false, bridge_output_owner: None,
         terminal_delivery_committed: output.terminal_delivery_committed,
         terminal_session_reset_required: false, transcript_events: Vec::new(),
@@ -457,20 +488,32 @@ fn kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg()
         crate::services::discord::internal_api::init(port, None);
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        for quick_exit in [false, true] {
-            let cleared = resume_failure_turn(StoredRow::Legacy, true, quick_exit, &api).await;
+        let triggers = [
+            Trigger::Reported,
+            Trigger::QuickExit,
+            Trigger::RecoveryRetry,
+            Trigger::OutputFile,
+        ];
+        for trigger in triggers {
+            let cleared = resume_failure_turn(StoredRow::Legacy, true, trigger, &api).await;
             assert_eq!(cleared.requeued, 1, "{cleared:?}");
             assert!(
                 cleared.continue_notice && !cleared.inflight_kept,
                 "{cleared:?}"
             );
             assert_eq!(cleared.core_sid, None, "{cleared:?}");
+            // Completion clears the stored id again only for a detected resume failure.
             let (terminal, total) = cleared.db_clears;
-            assert!(terminal > 0 && total == 2 * terminal, "{cleared:?}");
+            let again = if trigger == Trigger::RecoveryRetry {
+                0
+            } else {
+                terminal
+            };
+            assert!(terminal > 0 && total == terminal + again, "{cleared:?}");
         }
 
         // The existing branch for a turn with no message to retry.
-        let no_retry = resume_failure_turn(StoredRow::Legacy, false, false, &api).await;
+        let no_retry = resume_failure_turn(StoredRow::Legacy, false, Trigger::Reported, &api).await;
         assert_eq!(no_retry.requeued, 0, "{no_retry:?}");
         assert!(
             !no_retry.continue_notice && no_retry.inflight_kept,
@@ -478,15 +521,20 @@ fn kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg()
         );
         assert_eq!(no_retry.core_sid, None, "{no_retry:?}");
 
-        for (row, quick_exit) in [
-            (StoredRow::Bound, false),
-            (StoredRow::Missing, false),
-            (StoredRow::Bound, true),
+        for (row, trigger) in [
+            (StoredRow::Bound, Trigger::Reported),
+            (StoredRow::Missing, Trigger::Reported),
+            (StoredRow::Bound, Trigger::QuickExit),
+            (StoredRow::Bound, Trigger::RecoveryRetry),
+            (StoredRow::Missing, Trigger::RecoveryRetry),
+            (StoredRow::Bound, Trigger::OutputFile),
         ] {
-            let kept = resume_failure_turn(row, true, quick_exit, &api).await;
-            let case = format!("{row:?} quick_exit={quick_exit}: {kept:?}");
-            let branch = (kept.requeued, kept.continue_notice, kept.inflight_kept);
-            assert_eq!(branch, (0, false, true), "{case}");
+            let kept = resume_failure_turn(row, true, trigger, &api).await;
+            let case = format!("{row:?} {trigger:?}: {kept:?}");
+            // Nothing is queued, so no delivered text may promise that the turn continues.
+            assert_eq!((kept.requeued, kept.continue_notice), (0, false), "{case}");
+            let empty_response = trigger != Trigger::RecoveryRetry;
+            assert!(kept.inflight_kept || !empty_response, "{case}");
             assert_eq!(kept.core_sid.as_deref(), Some("sid-turn"), "{case}");
             assert_eq!(kept.db_clears, (0, 0), "{case}");
             assert!(kept.persisted_sid, "{case}");
