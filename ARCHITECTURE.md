@@ -187,6 +187,7 @@ src/
 │   ├── kanban.rs
 │   ├── meetings.rs
 │   ├── mod.rs
+│   ├── o_channel_activation.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs
@@ -1842,7 +1843,8 @@ src/
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
-│   │   └── registry.rs
+│   │   ├── registry.rs
+│   │   └── session_probe.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
@@ -1926,6 +1928,7 @@ src/
 │   │   ├── model.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
+│   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
 │   ├── settings/
@@ -1987,6 +1990,7 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
 │   │   │   ├── binding.rs

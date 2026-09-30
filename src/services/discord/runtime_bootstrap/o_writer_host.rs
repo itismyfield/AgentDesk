@@ -1,5 +1,5 @@
 //! Gateway side of the O writer host: the gateway's own HTTP client and bot id, the shared
-//! delivery lease cells and the process alarm router.
+//! delivery lease cells, the process alarm router and the facts a first activation checks.
 
 use super::*;
 
@@ -9,6 +9,7 @@ use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort
 use crate::services::tui_o::alarm::AlarmRouter;
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
+use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{self, HostIo};
@@ -48,6 +49,42 @@ impl HostIo for GatewayHost {
 
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<ChannelBindingLog> {
         Arc::new(ChannelBindingLog::new(channel, provider))
+    }
+
+    /// Open intake, sessions of other nodes, node overrides and Legacy inflight or custody.
+    fn activation_facts(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
+        let shared = Arc::clone(&self.shared);
+        async move {
+            let pool = shared.pg_pool.clone().ok_or("no PG pool")?;
+            let id = channel.to_string();
+            let local =
+                crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+            let rows = crate::db::o_channel_activation::activation_rows(&pool, &id, &local).await;
+            let rows = rows.map_err(|error| format!("activation rows: {error}"))?;
+            let agent_node =
+                crate::services::cluster::agent_execution_node::for_channel(&pool, &id);
+            let agent_node = agent_node
+                .await
+                .map_err(|error| format!("agent node: {error}"))?;
+            let node_override =
+                super::super::commands::channel_node_override(&shared, ChannelId::new(channel));
+            let kind = match provider {
+                ShadowProvider::Claude => ProviderKind::Claude,
+                ShadowProvider::Codex => ProviderKind::Codex,
+            };
+            let legacy_custody = super::super::inflight::inflight_state_file_exists(&kind, channel)
+                || super::super::terminal_delivery_custody::retains_channel(channel)?;
+            Ok(ActivationFacts {
+                open_intake: rows.open_intake,
+                runner_sessions: rows.foreign_sessions,
+                node_override: node_override.or(agent_node),
+                legacy_custody,
+            })
+        }
     }
 }
 

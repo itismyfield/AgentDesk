@@ -544,6 +544,7 @@ db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
 db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
+db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_drops_old_database_created_but_never_marked
 db::postgres::test_db_reclaim::tests::pg_reclaim_drops_orphaned_fixture_database
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
@@ -6001,6 +6002,7 @@ services::discord::terminal_coordinate::tests::message_identity_preserves_exact_
 services::discord::terminal_coordinate::tests::optional_source_range_is_strict_and_ends_at_c
 services::discord::terminal_coordinate::tests::route_family_is_exhaustive_and_constructor_materializes_every_input
 services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
+services::discord::terminal_delivery_custody::tests::a_record_naming_the_channel_or_one_that_does_not_parse_is_custody_of_it
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_aborted_attempt_deactivates_escaped_handle
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_checkpoint_failure_does_not_settle_or_overwrite
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_checkpoint_survives_interrupted_callback
@@ -8703,6 +8705,10 @@ services::provider::ready_input_prompt_tests::detects_codex_tui_prompt_for_codex
 services::provider::ready_input_prompt_tests::detects_provider_scoped_wrapper_ready_marker
 services::provider::ready_input_prompt_tests::detects_ready_banner
 services::provider::ready_input_prompt_tests::rejects_non_ready_capture
+services::provider::session_probe::tests::legacy_pane_override_and_typed_probe_share_one_answer
+services::provider::session_probe::tests::qwen_common_probe_keeps_the_legacy_tmux_alias_only
+services::provider::session_probe::tests::tmux_alive_and_missing_collapse_like_the_legacy_bool
+services::provider::session_probe::tests::unresolved_herdr_and_failed_probes_never_read_as_dead
 services::provider_auth::tests::detect_provider_credentials_reports_env_presence_without_auth_claim
 services::provider_auth::tests::env_file_contains_key_requires_non_empty_supported_key
 services::provider_auth::tests::gemini_corrupt_creds_are_not_unconfigured
@@ -9582,10 +9588,13 @@ services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_deliver
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
+services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor
+services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
+services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
