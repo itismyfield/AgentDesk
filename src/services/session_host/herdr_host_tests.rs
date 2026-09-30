@@ -695,6 +695,82 @@ fn production_sources() -> BTreeMap<String, String> {
     sources
 }
 
+/// Code with comments blanked and literals emptied, so a scan sees only tokens.
+fn code_tokens(prod: &str) -> String {
+    let chars: Vec<char> = prod.chars().collect();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < chars.len() {
+        match literal_end(&chars, i) {
+            Some(end) => {
+                out.push_str(if chars[i] == '/' { " " } else { "\"\"" });
+                i = end;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Byte ranges of the `use` declarations in token-only code.
+fn use_spans(code: &str) -> Vec<std::ops::Range<usize>> {
+    let keyword = regex::Regex::new(r"\buse\b").unwrap();
+    keyword
+        .find_iter(code)
+        .filter(|found| !code[..found.start()].ends_with("r#"))
+        .map(|found| {
+            let end = code[found.end()..].find(';');
+            found.start()..end.map_or(code.len(), |k| found.end() + k)
+        })
+        .collect()
+}
+
+/// Uses of `name` other than its definition or a plain `use` import, plus the
+/// names a `use … as` or `type … =` binds it to.
+fn item_uses(code: &str, name: &str) -> (usize, Vec<String>) {
+    if !code.contains(name) {
+        return (0, Vec::new());
+    }
+    let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).unwrap();
+    let defines = |start: usize| {
+        let before = code[..start].trim_end();
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        before.len() < start
+            && ["fn", "struct", "enum", "trait", "type", "mod"]
+                .iter()
+                .any(|k| {
+                    before
+                        .strip_suffix(k)
+                        .is_some_and(|rest| !rest.ends_with(ident))
+                })
+    };
+    let renamed = regex::Regex::new(r"^\s+as\s+(\w+)").unwrap();
+    let type_alias = regex::Regex::new(&format!(
+        r"\btype\s+(\w+)[^=;]*=[^;]*\b{}\b",
+        regex::escape(name)
+    ))
+    .unwrap();
+    let imports = use_spans(code);
+    let mut aliases: Vec<String> = type_alias
+        .captures_iter(code)
+        .map(|c| c[1].to_string())
+        .collect();
+    let mut uses = 0;
+    for found in word.find_iter(code) {
+        if defines(found.start()) {
+            continue;
+        }
+        if !imports.iter().any(|span| span.contains(&found.start())) {
+            uses += 1;
+        } else if let Some(alias) = renamed.captures(&code[found.end()..]) {
+            aliases.extend((&alias[1] != "_").then(|| alias[1].to_string()));
+        }
+    }
+    (uses, aliases)
+}
+
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
 
 // Dormant guard: no production code reaches a Herdr host. Owners may only name
@@ -762,6 +838,7 @@ fn herdr_items_have_no_production_caller() {
         ("host_locator: Some", &[]),
         ("host_locator:", &[INFLIGHT_MODEL, GUARD_ADAPTER]),
     ];
+    let variant = regex::Regex::new(r"\bHerdr\b|\*").unwrap();
     let mut violations = Vec::new();
     for (relative, prod) in &production_sources() {
         let relative = relative.as_str();
@@ -777,8 +854,17 @@ fn herdr_items_have_no_production_caller() {
                 .chain(activated)
                 .map(|n| format!("{relative}: {n}")),
         );
-        if prod.matches("herdr_pane(").count() > prod.matches("fn herdr_pane(").count() {
-            violations.push(format!("{relative}: herdr_pane( call"));
+        let code = code_tokens(prod);
+        if item_uses(&code, "herdr_pane").0 > 0 {
+            violations.push(format!("{relative}: herdr_pane use"));
+        }
+        // `HostKind::{Herdr}` or a glob import would name the variant without its path.
+        if owner.is_none()
+            && use_spans(&code).into_iter().any(|span| {
+                code[span.clone()].contains("HostKind") && variant.is_match(&code[span])
+            })
+        {
+            violations.push(format!("{relative}: HostKind::Herdr import"));
         }
         violations.extend(
             READERS
@@ -802,7 +888,7 @@ fn herdr_items_have_no_production_caller() {
 }
 
 // Dormant guard: the session target resolver and consumer guard have no production
-// caller. Their owners may only define them; nothing else may name them.
+// caller. Their owners may only define them; nothing else may name them or an alias.
 #[test]
 fn session_target_guard_has_no_production_caller() {
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
@@ -837,21 +923,38 @@ fn session_target_guard_has_no_production_caller() {
         ),
     ];
     let sources = production_sources();
+    let codes: BTreeMap<&str, String> = sources
+        .iter()
+        .map(|(relative, prod)| (relative.as_str(), code_tokens(prod)))
+        .collect();
+    // An alias inherits its item's owners and use budget and is matched as a whole word.
+    let mut items: Vec<(String, &[&str], usize, bool)> = ITEMS
+        .iter()
+        .map(|(needle, owners, calls)| (needle.to_string(), *owners, *calls, false))
+        .collect();
     let mut violations = Vec::new();
-    for (needle, owners, calls) in ITEMS {
-        for (relative, prod) in &sources {
-            let named = prod.matches(needle).count();
-            if named == 0 {
+    let mut next = 0;
+    while let Some((needle, owners, calls, alias)) = items.get(next).cloned() {
+        next += 1;
+        for (relative, code) in &codes {
+            let (used, aliases) = item_uses(code, &needle);
+            for renamed in aliases {
+                if !items.iter().any(|(known, ..)| *known == renamed) {
+                    items.push((renamed, owners, calls, true));
+                }
+            }
+            let named = if alias {
+                used > 0
+            } else {
+                sources[*relative].contains(needle.as_str())
+            };
+            if !named {
                 continue;
             }
-            if !owners.contains(&relative.as_str()) {
+            if !owners.contains(relative) {
                 violations.push(format!("{relative}: {needle}"));
-                continue;
-            }
-            let call = format!("{needle}(");
-            let used = prod.matches(&call).count() - prod.matches(&format!("fn {call}")).count();
-            if *calls != usize::MAX && used > *calls {
-                violations.push(format!("{relative}: {call} x{used} > {calls}"));
+            } else if calls != usize::MAX && used > calls {
+                violations.push(format!("{relative}: {needle} used x{used} > {calls}"));
             }
         }
     }

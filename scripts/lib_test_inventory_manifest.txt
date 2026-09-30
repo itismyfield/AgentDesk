@@ -3529,6 +3529,7 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
 services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
 services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
+services::discord::inflight::host_recovery_guard::tests::caller_runtime_evidence_survives_the_inflight_row_merge
 services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
 services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
