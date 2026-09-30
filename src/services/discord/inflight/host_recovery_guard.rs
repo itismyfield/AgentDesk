@@ -33,7 +33,7 @@ pub(in crate::services::discord) fn marker_witness(marker: HostKindMarker) -> Ho
 }
 
 /// Adds what the inflight row carries without overwriting what the caller read.
-/// A locator or tmux name that differs from an earlier reading is dropped, never guessed.
+/// A differing locator reads as unrecognized and a differing tmux name as a name conflict.
 pub(in crate::services::discord) fn with_inflight_row(
     mut evidence: SessionTargetEvidence,
     row: &InflightTurnState,
@@ -51,7 +51,10 @@ pub(in crate::services::discord) fn with_inflight_row(
     evidence.runtime_kind_unrecognized |= row.runtime_kind_unknown_on_disk;
     match (&evidence.session_name, &row.tmux_session_name) {
         (None, name) => evidence.session_name = name.clone(),
-        (Some(recorded), Some(name)) if recorded != name => evidence.session_name = None,
+        (Some(recorded), Some(name)) if recorded != name => {
+            let detail = format!("{recorded} then {name}");
+            evidence.name_conflict.get_or_insert(detail);
+        }
         _ => {}
     }
     evidence
@@ -161,11 +164,6 @@ mod tests {
                 row(Some(unknown_locator)),
             ),
             ("unknown runtime kind", recorded(None), future_kind),
-            (
-                "renamed tmux session",
-                recorded(Some("AgentDesk-claude-other")),
-                row(None),
-            ),
         ] {
             let (host, verdict) = kill_verdict(recorded, row);
             assert!(matches!(host, TargetHost::Unknown(_)), "{label}: {host:?}");
@@ -254,6 +252,42 @@ mod tests {
             "agreeing kinds keep the legacy reading: {host:?}"
         );
         assert_eq!(verdict, GuardVerdict::Proceed);
+    }
+
+    #[test]
+    fn a_tmux_name_disagreement_stays_a_conflict_across_merges() {
+        const OTHER: &str = "AgentDesk-claude-other";
+        let named_record = SessionTargetEvidence {
+            session_record: HostWitness::Known {
+                kind: HostKind::Tmux,
+                target: Some(OTHER.to_string()),
+            },
+            ..recorded(Some(OTHER))
+        };
+        let unnamed_record = SessionTargetEvidence {
+            session_name: None,
+            ..named_record.clone()
+        };
+        let renamed = recorded(Some(OTHER));
+        for (label, evidence) in [
+            ("renamed tmux session", renamed),
+            ("record names the other session", named_record),
+            ("record target against the row name", unnamed_record),
+        ] {
+            let merged_again = with_inflight_row(evidence.clone(), &row(None));
+            for evidence in [evidence, merged_again] {
+                let (host, verdict) = kill_verdict(evidence, row(None));
+                assert!(
+                    matches!(host, TargetHost::Conflict { .. }),
+                    "{label}: {host:?}"
+                );
+                assert_eq!(
+                    verdict,
+                    GuardVerdict::Refused(GuardRefusal::HostConflict),
+                    "{label}"
+                );
+            }
+        }
     }
 
     #[test]

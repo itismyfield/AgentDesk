@@ -1472,3 +1472,48 @@ async fn o_delegated_cancelled_partial_body_is_not_replaced() {
         }
     }
 }
+
+/// A terminal or /stop with no text to publish leaves a pending adoption; one that publishes the
+/// body ends it, and Legacy shows that body once.
+#[tokio::test]
+async fn only_a_terminal_or_stop_with_text_ends_a_pending_adoption() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::Adoption;
+    use crate::services::tui_o::cutover::test_override;
+    for (cancelled, body) in [
+        (false, ""),
+        (true, ""),
+        (false, DRIVER_BODY),
+        (true, DRIVER_BODY),
+    ] {
+        let mut driver =
+            TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0).with_body(body.to_string());
+        driver.inflight.runtime_kind = Some(ClaudeTui);
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+            .expect("seed the TUI-kind row");
+        let _candidates = test_override::force_candidates(&[(DRIVER_CHANNEL_ID, ClaudeTui)]);
+        let adoption = test_override::with_channels(|boot| {
+            boot.unwrap().candidate(DRIVER_CHANNEL_ID).cloned()
+        })
+        .unwrap();
+        let (mut ctx, state) = driver.parts();
+        ctx.cancelled = cancelled;
+        tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+            .await
+            .expect("terminal outcome delivery must not hang");
+        let shown = driver.published_bodies.lock().unwrap().clone();
+        let with_body = !body.is_empty();
+        let case = format!("cancelled={cancelled} body={with_body}: {shown:?}");
+        let expected = if with_body {
+            Adoption::Released
+        } else {
+            Adoption::Pending
+        };
+        assert_eq!(adoption.peek(), expected, "{case}");
+        let bodies = shown
+            .iter()
+            .filter(|shown| shown.contains(DRIVER_BODY))
+            .count();
+        assert_eq!(bodies, usize::from(with_body), "{case}");
+    }
+}

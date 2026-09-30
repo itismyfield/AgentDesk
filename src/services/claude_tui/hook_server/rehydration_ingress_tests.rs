@@ -565,6 +565,12 @@ fn registration_alias_conflict_keeps_original_pane_unready() {
     let ingress = Ingress::new();
     let _reset = Reset;
     let race = RegistrationRace::new(root.path(), 7_493);
+    // Coarse filesystem clocks give A and B one mtime; pin it so every platform takes that path.
+    let b_path = PathBuf::from(race.payload["transcript_path"].as_str().unwrap());
+    let a_path = b_path.with_file_name(format!("{}.jsonl", race.a));
+    let a_mtime = std::fs::metadata(a_path).unwrap().modified().unwrap();
+    let b_file = std::fs::File::options().write(true).open(&b_path).unwrap();
+    b_file.set_modified(a_mtime).unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     pr::BLOCK_ALIAS.set(true);
     rehydrate_existing_claude_tui_bindings(&shared);
@@ -799,3 +805,6 @@ async fn a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration() {
     release.send(()).unwrap();
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
+
+#[path = "../../discord/tui_prompt_relay/rehydration_pending_tests.rs"]
+mod pending;

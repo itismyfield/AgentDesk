@@ -50,17 +50,16 @@ pub(crate) fn held_channels(provider: &str) -> Vec<String> {
     owned.iter().filter_map(held).collect()
 }
 
+/// A known destination reads only its own adoption, so another channel's adoption in progress
+/// never delays it; an unknown one is held once any channel is O-owned.
 fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> IntakeRoute {
-    let owned = super::owned_channels();
-    if owned.is_empty() {
-        return IntakeRoute::Unselected;
-    }
-    let Some(channel) = channel() else {
-        return IntakeRoute::Hold("intake destination channel is unknown".into());
-    };
-    match owned.iter().find(|(owned, _)| *owned == channel) {
-        Some(&(channel, kind)) => judge(provider, channel, kind),
-        None => IntakeRoute::Unselected,
+    match channel() {
+        Some(channel) => match super::owned_kind(channel) {
+            Some(kind) => judge(provider, channel, kind),
+            None => IntakeRoute::Unselected,
+        },
+        None if super::owned_channels().is_empty() => IntakeRoute::Unselected,
+        None => IntakeRoute::Hold("intake destination channel is unknown".into()),
     }
 }
 

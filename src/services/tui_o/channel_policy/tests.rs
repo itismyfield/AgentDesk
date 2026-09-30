@@ -264,3 +264,45 @@ fn a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it() {
     let state = test_override::with_channels(|boot| boot.unwrap().candidate(41).unwrap().peek());
     assert_eq!(state, Adoption::Released);
 }
+
+#[test]
+fn a_placement_never_waits_on_another_channels_adoption_in_progress() {
+    use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute, test_probe};
+    use crate::services::tui_o::cutover::test_override;
+    use RuntimeHandoffKind::ClaudeTui;
+    use std::sync::mpsc;
+    let _candidates = test_override::force_candidates(&[(41, ClaudeTui), (43, ClaudeTui)]);
+    let candidate = |channel| {
+        test_override::with_channels(|boot| boot.unwrap().candidate(channel).cloned()).unwrap()
+    };
+    assert!(candidate(43).confirm_store());
+    // 41's activation holds its lock (init I/O) until every route below has returned.
+    let (locked_tx, locked) = mpsc::channel();
+    let (done, done_rx) = mpsc::channel::<()>();
+    let adopting = candidate(41);
+    let holder = std::thread::spawn(move || {
+        let _held = adopting.lock();
+        locked_tx.send(()).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_ok()
+    });
+    locked.recv().unwrap();
+    let _ready = test_probe::answers(&[true]);
+    let routes = [
+        intake_route::route_for_placement("claude", 42),
+        intake_route::route("claude", 42),
+        intake_route::route_for_placement("claude", 43),
+    ];
+    done.send(()).ok();
+    assert!(holder.join().unwrap(), "a route waited for 41's lock");
+    assert_eq!(
+        routes,
+        [
+            IntakeRoute::Unselected,
+            IntakeRoute::Unselected,
+            IntakeRoute::Gateway
+        ]
+    );
+    assert_eq!(candidate(41).peek(), Adoption::Pending);
+}

@@ -9,11 +9,14 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       production count of each send/edit primitive. A new or moved send fails.
   (b) CENSUS gives every file in (a) a census row and a target. A missing row,
       an unknown target, or a `TBD`/`?` target fails ("zero undecided").
-  (c) EXPECTED_GATES pins, per file under src/, the exact count of the cutover
-      helper tokens. CUT_D/CUT_T files and UNREACH_G gate files need at least
-      one; R-EVID files (real delivery evidence readers) must have none, so a
-      delegated verdict can never be read as Posted evidence. The
-      `O_TUI_WRITER` token itself may appear only in the O_TUI_WRITER_FILES.
+  (c) EXPECTED_GATES pins, per file under src/, the exact count of each kind of
+      cutover helper token: `claim` (a body is about to be sent, so a pending
+      adoption ends) and `peek` (no body, the adoption is only read). A claim
+      swapped for a peek or back fails its file's pins. CUT_D/CUT_T files and
+      UNREACH_G gate files need at least one claim; R-EVID files (real delivery
+      evidence readers) must have none of either, so a delegated verdict can
+      never be read as Posted evidence. The `O_TUI_WRITER` token itself may
+      appear only in the O_TUI_WRITER_FILES.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -59,9 +62,11 @@ PRIMITIVES: dict[str, str] = {
     "send_outbound_message": r"\bsend_outbound_message\s*\(",
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
-GATE_RE = re.compile(
-    r"\b(?:(?:peek_)?o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
-)
+_OWNS = r"o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?"
+GATE_RES = {
+    "claim": re.compile(rf"\b(?:{_OWNS}|bridge_o_body_cut_decision)\b"),
+    "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),
+}
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 DEFN_RE = re.compile(r"\bfn\s+$")
 # The switch is defined in topology.rs; the intake gate and its health probe read it there.
@@ -304,26 +309,27 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/routing.rs": ("1-E", "KEEP_36"),
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
 }
-EXPECTED_GATES: dict[str, int] = {
-    "src/services/discord/health/recovery.rs": 1,
-    "src/services/discord/idle_recap.rs": 1,
-    "src/services/discord/recovery_engine/completion_delivery.rs": 1,
-    "src/services/discord/recovery_paths/restart.rs": 1,
-    "src/services/discord/session_relay_sink.rs": 2,
-    "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
-    "src/services/discord/tmux_watcher.rs": 2,
-    "src/services/discord/tmux_watcher/completion_producer.rs": 1,
-    "src/services/discord/tmux_restart_handoff.rs": 1,
-    "src/services/discord/tmux_watcher/streaming_status_tick.rs": 2,
-    "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 1,
-    "src/services/discord/turn_bridge/stream_tick.rs": 1,
-    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
-    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": 1,
-    "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": 1,
-    "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": 1,
-    "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
-    "src/services/discord/turn_finalizer/watcher_backstop.rs": 1,
-    "src/services/tui_o/cutover.rs": 4,
+# claim: a body is about to be sent here. peek: no body, the adoption is only read.
+EXPECTED_GATES: dict[str, dict[str, int]] = {
+    "src/services/discord/health/recovery.rs": {"claim": 1},
+    "src/services/discord/idle_recap.rs": {"peek": 1},
+    "src/services/discord/recovery_engine/completion_delivery.rs": {"claim": 1},
+    "src/services/discord/recovery_paths/restart.rs": {"claim": 1},
+    "src/services/discord/session_relay_sink.rs": {"claim": 2},
+    "src/services/discord/session_relay_sink/task_notification_context.rs": {"claim": 1},
+    "src/services/discord/tmux_watcher.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/tmux_watcher/completion_producer.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/tmux_restart_handoff.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/tmux_watcher/streaming_status_tick.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": {"claim": 1},
+    "src/services/discord/turn_bridge/stream_tick.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": {"claim": 1, "peek": 1},
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": {"claim": 1},
+    "src/services/discord/turn_finalizer/watcher_backstop.rs": {"peek": 1},
+    "src/services/tui_o/cutover.rs": {"claim": 2, "peek": 2},
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
@@ -390,8 +396,9 @@ def measure(root: Path, pinned_test_only_files=None):
             for name, pattern in compiled.items():
                 if n := _count(pattern, text):
                     primitives.setdefault(rel[len(PRIMITIVE_ROOT) :], {})[name] = n
-        if n := _count(GATE_RE, text):
-            gates[rel] = n
+        for kind, pattern in GATE_RES.items():
+            if n := _count(pattern, text):
+                gates.setdefault(rel, {})[kind] = n
         if n := len(FLAG_RE.findall(text)):
             flags[rel] = n
     return primitives, gates, flags
@@ -423,13 +430,15 @@ def problems_for(primitives, gates, flags) -> list[str]:
             problems.append(f"census: {rel} has undecided target {target!r}")
             continue
         gate_file = PRIMITIVE_ROOT + (row[2] if len(row) > 2 else rel)
-        if target in {"CUT_D", "CUT_T", "UNREACH_G"} and gates.get(gate_file, 0) < 1:
-            problems.append(f"census: {target} row {row[0]} has no gate in {gate_file}")
+        if target in {"CUT_D", "CUT_T", "UNREACH_G"} and gates.get(gate_file, {}).get("claim", 0) < 1:
+            problems.append(f"census: {target} row {row[0]} has no claim gate in {gate_file}")
     for rel in sorted(set(EXPECTED_GATES) | set(gates)):
-        if EXPECTED_GATES.get(rel, 0) != gates.get(rel, 0):
-            problems.append(
-                f"gate: {rel} has {gates.get(rel, 0)}x, expected {EXPECTED_GATES.get(rel, 0)}x"
-            )
+        want, have = EXPECTED_GATES.get(rel, {}), gates.get(rel, {})
+        for kind in GATE_RES:
+            if want.get(kind, 0) != have.get(kind, 0):
+                problems.append(
+                    f"gate {kind}: {rel} has {have.get(kind, 0)}x, expected {want.get(kind, 0)}x"
+                )
         if gates.get(rel) and any(
             rel == evid or (evid.endswith("/") and rel.startswith(evid)) for evid in R_EVID
         ):
@@ -497,7 +506,7 @@ def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
         )
     return True, (
         f"OK: TUI O writer census: {sites} send sites in {len(primitives)} files, "
-        f"{sum(gates.values())} cutover gate tokens in {len(gates)} files, "
+        f"{sum(sum(g.values()) for g in gates.values())} cutover gate tokens in {len(gates)} files, "
         f"{len(deferred)} rows deferred; lexical scan (see docstring)"
     )
 

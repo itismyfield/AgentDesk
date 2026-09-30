@@ -2113,21 +2113,6 @@ async fn maybe_recover_completed_stale_leak(
     let Some(state) = discord::inflight::load_inflight_state(provider, channel_id.get()) else {
         return false;
     };
-    // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
-    // A held identity also resends nothing until the destination is known.
-    let kind = (state.channel_id == channel_id.get())
-        .then_some(state.runtime_kind)
-        .flatten();
-    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
-        != Ok(false)
-    {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
-        );
-        return false;
-    }
-
     // Planned restart / rebind flows re-deliver the answer themselves.
     if state.restart_mode.is_some() || state.rebind_origin {
         return false;
@@ -2172,6 +2157,20 @@ async fn maybe_recover_completed_stale_leak(
     // from live Discord state, then seed the ledger before continuing.
     let chunks = discord::formatting::split_message(&delivery_text);
     if chunks.is_empty() {
+        return false;
+    }
+    // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
+    // A held identity also resends nothing; only a resend with a body may end a pending adoption.
+    let kind = (state.channel_id == channel_id.get())
+        .then_some(state.runtime_kind)
+        .flatten();
+    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
+        != Ok(false)
+    {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
+        );
         return false;
     }
     let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);
@@ -6651,6 +6650,7 @@ mod o_stale_leak_cut_tests {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use crate::services::tui_o::channel_policy::Adoption;
     use crate::services::tui_o::cutover::test_override;
     use poise::serenity_prelude::ChannelId;
 
@@ -6710,7 +6710,7 @@ mod o_stale_leak_cut_tests {
 
     /// A watcher-owned turn whose answer never reached its placeholder, as the leak detector sees it.
     async fn recover(case: &str) {
-        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+        let mut state: InflightTurnState = serde_json::from_value(serde_json::json!({
             "version": 9, "provider": "claude", "channel_id": CHANNEL, "channel_name": "adk-cc",
             "request_owner_user_id": 7, "user_msg_id": 9_433_010, "current_msg_id": 9_433_011,
             "current_msg_len": 0, "user_text": "prompt", "source": "text", "session_id": "session",
@@ -6720,6 +6720,8 @@ mod o_stale_leak_cut_tests {
             "started_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00"
         }))
         .unwrap();
+        // A silent turn resends nothing, so it must leave a pending adoption as it found it.
+        state.silent_turn = case == "pending-silent";
         crate::services::discord::inflight::save_inflight_state(&state).unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared
@@ -6733,11 +6735,25 @@ mod o_stale_leak_cut_tests {
             "o" => vec![(CHANNEL, RuntimeHandoffKind::ClaudeTui)],
             _ => Vec::new(),
         };
-        let _owned = test_override::force_channels(&owned);
+        let _owned = match case {
+            "pending" | "pending-silent" => {
+                test_override::force_candidates(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)])
+            }
+            _ => test_override::force_channels(&owned),
+        };
+        let adoption = test_override::with_channels(|boot| boot?.candidate(CHANNEL).cloned());
         let channel = ChannelId::new(CHANNEL);
         let recovered =
             maybe_recover_completed_stale_leak(&registry, &ProviderKind::Claude, &shared, channel);
         assert!(!recovered.await, "no Discord answers in this child");
+        let expected = match case {
+            "pending" => Some(Adoption::Released),
+            "pending-silent" => Some(Adoption::Pending),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            assert_eq!(adoption.map(|adoption| adoption.peek()), Some(expected));
+        }
     }
 
     #[tokio::test]
@@ -6749,6 +6765,11 @@ mod o_stale_leak_cut_tests {
         assert!(
             discord_connections("legacy") > 0,
             "an unselected channel still tries its Legacy resend"
+        );
+        assert_eq!(discord_connections("pending-silent"), 0);
+        assert!(
+            discord_connections("pending") > 0,
+            "a pending adoption ends before Legacy tries its resend"
         );
     }
 }

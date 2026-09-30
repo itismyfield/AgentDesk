@@ -7,6 +7,8 @@ use super::process_host::ProcessHost;
 use super::tmux_host::TmuxHost;
 use super::traits::InteractiveSessionHost;
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 /// Host-kind evidence the caller already read at its own site. The resolver
 /// performs no lookups, so each site keeps its probe order and timeouts.
@@ -74,7 +76,8 @@ pub(crate) enum SessionTargetInput {
         token_hash: String,
         channel_id: u64,
     },
-    /// Raw name from a legacy compatibility API; it needs legacy evidence to reach tmux.
+    /// Raw name from a legacy compatibility API; it reaches a tmux or process host only
+    /// through a found sessions row with no hosted record, [`HostWitness::LegacyRow`].
     RawName(String),
 }
 
@@ -92,6 +95,12 @@ pub(crate) enum HostWitness {
     Unrecognized(String),
     /// Not read, or the read failed; never taken as absent.
     ReadFailed(String),
+    /// Sessions record only: the row was found and has no hosted record.
+    LegacyRow,
+    /// Sessions record only: no row matched, which never proves a legacy session.
+    NoRow,
+    /// Sessions record only: the key matched diverging rows or a foreign owner.
+    RowConflict(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +130,8 @@ pub(crate) struct SessionTargetEvidence {
     pub runtime_kind_unrecognized: bool,
     pub runtime_kind_marker: Option<RuntimeHandoffKind>,
     pub process_registry_hit: bool,
+    /// Two readings named different sessions; a later merge never clears it.
+    pub name_conflict: Option<String>,
 }
 
 impl SessionTargetEvidence {
@@ -137,7 +148,29 @@ impl SessionTargetEvidence {
             runtime_kind_unrecognized: false,
             runtime_kind_marker: None,
             process_registry_hit: false,
+            name_conflict: None,
         }
+    }
+
+    /// Reads the `.host_kind` marker under the matched key's tmux name, the name the
+    /// launch writes it under and session cleanup reads it by. Without a key it stays unread.
+    pub(crate) fn with_host_marker(mut self) -> Self {
+        let Some(key) = self.session_key.as_deref() else {
+            return self;
+        };
+        self.host_marker = match tmux_name_from_session_key(key) {
+            None => HostWitness::Absent,
+            Some(name) => match read_host_kind_marker(&name) {
+                HostKindMarker::Absent => HostWitness::Absent,
+                HostKindMarker::Known(kind) => HostWitness::Known {
+                    kind,
+                    target: matches!(kind, HostKind::Tmux | HostKind::Process).then_some(name),
+                },
+                HostKindMarker::Unrecognized(raw) => HostWitness::Unrecognized(raw),
+                HostKindMarker::ReadFailed(error) => HostWitness::ReadFailed(error),
+            },
+        };
+        self
     }
 }
 
@@ -155,6 +188,10 @@ pub(crate) enum UnknownHost {
     },
     /// The host is known but no witness names the session on it.
     MissingTarget(HostKind),
+    /// No sessions row matched the key.
+    NoSessionRow,
+    /// The sessions lookup matched diverging rows or a foreign owner.
+    SessionRowConflict(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,16 +240,37 @@ pub(crate) fn resolve_session_target(
     source: &dyn SessionTargetEvidenceSource,
 ) -> ResolvedSessionTarget {
     let evidence = source.read_evidence(&input);
+    let raw_name = matches!(input, SessionTargetInput::RawName(_));
+    let host = match resolve_target_host(&evidence) {
+        TargetHost::Known {
+            kind: HostKind::Tmux | HostKind::Process,
+            ..
+        } if raw_name && evidence.session_record != HostWitness::LegacyRow => {
+            TargetHost::Unknown(UnknownHost::NoHostEvidence)
+        }
+        host => host,
+    };
     ResolvedSessionTarget {
         input,
-        host: resolve_target_host(&evidence),
+        host,
         session_key: evidence.session_key,
+    }
+}
+
+/// A name disagreement between readings turns any known host into a Conflict.
+fn resolve_target_host(evidence: &SessionTargetEvidence) -> TargetHost {
+    match (&evidence.name_conflict, witnessed_host(evidence)) {
+        (Some(_), TargetHost::Known { kind, source, .. }) => TargetHost::Conflict {
+            first: (kind, source),
+            second: (kind, TargetSource::InflightLocator),
+        },
+        (_, host) => host,
     }
 }
 
 /// Explicit witnesses decide first; only a row with none of them keeps the
 /// legacy runtime-kind reading.
-fn resolve_target_host(evidence: &SessionTargetEvidence) -> TargetHost {
+fn witnessed_host(evidence: &SessionTargetEvidence) -> TargetHost {
     let witnesses = [
         (TargetSource::SessionRecord, &evidence.session_record),
         (TargetSource::InflightLocator, &evidence.inflight_locator),
@@ -221,7 +279,11 @@ fn resolve_target_host(evidence: &SessionTargetEvidence) -> TargetHost {
     let mut known = Vec::new();
     for (source, witness) in witnesses {
         match witness {
-            HostWitness::Absent => {}
+            HostWitness::Absent | HostWitness::LegacyRow => {}
+            HostWitness::NoRow => return TargetHost::Unknown(UnknownHost::NoSessionRow),
+            HostWitness::RowConflict(detail) => {
+                return TargetHost::Unknown(UnknownHost::SessionRowConflict(detail.clone()));
+            }
             HostWitness::Known { kind, target } => {
                 let target = target.as_deref().filter(|name| !name.trim().is_empty());
                 known.push((*kind, source, target));
@@ -263,6 +325,15 @@ fn resolve_target_host(evidence: &SessionTargetEvidence) -> TargetHost {
         };
     }
     let name = match (kind, named) {
+        // A Herdr pane id and a tmux name are different identifiers, so only tmux/process compare.
+        (HostKind::Tmux | HostKind::Process, Some(name))
+            if session_name.is_some_and(|recorded| recorded != name) =>
+        {
+            return TargetHost::Conflict {
+                first,
+                second: (kind, TargetSource::SessionRecord),
+            };
+        }
         (_, Some(name)) => name,
         (HostKind::Tmux | HostKind::Process, None) => match session_name {
             Some(name) => name,
@@ -332,6 +403,16 @@ fn legacy_target_host(evidence: &SessionTargetEvidence, session_name: Option<&st
             source: TargetSource::Legacy(source),
             name: name.to_string(),
         },
+        // A found row without any hosted trace keeps its pre-Herdr tmux reading.
+        (HostKindResolution::Unknown, Some(name))
+            if evidence.session_record == HostWitness::LegacyRow =>
+        {
+            TargetHost::Known {
+                kind: HostKind::Tmux,
+                source: TargetSource::SessionRecord,
+                name: name.to_string(),
+            }
+        }
         (HostKindResolution::Conflict { first, second }, _) => TargetHost::Conflict {
             first: (first.0, TargetSource::Legacy(first.1)),
             second: (second.0, TargetSource::Legacy(second.1)),
@@ -870,7 +951,19 @@ mod tests {
             runtime_kind_marker: Some(R::ClaudeTui),
             ..bare
         };
-        let resolved = resolve(raw, marked);
+        let resolved = resolve(raw.clone(), marked.clone());
+        assert_eq!(
+            resolved.host,
+            TargetHost::Unknown(UnknownHost::NoHostEvidence),
+            "a runtime vote without a found legacy row must not become a tmux ref"
+        );
+        assert_eq!(resolved.legacy_ref(), None);
+
+        let found_legacy_row = SessionTargetEvidence {
+            session_record: HostWitness::LegacyRow,
+            ..marked
+        };
+        let resolved = resolve(raw, found_legacy_row);
         assert_eq!(
             resolved.host,
             target(
@@ -880,5 +973,235 @@ mod tests {
             )
         );
         assert_eq!(resolved.legacy_ref(), Some(HostSessionRef::tmux(TUI_NAME)));
+    }
+
+    // Each sessions-row reading against the chain a consumer runs: resolve, then guard.
+    #[test]
+    fn only_a_found_legacy_row_without_host_traces_keeps_the_tmux_reading() {
+        use crate::services::session_host::consumer_guard::{
+            AutomaticEffect, GuardRefusal, GuardVerdict, StateChange, guard_first_state_change,
+        };
+        let found = || SessionTargetEvidence {
+            session_name: Some(TUI_NAME.to_string()),
+            session_record: HostWitness::LegacyRow,
+            ..absent()
+        };
+        let tmux_row = |source| target(HostKind::Tmux, source, TUI_NAME);
+        let (proceed, defer) = (
+            GuardVerdict::Proceed,
+            GuardVerdict::DeferredToExistingRecovery,
+        );
+        let refused = GuardVerdict::Refused(GuardRefusal::UnknownHost);
+        let cases: Vec<(&str, SessionTargetEvidence, TargetHost, GuardVerdict)> = vec![
+            (
+                "found legacy row, no votes",
+                found(),
+                tmux_row(TargetSource::SessionRecord),
+                proceed,
+            ),
+            (
+                "found legacy row, runtime vote",
+                SessionTargetEvidence {
+                    runtime_kind_marker: Some(R::LegacyTmuxWrapper),
+                    ..found()
+                },
+                tmux_row(TargetSource::Legacy(RuntimeKindMarker)),
+                proceed,
+            ),
+            (
+                "found legacy row, process registry",
+                SessionTargetEvidence {
+                    process_registry_hit: true,
+                    ..found()
+                },
+                target(
+                    HostKind::Process,
+                    TargetSource::Legacy(ProcessRegistry),
+                    TUI_NAME,
+                ),
+                proceed,
+            ),
+            (
+                "row not proven, no votes",
+                SessionTargetEvidence {
+                    session_record: HostWitness::Absent,
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::NoHostEvidence),
+                refused,
+            ),
+            (
+                "no row",
+                SessionTargetEvidence {
+                    session_record: HostWitness::NoRow,
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::NoSessionRow),
+                refused,
+            ),
+            (
+                "lookup failed",
+                SessionTargetEvidence {
+                    session_record: HostWitness::ReadFailed("pool closed".to_string()),
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::Unreadable {
+                    source: TargetSource::SessionRecord,
+                    detail: "pool closed".to_string(),
+                }),
+                refused,
+            ),
+            (
+                "rows conflict",
+                SessionTargetEvidence {
+                    session_record: HostWitness::RowConflict("EvidenceDivergence".to_string()),
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::SessionRowConflict(
+                    "EvidenceDivergence".to_string(),
+                )),
+                refused,
+            ),
+            (
+                "future or damaged record",
+                SessionTargetEvidence {
+                    session_record: HostWitness::Unrecognized("{}".to_string()),
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::Unreadable {
+                    source: TargetSource::SessionRecord,
+                    detail: "{}".to_string(),
+                }),
+                refused,
+            ),
+            (
+                "hosted record",
+                SessionTargetEvidence {
+                    session_record: witness(HostKind::Herdr, Some("w1-1")),
+                    ..found()
+                },
+                target(HostKind::Herdr, TargetSource::SessionRecord, "w1-1"),
+                defer,
+            ),
+            (
+                "found legacy row, Herdr marker",
+                SessionTargetEvidence {
+                    host_marker: witness(HostKind::Herdr, None),
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::MissingTarget(HostKind::Herdr)),
+                refused,
+            ),
+            (
+                "found legacy row, unknown runtime kind",
+                SessionTargetEvidence {
+                    runtime_kind_unrecognized: true,
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::Unreadable {
+                    source: TargetSource::Legacy(DurableRuntimeKind),
+                    detail: "unrecognized runtime kind".to_string(),
+                }),
+                refused,
+            ),
+        ];
+        let clear = StateChange::Automatic {
+            effect: AutomaticEffect::Clear,
+            observed: None,
+        };
+        for (label, evidence, expected, admitted) in cases {
+            for input in [
+                SessionTargetInput::RawName(TUI_NAME.to_string()),
+                key("claude/h/mac-mini:x"),
+            ] {
+                let resolved = resolve(input.clone(), evidence.clone());
+                assert_eq!(resolved.host, expected, "{label} via {input:?}");
+                let verdict = guard_first_state_change(&resolved, clear);
+                assert_eq!(verdict, admitted, "{label} via {input:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn host_marker_on_disk_replaces_the_tmux_vote_and_conflicts_with_another_host() {
+        use crate::services::tmux_common::{host_marker, session_temp_path};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let name = "AgentDesk-claude-marker-resolve";
+        let session_key = format!("claude/h/mac-mini:{name}");
+        let read = |evidence: SessionTargetEvidence| {
+            let evidence = SessionTargetEvidence {
+                session_key: Some(session_key.clone()),
+                ..evidence
+            }
+            .with_host_marker();
+            resolve(key(&session_key), evidence).host
+        };
+        let tui_row = SessionTargetEvidence {
+            session_name: Some(name.to_string()),
+            inflight_runtime_kind: Some(R::ClaudeTui),
+            runtime_kind_marker: Some(R::ClaudeTui),
+            ..absent()
+        };
+        assert_eq!(
+            read(tui_row.clone()),
+            target(
+                HostKind::Tmux,
+                TargetSource::Legacy(DurableRuntimeKind),
+                name
+            ),
+            "no marker keeps the legacy reading"
+        );
+
+        host_marker::record_tmux_host_marker(name);
+        assert_eq!(
+            read(tui_row.clone()),
+            target(HostKind::Tmux, TargetSource::HostMarker, name)
+        );
+        let other_host = [
+            SessionTargetEvidence {
+                inflight_locator: witness(HostKind::Tmux, Some("AgentDesk-claude-other")),
+                ..tui_row.clone()
+            },
+            SessionTargetEvidence {
+                inflight_locator: witness(HostKind::Process, None),
+                ..tui_row.clone()
+            },
+            SessionTargetEvidence {
+                process_registry_hit: true,
+                ..tui_row.clone()
+            },
+        ];
+        for evidence in other_host {
+            assert!(
+                matches!(read(evidence.clone()), TargetHost::Conflict { .. }),
+                "{evidence:?}"
+            );
+        }
+
+        std::fs::write(session_temp_path(name, "host_kind"), "herdr").unwrap();
+        let herdr = read(tui_row.clone());
+        assert_eq!(
+            herdr,
+            TargetHost::Unknown(UnknownHost::MissingTarget(HostKind::Herdr)),
+            "a TUI runtime kind must not turn a non-tmux marker into tmux"
+        );
+        for (written, label) in [("zellij", "a future host"), ("", "a truncated marker")] {
+            std::fs::write(session_temp_path(name, "host_kind"), written).unwrap();
+            assert!(
+                matches!(
+                    read(tui_row.clone()),
+                    TargetHost::Unknown(UnknownHost::Unreadable {
+                        source: TargetSource::HostMarker,
+                        ..
+                    })
+                ),
+                "{label} is Unknown, never the legacy tmux reading"
+            );
+        }
+        let keyless = SessionTargetEvidence::unread().with_host_marker();
+        assert!(
+            matches!(keyless.host_marker, HostWitness::ReadFailed(_)),
+            "without a key the marker stays unread"
+        );
     }
 }

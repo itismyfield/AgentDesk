@@ -170,3 +170,69 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
         assert_eq!(shows_body, !delegated, "delegated={delegated}");
     }
 }
+
+/// A footer with no target message sends nothing and leaves a pending adoption; the footer that
+/// rewrites the body ends it before its edit and shows that body once.
+#[tokio::test(flavor = "current_thread")]
+async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
+    use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
+    use crate::services::discord::recovery_engine::o_cut_recorder::start_watching;
+    use crate::services::tui_o::channel_policy::Adoption;
+    use crate::services::tui_o::cutover::test_override;
+    const BODY: &str = "ADK-C1A-footer-body";
+    const CHANNEL: u64 = 4_047_131;
+    let _candidates = test_override::force_candidates(&[(
+        CHANNEL,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let adoption =
+        test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).cloned()).unwrap();
+    let tmux = format!("AgentDesk-claude-o-adopt-footer-{CHANNEL}");
+    let _bound = test_override::bind_claude_tui_session(&tmux, "/tmp/adk-o-adopt-footer.jsonl");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let complete = |target: Option<serenity::all::MessageId>| {
+        let (shared, tmux, adoption) = (shared.clone(), tmux.clone(), adoption.clone());
+        async move {
+            let recorder = start_watching(CHANNEL, adoption).await;
+            let terminal_target = target.map(|msg_id| WatcherCompletionFooterTerminalTarget {
+                msg_id,
+                text: BODY.to_string(),
+            });
+            complete_watcher_terminal_footer_or_status_panel_with_sniffer(
+                &recorder.http,
+                &shared,
+                ChannelId::new(CHANNEL),
+                &ProviderKind::Claude,
+                1_700_000_000,
+                true,
+                &mut 0,
+                terminal_target,
+                target,
+                BODY,
+                None,
+                &mut String::new(),
+                None,
+                Some(tmux),
+                |_| async { false },
+                Some(CHANNEL + 1),
+                false,
+                false,
+                false,
+            )
+            .await;
+            recorder.calls()
+        }
+    };
+    let calls = complete(None).await;
+    assert!(calls.iter().all(|call| call.content.is_none()), "{calls:?}");
+    assert_eq!(adoption.peek(), Adoption::Pending);
+
+    let calls = complete(Some(serenity::all::MessageId::new(9_425_941))).await;
+    let shown: Vec<_> = calls
+        .iter()
+        .filter(|call| call.content.as_deref().is_some_and(|c| c.contains(BODY)))
+        .collect();
+    assert_eq!(shown.len(), 1, "{calls:?}");
+    assert_eq!(shown[0].adoption, Some(Adoption::Released));
+    assert_eq!(adoption.peek(), Adoption::Released);
+}
