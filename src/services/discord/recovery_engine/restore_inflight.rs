@@ -269,7 +269,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     extracted
                 };
                 let final_text = if assistant_response.trim().is_empty() {
-                    "(복구됨 — 응답 텍스트 없음)".to_string()
+                    RECOVERED_WITHOUT_TEXT.to_string()
                 } else {
                     super::formatting::format_for_discord_with_provider(
                         &assistant_response,
@@ -1184,7 +1184,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 extracted
             };
             let final_text = if assistant_response.trim().is_empty() {
-                "(복구됨 — 응답 텍스트 없음)".to_string()
+                RECOVERED_WITHOUT_TEXT.to_string()
             } else {
                 super::formatting::format_for_discord_with_provider(&assistant_response, provider)
             };

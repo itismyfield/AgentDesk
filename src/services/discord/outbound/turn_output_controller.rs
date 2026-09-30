@@ -44,6 +44,7 @@ use super::super::{
     LeaseSnapshot, lease_now_ms,
 };
 use super::decision::LengthPolicyDecision;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use transport::{TransportResult, drive_non_fresh_transport, post_send_finalize};
 
 mod fresh_send;
@@ -636,6 +637,9 @@ pub(in crate::services::discord) struct TurnOutputCtx<
     /// single acquire deadline is the only liveness signal). Only the held-lease
     /// path renews; a `ProceedMarkerless` send holds no lease.
     pub(in crate::services::discord) heartbeat: Option<&'a dyn PostHeartbeat>,
+    /// The pending O adoption this body ends, claimed only just before its transport; an
+    /// O-owned channel sends nothing and returns `Transient`. `None` sends without a claim.
+    pub(in crate::services::discord) body_claim: Option<BodyClaim<'a>>,
 }
 
 /// Deliver one turn's output through the single controller path.
@@ -760,7 +764,11 @@ where
     // ---- send (transport) ------------------------------------------------
     // Any post-send work (placeholder terminal transition, fallback cleanup,
     // release) happens AFTER the inline commit below (I1).
-    let transport = drive_transport(gateway, &ctx, chunk_count, fallback_revalidation).await;
+    let send = || drive_transport(gateway, &ctx, chunk_count, fallback_revalidation);
+    let transport = match claim_then_send(ctx.body_claim, send).await {
+        Ok(BodySend::Sent(transport)) => transport,
+        Ok(BodySend::OwnedByO) | Err(_) => TransportResult::Transient,
+    };
 
     let outcome = match transport {
         TransportResult::Delivered {
@@ -1505,6 +1513,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::Transient,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             },
             Some(&revalidate),
         )
@@ -1558,6 +1567,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::Transient,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             },
             Some(&revalidate),
         )
@@ -1629,6 +1639,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1759,6 +1770,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1931,6 +1943,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::ProceedMarkerless,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             },
         ));
 
@@ -2017,6 +2030,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2075,6 +2089,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2128,6 +2143,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2185,6 +2201,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::Transient,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             },
         )
         .await;
@@ -2252,6 +2269,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::Transient,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             },
         )
         .await;
@@ -2311,6 +2329,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::Transient,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             },
         )
         .await;
@@ -2383,6 +2402,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2451,6 +2471,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2528,6 +2549,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2606,6 +2628,7 @@ mod tests {
                 acquire_failure_mode: AcquireFailureMode::Transient,
                 advance: None,
                 heartbeat: None,
+                body_claim: None,
             };
             let outcome = deliver_turn_output(&gateway, ctx).await;
             let commits = lease.commit_calls.load(Ordering::SeqCst);
@@ -2703,6 +2726,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2763,6 +2787,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -2934,6 +2959,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::ProceedMarkerless,
             advance: Some(&|r| advance.invoke(r)),
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -3016,6 +3042,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: Some(&|r| advance.invoke(r)),
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -3089,6 +3116,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: Some(&|r| advance.invoke(r)),
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -3171,6 +3199,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: Some(&|r| advance.invoke(r)),
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -3237,6 +3266,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: Some(&|r| advance.invoke(r)),
             heartbeat: None,
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -3304,6 +3334,7 @@ mod tests {
             acquire_failure_mode: AcquireFailureMode::Transient,
             advance: None,
             heartbeat: Some(&heartbeat),
+            body_claim: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;

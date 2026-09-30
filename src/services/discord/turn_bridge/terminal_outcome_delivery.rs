@@ -54,6 +54,7 @@ mod recovery_retry;
 pub(super) mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
+use terminal_controller_cutover::{bridge_body_claim, bridge_o_body_peek_decision};
 
 const TERMINAL_DELIVERY_LOG_TARGET: &str = module_path!();
 
@@ -363,12 +364,13 @@ pub(super) async fn run_terminal_outcome_delivery(
             &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
-        // Resolve body ownership before committing or publishing a terminal response.
-        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
-            channel_id,
-            &inflight_state,
-            can_deliver_directly,
-        );
+        // Ownership is only read here; each Legacy arm below claims at its own transport.
+        let direct = can_deliver_directly;
+        let o_body_cut = bridge_o_body_peek_decision(channel_id, &inflight_state, direct);
+        // An empty-response notice or TUI chrome is no answer, so it sends without a claim.
+        let answerless = no_answer(&full_response, response_sent_offset, &delivery_response);
+        let body_claim =
+            (!answerless).then(|| bridge_body_claim(channel_id, &inflight_state, direct));
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
@@ -432,7 +434,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome body_claim);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
@@ -474,6 +476,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
+                            body_claim,
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -514,6 +517,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             inflight_state.user_msg_id,
+                            body_claim,
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -576,6 +580,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
+                            body_claim,
                             terminal_controller_cutover::BridgeShortReplaceLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -591,11 +596,8 @@ pub(super) async fn run_terminal_outcome_delivery(
                         )
                         .await;
                     } else {
-                        // #3041 P1-2 (site 5 — normal bridge terminal replace):
-                        // acquire the shared delivery lease on
-                        // `watcher_owner_channel_id` BEFORE delivering so the
-                        // watcher and bridge serialize. On B2 Skip the holder owns
-                        // this range/turn, so do NOT deliver+advance.
+                        // The shared delivery lease serializes the watcher and bridge; on
+                        // Skip another holder owns this range, so nothing is delivered.
                         let lease_acquire =
                             match terminal_controller_cutover::bridge_terminal_lease_range(
                                 Some((bridge_start, tmux_last_offset.unwrap_or(0))),
@@ -617,10 +619,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate terminal replace (channel {})",
                                 channel_id
                             );
-                            // #3041 P1-2 (codex P1-c): preserve retry on a B2
-                            // Skip — holder owns delivery; do NOT clear inflight /
-                            // mark the watcher delivered. (codex P1-2 R3)
-                            // identity-guard the save.
+                            // The holder owns delivery, so the inflight stays for its retry.
                             preserve_inflight_for_cleanup_retry = true;
                             bridge_skip_holder_owns_inflight = true;
                         } else {
@@ -631,36 +630,39 @@ pub(super) async fn run_terminal_outcome_delivery(
                                 _ => None,
                             };
                             {
-                                let replace_outcome = gateway
-                                    .replace_message_with_outcome(
+                                let replace = || {
+                                    gateway.replace_message_with_outcome(
                                         channel_id,
                                         current_msg_id,
                                         &delivery_response,
                                     )
-                                    .await;
-                                // #2860: delivered if the placeholder was edited OR a
-                                // fallback posted the full delivery_response as a fresh
-                                // message (edit non-committed); record it delivered so
-                                // stall-watchdog recovery does not re-deliver this turn.
+                                };
+                                // `None` sent nothing (O owns the channel or its identity is
+                                // held) and stays uncommitted like a failed replace.
+                                let replace_outcome =
+                                    terminal_controller_cutover::sent_under(body_claim, replace)
+                                        .await;
+                                // A fallback that posted the whole response as a fresh message
+                                // still delivered it, so recovery must not re-deliver this turn.
                                 let fallback_delivered = matches!(
                                     &replace_outcome,
-                                    Ok(super::super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
+                                    Some(Ok(super::super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }))
                                 );
-                                let replace_committed = turn_bridge_replace_outcome_committed(
-                                    shared_owned.as_ref(),
-                                    &provider,
-                                    channel_id,
-                                    current_msg_id,
-                                    inflight_state.tmux_session_name.as_deref(),
-                                    replace_outcome,
-                                    dispatch_id.as_deref(),
-                                    adk_session_key.as_deref(),
-                                    Some(turn_id.as_str()),
-                                    "turn_bridge_terminal_replace",
-                                );
-                                // #3041 P1-2 / B6: confirmed_end advance flows ONLY
-                                // through the lease commit — `Delivered` on a committed
-                                // replace, `NotDelivered` otherwise.
+                                let replace_committed = replace_outcome.is_some_and(|outcome| {
+                                    turn_bridge_replace_outcome_committed(
+                                        shared_owned.as_ref(),
+                                        &provider,
+                                        channel_id,
+                                        current_msg_id,
+                                        inflight_state.tmux_session_name.as_deref(),
+                                        outcome,
+                                        dispatch_id.as_deref(),
+                                        adk_session_key.as_deref(),
+                                        Some(turn_id.as_str()),
+                                        "turn_bridge_terminal_replace",
+                                    )
+                                });
+                                // confirmed_end advances only through the lease commit.
                                 let outcome = if let Some(lease) = lease {
                                     let lease_range = lease.range();
                                     let outcome = if replace_committed {
@@ -690,8 +692,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                     }
                                     replace_committed
                                 } else {
-                                    // NoRange: no new bytes, so deliver without a lease
-                                    // and without advancing.
+                                    // NoRange: no new bytes, so no lease and no advance.
                                     replace_committed
                                 };
                                 if outcome {
@@ -704,9 +705,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                 } else {
                                     preserve_inflight_for_cleanup_retry = true;
                                     if fallback_delivered {
-                                        // The fallback carried the whole response; persist
-                                        // that offset so recovery never treats it as
-                                        // never-delivered.
+                                        // Recovery must not treat the fallback as undelivered.
                                         inflight_state.response_sent_offset = full_response.len();
                                     }
                                 }
@@ -730,7 +729,8 @@ pub(super) async fn run_terminal_outcome_delivery(
                             cancel_token: Some(cancel_token.as_ref()),
                         },
                     );
-                let delivery_outcome = enqueue_headless_delivery(delivery_arguments).await;
+                let delivery_outcome =
+                    enqueue_claimed_headless_delivery(body_claim, delivery_arguments).await;
                 match super::headless_delivery::headless_delivery_disposition(&delivery_outcome) {
                     super::headless_delivery::HeadlessDeliveryDisposition::Commit => {
                         cleanup_headless_streaming_placeholder_after_delivery(

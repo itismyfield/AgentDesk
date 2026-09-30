@@ -1190,6 +1190,7 @@ src/
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── journal.rs
+│   │   │   ├── o_adoption_e2e_tests.rs
 │   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
@@ -1219,6 +1220,7 @@ src/
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
+│   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs
@@ -1313,6 +1315,7 @@ src/
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── task_response_authority.rs
+│   │   │   ├── task_response_authority_tests.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_delivery_types.rs
@@ -1438,7 +1441,8 @@ src/
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── guarded_persist.rs
-│   │   │   │   └── guarded_persist_tests.rs
+│   │   │   │   ├── guarded_persist_tests.rs
+│   │   │   │   └── o_adoption_tests.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs
@@ -1989,6 +1993,9 @@ src/
 │   │   └── mod.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
+│   │   │   ├── adoption/
+│   │   │   │   └── body_check.rs
+│   │   │   ├── adoption.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/
 │   │   │   ├── channel_gate/

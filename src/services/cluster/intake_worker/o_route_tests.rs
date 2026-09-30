@@ -319,10 +319,11 @@ async fn canary_topology(commit: bool) {
         gate: Arc::clone(&gate),
         readiness: host::process_readiness(),
     };
+    // The gateway boots with the canary pending; it adopts it only once Owned, before any message.
+    let _pending = test_override::force_candidates(&[(O, ClaudeTui)]);
     let _hosts = host::start(ShadowProvider::Claude, true, parts);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!routed_locally(&pool, O).await, "not Owned yet");
-    assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
+    assert!(!host::channel_accepts(O), "not Owned yet");
     gate.acquired();
     for _ in 0..100 {
         if host::channel_accepts(O) {

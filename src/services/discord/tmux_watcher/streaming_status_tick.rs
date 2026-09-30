@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::http::{edit_channel_message, send_channel_message};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -690,8 +691,9 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // Withhold Legacy body writes for O ownership or unresolved selected identities.
-        if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+        // Withhold Legacy body writes for O ownership or unresolved selected identities. Only a
+        // write that shows unsent assistant text claims the channel, as it is sent.
+        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
             channel_id.get(),
             Some(&tmux_session_name),
         )
@@ -700,6 +702,7 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
         }
+        let body_claim = BodyClaim::tmux(channel_id.get(), Some(&tmux_session_name));
         let banner_identity = turn_identity_for_panel.as_ref();
         let banner_user_msg_id = banner_identity
             .map(|identity| identity.user_msg_id)
@@ -747,15 +750,21 @@ pub(super) async fn update_streaming_status_tick(
             if !guard_rollover(ctx, msg_id, raw_current_portion, &plan.frozen_chunk).await {
                 break;
             }
-            rate_limit_wait(&shared, channel_id).await;
-            match crate::services::discord::http::edit_channel_message(
-                &http,
-                channel_id,
-                msg_id,
-                &plan.frozen_chunk,
-            )
-            .await
-            {
+            let freeze = || async {
+                rate_limit_wait(&shared, channel_id).await;
+                crate::services::discord::http::edit_channel_message(
+                    &http,
+                    channel_id,
+                    msg_id,
+                    &plan.frozen_chunk,
+                )
+                .await
+            };
+            let Ok(BodySend::Sent(frozen)) = claim_then_send(Some(body_claim), freeze).await else {
+                commit_streaming_status_tick_state!();
+                return StreamingStatusTickOutcome::Fallthrough;
+            };
+            match frozen {
                 Ok(_) => {
                     rate_limit_wait(&shared, channel_id).await;
                     match crate::services::discord::http::send_channel_message(
@@ -905,23 +914,29 @@ pub(super) async fn update_streaming_status_tick(
                 &display_text,
             )
         {
-            let edit_committed = match placeholder_msg_id {
-                Some(msg_id) => {
-                    rate_limit_wait(&shared, channel_id).await;
-                    edit_channel_message(&http, channel_id, msg_id, &display_text)
-                        .await
-                        .is_ok()
-                }
-                None => {
-                    if let Ok(msg) = send_channel_message(&http, channel_id, &display_text).await {
-                        placeholder_msg_id = Some(msg.id);
-                        placeholder_from_restored_inflight = false;
-                        true
-                    } else {
-                        false
+            let write = || async {
+                match placeholder_msg_id {
+                    Some(msg_id) => {
+                        rate_limit_wait(&shared, channel_id).await;
+                        let edit = edit_channel_message(&http, channel_id, msg_id, &display_text);
+                        edit.await.ok().map(|_| msg_id)
                     }
+                    None => send_channel_message(&http, channel_id, &display_text)
+                        .await
+                        .ok()
+                        .map(|msg| msg.id),
                 }
             };
+            let claim = (!raw_current_portion.trim().is_empty()).then_some(body_claim);
+            let Ok(BodySend::Sent(written)) = claim_then_send(claim, write).await else {
+                commit_streaming_status_tick_state!();
+                return StreamingStatusTickOutcome::Fallthrough;
+            };
+            if placeholder_msg_id.is_none() && written.is_some() {
+                placeholder_msg_id = written;
+                placeholder_from_restored_inflight = false;
+            }
+            let edit_committed = written.is_some();
             if edit_committed {
                 last_edit_text = display_text;
                 persist_watcher_stream_progress(

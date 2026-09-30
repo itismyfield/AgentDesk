@@ -259,8 +259,9 @@ pub(super) fn handle_watcher_runtime_handoff(
                     .tmux_watchers
                     .remove_tmux_session_if_current(&tmux_session_name, &cancel);
                 *watcher_delivery_pin = None;
-                // O posts TUI bodies itself; a standby relay would be a second writer.
-                if !crate::services::tui_o::cutover::o_owns_tui_output_for_channel(
+                // O posts TUI bodies itself; a standby relay would be a second writer. The relay
+                // claims the channel only as it posts the body.
+                if !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
                     channel_id.get(),
                     Some(runtime_kind),
                 )
