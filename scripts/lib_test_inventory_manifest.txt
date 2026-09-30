@@ -3121,6 +3121,7 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_zero_id_owned_inflight
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
+services::discord::health::recovery::o_stale_leak_cut_tests::o_delegated_stale_leak_recovery_resends_nothing
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
 services::discord::health::recovery::post_cancel_drain_tests::drain_restores_disk_queue_and_role_override
 services::discord::health::recovery::post_cancel_drain_tests::queue_truth_drain_distinguishes_unreachable_from_empty
