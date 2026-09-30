@@ -391,27 +391,22 @@ pub(super) struct AutoRetry {
 }
 
 impl AutoRetry {
-    /// Queues retry-with-history only for a cleared session with a user message to retry.
-    pub(super) fn schedule(
+    /// Records the reset and returns the user message the caller queues retry-with-history
+    /// for: only a cleared session with a user message to retry.
+    pub(super) fn queue(
         &mut self,
         reset: RetryReset,
-        gateway: &Arc<dyn gateway::TurnGateway>,
-        channel_id: ChannelId,
         user_msg_id: Option<MessageId>,
-        user_text: &str,
-    ) {
-        match (reset, user_msg_id) {
-            (RetryReset::KeptByHostGuard, _) => self.kept_by_host_guard = true,
-            (RetryReset::Cleared, Some(user_msg_id)) => {
-                spawn_retry_with_history_with_release(
-                    gateway.clone(),
-                    channel_id,
-                    user_msg_id,
-                    user_text.to_string(),
-                );
-                self.queued = true;
+    ) -> Option<MessageId> {
+        match reset {
+            RetryReset::KeptByHostGuard => {
+                self.kept_by_host_guard = true;
+                None
             }
-            (RetryReset::Cleared, None) => {}
+            RetryReset::Cleared => {
+                self.queued |= user_msg_id.is_some();
+                user_msg_id
+            }
         }
     }
 

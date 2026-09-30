@@ -145,7 +145,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     // resurrecting. When the holder FAILS (does not clear), the row is still
     // present + matching, so the bridge refreshes it and retry survives.
     let mut bridge_skip_holder_owns_inflight = false;
-    let mut claude_tui_busy_requeue_pending = false;
+    let (mut claude_tui_busy_requeue_pending, mut auto_retry) = (false, AutoRetry::default());
     let mut busy_requeue_outcome = None;
     let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
     let mut status_panel_terminal_committed = false;
@@ -159,7 +159,6 @@ pub(super) async fn run_terminal_outcome_delivery(
     #[allow(unused_mut)]
     let mut bridge_should_emit_completion = true;
     let inflight_generation = inflight_state.born_generation;
-    let mut auto_retry = AutoRetry::default();
 
     if may_publish
         && !(admitted.is_some() && inflight_state.requires_pinned_terminal_recovery())
@@ -294,10 +293,15 @@ pub(super) async fn run_terminal_outcome_delivery(
                 "resume failed in response output",
             )
             .await;
-            // #2452 H6: explicit completion path — see helper docs.
-            // Skip retry-with-history when the recovery turn has no anchored
-            // user message (user_msg_id == 0), or when the host guard kept the session.
-            auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, &user_text_owned);
+            // Retry with history only for an anchored user message whose session was cleared.
+            if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
+                spawn_retry_with_history_with_release(
+                    gateway.clone(),
+                    channel_id,
+                    user_msg_id,
+                    user_text_owned.clone(),
+                );
+            }
             full_response = String::new(); // Suppress error message to user
         }
 

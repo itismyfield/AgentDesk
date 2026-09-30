@@ -267,7 +267,14 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                 )
                 .await;
                 // #2452 H6: explicit completion path — see helper docs.
-                auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, user_text_owned);
+                if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
+                    spawn_retry_with_history_with_release(
+                        gateway.clone(),
+                        channel_id,
+                        user_msg_id,
+                        user_text_owned.clone(),
+                    );
+                }
                 full_response = String::new();
             } else {
                 // Check for resume failure via other methods
@@ -298,7 +305,14 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     )
                     .await;
                     // #2452 H6: explicit completion path — see helper.
-                    auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, user_text_owned);
+                    if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
+                        spawn_retry_with_history_with_release(
+                            gateway.clone(),
+                            channel_id,
+                            user_msg_id,
+                            user_text_owned.clone(),
+                        );
+                    }
                     full_response = String::new();
                 }
                 // #2451 H5 Method 2: authoritative resume-failure
@@ -339,7 +353,14 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                         )
                         .await;
                         // #2452 H6: explicit completion path.
-                        auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, user_text_owned);
+                        if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
+                            spawn_retry_with_history_with_release(
+                                gateway.clone(),
+                                channel_id,
+                                user_msg_id,
+                                user_text_owned.clone(),
+                            );
+                        }
                         full_response = String::new();
                     }
                 }

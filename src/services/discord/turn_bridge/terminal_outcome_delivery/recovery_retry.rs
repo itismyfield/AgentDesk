@@ -74,9 +74,15 @@ pub(super) async fn handle_recovery_retry(
         // #2452 H6: schedule the auto-retry via the explicit
         // completion path so the dedup lockout is released as soon
         // as scheduling resolves (≤ 120s safety net inside helper).
-        // A recovery turn with no anchored user message (user_msg_id == 0)
-        // has no message to retry-with-history against; a kept session skips it too.
-        state.auto_retry.schedule(reset, &gateway, channel_id, user_msg_id, user_text_owned);
+        // No retry without an anchored user message (user_msg_id == 0) or for a kept session.
+        if let Some(user_msg_id) = state.auto_retry.queue(reset, user_msg_id) {
+            spawn_retry_with_history_with_release(
+                gateway.clone(),
+                channel_id,
+                user_msg_id,
+                user_text_owned.clone(),
+            );
+        }
         // Replace placeholder with recovery notice (don't delete — avoids visual gap)
         let _ = gateway
             .edit_message(
