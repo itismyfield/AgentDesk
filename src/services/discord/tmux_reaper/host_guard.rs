@@ -10,6 +10,7 @@ use super::super::SharedData;
 use super::super::adk_session::build_namespaced_session_key;
 use super::super::host_teardown_gate::shared_teardown;
 use super::super::inflight::{KeyedTeardown, keyed_teardown};
+use super::super::session_identity::tmux_name_from_session_key;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_host::{
     HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
@@ -52,8 +53,8 @@ pub(super) fn tmux_session_not_missing(name: String) -> BoxFuture<'static, bool>
     })
 }
 
-/// The gate the fresh-routine backstop takes: the row the latest owning run recorded is
-/// the ownership proof; without one the channel-style key finds no row, as for an orphan.
+/// The fresh-routine backstop's gate: each row a run recorded as owning `session_name` is
+/// read and any kept or unreadable one keeps it; with none, the orphan rule applies.
 pub(super) async fn routine_teardown(
     shared: &SharedData,
     pool: &sqlx::PgPool,
@@ -61,45 +62,75 @@ pub(super) async fn routine_teardown(
     routine_id: &str,
     session_name: &str,
 ) -> KeyedTeardown {
-    let key = match routine_owned_session_key(pool, routine_id, session_name).await {
-        Some(owned) => owned,
-        None => build_namespaced_session_key(&shared.token_hash, provider, session_name),
-    };
     let caller = "fresh_routine_backstop";
-    keyed_teardown(
-        Some(pool),
-        provider,
-        0,
-        Some(&key),
-        session_name,
-        None,
-        caller,
-    )
-    .await
+    let owned = match routine_owned_session_keys(pool, session_name).await {
+        Ok(owned) => owned,
+        Err(error) => {
+            tracing::warn!(caller, routine_id, session_name, %error, "routine ownership unreadable");
+            return KeyedTeardown::Kept;
+        }
+    };
+    if owned.is_empty() {
+        let key = build_namespaced_session_key(&shared.token_hash, provider, session_name);
+        return keyed_teardown(
+            Some(pool),
+            provider,
+            0,
+            Some(&key),
+            session_name,
+            None,
+            caller,
+        )
+        .await;
+    }
+    let mut newest = None;
+    for key in &owned {
+        // A bare-name record owns the session but names no row to read.
+        if tmux_name_from_session_key(key).is_none() {
+            return KeyedTeardown::Kept;
+        }
+        let gate = keyed_teardown(
+            Some(pool),
+            provider,
+            0,
+            Some(key),
+            session_name,
+            None,
+            caller,
+        );
+        match gate.await {
+            KeyedTeardown::Kept => return KeyedTeardown::Kept,
+            admitted => {
+                newest.get_or_insert(admitted);
+            }
+        }
+    }
+    newest.unwrap_or(KeyedTeardown::Kept)
 }
 
-/// The full session key the routine's latest owning run recorded, when it names exactly
-/// `session_name`; a bare name or another session proves nothing.
-async fn routine_owned_session_key(
+/// The distinct trimmed tokens any routine run recorded for `session_name`, newest first,
+/// read as the owned-session teardown reads them: a full key, or the bare tmux name.
+async fn routine_owned_session_keys(
     pool: &sqlx::PgPool,
-    routine_id: &str,
     session_name: &str,
-) -> Option<String> {
-    let owned: Option<String> = sqlx::query_scalar(
+) -> Result<Vec<String>, sqlx::Error> {
+    let recorded: Vec<String> = sqlx::query_scalar(
         "SELECT owned_tmux_session FROM routine_runs
-          WHERE routine_id = $1 AND owned_tmux_session IS NOT NULL
-          ORDER BY started_at DESC, id DESC
-          LIMIT 1",
+          WHERE strpos(owned_tmux_session, $1) > 0
+          GROUP BY owned_tmux_session
+          ORDER BY MAX(started_at) DESC, MAX(id) DESC",
     )
-    .bind(routine_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    owned.filter(|key| {
-        super::super::session_identity::tmux_name_from_session_key(key).as_deref()
-            == Some(session_name)
-    })
+    .bind(session_name)
+    .fetch_all(pool)
+    .await?;
+    let mut owned: Vec<String> = Vec::new();
+    for token in recorded.iter().map(|token| token.trim()) {
+        let name = tmux_name_from_session_key(token).unwrap_or_else(|| token.to_string());
+        if name == session_name && !owned.iter().any(|seen| seen == token) {
+            owned.push(token.to_string());
+        }
+    }
+    Ok(owned)
 }
 
 /// The listed session of one completed unified-thread run, once the host guard admits
