@@ -1,15 +1,21 @@
 //! Session-lifetime hosted execution record in `sessions.hosted_execution`. NULL is legacy;
 //! an unreadable payload is `Unknown` and keeps the row. Writes CAS the exact value last read.
+//! Ordinary cleanup deletes a row only through [`CleanupRow::deletable`].
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use sqlx::postgres::{PgArguments, PgRow};
+use sqlx::query::Query;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityConflictKind, SessionIdentityKind,
     resolve_session_row_pg,
 };
+use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::services::session_host::HostKind;
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 pub(crate) const HOSTED_EXECUTION_SCHEMA: u32 = 1;
 const HERDR_HOST: &str = "herdr";
@@ -182,7 +188,7 @@ impl HostedRecord {
         known.map_or_else(|| Self::Unknown(raw.clone()), Self::Known)
     }
 
-    /// Only a legacy row or a readable retired record may leave through ordinary cleanup.
+    /// Payload-only gate; the row must also pass [`CleanupRow::deletable`].
     pub(crate) fn deletable(&self) -> bool {
         match self {
             Self::Legacy => true,
@@ -464,6 +470,10 @@ async fn compare_and_set_pg(
     observed: &HostedObservation,
     next: &HostedExecution,
 ) -> Result<HostedCasOutcome, HostedTransitionError> {
+    // A write that would decode as Unknown would strand the row, so it never lands.
+    if !next.is_consistent() {
+        return Err(HostedTransitionError::Incomplete);
+    }
     let payload = serde_json::to_value(next).map_err(|error| {
         HostedTransitionError::Database(format!("encode hosted execution: {error}"))
     })?;
@@ -492,60 +502,146 @@ async fn compare_and_set_pg(
     })
 }
 
-/// Bulk cleanup of disconnected rows. Legacy rows go in one statement; each
-/// hosted row is read, decoded and deleted only if its value is still the one read.
+/// One sessions row as ordinary cleanup reads it before deleting it.
+#[derive(Debug)]
+pub(crate) struct CleanupRow {
+    pub(crate) id: i64,
+    pub(crate) session_key: Option<String>,
+    /// provider, identity_kind, discord_token_hash, channel_id as read.
+    identity: [Option<String>; 4],
+    raw: Option<Value>,
+    aliases: Vec<String>,
+}
+
+impl CleanupRow {
+    /// Reads the columns every cleanup SELECT returns, `aliases` being the row's alias keys.
+    pub(crate) fn read(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            session_key: row.try_get("session_key")?,
+            identity: [
+                row.try_get("provider")?,
+                row.try_get("identity_kind")?,
+                row.try_get("discord_token_hash")?,
+                row.try_get("channel_id")?,
+            ],
+            raw: row.try_get("hosted_execution")?,
+            aliases: row.try_get("aliases")?,
+        })
+    }
+
+    /// A record must be a Retired owned by this row. A NULL record keeps the row while any
+    /// locator's `.host_kind` marker is not tmux: a lost field leaves that trace behind.
+    pub(crate) fn deletable(&self) -> bool {
+        let record = HostedRecord::decode(self.raw.as_ref());
+        record.deletable()
+            && match &record {
+                HostedRecord::Legacy => self
+                    .session_key
+                    .iter()
+                    .chain(&self.aliases)
+                    .all(|key| no_foreign_host_marker(key)),
+                HostedRecord::Known(known) => owner_matches_row(&known.owner, &self.identity),
+                HostedRecord::Unknown(_) => false,
+            }
+    }
+
+    /// Binds `$2..$7` of a DELETE that re-checks the record, identity and key read here.
+    pub(crate) fn bind_recheck<'q>(
+        &self,
+        query: Query<'q, Postgres, PgArguments>,
+    ) -> Query<'q, Postgres, PgArguments> {
+        let [provider, kind, token, channel] = self.identity.clone();
+        query
+            .bind(self.raw.clone())
+            .bind(provider)
+            .bind(kind)
+            .bind(token)
+            .bind(channel)
+            .bind(self.session_key.clone())
+    }
+}
+
+/// A key with no tmux name has no marker; an unreadable or unknown marker is a trace.
+fn no_foreign_host_marker(session_key: &str) -> bool {
+    tmux_name_from_session_key(session_key).is_none_or(|name| {
+        matches!(
+            read_host_kind_marker(&name),
+            HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
+        )
+    })
+}
+
+/// Bulk cleanup of disconnected rows. Rows are judged, marker reads included, before one
+/// transaction deletes those still as read, so the count returns only after commit.
 pub(crate) async fn delete_disconnected_sessions_pg(pool: &PgPool) -> Result<u64, String> {
-    let mut deleted = sqlx::query(
-        "DELETE FROM sessions WHERE status = 'disconnected' AND hosted_execution IS NULL",
-    )
-    .execute(pool)
-    .await
-    .map_err(|error| format!("{error}"))?
-    .rows_affected();
-    let hosted: Vec<(i64, Value)> = sqlx::query_as(
-        "SELECT id, hosted_execution FROM sessions
-         WHERE status = 'disconnected' AND hosted_execution IS NOT NULL",
+    let rows = sqlx::query(
+        "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
+                s.channel_id, s.hosted_execution,
+                ARRAY(SELECT a.session_key FROM session_key_aliases a
+                      WHERE a.session_id = s.id) AS aliases
+         FROM sessions s WHERE s.status = 'disconnected' ORDER BY s.id",
     )
     .fetch_all(pool)
     .await
     .map_err(|error| format!("{error}"))?;
-    for (id, raw) in hosted {
-        if !HostedRecord::decode(Some(&raw)).deletable() {
-            continue;
+    let mut judged = Vec::new();
+    for row in &rows {
+        let row = CleanupRow::read(row).map_err(|error| format!("{error}"))?;
+        if row.deletable() {
+            judged.push(row);
         }
-        deleted += sqlx::query(
+    }
+    let mut tx = pool.begin().await.map_err(|error| format!("{error}"))?;
+    let mut deleted = 0;
+    for row in &judged {
+        let delete = sqlx::query(
             "DELETE FROM sessions
-             WHERE id = $1 AND status = 'disconnected' AND hosted_execution = $2::JSONB
+             WHERE id = $1 AND status = 'disconnected'
+               AND hosted_execution IS NOT DISTINCT FROM $2::JSONB
+               AND provider IS NOT DISTINCT FROM $3 AND identity_kind IS NOT DISTINCT FROM $4
+               AND discord_token_hash IS NOT DISTINCT FROM $5
+               AND channel_id IS NOT DISTINCT FROM $6 AND session_key IS NOT DISTINCT FROM $7
                AND agentdesk_hosted_execution_deletable(hosted_execution)",
         )
-        .bind(id)
-        .bind(raw)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("{error}"))?
-        .rows_affected();
+        .bind(row.id);
+        deleted += row
+            .bind_recheck(delete)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("{error}"))?
+            .rows_affected();
     }
+    tx.commit().await.map_err(|error| format!("{error}"))?;
     Ok(deleted)
 }
 
 /// Explicit delete of a row already locked by the caller's locator resolution.
-/// A live or unreadable record refuses the delete instead of reporting zero rows.
+/// A row cleanup must keep refuses the delete instead of reporting zero rows.
 pub(crate) async fn delete_locked_session_pg(
     tx: &mut Transaction<'_, Postgres>,
     session_id: i64,
 ) -> Result<u64, String> {
-    let raw: Option<Option<Value>> =
-        sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|error| format!("load session hosted execution: {error}"))?;
-    let Some(raw) = raw else {
+    let row = sqlx::query(
+        "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
+                s.channel_id, s.hosted_execution,
+                ARRAY(SELECT a.session_key FROM session_key_aliases a
+                      WHERE a.session_id = s.id) AS aliases
+         FROM sessions s WHERE s.id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load session hosted execution: {error}"))?;
+    let Some(row) = row else {
         return Ok(0);
     };
-    if !HostedRecord::decode(raw.as_ref()).deletable() {
+    let row = CleanupRow::read(&row)
+        .map_err(|error| format!("decode session hosted execution: {error}"))?;
+    if !row.deletable() {
         return Err(format!(
-            "session {session_id} keeps a live or unreadable hosted execution record"
+            "session {session_id} keeps a live, unowned or unreadable hosted execution record \
+             or a non-tmux host marker"
         ));
     }
     sqlx::query(
