@@ -96,7 +96,7 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
 - The transcript ends at that cursor on a line boundary, and its last turn is closed: no user or
   assistant record follows the last turn end.
 - The delivery record is authoritative and its frontier ends a record at or before the cursor
-  (`frontier F ends no record`). Legacy's reader ends a turn at its `stop_hook_summary`, so the
+  (`frontier F ends no record`). Legacy's reader can end a turn at its `stop_hook_summary`, so the
   records after it may only be turn ends and TUI bookkeeping: `turn_duration`, `informational`,
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
   `file-history-snapshot` and `hook_success` attachments. A prompt or any other record there
