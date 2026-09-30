@@ -150,9 +150,3 @@ pub(crate) async fn turn_kept(
         && snapshot.active_user_message_id == Some(MessageId::new(channel_id.get() + 1))
         && inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get()).is_some()
 }
-
-/// Whether a turn stop was recorded for `channel_id`, the first change a force-kill makes.
-#[cfg(unix)]
-pub(crate) fn stop_recorded(channel_id: ChannelId) -> bool {
-    crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id).is_some()
-}

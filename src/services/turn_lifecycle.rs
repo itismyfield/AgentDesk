@@ -849,8 +849,13 @@ fn compute_queue_preserved(
 mod host_guard_tests {
     use super::*;
     use crate::services::discord::host_teardown_gate::test_support::{
-        Stored, busy_turn, channel_key, runtime, seed, stop_recorded, turn_kept,
+        Stored, busy_turn, channel_key, runtime, seed, turn_kept,
     };
+
+    /// Whether a turn stop was recorded for `channel_id`, the first change a force-kill makes.
+    fn stop_recorded(channel_id: ChannelId) -> bool {
+        crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id).is_some()
+    }
 
     // A force-kill the registry can key reads the stored rows before its tombstone, stop
     // or kill; a missing row keeps main's name-only path, any other trace keeps the turn.
