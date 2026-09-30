@@ -2012,6 +2012,7 @@ services::cluster::intake_router_hook::edge_case_tests::per_agent_primary_race_r
 services::cluster::intake_router_hook::edge_case_tests::primary_readiness_loss_and_removed_registration_only_use_compatible_fallback_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
+services::cluster::intake_router_hook::o_route_tests::an_o_channel_is_placed_only_on_its_ready_gateway_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
 services::cluster::intake_router_hook::owner_record::tests::admission_idempotency_conflict_returns_prior_row
 services::cluster::intake_router_hook::owner_record::tests::admission_insert_stamps_owner_and_returns_id
@@ -2096,6 +2097,7 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
+services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::tests::fence_between_open_check_and_active_registration_rejects_late_tick
 services::cluster::intake_worker::tests::intake_request_from_row_handles_null_request_owner_name
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_numeric_channel_id
@@ -5134,6 +5136,7 @@ services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachme
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
 services::discord::router::intake_dispatch::queued::tests::actual_merge_persistence_restores_canonical_retry_lineage_4888
 services::discord::router::intake_dispatch::queued::tests::queued_admission_carries_every_absorbed_source_message_id
+services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
@@ -9580,6 +9583,7 @@ services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halt
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor
+services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
