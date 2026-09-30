@@ -113,7 +113,10 @@ pub(crate) struct SessionTargetEvidence {
     pub session_record: HostWitness,
     pub inflight_locator: HostWitness,
     pub host_marker: HostWitness,
+    /// Turn-bound kind the caller read itself, such as a cancel token's.
     pub durable_runtime_kind: Option<RuntimeHandoffKind>,
+    /// Kind the inflight row stores; a separate vote, so a disagreement stays visible.
+    pub inflight_runtime_kind: Option<RuntimeHandoffKind>,
     /// A runtime kind was stored but this binary does not know it.
     pub runtime_kind_unrecognized: bool,
     pub runtime_kind_marker: Option<RuntimeHandoffKind>,
@@ -130,6 +133,7 @@ impl SessionTargetEvidence {
             inflight_locator: unread(),
             host_marker: unread(),
             durable_runtime_kind: None,
+            inflight_runtime_kind: None,
             runtime_kind_unrecognized: false,
             runtime_kind_marker: None,
             process_registry_hit: false,
@@ -284,10 +288,14 @@ fn host_votes(
             RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui
         )
     };
-    let durable = evidence
-        .durable_runtime_kind
-        .filter(host_bound)
-        .map(|kind| (kind_hint(kind), HostKindSource::DurableRuntimeKind));
+    let durable = [
+        evidence.durable_runtime_kind,
+        evidence.inflight_runtime_kind,
+    ]
+    .into_iter()
+    .flatten()
+    .filter(host_bound)
+    .map(|kind| (kind_hint(kind), HostKindSource::DurableRuntimeKind));
     let marker = evidence
         .runtime_kind_marker
         .filter(host_bound)
@@ -295,13 +303,26 @@ fn host_votes(
     let registry = evidence
         .process_registry_hit
         .then_some((HostKind::Process, HostKindSource::ProcessRegistry));
-    durable.into_iter().chain(marker).chain(registry)
+    durable.chain(marker).chain(registry)
 }
 
 fn legacy_target_host(evidence: &SessionTargetEvidence, session_name: Option<&str>) -> TargetHost {
+    let durable = match (
+        evidence.durable_runtime_kind,
+        evidence.inflight_runtime_kind,
+    ) {
+        (Some(caller), Some(row)) if kind_hint(caller) != kind_hint(row) => {
+            let source = TargetSource::Legacy(HostKindSource::DurableRuntimeKind);
+            return TargetHost::Conflict {
+                first: (kind_hint(caller), source),
+                second: (kind_hint(row), source),
+            };
+        }
+        (caller, row) => caller.or(row),
+    };
     let legacy = HostEvidence {
         session_name,
-        durable_runtime_kind: evidence.durable_runtime_kind,
+        durable_runtime_kind: durable,
         runtime_kind_marker: evidence.runtime_kind_marker,
         process_registry_hit: evidence.process_registry_hit,
     };
