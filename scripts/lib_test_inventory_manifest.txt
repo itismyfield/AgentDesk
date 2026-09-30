@@ -6917,6 +6917,10 @@ services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::recent_
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_returns_the_ids_nearest_the_cursor_newest_first
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_announcement_leaves_the_prompt_to_the_idle_scanner
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
 services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
@@ -7078,8 +7082,6 @@ services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_cl
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_does_not_clobber_newer_lease
 services::discord::tui_prompt_relay::tests::owner_channel_chokepoint_triggers_drift_repair_on_drift_drop
-services::discord::tui_prompt_relay::tests::prompt_identity_observer_tests::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
-services::discord::tui_prompt_relay::tests::prompt_identity_observer_tests::an_aliased_hook_broadcast_twice_is_announced_once
 services::discord::tui_prompt_relay::tests::registry_is_authoritative_for_owner_channel_resolution
 services::discord::tui_prompt_relay::tests::registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror
 services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_two_half_transcript
@@ -9735,6 +9737,7 @@ services::tui_prompt_dedupe::pending::tests::resolved_pending_restores_exactly_t
 services::tui_prompt_dedupe::pending::tests::strict_read_blocks_an_unparseable_or_out_of_sequence_line
 services::tui_prompt_dedupe::pending::tests::strict_read_takes_blank_and_crlf_lines_as_the_writer_does
 services::tui_prompt_dedupe::pending::tests::torn_tail_is_not_corruption
+services::tui_prompt_dedupe::prompt_identity::tests::a_known_row_with_other_text_still_makes_its_prompt_id_ambiguous
 services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_match_also_records_the_row_uuid
 services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_seen_with_other_text_stops_suppressing_either_text
 services::tui_prompt_dedupe::prompt_identity::tests::a_repeated_hook_for_the_same_prompt_id_does_not_extend_its_lifetime

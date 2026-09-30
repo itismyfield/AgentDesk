@@ -4,7 +4,6 @@ use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
 mod compact_summary_tests;
-mod prompt_identity_observer_tests;
 
 fn compact_command_name_first_stub() -> &'static str {
     "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"

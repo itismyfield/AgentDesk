@@ -246,6 +246,14 @@ fn observe_prompt_candidates_by_tmux_inner(
         let _ = OBSERVED_PROMPTS.send(event);
         return PromptObservation::PublishedTaskNotification;
     }
+    // The prompt_id text check runs before the uuid return so a known row that
+    // pairs the id with other text still marks the id ambiguous.
+    let prompt_id_match = prompt_id.map(|prompt_id| {
+        let prompt_id = prompt_id.value().trim();
+        let found =
+            check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]);
+        (prompt_id, found)
+    });
     // #3540 (root cause): suppress by STABLE entry identity BEFORE any pending /
     // recent / lease bookkeeping or synthetic-turn mint. If this JSONL entry
     // `uuid` was already relayed for this `(provider, tmux)` pair it is a
@@ -262,9 +270,8 @@ fn observe_prompt_candidates_by_tmux_inner(
     }
     // Same input seen through its other native key: a hook-recorded prompt_id
     // with identical text. The row uuid is recorded so later re-scans match it.
-    if let Some(prompt_id) = prompt_id {
-        let prompt_id = prompt_id.value().trim();
-        match check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]) {
+    if let Some((prompt_id, found)) = prompt_id_match {
+        match found {
             PromptIdMatch::Same => {
                 if let Some(entry_id) = entry_id {
                     record_relayed_entry_id(&provider, tmux_session_name, entry_id);
@@ -303,14 +310,6 @@ fn observe_prompt_candidates_by_tmux_inner(
         if let Some(entry_id) = entry_id {
             record_relayed_entry_id(&provider, tmux_session_name, entry_id);
         }
-        if let Some(ClaudePromptId::HookSubmit(prompt_id)) = prompt_id {
-            record_relayed_prompt_id(
-                &provider,
-                tmux_session_name,
-                prompt_id.trim(),
-                &candidates[0],
-            );
-        }
     }
     if effect == PromptObservationEffect::RelayLeaseOnly {
         if local_only_control.is_none() {
@@ -334,10 +333,19 @@ fn observe_prompt_candidates_by_tmux_inner(
                 tmux_session_name,
                 ExternalInputRelayLease::unassigned(None),
             );
-            (
-                external_input_lease.generation,
-                mark_ssh_direct_observation_pending(&provider, tmux_session_name),
-            )
+            let observation_generation =
+                mark_ssh_direct_observation_pending(&provider, tmux_session_name);
+            // Tagged with this observation so its relay can withdraw it if unsent.
+            if let Some(ClaudePromptId::HookSubmit(prompt_id)) = prompt_id {
+                record_relayed_prompt_id(
+                    &provider,
+                    tmux_session_name,
+                    prompt_id.trim(),
+                    &candidates[0],
+                    observation_generation,
+                );
+            }
+            (external_input_lease.generation, observation_generation)
         };
     let prompt = candidates
         .first()

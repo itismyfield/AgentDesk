@@ -157,6 +157,34 @@ fn a_prompt_id_seen_with_other_text_stops_suppressing_either_text() {
     );
 }
 
+/// A fork's inherited row pairs a known uuid with the fork's prompt_id and old text.
+#[test]
+fn a_known_row_with_other_text_still_makes_its_prompt_id_ambiguous() {
+    let mut pane = Pane::new("known-uuid-conflict");
+    pane.scan("U_old", Some("P_old"), "old text");
+    pane.age(RECENT_PLUS);
+    pane.hook(Some("P_fork"), "new text");
+    pane.age(RECENT_PLUS);
+    assert_eq!(
+        pane.scan("U_old", Some("P_fork"), "old text"),
+        PromptObservation::SuppressedReplayedEntry,
+        "the inherited row is still suppressed by its uuid"
+    );
+    pane.age(RECENT_PLUS);
+    assert_eq!(
+        pane.scan("U_new", Some("P_fork"), "new text"),
+        PromptObservation::PublishedSshDirect
+    );
+    assert_eq!(
+        pane.published(),
+        vec![
+            row_event("U_old", "old text"),
+            hook_event("new text"),
+            row_event("U_new", "new text"),
+        ]
+    );
+}
+
 #[test]
 fn hooks_without_prompt_id_keep_only_the_thirty_second_content_window() {
     let mut pane = Pane::new("no-prompt-id");

@@ -14,6 +14,7 @@
 
 mod catch_up_pagination_e2e;
 mod discord_mock;
+mod prompt_identity_e2e;
 mod stale_resume_retry_e2e;
 
 use std::path::PathBuf;
@@ -129,6 +130,9 @@ pub(super) struct RelayE2eHarness {
     pub(super) ctx: serenity::Context,
     pub(super) channel_id: ChannelId,
     mock: discord_mock::DiscordMockState,
+    proxy: String,
+    /// Only set by [`Self::start_with_health_registry`]; `shared` holds it weakly.
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     _server: AbortOnDrop<()>,
     _dedupe_guard: std::sync::MutexGuard<'static, ()>,
     _intake_guard: crate::config::TestEnvVarGuard,
@@ -145,6 +149,16 @@ impl RelayE2eHarness {
     }
 
     pub(super) async fn start_with_provider(stub: ProviderStub) -> Self {
+        Self::start_inner(stub, false).await
+    }
+
+    /// Adds a health registry, the source of the utility bots SSH-direct
+    /// announcements post through.
+    pub(super) async fn start_with_health_registry() -> Self {
+        Self::start_inner(ProviderStub::Success, true).await
+    }
+
+    async fn start_inner(stub: ProviderStub, with_health_registry: bool) -> Self {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -173,8 +187,15 @@ impl RelayE2eHarness {
 
         let mock = discord_mock::DiscordMockState::new();
         let (proxy, gateway_url, server) = discord_mock::start(mock.clone()).await;
-        let ctx = discord_mock::serenity_context(proxy, gateway_url).await;
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let ctx = discord_mock::serenity_context(proxy.clone(), gateway_url).await;
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        let health_registry = with_health_registry.then(|| {
+            let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+            Arc::get_mut(&mut shared)
+                .expect("fresh shared")
+                .health_registry = Arc::downgrade(&registry);
+            registry
+        });
         {
             let mut settings = shared.settings.write().await;
             settings.owner_user_id = Some(USER_ID);
@@ -205,6 +226,8 @@ impl RelayE2eHarness {
             ctx,
             channel_id,
             mock,
+            proxy,
+            health_registry,
             _server: AbortOnDrop(Some(server)),
             _dedupe_guard: dedupe_guard,
             _intake_guard: intake_guard,
@@ -396,6 +419,38 @@ impl RelayE2eHarness {
             .cached_bot_token
             .set(self.data.token.clone())
             .expect("cache test bot token");
+    }
+
+    /// Answers the first `...` at once instead of parking it.
+    pub(super) fn answer_placeholders_immediately(&self) {
+        self.mock
+            .park_first_placeholder
+            .store(false, Ordering::SeqCst);
+    }
+
+    pub(super) fn answer_notes_with(&self, answer: discord_mock::NoteAnswer) {
+        *self.mock.note_answer.lock().expect("note answer") = answer;
+    }
+
+    /// Points the notify bot at the mock; `timeout` bounds each of its requests.
+    pub(super) async fn use_mock_notify_bot(&self, timeout: Duration) {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("notify bot client");
+        let http = serenity::HttpBuilder::new("notify-test-token")
+            .client(client)
+            .proxy(self.proxy.clone())
+            .ratelimiter_disabled(true)
+            .build();
+        self.health_registry
+            .as_ref()
+            .expect("started with a health registry")
+            .set_utility_bot_http_for_tests(
+                crate::services::discord::bot_role::UtilityBotRole::Notify,
+                Arc::new(http),
+            )
+            .await;
     }
 
     /// Registers a watcher over a fresh empty transcript in the isolated root,

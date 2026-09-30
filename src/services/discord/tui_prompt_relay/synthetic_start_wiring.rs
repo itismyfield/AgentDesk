@@ -61,13 +61,43 @@ pub(super) async fn post_suppressed_injection_note(
             slash_command_kind = slash_command_kind.unwrap_or(""),
             "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
         ),
-        Err(error) => tracing::warn!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            tmux_session_name = %prompt.tmux_session_name,
-            error = %error,
-            "failed to send system/compact continuation session note"
-        ),
+        Err(error) => {
+            withdraw_prompt_id_if_unsent(prompt, &error);
+            tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                error = %error,
+                "failed to send system/compact continuation session note"
+            )
+        }
+    }
+}
+
+/// True only when the POST certainly created no message: rejected before dispatch,
+/// refused by Discord (4xx), or never connected. Timeouts and 5xx stay unknown.
+pub(super) fn discord_post_certainly_unsent(error: &serenity::Error) -> bool {
+    match error {
+        serenity::Error::Model(_) => true,
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)) => {
+            response.status_code.is_client_error()
+        }
+        serenity::Error::Http(serenity::http::HttpError::Request(error)) => {
+            error.is_connect() || error.is_builder()
+        }
+        _ => false,
+    }
+}
+
+/// An announcement that certainly never reached Discord leaves no prompt-id
+/// suppression behind, so the idle scanner can still announce the prompt.
+pub(super) fn withdraw_prompt_id_if_unsent(prompt: &ObservedTuiPrompt, error: &serenity::Error) {
+    if discord_post_certainly_unsent(error) {
+        crate::services::tui_prompt_dedupe::withdraw_relayed_prompt_id(
+            &prompt.provider,
+            &prompt.tmux_session_name,
+            prompt.ssh_direct_observation_generation,
+        );
     }
 }
 

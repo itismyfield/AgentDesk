@@ -84,6 +84,7 @@ pub(super) fn record_relayed_prompt_id(
     tmux_session_name: &str,
     prompt_id: &str,
     prompt: &str,
+    recorded_by: u64,
 ) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -105,11 +106,26 @@ pub(super) fn record_relayed_prompt_id(
             prompt_id: prompt_id.to_string(),
             prompt: prompt.to_string(),
             ambiguous: false,
+            recorded_by,
         },
         recorded_at: Instant::now(),
     });
     while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
         queue.pop_front();
+    }
+}
+
+/// Drops the prompt id recorded by observation `recorded_by` once its announcement
+/// is known unsent, so the idle scanner can announce the prompt again.
+pub fn withdraw_relayed_prompt_id(provider: &str, tmux_session_name: &str, recorded_by: u64) {
+    if recorded_by == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return;
+    }
+    let provider = normalize_provider(provider);
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let key = PromptKey::new(&provider, tmux_session_name.trim());
+    if let Some(queue) = state.relayed_prompt_ids_by_tmux.get_mut(&key) {
+        queue.retain(|seen| seen.value.recorded_by != recorded_by);
     }
 }
 

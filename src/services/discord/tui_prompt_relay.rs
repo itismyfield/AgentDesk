@@ -610,6 +610,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             match channel_id.say(&*notify_http, content).await {
                 Ok(message) => message.id,
                 Err(error) => {
+                    synthetic_start_wiring::withdraw_prompt_id_if_unsent(&prompt, &error);
                     tracing::warn!(
                         provider = %prompt.provider,
                         channel_id = channel_id.get(),
