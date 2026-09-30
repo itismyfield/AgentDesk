@@ -524,11 +524,14 @@ pub(super) async fn run_bridge_stream_tick(
         status_panel_dirty = false;
     }
     // O posts this body: consume streamed bytes so no anchor, rollover or edit carries them.
-    let o_body_cut = super::terminal_controller_cutover::bridge_o_body_cut_decision(
-        channel_id,
-        &inflight_state,
-        gateway.can_deliver_directly(),
-    );
+    // Only a tick with unsent body text may end a pending adoption; an empty one just reads it.
+    let o_body_decision =
+        if response_portion_after_offset(&full_response, response_sent_offset).is_empty() {
+            super::terminal_controller_cutover::bridge_o_body_peek_decision
+        } else {
+            super::terminal_controller_cutover::bridge_o_body_cut_decision
+        };
+    let o_body_cut = o_body_decision(channel_id, &inflight_state, gateway.can_deliver_directly());
     let body_held = o_body_cut.unwrap_or(true);
     if o_body_cut == Ok(true) {
         response_sent_offset = full_response.len();

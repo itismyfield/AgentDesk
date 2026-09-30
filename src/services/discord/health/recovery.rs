@@ -2113,21 +2113,6 @@ async fn maybe_recover_completed_stale_leak(
     let Some(state) = discord::inflight::load_inflight_state(provider, channel_id.get()) else {
         return false;
     };
-    // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
-    // A held identity also resends nothing until the destination is known.
-    let kind = (state.channel_id == channel_id.get())
-        .then_some(state.runtime_kind)
-        .flatten();
-    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
-        != Ok(false)
-    {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
-        );
-        return false;
-    }
-
     // Planned restart / rebind flows re-deliver the answer themselves.
     if state.restart_mode.is_some() || state.rebind_origin {
         return false;
@@ -2172,6 +2157,20 @@ async fn maybe_recover_completed_stale_leak(
     // from live Discord state, then seed the ledger before continuing.
     let chunks = discord::formatting::split_message(&delivery_text);
     if chunks.is_empty() {
+        return false;
+    }
+    // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
+    // A held identity also resends nothing; only a resend with a body may end a pending adoption.
+    let kind = (state.channel_id == channel_id.get())
+        .then_some(state.runtime_kind)
+        .flatten();
+    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
+        != Ok(false)
+    {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
+        );
         return false;
     }
     let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);

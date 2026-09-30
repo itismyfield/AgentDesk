@@ -54,6 +54,22 @@ fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
     boot_ownership().into_iter().filter_map(owned).collect()
 }
 
+/// The boot kind of `channel` when O owns it; no other channel's adoption is read.
+fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
+    if !writer_enabled() {
+        return None;
+    }
+    test_override::with_channels(|snapshot| {
+        let snapshot = snapshot?;
+        let kind = snapshot.kind(channel);
+        let hosted = channel_policy::owns_output(true, snapshot.channels(), channel, kind);
+        snapshot
+            .candidate(channel)
+            .filter(|c| hosted && c.peek().owned())?;
+        kind
+    })
+}
+
 /// Before a new placement: a non-home node holds a selected channel, and the home releases a
 /// pending adoption so the placed Legacy turn never shares the channel with O.
 fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {

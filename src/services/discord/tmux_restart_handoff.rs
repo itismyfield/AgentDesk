@@ -286,14 +286,20 @@ pub(super) async fn start_restart_handoff_from_state(
     let kind = (state.channel_id == channel_id.get())
         .then_some(state.runtime_kind)
         .flatten();
-    let Ok(o_owns_body) =
-        crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
-    else {
+    let target = restart_handoff_notice_target(&state);
+    // Only a notice carrying the saved body may end a pending adoption; cleanup just reads it.
+    let o_owns = match target {
+        RestartHandoffNoticeTarget::Edit(_) if !best_response.trim().is_empty() => {
+            crate::services::tui_o::cutover::o_owns_tui_output_for_channel
+        }
+        _ => crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel,
+    };
+    let Ok(o_owns_body) = o_owns(channel_id.get(), kind) else {
         return false;
     };
     let stale_text =
         super::turn_bridge::stale_inflight_message(if o_owns_body { "" } else { best_response });
-    match restart_handoff_notice_target(&state) {
+    match target {
         RestartHandoffNoticeTarget::Edit(current_msg_id) => {
             let current_msg_id = serenity::MessageId::new(current_msg_id);
             forget_completion_footer_for_restart_handoff(channel_id, current_msg_id);
