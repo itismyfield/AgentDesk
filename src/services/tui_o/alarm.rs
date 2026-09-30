@@ -120,6 +120,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::RetiredSourceGrew { .. } => "retired_source_grew",
         WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::RotationStalled { .. } => "rotation_stalled",
+        WriterAlarm::SelectionMissing => "selection_missing",
         WriterAlarm::NotFound { .. } => return None,
     })
 }

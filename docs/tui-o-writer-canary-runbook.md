@@ -54,6 +54,33 @@ body take the channel for that process: it stays on Legacy until the next restar
 2. Restart the gateway node through the managed restart path. The new list applies at boot only.
 3. Restart any standby or runner node the same way, so no node keeps the old list.
 
+To select every TUI channel at once, set `tui_o.writer.all_tui: true` and leave
+`tui_o.writer.channels` empty or absent; a file with both refuses to load. Every binding in
+`agents[].channels` that resolves to a Claude or Codex TUI is selected and the rest are skipped.
+Apply it as above: the same file on every node, then managed restarts. No redeploy is needed. Each
+TUI channel is still adopted only through §1 and §3.1; the others stay on Legacy for that process.
+The selection is taken from `agents[].channels` at boot, so every node needs the same agent
+bindings as well.
+
+Every node must keep an adopted channel selected for as long as it exists. On the O home a channel
+with `<runtime_root>/o_store/<channel>/init` (or named by `o_era`) stays on O even when the
+selection drops it, but that only protects the home's own restart. A standby whose selection
+dropped it serves it as an ordinary Legacy channel once it takes the gateway lease, and an empty
+selection (no list and no `all_tui`, or `all_tui` with no TUI binding) turns O off everywhere,
+committed channels included. Both are unsupported handbacks.
+
+If the home logs `[tui_o] committed channel missing from writer selection` and `/api/health` shows
+`tui_o:selection_missing:<channel>`, the channel is still on O but its selection is wrong:
+
+1. Put the channel back in the selection (the list, or a TUI binding under `all_tui`) on every
+   node, so every node selects the same set again. Do not delete its store.
+2. Restart the standby and runner nodes first, then the home, through the managed path. Restarting
+   the home while a standby still lacks the channel lets that standby serve it through Legacy.
+3. After the restart the reason is gone and the log line does not repeat.
+
+A startup refused with `o_store: channel <id> is not registered` or `is not TUI` means a committed
+channel lost its TUI binding. Restore the binding; do not delete the store to get past it.
+
 ## 3. Confirm activation
 
 - The release log has `[tui_o] writer host created the channel's init` for the channel, once.
@@ -111,10 +138,11 @@ log. If either fails, stop the expansion; neither may be skipped.
 
 1. Panes (F4): on every node, list the tmux sessions and the Legacy binding for each channel being
    added. A pane for it on any node other than the O home stops the expansion.
-2. Selection (F5): diff `tui_o.writer.channels`, `cluster.gateway_preferred_instance_id` and
-   `cluster.instance_id` across the nodes. Refuse the deploy if any node's list drops a channel
+2. Selection (F5): diff `tui_o.writer.channels`, `tui_o.writer.all_tui`, the TUI bindings in
+   `agents[].channels`, `cluster.gateway_preferred_instance_id` and `cluster.instance_id` across
+   the nodes. Refuse the deploy if any node's list drops a channel
    another node selects. After the restart, every channel with `<runtime_root>/o_store/<channel>/init`
-   on the O home must still be in its list.
+   on the O home must still be in its selection: the home has no `tui_o:selection_missing` reason.
 
 Confirm as in §3. The channel's `init` lists its current transcript with `delivery_start` at
 Legacy's cursor, which is that transcript's length when it was adopted, and each earlier transcript
@@ -126,8 +154,10 @@ When output must stop without a drain, stop the provider's gateway process throu
 stop path. Shutdown closes the O ownership gate before the gateway lease is released, so no new O
 POST starts; in-flight results are settled from the O ledger on the next start.
 
-- Keep the channel in `tui_o.writer.channels`. Removing it would hand the channel to Legacy on the
-  next boot; that handback is not supported.
+- Keep the channel selected on every node and do not change the selection (the list or `all_tui`)
+  while stopped. The O home keeps a committed channel its selection dropped, with the
+  `tui_o:selection_missing:<channel>` reason, but a standby that takes the lease without it and
+  an empty selection both hand it to Legacy; that handback is not supported.
 - Do not start Legacy delivery for the channel by any other means.
 - A node other than the O home adopts nothing. If it takes the gateway lease it holds new messages
   for the canary with `served only on O home <id>`; keep no TUI session for the canary there,
@@ -149,6 +179,7 @@ Other channels stay on Legacy throughout. Check that their delivery is unchanged
 ## 6. Forbidden during the canary
 
 - Removing the canary channel from the list, or adding a removed channel back.
+- Emptying the selection, or turning `all_tui` off, once a channel it selected was adopted.
 - Deleting `o_store`, `o_era` or a channel directory. A fully deleted store cannot be told apart
   from a first install; restore it from an external backup instead.
 - Running nodes with different lists.

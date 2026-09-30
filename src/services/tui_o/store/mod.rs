@@ -160,6 +160,25 @@ impl OStore {
         !matches!(entry, Err(error) if error.kind() == io::ErrorKind::NotFound)
     }
 
+    /// Channels whose directory holds an `init` entry, readable or not. Only canonical ids count,
+    /// so `042` never stands for channel 42.
+    pub fn channels_with_init(&self) -> io::Result<std::collections::BTreeSet<u64>> {
+        let mut channels = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&self.root)? {
+            let name = entry?.file_name();
+            let channel = name.to_str().and_then(|name| {
+                let channel = name.parse::<u64>().ok()?;
+                (channel != 0 && channel.to_string() == name).then_some(channel)
+            });
+            let Some(channel) = channel else { continue };
+            let init = std::fs::symlink_metadata(self.channel_dir(channel).join(INIT_FILE));
+            if !matches!(init, Err(error) if error.kind() == io::ErrorKind::NotFound) {
+                channels.insert(channel);
+            }
+        }
+        Ok(channels)
+    }
+
     pub fn read_era(&self) -> Result<Option<OEra>, StoreError> {
         durable::read_json(&self.root.join(ERA_FILE))
     }
