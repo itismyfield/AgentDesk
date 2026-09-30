@@ -374,6 +374,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
+  services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_the_configured_home_id_and_local_starts_hold_pg
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::foreign_nonce_terminal_artifact_does_not_mask_our_cancellation
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::identity_terminal_proof_commits_handoff_despite_clock_regression
