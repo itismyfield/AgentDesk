@@ -2160,17 +2160,21 @@ async fn maybe_recover_completed_stale_leak(
         return false;
     }
     // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
-    // A held identity also resends nothing; only a resend with a body may end a pending adoption.
+    // A held identity also resends nothing; only a resending pass may end a pending adoption.
     let kind = (state.channel_id == channel_id.get())
         .then_some(state.runtime_kind)
         .flatten();
-    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
-        != Ok(false)
-    {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
-        );
+    let o_holds = |gate: fn(u64, _) -> Result<bool, _>| {
+        let held = gate(channel_id.get(), kind) != Ok(false);
+        if held {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                "stale-leak recovery skipped: O owns or holds this channel's TUI body"
+            );
+        }
+        held
+    };
+    if o_holds(crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel) {
         return false;
     }
     let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);
@@ -2284,7 +2288,6 @@ async fn maybe_recover_completed_stale_leak(
         None
     };
 
-    let mut wrote_any_chunk = false;
     if confirmed_chunks == 0 {
         let Some(current_message) = current_message.as_ref() else {
             tracing::warn!(
@@ -2311,7 +2314,15 @@ async fn maybe_recover_completed_stale_leak(
             );
             return false;
         }
-
+    }
+    // Claimed only here, before the first edit or post; a confirm-only pass reads the adoption.
+    if confirmed_chunks < chunks.len()
+        && o_holds(crate::services::tui_o::cutover::o_owns_tui_output_for_channel)
+    {
+        return false;
+    }
+    let mut wrote_any_chunk = false;
+    if confirmed_chunks == 0 {
         // Edit the original placeholder to chunk 0. If Discord commits the edit
         // but the client observes an error/crash, the next pass derives
         // `confirmed_chunks == 1` from the live message and continues with chunk

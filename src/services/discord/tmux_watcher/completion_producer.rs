@@ -151,9 +151,13 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
         task_notification_kind,
         Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
     );
-    // Withhold body footers for O ownership or unresolved selected identities. Only a footer
-    // with a target message rewrites the body and may end a pending adoption; none just reads it.
-    let o_owns = if terminal_target.is_some() || placeholder_msg_id.is_some() {
+    // Withhold body footers for O ownership or unresolved selected identities. Only a footer that
+    // rewrites a non-empty assistant body may end a pending adoption; any other just reads it.
+    let body = match &terminal_target {
+        Some(target) => target.text.as_str(),
+        None => placeholder_msg_id.map_or("", |_| last_edit_text),
+    };
+    let o_owns = if !body.trim().is_empty() {
         crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux
     } else {
         crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux

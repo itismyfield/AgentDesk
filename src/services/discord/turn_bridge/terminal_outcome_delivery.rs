@@ -364,8 +364,8 @@ pub(super) async fn run_terminal_outcome_delivery(
             &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
-        // Resolve body ownership first; only unsent answer text may end a pending adoption.
-        let o_body_cut = if silent_turn_handled || full_response.len() <= response_sent_offset {
+        // Body ownership first: only an answer delivery would send may end a pending adoption.
+        let o_body_cut = if silent_turn_handled || no_answer(&full_response, response_sent_offset) {
             terminal_controller_cutover::bridge_o_body_peek_decision
         } else {
             terminal_controller_cutover::bridge_o_body_cut_decision
