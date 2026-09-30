@@ -52,22 +52,65 @@ pub(super) async fn post_suppressed_injection_note(
         format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt)
     };
     match channel_id.say(&**notify_http, note).await {
-        Ok(message) => tracing::info!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            tmux_session_name = %prompt.tmux_session_name,
-            note_message_id = message.id.get(),
-            session_resetting_slash_control,
-            slash_command_kind = slash_command_kind.unwrap_or(""),
-            "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
-        ),
-        Err(error) => tracing::warn!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            tmux_session_name = %prompt.tmux_session_name,
-            error = %error,
-            "failed to send system/compact continuation session note"
-        ),
+        Ok(message) => {
+            record_prompt_id_after_post(prompt, None);
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                note_message_id = message.id.get(),
+                session_resetting_slash_control,
+                slash_command_kind = slash_command_kind.unwrap_or(""),
+                "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
+            )
+        }
+        Err(error) => {
+            record_prompt_id_after_post(prompt, Some(&error));
+            tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                error = %error,
+                "failed to send system/compact continuation session note"
+            )
+        }
+    }
+}
+
+/// True only when the POST certainly created no message: rejected before dispatch,
+/// refused by Discord (4xx), or never connected. Timeouts and 5xx stay unknown.
+pub(super) fn discord_post_certainly_unsent(error: &serenity::Error) -> bool {
+    match error {
+        serenity::Error::Model(_) => true,
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)) => {
+            response.status_code.is_client_error()
+        }
+        serenity::Error::Http(serenity::http::HttpError::Request(error)) => {
+            error.is_connect() || error.is_builder()
+        }
+        _ => false,
+    }
+}
+
+/// Lets the hook prompt_id suppress once its announcement POST was sent or may have
+/// been; a POST that certainly created nothing withdraws it for the idle scanner.
+pub(super) fn record_prompt_id_after_post(
+    prompt: &ObservedTuiPrompt,
+    error: Option<&serenity::Error>,
+) {
+    if error.is_some_and(discord_post_certainly_unsent) {
+        crate::services::tui_prompt_dedupe::withdraw_unannounced_prompt_id(prompt);
+        return;
+    }
+    crate::services::tui_prompt_dedupe::record_announced_prompt_id(prompt);
+}
+
+/// Withdraws the hook prompt_id on every relay return that no POST result settled.
+pub(super) struct UnannouncedPromptIdGuard<'a>(pub(super) &'a ObservedTuiPrompt);
+
+impl Drop for UnannouncedPromptIdGuard<'_> {
+    fn drop(&mut self) {
+        crate::services::tui_prompt_dedupe::withdraw_unannounced_prompt_id(self.0);
     }
 }
 

@@ -372,6 +372,16 @@ impl HealthRegistry {
         self.utility_bot(role).http.lock().await.clone()
     }
 
+    /// Test-only: installs a utility-bot client pointed at a mock Discord.
+    #[cfg(test)]
+    pub(crate) async fn set_utility_bot_http_for_tests(
+        &self,
+        role: UtilityBotRole,
+        http: Arc<serenity::Http>,
+    ) {
+        *self.utility_bot(role).http.lock().await = Some(http);
+    }
+
     /// Snapshot the announce-role HTTP client. This role is where `Manage
     /// Messages` permissions are concentrated, so pin/unpin lifecycle code
     /// prefers it over per-provider HTTP clients.

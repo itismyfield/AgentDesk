@@ -35,6 +35,7 @@ fn compact_summary_idle_transcript_scans_skip_summary_and_keep_human() {
                 prompt_start_offset: summary.len() as u64,
                 line_end_offset: (summary.len() + human.len()) as u64,
                 entry_id: Some("human".into()),
+                prompt_id: None,
             }
         );
     }

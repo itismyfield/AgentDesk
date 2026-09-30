@@ -1632,6 +1632,7 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         observed_at: now,
         external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     });
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at(
@@ -1696,6 +1697,7 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
         observed_at: now,
         external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        hook_prompt_id: None,
     };
 
     record_local_only_entry_id_after_note_delivery(&nonlocal);

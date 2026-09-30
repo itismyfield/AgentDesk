@@ -1354,6 +1354,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   └── stale_resume_retry_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
@@ -2044,6 +2045,8 @@ src/
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_tests.rs
+│   │   ├── prompt_identity.rs
+│   │   ├── prompt_identity_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs

@@ -361,21 +361,19 @@ async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
                 prompt,
                 line_end_offset,
                 entry_id,
+                prompt_id,
                 ..
             } => {
                 let observed_at = chrono::Utc::now();
-                // #3540: pass the entry's STABLE identity so an
-                // already-relayed prompt re-encountered after a watermark
-                // reset / jsonl head rotation is suppressed by identity
-                // (`SuppressedReplayedEntry`) and never mints a phantom
-                // synthetic inflight. `entry_id == None` falls back to the
-                // content-keyed 30s recent-observed dedup (pre-#3540).
+                // Row uuid and `promptId` suppress a re-scanned or hook-relayed
+                // prompt by identity; without them only the 30s content window applies.
                 let observation =
-                    crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
+                    crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at(
                         ProviderKind::Claude.as_str(),
                         &tmux_session_name,
                         &prompt,
                         entry_id.as_deref(),
+                        prompt_id.as_deref(),
                         observed_at,
                     );
                 tracing::info!(
@@ -383,6 +381,7 @@ async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
                     channel_id = channel_id.get(),
                     observation = ?observation,
                     entry_id = entry_id.as_deref().unwrap_or(""),
+                    prompt_id = prompt_id.as_deref().unwrap_or(""),
                     "Claude idle transcript relay observed prompt"
                 );
                 advance_claude_tmux_runtime_binding_offset(
