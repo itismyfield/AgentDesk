@@ -19,9 +19,11 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       read as Posted evidence. The `O_TUI_WRITER` token itself may appear only
       in the O_TUI_WRITER_FILES.
   (d) A claim is the `claim_then_send` helper, which claims just before the
-      send it runs; its closure is the transport call alone. A raw claim (a
-      claiming gate fn, or under tui_o any `.claim(`/`::claim(`) may appear only
-      in the RAW_CLAIM_SITES functions, each listed with its reason.
+      send it runs; its closure is the transport call alone. `claim_at_post`
+      wraps a task-response transport so each chunk post claims that way. A
+      raw claim (a claiming gate fn, or under tui_o any `.claim(`/`::claim(`)
+      may appear only in the RAW_CLAIM_SITES functions, each listed with its
+      reason.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -77,7 +79,7 @@ RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
 TUI_O_ROOT = "src/services/tui_o/"
 TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|(?:\.|::)\s*claim\s*\(")
 GATE_RES = {
-    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send\b"),
+    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send\b|\bclaim_at_post\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
@@ -370,6 +372,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/standby_relay.rs": (
         "run_standby_relay:claim",
+    ),
+    "src/services/discord/task_notification_delivery/response_chunks.rs": (
+        "post_chunk:claim",
     ),
     "src/services/discord/tmux_restart_handoff.rs": (
         "start_restart_handoff_from_state:peek",

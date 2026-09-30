@@ -326,7 +326,7 @@ impl super::SessionBoundDiscordRelaySink {
     async fn send_plain_response_chunks(
         &self,
         shared: &Arc<SharedData>,
-        provider: &ProviderKind,
+        http: &poise::serenity_prelude::Http,
         channel: ChannelId,
         relay_text: &str,
         reference: Option<(ChannelId, MessageId)>,
@@ -337,15 +337,9 @@ impl super::SessionBoundDiscordRelaySink {
         ),
         RelaySinkError,
     > {
-        let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
-            RelaySinkError::Transient(format!(
-                "discord http unavailable for provider {}",
-                provider.as_str()
-            ))
-        })?;
         if super::super::formatting::split_message(relay_text).len() == 1 {
             let receipt = super::super::formatting::send_single_message_returning_receipt(
-                &http, channel, relay_text, shared, reference,
+                http, channel, relay_text, shared, reference,
             )
             .await
             .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
@@ -355,7 +349,7 @@ impl super::SessionBoundDiscordRelaySink {
             Ok((vec![message_id], Some(receipt)))
         } else {
             super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
-                &http, channel, relay_text, shared, reference,
+                http, channel, relay_text, shared, reference,
             )
             .await
             .map(|ids| (ids, None))
@@ -465,26 +459,31 @@ impl super::SessionBoundDiscordRelaySink {
                 .as_ref()
                 .expect("claim checked above")
                 .clone();
-            let send = || {
+            // The response is the body: its first chunk post claims the channel.
+            let claimed = super::super::task_notification_delivery::claim_at_post(
+                &response_transport,
+                body_claim,
+            );
+            let sent =
                 super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
                     shared.pg_pool.as_ref(),
                     &clients,
                     &card_transport,
-                    &response_transport,
+                    &claimed,
                     &event,
                     response_claim,
                     relay_text,
                 )
-            };
-            let (_messages, rebound) = super::claimed_body_send(
-                claim_then_send(Some(body_claim), send).await,
-            )?
-            .map_err(|error| match error {
+                .await;
+            let (_messages, rebound) =
+                super::claimed_body_send(claimed.settle(sent))?.map_err(|error| {
+                    match error {
                 super::super::task_notification_delivery::ResponseChunkDeliveryError::Permanent(
                     _,
                 ) => RelaySinkError::Permanent(error.to_string()),
                 _ => RelaySinkError::Transient(error.to_string()),
-            })?;
+            }
+                })?;
             task_card_message_id = Some(MessageId::new(rebound.card_message_id()));
             task_response_claim = Some(rebound);
             record_task_response_sent_bounded(
@@ -498,6 +497,17 @@ impl super::SessionBoundDiscordRelaySink {
             if super::super::formatting::split_message(relay_text).len() == 1 {
                 plain_journal_attempt = self.journal.begin_fresh(shared, delivery);
             }
+            // The client is found before the claim: without one nothing is sent or claimed.
+            let plain_http = match (shared.serenity_http_or_token_fallback(), _gateway) {
+                (Some(http), _) => Some(http),
+                (None, Some(_)) => None,
+                (None, None) => {
+                    return Err(RelaySinkError::Transient(format!(
+                        "discord http unavailable for provider {}",
+                        provider.as_str()
+                    )));
+                }
+            };
             let receipt_slot = &mut plain_transport_receipt;
             let send = move || async move {
                 #[cfg(test)]
@@ -510,10 +520,14 @@ impl super::SessionBoundDiscordRelaySink {
                         .await
                         .map_err(RelaySinkError::Transient);
                 }
+                // Production passes no gateway, so the client was checked before the claim.
+                let http = plain_http.ok_or_else(|| {
+                    RelaySinkError::Transient("discord http unavailable".to_string())
+                })?;
                 let (message_ids, receipt) = self
                     .send_plain_response_chunks(
                         shared,
-                        provider,
+                        &http,
                         channel,
                         relay_text,
                         prompt_anchor_reference,

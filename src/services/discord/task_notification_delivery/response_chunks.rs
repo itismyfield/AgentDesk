@@ -13,6 +13,7 @@ use super::store::{
 };
 use super::{ResponseDeliveryClaim, content_hash, response_chunk_nonce_for_generation};
 use crate::services::discord::{SharedData, rate_limit_wait};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
 
 /// Discord documents nonce reconciliation as only a recent-message contract.
 /// Stay strictly inside a conservative two-minute subset; the equality
@@ -195,6 +196,119 @@ impl ResponseChunkTransport for DiscordResponseChunkTransport<'_> {
                 })
             })
             .collect()
+    }
+}
+
+/// A response transport that claims the channel's body inside its first chunk post, after the
+/// identity, journal, confirmed-chunk, quarantine and history decisions that send nothing.
+pub(in crate::services::discord) struct ClaimAtPost<'a, T> {
+    inner: &'a T,
+    body: BodyClaim<'a>,
+    state: std::sync::Mutex<PostClaim>,
+}
+
+#[derive(Clone, Copy)]
+enum PostClaim {
+    Open,
+    Claimed,
+    Refused(Option<IdentityError>),
+}
+
+pub(in crate::services::discord) fn claim_at_post<'a, T: ResponseChunkTransport>(
+    inner: &'a T,
+    body: BodyClaim<'a>,
+) -> ClaimAtPost<'a, T> {
+    ClaimAtPost {
+        inner,
+        body,
+        state: std::sync::Mutex::new(PostClaim::Open),
+    }
+}
+
+impl<T> ClaimAtPost<'_, T> {
+    /// The send's own result, unless O owned the channel or the identity was held at a post.
+    pub(in crate::services::discord) fn settle<R>(
+        &self,
+        sent: R,
+    ) -> Result<BodySend<R>, IdentityError> {
+        match *self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+        {
+            PostClaim::Refused(None) => Ok(BodySend::OwnedByO),
+            PostClaim::Refused(Some(error)) => Err(error),
+            PostClaim::Open | PostClaim::Claimed => Ok(BodySend::Sent(sent)),
+        }
+    }
+
+    fn set(&self, next: PostClaim) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = next;
+    }
+}
+
+impl<T: ResponseChunkTransport> ResponseChunkTransport for ClaimAtPost<'_, T> {
+    async fn bot_user_id(&self) -> Result<u64, String> {
+        self.inner.bot_user_id().await
+    }
+
+    async fn post_chunk(
+        &self,
+        channel_id: u64,
+        content: &str,
+        reference_message_id: Option<u64>,
+        nonce: &str,
+    ) -> Result<u64, ResponseChunkPostError> {
+        let state = *self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let PostClaim::Refused(_) = state {
+            return Err(ResponseChunkPostError::Transient(
+                "O owns this channel's body".to_string(),
+            ));
+        }
+        let claim = matches!(state, PostClaim::Open).then_some(self.body);
+        let post = || {
+            self.inner
+                .post_chunk(channel_id, content, reference_message_id, nonce)
+        };
+        match claim_then_send(claim, post).await {
+            Ok(BodySend::Sent(posted)) => {
+                self.set(PostClaim::Claimed);
+                posted
+            }
+            Ok(BodySend::OwnedByO) => {
+                self.set(PostClaim::Refused(None));
+                Err(ResponseChunkPostError::Transient(
+                    "O owns this channel's body".to_string(),
+                ))
+            }
+            Err(error) => {
+                self.set(PostClaim::Refused(Some(error)));
+                Err(ResponseChunkPostError::Transient(format!(
+                    "TUI output identity held: {error}"
+                )))
+            }
+        }
+    }
+
+    async fn history_page(
+        &self,
+        channel_id: u64,
+        before_message_id: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<ResponseChunkHistoryMessage>, ResponseChunkHistoryError> {
+        self.inner
+            .history_page(channel_id, before_message_id, limit)
+            .await
+    }
+
+    fn history_proves_deletions(&self) -> bool {
+        self.inner.history_proves_deletions()
     }
 }
 
