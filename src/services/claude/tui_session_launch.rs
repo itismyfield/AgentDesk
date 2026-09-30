@@ -34,6 +34,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
             Some(resolved_session_id),
             resume,
         )?;
+        crate::services::tmux_common::host_marker::record_tmux_host_marker(tmux_session_name);
         let exe =
             std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
         let (claude_bin, _resolution) = resolve_claude_binary()?;
@@ -104,5 +105,78 @@ mod tests {
             |t| launch(t, dir, cwd, id, None, None, "".into(), false, "", None).map(|_| ()),
             crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         );
+    }
+}
+
+#[cfg(test)]
+mod host_marker_tests {
+    #[cfg(unix)]
+    #[test]
+    fn claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_mark_still_launches()
+     {
+        use super::prepare_and_create_claude_tui_session as launch;
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::discord::session_identity::tmux_name_from_session_key;
+        use crate::services::session_host::HostKind;
+        use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
+        use std::os::unix::fs::PermissionsExt;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = tests::fixture_after_shared_test_env_lock();
+        let _tmux = tests::fake_tmux(root.path());
+        let claude = root.path().join("claude");
+        std::fs::write(&claude, "#!/bin/bash\necho '2.1.0 (Claude Code)'\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &claude);
+        let dir = root.path().to_str().unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let calls = root.path().join("tmux.calls");
+
+        let tmux = "AgentDesk-claude-host-marker-launch";
+        let session_key = format!("claude/token-hash/mac-mini:{tmux}");
+        let witness_name = tmux_name_from_session_key(&session_key).unwrap();
+        assert_eq!(read_host_kind_marker(&witness_name), HostKindMarker::Absent);
+        launch(
+            tmux,
+            dir,
+            root.path(),
+            id,
+            None,
+            None,
+            "".into(),
+            false,
+            "",
+            Some(42),
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&calls).unwrap().contains(tmux));
+        assert_eq!(
+            read_host_kind_marker(&witness_name),
+            HostKindMarker::Known(HostKind::Tmux),
+            "cleanup reads the marker by the session key's tmux name"
+        );
+
+        let blocked = "AgentDesk-claude-host-marker-blocked";
+        let marker = crate::services::tmux_common::session_temp_path(blocked, "host_kind");
+        std::fs::create_dir(&marker).unwrap();
+        launch(
+            blocked,
+            dir,
+            root.path(),
+            id,
+            None,
+            None,
+            "".into(),
+            false,
+            "",
+            Some(43),
+        )
+        .expect("a marker write failure must not block the launch");
+        assert!(std::fs::read_to_string(&calls).unwrap().contains(blocked));
+        assert!(matches!(
+            read_host_kind_marker(blocked),
+            HostKindMarker::ReadFailed(_)
+        ));
     }
 }

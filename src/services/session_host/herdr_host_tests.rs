@@ -811,16 +811,21 @@ fn herdr_items_have_no_production_caller() {
         "HerdrSocketTransport::new(",
         "HerdrSocketTransport::<",
     ];
-    // Nothing writes a host locator or `.host_kind` marker; only their owners, the guard
-    // adapter and the cleanup gate read one. Termination holds a locator only as a target.
+    // Only the inflight binding CAS copies a locator and only the Claude launch writes a
+    // (tmux) `.host_kind` marker. Termination holds a locator only as a target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
     const MARKER: &str = "src/services/tmux_common/host_marker.rs";
     const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
     const CLEANUP_GATE: &str = "src/db/dispatched_sessions/hosted_execution.rs";
+    const BINDING_CAS: &str =
+        "src/services/discord/inflight/save_store/identity_gate/host_locator.rs";
+    const IDENTITY_GATE: &str = "src/services/discord/inflight/save_store/identity_gate.rs";
+    const CLAUDE_LAUNCH: &str = "src/services/claude/tui_session_launch.rs";
+    const RESOLVE: &str = "src/services/session_host/resolve.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
-            &[LOCATOR, INFLIGHT_MODEL, GUARD_ADAPTER],
+            &[LOCATOR, INFLIGHT_MODEL, GUARD_ADAPTER, BINDING_CAS],
         ),
         (
             "HostedRuntimeLocator",
@@ -832,12 +837,22 @@ fn herdr_items_have_no_production_caller() {
             ],
         ),
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
-        ("HostKindMarker", &[MARKER, GUARD_ADAPTER, CLEANUP_GATE]),
-        ("read_host_kind_marker", &[MARKER, CLEANUP_GATE]),
-        ("host_marker::", &[GUARD_ADAPTER, CLEANUP_GATE]),
-        (".host_locator", &[GUARD_ADAPTER]),
+        (
+            "HostKindMarker",
+            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE],
+        ),
+        ("read_host_kind_marker", &[MARKER, CLEANUP_GATE, RESOLVE]),
+        (
+            "host_marker::",
+            &[GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, CLAUDE_LAUNCH],
+        ),
+        ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
+        (".host_locator", &[GUARD_ADAPTER, BINDING_CAS]),
         ("host_locator: Some", &[]),
-        ("host_locator:", &[INFLIGHT_MODEL, GUARD_ADAPTER]),
+        (
+            "host_locator:",
+            &[INFLIGHT_MODEL, GUARD_ADAPTER, IDENTITY_GATE, BINDING_CAS],
+        ),
     ];
     let variant = regex::Regex::new(r"\bHerdr\b|\*").unwrap();
     let mut violations = Vec::new();
@@ -907,6 +922,7 @@ fn session_target_guard_has_no_production_caller() {
         ("with_inflight_row", &[GUARD_ADAPTER], 0),
         ("locator_witness", &[GUARD_ADAPTER], 1),
         ("marker_witness", &[GUARD_ADAPTER], 0),
+        ("with_host_marker", &[RESOLVE], 0),
         (
             "ResolvedSessionTarget",
             &[RESOLVE, GUARD, ROOT, INPUT],
