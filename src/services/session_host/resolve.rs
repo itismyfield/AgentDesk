@@ -968,6 +968,19 @@ mod tests {
             TargetHost::Unknown(UnknownHost::MissingTarget(HostKind::Herdr)),
             "a TUI runtime kind must not turn a non-tmux marker into tmux"
         );
+        for (written, label) in [("zellij", "a future host"), ("", "a truncated marker")] {
+            std::fs::write(session_temp_path(name, "host_kind"), written).unwrap();
+            assert!(
+                matches!(
+                    read(tui_row.clone()),
+                    TargetHost::Unknown(UnknownHost::Unreadable {
+                        source: TargetSource::HostMarker,
+                        ..
+                    })
+                ),
+                "{label} is Unknown, never the legacy tmux reading"
+            );
+        }
         let keyless = SessionTargetEvidence::unread().with_host_marker();
         assert!(
             matches!(keyless.host_marker, HostWitness::ReadFailed(_)),

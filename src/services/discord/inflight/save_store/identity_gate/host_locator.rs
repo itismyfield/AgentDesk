@@ -106,8 +106,15 @@ mod tests {
         save_inflight_state_in_root(root.path(), &legacy).expect("seed row");
         let first = bound(legacy.clone(), 7, "nonce-a", TMUX);
         let expected = InflightTurnIdentity::from_state(&legacy);
+        // Runtime handoff callers stamp against the persisted baseline they read.
+        let mut local = first.clone();
         assert_eq!(
-            stamp(root.path(), &first, &expected, "test::first_bind"),
+            stamp(
+                root.path(),
+                (&legacy, &mut local),
+                &expected,
+                "test::first_bind"
+            ),
             GuardedSaveOutcome::Saved
         );
         let row = load(root.path(), channel_id);
