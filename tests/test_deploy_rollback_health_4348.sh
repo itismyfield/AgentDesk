@@ -115,9 +115,17 @@ HEALTHY_STANDBY_EMPTY_BODY='{"ok":true,"status":"healthy","db":true,"dashboard":
 # the multi-reason body is the ORDINARY case, not an exotic one -- this is the
 # shape measured on the mac-mini peer (2026-08-18).
 MULTI_PROVIDER_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:claude:gateway_standby"]}'
-# With the O writer on, a standby also names each TUI provider whose intake it
-# refuses; that is its settled shape, while the same reason on a runner blocks.
-TUI_GATEWAY_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:codex:tui_output_requires_gateway","provider:claude:gateway_standby","provider:claude:tui_output_requires_gateway"]}'
+# With the O writer on, a node also names each TUI provider whose writer channels
+# it leaves to the gateway; that reason is settled only where the body's own
+# per-provider evidence verifies a worker/standby role, never on the flag alone.
+TUI_GATEWAY_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:codex:tui_output_requires_gateway","provider:claude:gateway_standby","provider:claude:tui_output_requires_gateway"],"tui_output_gateway_channels":["codex:standby:complete:1","claude:standby:complete:2"]}'
+TUI_UNPROVEN_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:codex:tui_output_requires_gateway"]}'
+# Each evidence element is read whole: one string holding a comma is malformed, not two
+# entries, while whitespace between array tokens is insignificant in both parser paths.
+TUI_COMMA_ELEMENT_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:claude:tui_output_requires_gateway"],"tui_output_gateway_channels":["codex:worker:complete:1,claude:worker:complete:1"]}'
+TUI_COMMA_GARBAGE_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:claude:tui_output_requires_gateway"],"tui_output_gateway_channels":["claude:worker:complete:1,garbage"]}'
+TUI_SPACED_EVIDENCE_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:claude:tui_output_requires_gateway"],"tui_output_gateway_channels":[ "claude:worker:complete:1" ]}'
+TUI_COMMA_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:claude:gateway_standby","provider:claude:tui_output_requires_gateway"],"tui_output_gateway_channels":["codex:standby:complete:1,claude:standby:complete:1"]}'
 TUI_RUNNER_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:codex:tui_output_requires_gateway"]}'
 # Both element FORMS together (the bare reason and the per-provider one), to keep
 # the alternation covering each branch off the first position.
@@ -296,8 +304,26 @@ run_gate_cases() {
     _health_json_gateway_standby_only "$TUI_GATEWAY_STANDBY_BODY"
   assert_rc "[$mode] standby refusing TUI intake → READY under deploy flags" 0 \
     health_json_is_ready "$TUI_GATEWAY_STANDBY_BODY" 1 1 1
-  assert_rc "[$mode] runner refusing TUI intake → NOT ready" 1 \
+  assert_rc "[$mode] standby without TUI role evidence → gateway_standby_only REJECTS" 1 \
+    _health_json_gateway_standby_only "$TUI_UNPROVEN_STANDBY_BODY"
+  assert_rc "[$mode] standby without TUI role evidence → NOT ready" 1 \
+    health_json_is_ready "$TUI_UNPROVEN_STANDBY_BODY" 1 1 1
+  assert_rc "[$mode] runner without TUI role evidence → NOT ready" 1 \
     health_json_is_ready "$TUI_RUNNER_BODY" 1 1 1
+  comma_case=0
+  for body in "$TUI_COMMA_ELEMENT_BODY" "$TUI_COMMA_GARBAGE_BODY"; do
+    comma_case=$((comma_case + 1))
+    assert_rc "[$mode] comma inside evidence element #$comma_case → NOT ready (release)" 1 \
+      health_json_is_ready "$body" 1 1 1 1
+    assert_rc "[$mode] comma inside evidence element #$comma_case → NOT ready" 1 \
+      health_json_is_ready "$body" 0 1
+  done
+  assert_rc "[$mode] evidence with array whitespace → READY (release)" 0 \
+    health_json_is_ready "$TUI_SPACED_EVIDENCE_BODY" 1 1 1 1
+  assert_rc "[$mode] evidence with array whitespace → READY" 0 \
+    health_json_is_ready "$TUI_SPACED_EVIDENCE_BODY" 0 1
+  assert_rc "[$mode] standby evidence element holding a comma → gateway_standby_only REJECTS" 1 \
+    _health_json_gateway_standby_only "$TUI_COMMA_STANDBY_BODY"
   assert_rc "[$mode] both standby reason forms mixed → gateway_standby_only matches" 0 \
     _health_json_gateway_standby_only "$MULTI_FORM_STANDBY_BODY"
   # ONLY semantics preserved: one intruder anywhere rejects the whole array.

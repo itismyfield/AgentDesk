@@ -25,6 +25,30 @@ pub(super) fn expired_relay_ledgers(json: &serde_json::Value) -> serde_json::Val
     serde_json::Value::Array(entries)
 }
 
+/// Applied TUI gateway restriction per provider as `<id>:<runtime_role>:<complete|incomplete>:<n>`,
+/// the role evidence readiness needs; a report of this node's state, not a copy of the config.
+pub(super) fn tui_output_gateway_channels(json: &serde_json::Value) -> Vec<serde_json::Value> {
+    let supported = crate::services::provider::supported_provider_ids();
+    let providers = json.get("providers").and_then(serde_json::Value::as_array);
+    providers
+        .into_iter()
+        .flatten()
+        .filter_map(|provider| {
+            let channels = provider.get("tui_output_gateway_channels")?.as_u64()?;
+            let name = provider.get("name")?.as_str()?;
+            let role = provider.get("runtime_role")?.as_str()?;
+            if !supported.contains(&name) || role.contains(':') {
+                return None;
+            }
+            let complete = provider.get("runtime_state_complete") == Some(&true.into());
+            let state = if complete { "complete" } else { "incomplete" };
+            Some(serde_json::Value::String(format!(
+                "{name}:{role}:{state}:{channels}"
+            )))
+        })
+        .collect()
+}
+
 /// Bare (argument-less) provider degraded-reason classifications emitted by
 /// `provider_probe::classify_provider`. Keep in sync with that producer: a reason
 /// missing here is flattened to `provider:unsupported` by the fail-closed sanitizer.
@@ -109,3 +133,7 @@ pub(super) fn sanitize_public_degraded_reasons(reasons: serde_json::Value) -> se
         .collect();
     serde_json::Value::Array(sanitized)
 }
+
+#[cfg(all(test, unix))]
+#[path = "tui_output_readiness_tests.rs"]
+mod tui_output_readiness_tests;

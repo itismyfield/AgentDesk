@@ -171,6 +171,27 @@ pub(crate) mod test_override {
     pub(crate) fn force_off() -> ForceGuard {
         ForceGuard(FORCED.with(|cell| cell.replace(false)))
     }
+    thread_local! {
+        static INTAKE_ADMITTED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn intake_admitted() -> bool {
+        INTAKE_ADMITTED.with(Cell::get)
+    }
+
+    pub(crate) struct IntakeGuard(bool);
+
+    /// Acts as if the intake gate admitted TUI providers off the gateway, until dropped.
+    pub(crate) fn admit_intake() -> IntakeGuard {
+        IntakeGuard(INTAKE_ADMITTED.with(|cell| cell.replace(true)))
+    }
+
+    impl Drop for IntakeGuard {
+        fn drop(&mut self) {
+            INTAKE_ADMITTED.with(|cell| cell.set(self.0));
+        }
+    }
+
     // Registry-reset tests run concurrently, so binding-dependent fixtures use their own process.
     pub(crate) fn isolated_binding_case(name: &str) -> bool {
         const CHILD: &str = "ADK_TEST_O_BINDING_CASE";

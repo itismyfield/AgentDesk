@@ -10,6 +10,7 @@ pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
 mod host_locator;
+mod host_recovery_guard;
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
