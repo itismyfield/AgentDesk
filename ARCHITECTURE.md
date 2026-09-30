@@ -1841,7 +1841,8 @@ src/
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
-│   │   └── registry.rs
+│   │   ├── registry.rs
+│   │   └── session_probe.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
@@ -1925,6 +1926,7 @@ src/
 │   │   ├── model.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
+│   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
 │   ├── settings/

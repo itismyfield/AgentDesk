@@ -366,9 +366,10 @@ fi
 if run_check guards "Comment-only change checker self-tests"; then
 # scripts/check_comment_only_change.py decides whether a diff may skip human
 # review, so a false "comment-only" verdict ships unread code. These tests are
-# what stops that. The checker is an on-demand reviewer tool, not a tree gate:
-# nothing here runs it against this PR.
+# what stops that. ci-pr.yml's changes job also runs it, through
+# scripts/ci/comment_only_gate.py, to skip the heavy test jobs.
 "$PYTHON" -m unittest tests.test_comment_only_change
+"$PYTHON" -m unittest tests.test_comment_only_ci_gate
 fi
 
 if run_check guards "Hotfile LOC ratchet guard (#3565)"; then
