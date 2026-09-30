@@ -277,6 +277,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/durability_tests.rs",
         "src/services/tui_o/writer/switch_tests.rs",
         "src/services/tui_o/writer/host_tests.rs",
+        "src/services/tui_o/writer/adoption_tests.rs",
         "src/services/tui_o/cutover/channel_gate/tests.rs",
         "src/services/tui_prompt_dedupe/prompt_identity_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",

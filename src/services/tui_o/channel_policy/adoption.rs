@@ -68,6 +68,15 @@ impl Candidate {
         state.owned()
     }
 
+    /// Leaves a pending adoption to Legacy for the rest of this process; a decided one is kept.
+    pub(crate) fn release(&self, channel: u64) {
+        let mut state = self.lock();
+        if *state == Adoption::Pending {
+            *state = Adoption::Released;
+            tracing::info!(channel, "[tui_o] adoption released before the first init");
+        }
+    }
+
     /// A recovered store commits the adoption, unless Legacy already took the channel.
     pub(crate) fn confirm_store(&self) -> bool {
         let mut state = self.lock();

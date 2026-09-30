@@ -85,6 +85,11 @@ pub(crate) fn mark_boot_discovery_complete() {
     TEST_DISCOVERY_CLOCK.set((true, Duration::ZERO));
 }
 
+/// Whether a rehydrate pass has listed tmux in this process; the grace expiry does not count.
+pub(crate) fn boot_discovery_done() -> bool {
+    DISCOVERY_DONE.load(Ordering::Acquire)
+}
+
 fn discovery_done() -> bool {
     let clock = (
         DISCOVERY_DONE.load(Ordering::Acquire),

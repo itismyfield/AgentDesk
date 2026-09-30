@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use super::activation::{self, ActivationFacts};
 use super::actor;
+use super::adoption::{self, LegacyView};
 use super::binding::BindingEvents;
 use super::deliver::ChannelWriter;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
@@ -41,6 +42,8 @@ pub trait HostIo: Send + Sync + 'static {
     /// Whether local Legacy inflight, custody or a pending start holds the channel. Read under its
     /// adoption lock right before the first `init`, so it must not judge TUI output itself.
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<bool, String>;
+    /// Legacy's relay state, asked only for a Claude channel whose sources already hold output.
+    fn legacy(&self) -> Arc<dyn LegacyView>;
 }
 
 /// Channels with a hosted actor and those ready to take work.
@@ -180,6 +183,12 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
     alarms.raise(channel, WriterAlarm::Halted { detail });
 }
 
+/// A channel not adopted before its first `init` stays Legacy's for this process.
+fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
+    candidate.release(channel);
+    hold(alarms, channel, &format!("adoption held: {detail}"));
+}
+
 async fn host_channel<I: HostIo>(
     io: Arc<I>,
     channel: u64,
@@ -202,6 +211,19 @@ async fn host_channel<I: HostIo>(
         Ok(Recovered::Store(store)) => store,
         Ok(Recovered::Fresh(fresh)) => {
             let log = bindings.insert(io.bindings(channel, provider));
+            let held =
+                provider == ShadowProvider::Claude && adoption::holds_output(&**log, channel);
+            let legacy = held.then(|| io.legacy());
+            if let Some(legacy) = &legacy
+                && !adoption::legacy_started(&**legacy).await
+            {
+                return release(
+                    &candidate,
+                    &alarms,
+                    channel,
+                    "legacy cursor not established",
+                );
+            }
             let facts = loop {
                 until_owned(&gate).await;
                 let facts = io.activation_facts(channel, provider).await;
@@ -211,7 +233,25 @@ async fn host_channel<I: HostIo>(
                 }
             };
             let local = || io.local_custody(channel, provider);
-            let created = activation::activate(&fresh, channel, facts, &**log, local, &candidate);
+            let created = match legacy {
+                None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
+                Some(legacy) => {
+                    let events = log.binding_events_since(channel, 0);
+                    let events = events.map_err(|error| format!("binding log: {error}"));
+                    // Pinning reads whole transcripts, so it stays off the runtime's threads.
+                    let view = Arc::clone(&legacy);
+                    let pinned = tokio::task::spawn_blocking(move || {
+                        adoption::pin(&*view, &events?, channel)
+                    });
+                    let pinned = pinned.await.map_err(|error| format!("pin task: {error}"));
+                    let snapshot = match pinned.and_then(|pinned| pinned) {
+                        Ok(snapshot) => snapshot,
+                        Err(detail) => return release(&candidate, &alarms, channel, &detail),
+                    };
+                    let sources = || snapshot.recheck(&*legacy, &**log, channel);
+                    activation::activate_with(&fresh, channel, facts, local, &candidate, sources)
+                }
+            };
             if let Err(detail) = created {
                 return hold(&alarms, channel, &format!("first activation: {detail}"));
             }
@@ -407,6 +447,10 @@ pub(crate) mod test_io {
         sources: BTreeMap<u64, SourceId>,
         pub(crate) facts: Mutex<ActivationFacts>,
         pub(crate) on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Legacy's relay state for channels that already hold output; fails closed when unset.
+        pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
+        /// The tmux session each channel's binding names, `host-<channel>` when unset.
+        pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
     }
 
     impl TestHost {
@@ -417,6 +461,8 @@ pub(crate) mod test_io {
                 sources: sources.into_iter().collect(),
                 facts: Mutex::default(),
                 on_facts: Mutex::default(),
+                legacy: Mutex::default(),
+                sessions: Mutex::default(),
             })
         }
     }
@@ -458,7 +504,10 @@ pub(crate) mod test_io {
                 seq: 1,
                 channel_id: channel,
                 provider,
-                tmux_session: format!("host-{channel}"),
+                tmux_session: locked(&self.sessions)
+                    .get(&channel)
+                    .cloned()
+                    .unwrap_or_else(|| format!("host-{channel}")),
                 execution_nonce: "host".into(),
                 record,
                 committed_at: received_at,
@@ -480,6 +529,11 @@ pub(crate) mod test_io {
 
         fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<bool, String> {
             Ok(false)
+        }
+
+        fn legacy(&self) -> Arc<dyn LegacyView> {
+            let set = locked(&self.legacy).clone();
+            set.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
         }
     }
 }
