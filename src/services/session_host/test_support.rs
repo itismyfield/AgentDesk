@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use super::model::{HostKind, HostLiveness, HostSessionRef};
+use super::model::{HostKind, HostLiveness, HostPresence, HostSessionRef};
 
 type Injected = HashMap<(HostKind, String), HostLiveness>;
 
 static INJECTED_LIVENESS: LazyLock<Mutex<Injected>> = LazyLock::new(Mutex::default);
+static INJECTED_PRESENCE: LazyLock<Mutex<HashMap<(HostKind, String), HostPresence>>> =
+    LazyLock::new(Mutex::default);
 
 fn injected() -> MutexGuard<'static, Injected> {
     INJECTED_LIVENESS
@@ -56,5 +58,41 @@ impl Drop for InjectedLivenessGuard {
             name: &self.name,
         };
         inject_liveness(session, None);
+    }
+}
+
+/// The injected presence answer for exactly this host kind and name.
+pub(crate) fn injected_presence(session: HostSessionRef<'_>) -> Option<HostPresence> {
+    let injected = INJECTED_PRESENCE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    injected
+        .get(&(session.kind, session.name.to_string()))
+        .copied()
+}
+
+/// Forces the presence answer for one hosted session until dropped, including on unwind.
+#[must_use = "the injected answer is cleared when this guard is dropped"]
+pub(crate) struct InjectedPresenceGuard {
+    key: (HostKind, String),
+}
+
+impl InjectedPresenceGuard {
+    pub(crate) fn set(session: HostSessionRef<'_>, presence: HostPresence) -> Self {
+        let key = (session.kind, session.name.to_string());
+        let mut injected = INJECTED_PRESENCE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        injected.insert(key.clone(), presence);
+        Self { key }
+    }
+}
+
+impl Drop for InjectedPresenceGuard {
+    fn drop(&mut self) {
+        let mut injected = INJECTED_PRESENCE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        injected.remove(&self.key);
     }
 }

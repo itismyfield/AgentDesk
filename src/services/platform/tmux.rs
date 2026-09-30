@@ -292,8 +292,36 @@ fn install_dead_marker_hooks(session_name: &str) {
 }
 
 fn log_kill_request(session_name: &str, reason: &str) {
+    #[cfg(test)]
+    kill_requests::record(session_name);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ✂ tmux kill requested: session={session_name} reason={reason}");
+}
+
+/// Test-only record of every tmux kill this process requested, by session name.
+#[cfg(test)]
+pub(crate) mod kill_requests {
+    use std::sync::{LazyLock, Mutex};
+
+    static REQUESTED: LazyLock<Mutex<Vec<String>>> = LazyLock::new(Mutex::default);
+
+    pub(super) fn record(session_name: &str) {
+        let mut requested = REQUESTED
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        requested.push(session_name.to_string());
+    }
+
+    /// How many kills were requested for exactly `session_name`.
+    pub(crate) fn count(session_name: &str) -> usize {
+        let requested = REQUESTED
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        requested
+            .iter()
+            .filter(|name| *name == session_name)
+            .count()
+    }
 }
 
 fn log_kill_result(session_name: &str, reason: &str, output: &Output) {

@@ -26,6 +26,32 @@ pub(crate) use provider_errors::observe_provider_error;
 #[cfg(test)]
 mod postgres_tests;
 
+/// A test-only durable store for one task, so a test never attaches the process one.
+#[cfg(test)]
+pub(crate) mod test_store {
+    use super::*;
+
+    tokio::task_local! {
+        pub(super) static SCOPED: &'static Coordinator;
+    }
+
+    /// Runs `future` with the recovery store on `pool` and `catalog` for this task only.
+    pub(crate) async fn with_store<F: std::future::Future>(
+        pool: PgPool,
+        catalog: RecoveryCatalog,
+        future: F,
+    ) -> F::Output {
+        let mut runtime = RecoveryRuntime::new();
+        runtime.install_catalog(catalog);
+        let store = Box::leak(Box::new(Coordinator {
+            runtime: Mutex::new(runtime),
+            pool: Mutex::new(Some(pool)),
+            ..Coordinator::default()
+        }));
+        SCOPED.scope(store, future).await
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Coordinator {
     pub(super) runtime: Mutex<RecoveryRuntime>,
@@ -40,6 +66,10 @@ pub(super) fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub(super) fn coordinator() -> &'static Coordinator {
+    #[cfg(test)]
+    if let Ok(scoped) = test_store::SCOPED.try_with(|scoped| *scoped) {
+        return scoped;
+    }
     static COORDINATOR: OnceLock<Coordinator> = OnceLock::new();
     COORDINATOR.get_or_init(Coordinator::default)
 }

@@ -15,10 +15,9 @@ use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
 use crate::services::tmux_diagnostics::PaneLivenessOverrideGuard;
 
-/// Whether the session got main's teardown, read from the exit reason written before the kill.
+/// Whether any tmux kill was requested for the session.
 fn killed(name: &str) -> bool {
-    let exit_reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
-    std::path::Path::new(&exit_reason).exists()
+    crate::services::platform::tmux::kill_requests::count(name) > 0
 }
 
 fn own(name: &str) {
@@ -181,52 +180,114 @@ async fn orphan_cleanup_kills_only_what_the_host_guard_admits_pg() {
     db.drop().await;
 }
 
-// The fresh-routine backstop keys the row its latest owning run recorded, which a
-// channel-style key would miss; with no recorded key it falls back to the orphan rule.
+/// A fresh routine with primary agent `a` and fallback agent `b`, and each one's session.
+async fn fresh_routine(pool: &sqlx::PgPool, id: &str) -> (String, String) {
+    sqlx::query(
+        "INSERT INTO agents (id, name) VALUES ('a', 'a'), ('b', 'b') ON CONFLICT DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO routines (id, agent_id, fallback_agent_id, script_ref, name, execution_strategy)
+         VALUES ($1, 'a', 'b', 'script', $1, 'fresh')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let reread = crate::services::routines::fresh_session_reaper::reread_routine(pool, id);
+    let routine = reread.await.unwrap().expect("the routine row");
+    let name = |agent| {
+        crate::services::routines::fresh_session_reaper::fresh_routine_owned_tmux_session_name(
+            &routine,
+            agent,
+            &ProviderKind::Claude,
+        )
+    };
+    (name("a"), name("b"))
+}
+
+async fn owned_run(pool: &sqlx::PgPool, run: &str, routine: &str, key: &str, age_secs: i64) {
+    sqlx::query(
+        "INSERT INTO routine_runs (id, routine_id, status, owned_tmux_session, started_at)
+         VALUES ($1, $2, 'succeeded', $3, NOW() - make_interval(secs => $4))",
+    )
+    .bind(run)
+    .bind(routine)
+    .bind(key)
+    .bind(age_secs as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+// The listed-session pass reaps a fresh routine's dead session only on the row the run
+// that owned that session recorded, even when a newer run owned the other agent's session.
 #[tokio::test]
-async fn fresh_routine_backstop_takes_the_owned_row_as_ownership_proof_pg() {
+async fn fresh_routine_backstop_reads_the_run_that_owned_the_listed_session_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (db, pool) = postgres().await;
     let (shared, _registry) = runtime(&pool).await;
-    let claude = ProviderKind::Claude;
-    // (owned run recorded, what the stored rows say, killed)
+    // (primary's own run recorded, newer fallback run recorded, primary's rows, killed)
     let cases = [
-        (true, Stored::Hosted, false),
-        (true, Stored::Legacy, true),
-        (false, Stored::Missing, true),
-        (false, Stored::MissingHerdrMarker, false),
+        (true, true, Stored::Hosted, false),
+        (true, true, Stored::Future, false),
+        (true, true, Stored::LegacyHerdrMarker, false),
+        (true, true, Stored::Legacy, true),
+        (true, false, Stored::Hosted, false),
+        (false, true, Stored::Missing, true),
+        (false, false, Stored::MissingHerdrMarker, false),
     ];
-    for (n, (owned, stored, expected)) in cases.into_iter().enumerate() {
-        let routine_id = format!("p4a-routine-{n}");
-        let name = claude.build_tmux_session_name(&format!("routine p4a-{n} - agent"));
-        sqlx::query(
-            "INSERT INTO routines (id, agent_id, script_ref, name, execution_strategy)
-             VALUES ($1, 'agent', 'script', $1, 'fresh')",
-        )
-        .bind(&routine_id)
+    let mut listed = Vec::new();
+    let mut guards = Vec::new();
+    for (n, (primary_run, fallback_run, stored, expected)) in cases.into_iter().enumerate() {
+        let routine = format!("p4a-routine-{n}");
+        let (primary, fallback) = fresh_routine(&pool, &routine).await;
+        // A routine session's row key is not the channel-style key for its tmux name.
+        let key = |name: &str| format!("claude/routine-token/mac-mini:{name}");
+        let channel = 1_479_671_301_387_060_300 + n as u64;
+        let stored_key = if primary_run {
+            key(&primary)
+        } else {
+            channel_key(&shared, &primary)
+        };
+        seed(&pool, &stored_key, &primary, channel, stored).await;
+        if primary_run {
+            owned_run(&pool, &format!("{routine}-a"), &routine, &key(&primary), 60).await;
+        }
+        if fallback_run {
+            owned_run(&pool, &format!("{routine}-b"), &routine, &key(&fallback), 0).await;
+        }
+        own(&primary);
+        let pane = PaneLiveness::DeadOrAbsent;
+        guards.push(PaneLivenessOverrideGuard::set(&primary, pane));
+        listed.push((primary, expected, stored));
+    }
+    let names: Vec<String> = listed.iter().map(|(name, ..)| name.clone()).collect();
+    super::reap_listed_dead_sessions(&shared, &names).await;
+    for (name, expected, stored) in listed {
+        assert_eq!(killed(&name), expected, "{stored:?} {name}");
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+// An unreadable ownership record keeps the fresh routine's session; it is not an orphan.
+#[tokio::test]
+async fn fresh_routine_backstop_keeps_the_session_when_ownership_is_unreadable_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = runtime(&pool).await;
+    let (primary, _) = fresh_routine(&pool, "p4a-routine-unreadable").await;
+    sqlx::query("ALTER TABLE routine_runs RENAME COLUMN owned_tmux_session TO p4a_unreadable")
         .execute(&pool)
         .await
         .unwrap();
-        // A routine session's row key is not the channel-style key for its tmux name.
-        let key = format!("claude/routine-token/mac-mini:{name}");
-        let channel = 1_479_671_301_387_060_300 + n as u64;
-        seed(&pool, &key, &name, channel, stored).await;
-        if owned {
-            sqlx::query(
-                "INSERT INTO routine_runs (id, routine_id, status, owned_tmux_session)
-                 VALUES ($1, $2, 'succeeded', $3)",
-            )
-            .bind(format!("{routine_id}-run"))
-            .bind(&routine_id)
-            .bind(&key)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        let _pane = PaneLivenessOverrideGuard::set(&name, PaneLiveness::DeadOrAbsent);
-        super::reap_fresh_routine_orphan(&shared, &claude, &name, &routine_id).await;
-        assert_eq!(killed(&name), expected, "{owned} {stored:?}");
-    }
+    own(&primary);
+    let _pane = PaneLivenessOverrideGuard::set(&primary, PaneLiveness::DeadOrAbsent);
+    super::reap_listed_dead_sessions(&shared, std::slice::from_ref(&primary)).await;
+    assert!(!killed(&primary), "{primary}");
     pool.close().await;
     db.drop().await;
 }

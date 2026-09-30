@@ -27891,7 +27891,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:18f8ec06762d4cf251d4b30a60456d0f41006e30ca8bbe3e384a66af52e277a4"
+      "fingerprint": "sha256:1a80b39033f1c25153908289cc87e17141beab9792b1f59941b638643302af5f"
     },
     {
       "root": "src",
@@ -27900,7 +27900,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:b303c8f07b04f9d5c796d891ba5eae2a7d7642ce0cd340705f74342890db022a"
+      "fingerprint": "sha256:635bb1cd837fe936489c2eebfdc3a574b83498cfd4d6e0c8574e8786e030720b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8fa216bc5bde76726fdea22c4054dfb77ee21d202178a9dcca7a3f633c6d897d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ac59595cffa0a17b6582ee5218ad24cbb85d57103f03d97d18d375077058cc0d"
     },
     {
       "root": "src",

@@ -52,18 +52,30 @@ async fn session_status(pool: &sqlx::PgPool, key: &str) -> Option<String> {
         .unwrap()
 }
 
-// Only a found legacy row reaches the tmux probe; every other stored answer is a 409
-// that leaves the turn, its inflight row and the active session row as they were.
+// Only a found legacy row reaches the injected tmux probe; every other stored answer is a
+// 409 that leaves the turn, its inflight row and the active session row as they were.
 #[tokio::test]
 async fn stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg() {
+    use crate::services::session_host::test_support::InjectedPresenceGuard;
+    use crate::services::session_host::{HostPresence, HostSessionRef};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let (shared, registry) = runtime(&pool).await;
-    let tmux = crate::services::platform::tmux::is_available();
-    for (n, stored) in Stored::ALL.into_iter().enumerate() {
+    let legacy = [
+        HostPresence::Missing,
+        HostPresence::Present,
+        HostPresence::ProbeFailed,
+    ]
+    .map(|presence| (Stored::Legacy, presence));
+    // A probe that would fail shows the host refusal comes before it.
+    let refused = Stored::ALL[1..]
+        .iter()
+        .map(|stored| (*stored, HostPresence::ProbeFailed));
+    for (n, (stored, presence)) in legacy.into_iter().chain(refused).enumerate() {
         let channel = ChannelId::new(1_479_671_301_387_059_900 + n as u64);
         let name = format!("AgentDesk-claude-p4a-repair-{n}");
+        let _probe = InjectedPresenceGuard::set(HostSessionRef::tmux(&name), presence);
         let key = channel_key(&shared, &name);
         seed(&pool, &key, &name, channel.get(), stored).await;
         sqlx::query(
@@ -78,22 +90,23 @@ async fn stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_leg
         let (status, json) = post_repair(registry.clone(), &pool, channel).await;
         let kept = turn_kept(&shared, channel, &token).await;
         let row = session_status(&pool, &key).await;
-        if stored != Stored::Legacy {
-            assert_eq!(status, StatusCode::CONFLICT, "{stored:?} {json}");
-            assert_eq!(json["safety_gate"], "host_not_legacy_tmux", "{stored:?}");
-            assert!(kept, "{stored:?} {json}");
-            let unchanged = row.is_none_or(|status| status == "turn_active");
-            assert!(unchanged, "{stored:?} {json}");
-        } else if tmux {
-            assert_eq!(status, StatusCode::OK, "{json}");
-            assert!(!kept, "{json}");
-            assert_eq!(row.as_deref(), Some("disconnected"), "{json}");
-        } else {
-            // No tmux binary: the presence probe fails and the repair refuses, changing nothing.
-            assert_eq!(json["safety_gate"], "tmux_probe_failed", "{json}");
-            assert!(kept, "{json}");
-            assert_eq!(row.as_deref(), Some("turn_active"), "{json}");
-        }
+        let case = format!("{stored:?} {presence:?} {json}");
+        let gate = match (stored, presence) {
+            (Stored::Legacy, HostPresence::Missing) => {
+                assert_eq!(status, StatusCode::OK, "{case}");
+                assert!(!kept, "{case}");
+                assert_eq!(row.as_deref(), Some("disconnected"), "{case}");
+                continue;
+            }
+            (Stored::Legacy, HostPresence::Present) => "tmux_present",
+            (Stored::Legacy, HostPresence::ProbeFailed) => "tmux_probe_failed",
+            _ => "host_not_legacy_tmux",
+        };
+        assert_eq!(status, StatusCode::CONFLICT, "{case}");
+        assert_eq!(json["safety_gate"], gate, "{case}");
+        assert!(kept, "{case}");
+        let unchanged = row.is_none_or(|status| status == "turn_active");
+        assert!(unchanged, "{case}");
     }
     pool.close().await;
     db.drop().await;

@@ -85,7 +85,7 @@ pub(super) async fn routine_teardown(
     }
     let mut newest = None;
     for key in &owned {
-        // A bare-name record owns the session but names no row to read.
+        // A bare or unparsable record owns the session but names no row to read.
         if tmux_name_from_session_key(key).is_none() {
             return KeyedTeardown::Kept;
         }
@@ -108,8 +108,8 @@ pub(super) async fn routine_teardown(
     newest.unwrap_or(KeyedTeardown::Kept)
 }
 
-/// The distinct trimmed tokens any routine run recorded for `session_name`, newest first,
-/// read as the owned-session teardown reads them: a full key, or the bare tmux name.
+/// Every token a routine run recorded for `session_name`, newest first, as written and
+/// trimmed; a bare or unparsable token is kept so the caller refuses on it.
 async fn routine_owned_session_keys(
     pool: &sqlx::PgPool,
     session_name: &str,
@@ -124,10 +124,16 @@ async fn routine_owned_session_keys(
     .fetch_all(pool)
     .await?;
     let mut owned: Vec<String> = Vec::new();
-    for token in recorded.iter().map(|token| token.trim()) {
-        let name = tmux_name_from_session_key(token).unwrap_or_else(|| token.to_string());
-        if name == session_name && !owned.iter().any(|seen| seen == token) {
-            owned.push(token.to_string());
+    for raw in &recorded {
+        let token = raw.trim();
+        let tail = token.rsplit_once(':').map_or(token, |(_, tail)| tail);
+        if tail.trim() != session_name {
+            continue;
+        }
+        for key in [raw.as_str(), token] {
+            if !owned.iter().any(|seen| seen == key) {
+                owned.push(key.to_string());
+            }
         }
     }
     Ok(owned)
