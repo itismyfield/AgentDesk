@@ -1,11 +1,12 @@
 //! Adoption of a selected Claude channel that already holds output: O starts at Legacy's own
-//! cursor, only past a closed turn Legacy's delivery record covers, so no byte changes readers.
+//! cursor when every record past Legacy's delivered frontier is a turn end or TUI bookkeeping.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
@@ -144,26 +145,77 @@ impl Pinned {
     }
 }
 
-/// Where the last turn ending before the cursor ends, and whether output follows it.
-#[derive(Default)]
+/// The records before the cursor as they bear on Legacy's delivered frontier: whether output
+/// follows the last turn end, and the first record past the frontier that is not quiet.
 struct Turns {
+    frontier: u64,
     closed_at: u64,
     open: bool,
+    /// Whether the frontier is 0 or ends a record.
+    frontier_on_line: bool,
+    output_past: Option<u64>,
+    prompt_past: Option<u64>,
+}
+
+/// What neither Legacy nor O posts: turn ends and the TUI's own bookkeeping. Anything else
+/// may post or start a turn.
+fn quiet(record: &Value) -> bool {
+    let field = |value: &Value, key| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let attachment = record.get("attachment").unwrap_or(&Value::Null);
+    match field(record, "type").as_deref() {
+        Some("last-prompt" | "ai-title" | "mode" | "permission-mode") => true,
+        Some("atis-latch" | "cost-state" | "file-history-snapshot") => true,
+        Some("system") => matches!(
+            field(record, "subtype").as_deref(),
+            Some("stop_hook_summary" | "turn_duration" | "informational")
+        ),
+        Some("attachment") => field(attachment, "type").as_deref() == Some("hook_success"),
+        _ => false,
+    }
 }
 
 impl Turns {
-    fn record(&mut self, line: &[u8], end: u64) {
-        let Ok(record) = serde_json::from_slice(line) else {
-            // An unreadable record after the last turn end may hold output.
-            self.open |= !line.iter().all(u8::is_ascii_whitespace);
+    fn new(frontier: u64) -> Self {
+        Self {
+            frontier,
+            closed_at: 0,
+            open: false,
+            frontier_on_line: frontier == 0,
+            output_past: None,
+            prompt_past: None,
+        }
+    }
+
+    fn record(&mut self, line: &[u8], start: u64, end: u64) {
+        self.frontier_on_line |= end == self.frontier;
+        if line.iter().all(u8::is_ascii_whitespace) {
             return;
-        };
-        let facts = classify(ShadowProvider::Claude, &record);
+        }
+        let record: Option<Value> = serde_json::from_slice(line).ok();
+        let facts = record.as_ref().map(|r| classify(ShadowProvider::Claude, r));
+        let facts = facts.unwrap_or_default();
         if facts.iter().any(|fact| matches!(fact, RecordFact::Idle(_))) {
             (self.closed_at, self.open) = (end, false);
-        } else if !facts.is_empty() {
+        } else if !facts.is_empty() || record.is_none() {
+            // An unreadable record after the last turn end may hold output.
             self.open = true;
         }
+        if start < self.frontier {
+            return;
+        }
+        let opens =
+            |fact: &RecordFact| matches!(fact, RecordFact::Prompt(..) | RecordFact::TurnStart(_));
+        let posts = facts
+            .iter()
+            .any(|fact| !opens(fact) && !matches!(fact, RecordFact::Idle(_)));
+        let user = record.as_ref().and_then(|r| r.get("type")) == Some(&Value::from("user"));
+        let prompts = user || facts.iter().any(opens);
+        let past = match record {
+            Some(_) if !posts && prompts => &mut self.prompt_past,
+            Some(record) if !posts && quiet(&record) => return,
+            _ => &mut self.output_past,
+        };
+        past.get_or_insert(start);
     }
 }
 
@@ -191,12 +243,13 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
             break;
         }
         hasher.update(&line);
+        let start = at;
         at += read as u64;
         if line.last() != Some(&b'\n') {
             return Err(format!("source {path} ends inside a line at {at}"));
         }
         if let Some(turns) = turns.as_deref_mut() {
-            turns.record(&line, at);
+            turns.record(&line, start, at);
         }
     }
     if at != len {
@@ -221,7 +274,8 @@ pub struct Snapshot {
 }
 
 /// Reads Legacy's cursor and pins every source the channel's `events` bind. The current one starts
-/// at that cursor, which must end a line after a closed turn Legacy's frontier already covers.
+/// at that cursor, which must end a line after a closed turn, with only quiet records between
+/// Legacy's delivered frontier and it.
 pub fn pin(
     legacy: &dyn LegacyView,
     events: &[BindingEvent],
@@ -246,16 +300,25 @@ pub fn pin(
         LegacyCursor::Unbound => return Err("legacy cursor not established".into()),
         LegacyCursor::NoPane => len_of(&current.path)?,
     };
-    let mut turns = Turns::default();
+    let frontier = legacy.frontier(channel, &tmux, start);
+    let frontier = frontier.ok_or("the delivery record is not authoritative")?;
+    let mut turns = Turns::new(frontier);
     let head = read(current, start, Some(&mut turns))?;
     if turns.open {
         return Err(format!("a turn after {} is still open", turns.closed_at));
     }
-    let frontier = legacy.frontier(channel, &tmux, start);
-    let frontier = frontier.ok_or("the delivery record is not authoritative")?;
-    if !(turns.closed_at..=start).contains(&frontier) {
-        let closed = turns.closed_at;
-        return Err(format!("frontier {frontier} is outside {closed}..={start}"));
+    if !turns.frontier_on_line || frontier > start {
+        return Err(format!(
+            "frontier {frontier} ends no record within ..={start}"
+        ));
+    }
+    if let Some(at) = turns.output_past {
+        return Err(format!(
+            "a record at {at} past frontier {frontier} may post"
+        ));
+    }
+    if let Some(at) = turns.prompt_past {
+        return Err(format!("a prompt at {at} is past frontier {frontier}"));
     }
     let mut pinned = vec![head];
     let mut past: Vec<&SourceId> = Vec::new();

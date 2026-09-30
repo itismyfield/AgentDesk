@@ -206,7 +206,7 @@ fn a_closed_turn_legacy_has_not_delivered_is_not_adopted() {
     let channel = Channel::new(641003);
     *channel.legacy.frontier.lock().unwrap() = Some(0);
     let detail = channel.pin().expect_err("an undelivered turn is refused");
-    assert!(detail.contains("frontier 0 is outside"), "{detail}");
+    assert!(detail.contains("past frontier 0 may post"), "{detail}");
 }
 
 #[test]
@@ -286,4 +286,74 @@ fn past_sources_over_the_boot_budget_are_not_adopted() {
     let (channel, _) = rotated(641007, PAST_BUDGET_SOURCES + 1);
     let detail = channel.pin().expect_err("the budget refuses the channel");
     assert!(detail.contains("past sources exceed budget"), "{detail}");
+}
+
+fn prompt(key: &str) -> serde_json::Value {
+    serde_json::json!({"type":"user", "uuid":format!("{key}-q"), "message":{"content":key}})
+}
+
+fn answer(key: &str) -> serde_json::Value {
+    serde_json::json!({"type":"assistant", "uuid":format!("{key}-a"), "apiBlockIndex":0,
+        "message":{"id":key, "content":[{"type":"text", "text":format!("answer {key}")}]}})
+}
+
+fn system(subtype: &str) -> serde_json::Value {
+    serde_json::json!({"type":"system", "subtype":subtype})
+}
+
+/// A channel whose transcript is `rows`, with Legacy's cursor at its end and its delivered
+/// frontier at the end of the first `delivered` rows.
+fn delivered(channel: u64, rows: &[serde_json::Value], delivered: usize) -> Channel {
+    let adopted = Channel::new(channel);
+    let lines: Vec<String> = rows.iter().map(|row| format!("{row}\n")).collect();
+    std::fs::write(&adopted.source.path, lines.concat()).unwrap();
+    let frontier = lines[..delivered].iter().map(String::len).sum::<usize>();
+    *adopted.legacy.cursor.lock().unwrap() = Some(adopted.end());
+    *adopted.legacy.frontier.lock().unwrap() = Some(frontier as u64);
+    adopted
+}
+
+#[test]
+fn assistant_text_past_legacys_frontier_is_not_adopted() {
+    // The TUI can write late text after the stop hook, where Legacy's reader ends the turn.
+    let late = [answer("first"), system("stop_hook_summary"), answer("late")];
+    let rows = [&[prompt("q")], &late[..], &[system("turn_duration")]].concat();
+    let channel = delivered(641008, &rows, 3);
+    let detail = channel.pin().expect_err("undelivered text is refused");
+    assert!(
+        detail.contains("past frontier") && detail.contains("may post"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_prompt_past_legacys_frontier_is_not_adopted() {
+    let first = [prompt("q"), answer("first"), system("stop_hook_summary")];
+    let next = [
+        system("turn_duration"),
+        prompt("next"),
+        system("turn_duration"),
+    ];
+    let channel = delivered(641009, &[first, next].concat(), 3);
+    let detail = channel
+        .pin()
+        .expect_err("a prompt past the frontier is refused");
+    assert!(detail.contains("a prompt at"), "{detail}");
+}
+
+#[test]
+fn a_turn_legacys_reader_has_not_ended_is_not_adopted() {
+    // A turn closed by its duration alone never reaches the stop hook Legacy's reader ends at.
+    let error = serde_json::json!({"type":"assistant", "uuid":"error-a", "isApiErrorMessage":true,
+        "message":{"model":"<synthetic>", "content":[{"type":"text", "text":"API Error"}]}});
+    let first = [prompt("q"), answer("first"), system("stop_hook_summary")];
+    let next = [
+        system("turn_duration"),
+        prompt("again"),
+        error,
+        system("turn_duration"),
+    ];
+    let channel = delivered(641010, &[&first[..], &next].concat(), 3);
+    let detail = channel.pin().expect_err("an unended turn is refused");
+    assert!(detail.contains("past frontier"), "{detail}");
 }

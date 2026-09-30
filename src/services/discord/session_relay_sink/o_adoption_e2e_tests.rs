@@ -356,6 +356,38 @@ fn first_turn(body: &str) -> String {
     rows.iter().map(|row| format!("{row}\n")).collect()
 }
 
+/// A first turn as the Claude TUI writes it: the stop hook closes the reply, then the turn's
+/// duration and the TUI's own bookkeeping follow.
+fn warm_up(body: &str) -> String {
+    let rows = [
+        serde_json::json!({"type":"user", "uuid":"row-warm-q", "message":{"content":"hello"}}),
+        serde_json::json!({"type":"assistant", "uuid":"row-answer", "apiBlockIndex":0,
+            "message":{"id":"answer", "content":[{"type":"text", "text":body}]}}),
+        serde_json::json!({"type":"system", "subtype":"stop_hook_summary", "hookCount":1}),
+        serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":1200}),
+        serde_json::json!({"type":"last-prompt", "leafUuid":"row-warm-q", "sessionId":"e2e"}),
+        serde_json::json!({"type":"ai-title", "aiTitle":"warm-up", "sessionId":"e2e"}),
+        serde_json::json!({"type":"permission-mode", "permissionMode":"default", "sessionId":"e2e"}),
+    ];
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
+
+/// Where Legacy's own transcript reader ends the turn read from 0, which its delivery commits.
+fn legacy_turn_end(path: &str) -> u64 {
+    let (tx, _frames) = std::sync::mpsc::channel();
+    let probe = crate::services::provider::SessionProbe::new(|| true, || false);
+    let read = crate::services::session_backend::read_output_file_until_result_with_harvest(
+        path, 0, tx, None, probe,
+    );
+    match read.map(|(result, stats)| (result, stats.decoded_terminal)) {
+        Ok((crate::services::provider::ReadOutputResult::Completed { offset }, true)) => offset,
+        other => panic!(
+            "the reader ends the turn: {:?}",
+            other.map(|(result, _)| result)
+        ),
+    }
+}
+
 /// A's rows for its second turn, carrying a unit no other turn carries.
 fn second_turn(body: &str) -> String {
     let text = format!("{body} second");
@@ -435,10 +467,29 @@ impl Pair {
         legacy
     }
 
-    /// A's first turn, delivered by Legacy before A was selected; returns Legacy's cursor after it.
+    /// A's warm-up turn, delivered by Legacy up to where its own reader ends the turn, before A
+    /// was selected; returns Legacy's cursor after a restart's rehydrate pass.
     async fn delivered_history(&self) -> u64 {
         let unselected = cutover::test_override::force_channels(&[]);
-        finish(&self.legs[0]).await;
+        let leg = &self.legs[0];
+        let path = &leg.binding.expected_rollout_path;
+        std::fs::write(path, warm_up(&leg.body)).unwrap();
+        let end = legacy_turn_end(path);
+        eprintln!(
+            "warm-up: Legacy's reader ends the turn at {end} of {}",
+            transcript_len(path)
+        );
+        // The sink posts the body its terminal row carries and commits the reader's end.
+        let payload = first_turn(&leg.body);
+        let mut frame =
+            terminal_frame_offset(&leg.binding, &payload, 1, end, 710, STARTED, Some(0));
+        let session = &leg.binding.expected_session_name;
+        frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
+        let outcome = leg.sink.deliver(&frame).await;
+        assert!(
+            matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+            "{outcome:?}"
+        );
         drop(unselected);
         assert_eq!(self.legs[0].legacy_posts(), 1);
         self.read_legacy();
@@ -520,7 +571,7 @@ async fn undelivered_closed_turn() {
     let hosts = pair.host(&pair.io);
     settle().await;
     assert_eq!(adoption(A), Adoption::Released);
-    pair.held_for("frontier 0 is outside");
+    pair.held_for("past frontier 0 may post");
     // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
     finish(&pair.legs[0]).await;
     settle().await;
