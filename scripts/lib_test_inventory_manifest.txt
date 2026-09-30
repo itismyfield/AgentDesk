@@ -3526,6 +3526,8 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
 services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
 services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
+services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
+services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
 services::discord::inflight::model::discord_id_tests::slice_a_transfer_end_boundaries
 services::discord::inflight::model::identity::tests::only_an_id_zero_row_without_a_disambiguator_is_unnameable_5464
@@ -9159,6 +9161,9 @@ services::session_forwarding::trusted_target::tests::origin_parser_rejects_ambig
 services::session_forwarding::trusted_target::tests::pinned_client_connects_to_validated_address_without_reresolving_hostname
 services::session_forwarding::trusted_target::tests::private_and_tailscale_addresses_require_operator_opt_in
 services::session_forwarding::trusted_target::tests::resolver_answer_is_pinned_once_before_request_builder_exists
+services::session_host::consumer_guard::tests::automatic_state_change_verdict_for_every_host_state
+services::session_host::consumer_guard::tests::policy_probe_defers_every_non_legacy_host_without_probing
+services::session_host::consumer_guard::tests::transcript_completion_is_never_blocked_by_host_evidence
 services::session_host::herdr::transport::tests::herdr_socket_handshake_checks_protocol_not_version
 services::session_host::herdr::transport::tests::herdr_socket_observation_keeps_the_snapshot_generation_across_a_concurrent_reconnect
 services::session_host::herdr::transport::tests::herdr_socket_observation_never_spans_a_reconnect
@@ -9188,6 +9193,7 @@ services::session_host::herdr_host::tests::herdr_requests_serialize_with_schema_
 services::session_host::herdr_host::tests::herdr_send_text_keeps_ambiguous_outcomes_indeterminate
 services::session_host::herdr_host::tests::herdr_unconfigured_host_fails_every_call_explicitly
 services::session_host::herdr_host::tests::herdr_working_dir_prefers_foreground_cwd
+services::session_host::herdr_host::tests::session_target_guard_has_no_production_caller
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead
@@ -9204,14 +9210,20 @@ services::session_host::process_host::tests::send_text_surfaces_the_registry_err
 services::session_host::process_host::tests::unregistered_session_reads_as_missing_and_dead
 services::session_host::resolve::tests::agreeing_votes_report_the_first_source
 services::session_host::resolve::tests::conflict_pairs_the_first_vote_with_the_first_disagreeing_vote
+services::session_host::resolve::tests::disagreeing_witnesses_are_a_conflict
 services::session_host::resolve::tests::durable_tmux_with_registry_hit_is_a_conflict
+services::session_host::resolve::tests::each_known_host_comes_from_its_witness
+services::session_host::resolve::tests::full_session_key_is_kept_and_no_name_comes_from_its_suffix
 services::session_host::resolve::tests::herdr_host_for_without_endpoint_fails_explicitly
+services::session_host::resolve::tests::herdr_record_outlives_marker_and_inflight_loss
 services::session_host::resolve::tests::herdr_tui_runtime_kinds_without_host_evidence_stay_non_herdr
 services::session_host::resolve::tests::host_for_returns_the_host_of_that_kind
 services::session_host::resolve::tests::kind_hint_maps_every_runtime_kind
 services::session_host::resolve::tests::missing_or_blank_session_name_is_unknown_even_with_evidence
 services::session_host::resolve::tests::no_evidence_is_unknown_not_a_tmux_default
+services::session_host::resolve::tests::raw_name_reaches_tmux_only_with_legacy_tmux_evidence
 services::session_host::resolve::tests::single_vote_is_known_with_its_source
+services::session_host::resolve::tests::unreadable_or_future_witness_is_unknown_despite_legacy_tmux_votes
 services::session_host::tmux_host::tests::herdr_ref_never_reaches_a_tmux_probe
 services::session_host::tmux_host::tests::mutation_outcome_follows_the_tmux_exit_status
 services::session_host::tmux_host::tests::probes_are_the_platform_probes

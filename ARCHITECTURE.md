@@ -849,6 +849,7 @@ src/
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── host_locator.rs
+│   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1914,6 +1915,7 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_tests.rs
 │   │   │   └── wire.rs
+│   │   ├── consumer_guard.rs
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── legacy_collapse.rs
