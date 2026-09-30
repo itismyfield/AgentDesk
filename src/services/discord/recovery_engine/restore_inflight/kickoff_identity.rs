@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::host_liveness;
+use crate::services::discord::inflight::KeyedTeardown;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::session_probe::SessionLiveness;
 use std::num::NonZeroU64;
@@ -69,16 +70,22 @@ pub(super) async fn ownerless_pane_dead_admitted(
     let observed = tokio::task::spawn_blocking(observe).await;
     let observed = observed.unwrap_or(SessionLiveness::ProbeFailed);
     let (channel, caller) = (state.channel_id, "recovery_ownerless_dead_pane");
-    observed == SessionLiveness::Missing
-        && host_liveness::admits_tmux_verdict(
-            shared,
-            provider,
-            channel,
-            tmux_session_name,
-            observed,
-            caller,
-        )
-        .await
+    if observed != SessionLiveness::Missing {
+        return false;
+    }
+    let gate = host_liveness::tmux_verdict_gate(
+        shared,
+        provider,
+        channel,
+        tmux_session_name,
+        observed,
+        caller,
+    );
+    match gate.await {
+        // An ownerless row is watcher-reacquired: no turn start ever wrote its sessions row.
+        KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => true,
+        KeyedTeardown::Kept => false,
+    }
 }
 
 /// Ownerless rows get no mailbox turn: notify and dispose a dead pane, keep a live one.

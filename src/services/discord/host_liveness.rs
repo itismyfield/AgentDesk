@@ -69,21 +69,20 @@ pub(in crate::services::discord) fn not_dead(liveness: SessionLiveness) -> bool 
     liveness != SessionLiveness::Missing
 }
 
-/// The keyed gate before a consumer acts on a tmux verdict. A found legacy row goes on, and
-/// so does no row with no other-host trace, as in main: dead legacy sessions lose their rows.
-pub(in crate::services::discord) async fn admits_tmux_verdict(
+/// The keyed gate's verdict before a consumer acts on a tmux answer. Each caller decides
+/// whether `RowMissing` may go on: only where a row may never have been written.
+pub(in crate::services::discord) async fn tmux_verdict_gate(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: u64,
     name: &str,
     observed: SessionLiveness,
     caller: &str,
-) -> bool {
+) -> KeyedTeardown {
     let observed = match observed {
         SessionLiveness::Alive => HostLiveness::Live,
         SessionLiveness::Missing => HostLiveness::DeadOrAbsent,
         SessionLiveness::ProbeFailed | SessionLiveness::Unknown => HostLiveness::ProbeError,
     };
-    let gate = shared_teardown(shared, provider, channel_id, name, Some(observed), caller);
-    !matches!(gate.await, KeyedTeardown::Kept)
+    shared_teardown(shared, provider, channel_id, name, Some(observed), caller).await
 }

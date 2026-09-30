@@ -310,7 +310,7 @@ jobs:
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
-              - 'src/services/discord/recovery_engine/routing_orphan.rs'
+              - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'

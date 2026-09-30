@@ -439,7 +439,7 @@ pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin(
         .unwrap_or_default()
         .trim();
     let (dead, caller) = (SessionLiveness::Missing, "dead_watcher_rebind_reap");
-    let admitted = crate::services::discord::host_liveness::admits_tmux_verdict(
+    let gate = crate::services::discord::host_liveness::tmux_verdict_gate(
         shared,
         provider,
         state.channel_id,
@@ -447,8 +447,10 @@ pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin(
         dead,
         caller,
     );
-    if !admitted.await {
-        return false;
+    match gate.await {
+        // A structurally abandoned rebind origin had no Discord turn start to write its row.
+        KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => {}
+        KeyedTeardown::Kept => return false,
     }
     reap_dead_watcher_rebind_origin_locked(provider, state, current_generation)
 }

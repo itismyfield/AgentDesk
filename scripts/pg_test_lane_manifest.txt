@@ -97,7 +97,7 @@ src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
 src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
-src/services/discord/recovery_engine/routing_orphan.rs
+src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/tests.rs
@@ -257,7 +257,7 @@ services::discord::inflight::rebind_reap::tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
-services::discord::recovery_engine::routing_orphan::tests
+services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
@@ -938,7 +938,7 @@ services::discord::inflight::removal::custody_notice_tests::without_postgres_the
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
-services::discord::recovery_engine::routing_orphan::tests::routing_orphan_reads_dead_only_for_an_admitted_dead_pane_pg
+services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg

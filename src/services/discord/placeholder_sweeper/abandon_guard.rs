@@ -3,7 +3,8 @@ use std::sync::Arc;
 use super::super::SharedData;
 use super::super::inflight::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
-    clear_inflight_state_if_matches_identity_generation, opt_channel_id, opt_message_id,
+    KeyedTeardown, clear_inflight_state_if_matches_identity_generation, opt_channel_id,
+    opt_message_id,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::host_liveness;
@@ -171,18 +172,21 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
     .await;
     // A dead-pane verdict takes the host guard before any cleanup it would admit.
     let (dead, caller) = (SessionLiveness::Missing, "placeholder_sweeper_abandon");
-    if owner_decision == AbandonedTmuxCleanupDecision::Kill
-        && !host_liveness::admits_tmux_verdict(
+    if owner_decision == AbandonedTmuxCleanupDecision::Kill {
+        let gate = host_liveness::tmux_verdict_gate(
             shared,
             provider,
             state.channel_id,
             session_name,
             dead,
             caller,
-        )
-        .await
-    {
-        return AbandonedTmuxCleanupDecision::PreserveRetry;
+        );
+        match gate.await {
+            // The last-resort finalizer: a turn-start row write is best effort, and
+            // watcher-reacquired turns never ran one.
+            KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => {}
+            KeyedTeardown::Kept => return AbandonedTmuxCleanupDecision::PreserveRetry,
+        }
     }
     decision_for_user_identity(state.user_msg_id, owner_decision)
 }
