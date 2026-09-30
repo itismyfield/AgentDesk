@@ -3543,6 +3543,7 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
 services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
 services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
+services::discord::inflight::host_recovery_guard::tests::a_tmux_name_disagreement_stays_a_conflict_across_merges
 services::discord::inflight::host_recovery_guard::tests::caller_runtime_evidence_survives_the_inflight_row_merge
 services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
 services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
@@ -9202,6 +9203,7 @@ services::session_host::herdr::transport::tests::herdr_socket_unclear_replies_ne
 services::session_host::herdr::wire::tests::herdr_line_frame_bounds_and_partial_frames
 services::session_host::herdr::wire::tests::herdr_wire_matches_the_vendored_schema
 services::session_host::herdr::wire::tests::herdr_write_failure_reports_bytes_already_sent
+services::session_host::herdr_host::tests::caller_scan_follows_aliases_scopes_and_lexer_edges
 services::session_host::herdr_host::tests::herdr_capture_maps_scroll_back_and_rejects_truncation
 services::session_host::herdr_host::tests::herdr_complete_snapshot_decides_present_or_missing
 services::session_host::herdr_host::tests::herdr_endpoint_requires_every_field_and_an_absolute_socket
@@ -9247,9 +9249,11 @@ services::session_host::resolve::tests::host_for_returns_the_host_of_that_kind
 services::session_host::resolve::tests::kind_hint_maps_every_runtime_kind
 services::session_host::resolve::tests::missing_or_blank_session_name_is_unknown_even_with_evidence
 services::session_host::resolve::tests::no_evidence_is_unknown_not_a_tmux_default
+services::session_host::resolve::tests::only_a_found_legacy_row_without_host_traces_keeps_the_tmux_reading
 services::session_host::resolve::tests::raw_name_reaches_tmux_only_with_legacy_tmux_evidence
 services::session_host::resolve::tests::single_vote_is_known_with_its_source
 services::session_host::resolve::tests::unreadable_or_future_witness_is_unknown_despite_legacy_tmux_votes
+services::session_host::session_record::tests::only_a_found_null_record_admits_the_legacy_clear_pg
 services::session_host::tmux_host::tests::herdr_ref_never_reaches_a_tmux_probe
 services::session_host::tmux_host::tests::host_keys_use_the_legacy_tmux_key_names
 services::session_host::tmux_host::tests::mutation_outcome_follows_the_tmux_exit_status
