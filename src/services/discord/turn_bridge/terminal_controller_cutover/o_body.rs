@@ -1,6 +1,7 @@
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::tui_o::cutover::{self, BodyClaim, IdentityError};
+pub(in crate::services::discord::turn_bridge) use crate::services::tui_o::cutover::BodyClaim;
+use crate::services::tui_o::cutover::{self, IdentityError};
 
 type Gate = fn(u64, Option<RuntimeHandoffKind>) -> Result<bool, IdentityError>;
 
@@ -41,4 +42,13 @@ fn decision(
         return Err(IdentityError::NonDirectGateway.hold(channel_id.get()));
     }
     Ok(owned)
+}
+
+/// A bridge body sent under `claim`; O owning the channel or a held identity sent nothing, which
+/// reads as a failed send.
+pub(super) async fn claimed_send<T, F: std::future::Future<Output = Result<T, String>>>(
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Result<T, String> {
+    cutover::BodySend::flatten(cutover::claim_then_send(claim, send).await)
 }

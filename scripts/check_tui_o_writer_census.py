@@ -407,11 +407,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "run_bridge_stream_tick:peek",
         "run_bridge_stream_tick:claim",
     ),
-    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": (
-        "apply_bridge_long_chunks_legacy:claim",
-    ),
     "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
         "bridge_o_body_peek_decision:peek",
+        "claimed_send:claim",
     ),
     "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": (
         "run_terminal_outcome_delivery:peek",

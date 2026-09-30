@@ -18,7 +18,6 @@ use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use unix_journal::{
     Disposition, begin_controller_terminal as journal_begin,
     settle_controller_terminal as journal_settle,
@@ -118,7 +117,7 @@ pub(super) fn bridge_long_chunks_cutover_decision(
 }
 
 mod o_body;
-pub(super) use o_body::{bridge_body_claim, bridge_o_body_peek_decision};
+pub(super) use o_body::{BodyClaim, bridge_body_claim, bridge_o_body_peek_decision};
 
 /// #3089 A5: pure no-double-acquire gate. The legacy site-5 arm acquires its OWN
 /// `BridgeDeliveryLease` over `cutover_range` (mod.rs ~6134). When the
@@ -583,12 +582,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
             turn_id,
         )
     };
-    let sent = match claim_then_send(body_claim, send).await {
-        Ok(BodySend::Sent(sent)) => sent,
-        // Nothing was sent: O owns the channel or its identity is held.
-        Ok(BodySend::OwnedByO) | Err(_) => Err("O owns this channel's body".into()),
-    };
-    match sent {
+    match o_body::claimed_send(body_claim, send).await {
         Ok((_first, last_chunk_msg_id)) => {
             *locals.terminal_delivery_committed = true;
             *locals.terminal_body_visible = true;
