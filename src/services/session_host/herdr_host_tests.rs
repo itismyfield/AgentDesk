@@ -1059,6 +1059,7 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
     let mut violations = Vec::new();
     let files = scan_files(sources, &mut violations);
     let kinds = bindings(&files, "HostKind");
+    let variant = regex::Regex::new(r"\b(\w+)\s*::\s*Herdr\b").unwrap();
     for (relative, file) in files.iter().filter(|(r, _)| !owners.contains(&r.as_str())) {
         // Whether `path[k]`, reached through `path[..k]`, names HostKind or an alias of it.
         let kind_at = |path: &[String], k: usize| {
@@ -1082,7 +1083,6 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
                     }
             })
         });
-        let variant = regex::Regex::new(r"\b(\w+)\s*::\s*Herdr\b").unwrap();
         let pathed = variant.captures_iter(&file.code).any(|found| {
             let name = found.get(1).unwrap();
             let mut path = qualifier(&file.code, name.start());
@@ -1309,7 +1309,8 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     };
     assert_eq!(scan(&[]), Vec::<String>::new());
 
-    let caught: &[(&str, &[(&str, &str)], &str)] = &[
+    type Extra = &'static [(&'static str, &'static str)];
+    let caught: &[(&str, Extra, &str)] = &[
         (
             "an alias shares its item's budget",
             &[(
@@ -1405,7 +1406,7 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
         );
     }
 
-    let clean: &[(&str, &[(&str, &str)])] = &[
+    let clean: &[(&str, Extra)] = &[
         ("an alias stays in its own scope", &[(RESOLVE, ALIAS)]),
         (
             "a comment names the item",
