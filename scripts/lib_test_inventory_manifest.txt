@@ -1769,6 +1769,12 @@ services::claude_tui::hook_server_memento_tests::pending_retry_is_cross_session_
 services::claude_tui::hook_server_memento_tests::stale_relay_stop_emits_no_ephemeral_signal_and_does_not_advance_memento
 services::claude_tui::hook_server_memento_tests::stop_hook_active_suppresses_memento_flush
 services::claude_tui::hook_server_memento_tests::stop_without_pending_memento_search_stays_observational
+services::claude_tui::host_input::tests::a_send_that_may_have_landed_is_indeterminate_and_nothing_follows
+services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_never_ready
+services::claude_tui::host_input::tests::compact_literal_failure_never_sends_enter
+services::claude_tui::host_input::tests::every_mutation_passes_the_gate_and_a_refusal_stops_before_enter
+services::claude_tui::host_input::tests::non_tmux_targets_send_nothing_and_are_never_recreated
+services::claude_tui::host_input::tests::steering_submit_keeps_the_legacy_tmux_key_order
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_keeps_legacy_done_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_reports_manual_resend_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_retry_emits_no_stream_frames
@@ -1975,6 +1981,7 @@ services::claude_tui::tui_relay::tests::try_claim_registry_match_skips_when_no_s
 services::claude_tui::tui_relay::tests::try_claim_registry_match_token_ignores_prompt_submit_payload
 services::claude_tui::tui_relay::tests::try_claim_registry_match_token_leaves_stop_for_later_wait
 services::claude_tui::tui_relay::tests::tui_send_holds_composer_lock_across_paste_and_enter
+services::claude_tui::tui_relay::tests::tui_send_reaches_tmux_only_through_the_host_executor
 services::claude_tui::tui_relay::tests::unrelated_event_does_not_match_stop
 services::claude_tui::tui_relay::tests::wait_request_not_before_defaults_to_none
 services::cluster::agent_execution_node::tests::validates_stable_node_identifiers_and_explicit_reset
@@ -8700,6 +8707,7 @@ services::provider::ready_input_prompt_tests::detects_codex_tui_prompt_for_codex
 services::provider::ready_input_prompt_tests::detects_provider_scoped_wrapper_ready_marker
 services::provider::ready_input_prompt_tests::detects_ready_banner
 services::provider::ready_input_prompt_tests::rejects_non_ready_capture
+services::provider::session_probe::tests::common_tmux_probe_keeps_polling_through_a_failed_probe
 services::provider::session_probe::tests::legacy_pane_override_and_typed_probe_share_one_answer
 services::provider::session_probe::tests::qwen_common_probe_keeps_the_legacy_tmux_alias_only
 services::provider::session_probe::tests::tmux_alive_and_missing_collapse_like_the_legacy_bool
@@ -9204,6 +9212,7 @@ services::session_host::herdr_host::tests::herdr_send_text_keeps_ambiguous_outco
 services::session_host::herdr_host::tests::herdr_unconfigured_host_fails_every_call_explicitly
 services::session_host::herdr_host::tests::herdr_working_dir_prefers_foreground_cwd
 services::session_host::herdr_host::tests::session_target_guard_has_no_production_caller
+services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead
@@ -9235,6 +9244,7 @@ services::session_host::resolve::tests::raw_name_reaches_tmux_only_with_legacy_t
 services::session_host::resolve::tests::single_vote_is_known_with_its_source
 services::session_host::resolve::tests::unreadable_or_future_witness_is_unknown_despite_legacy_tmux_votes
 services::session_host::tmux_host::tests::herdr_ref_never_reaches_a_tmux_probe
+services::session_host::tmux_host::tests::host_keys_use_the_legacy_tmux_key_names
 services::session_host::tmux_host::tests::mutation_outcome_follows_the_tmux_exit_status
 services::session_host::tmux_host::tests::probes_are_the_platform_probes
 services::session_resume::tests::completed_critical_section_cancels_its_watchdog

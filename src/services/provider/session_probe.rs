@@ -237,6 +237,7 @@ pub(crate) enum SessionProbeRefusal {
 
 impl SessionProbe {
     /// Common entry: bool callbacks only for a verified tmux or process target.
+    /// A failed tmux probe reads alive, so a poll waits instead of ending as dead.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn for_target(
         target: &SessionProbeTarget,
@@ -247,11 +248,18 @@ impl SessionProbe {
             return Err(SessionProbeRefusal::LegacyTmuxOnly(provider));
         }
         match target {
-            SessionProbeTarget::Tmux(name) => Ok(Self::tmux_with_runtime(
-                name.clone(),
-                provider,
-                runtime_kind,
-            )),
+            SessionProbeTarget::Tmux(name) => {
+                let legacy = Self::tmux_with_runtime(name.clone(), provider, runtime_kind);
+                let observed = target.clone();
+                Ok(Self {
+                    is_alive: Box::new(move || {
+                        observe_session_liveness(&observed)
+                            .legacy_tmux_alive()
+                            .unwrap_or(true)
+                    }),
+                    is_ready_for_input: legacy.is_ready_for_input,
+                })
+            }
             SessionProbeTarget::Process(name) => Ok(
                 crate::services::session_backend::process_session_probe(name),
             ),
@@ -377,6 +385,43 @@ mod tests {
         }
         assert_eq!(injected_liveness(HostSessionRef::tmux(legacy)), None);
         assert_eq!(injected_liveness(HostSessionRef::tmux(injected)), None);
+    }
+
+    #[test]
+    fn common_tmux_probe_keeps_polling_through_a_failed_probe() {
+        // With no output file the poll asks `is_alive` first, then honours cancel.
+        let poll = |liveness| {
+            let name = "session-probe-common-poll";
+            let _guard = InjectedLivenessGuard::set(HostSessionRef::tmux(name), liveness);
+            let probe = SessionProbe::for_target(&tmux(name), ProviderKind::Claude, None).unwrap();
+            let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+            cancel
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            crate::services::provider::poll_output_file_until_result(
+                "/nonexistent/agentdesk-session-probe-common-poll.jsonl",
+                0,
+                Some(cancel),
+                &mut (),
+                probe.is_alive,
+                probe.is_ready_for_input,
+                |_| {},
+                |_, _| true,
+                |_| false,
+                |_| true,
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            poll(HostLiveness::ProbeError),
+            crate::services::provider::ReadOutputResult::Cancelled { .. }
+        ));
+        assert!(matches!(
+            poll(HostLiveness::DeadOrAbsent),
+            crate::services::provider::ReadOutputResult::SessionDied { .. }
+        ));
     }
 
     #[test]
