@@ -1219,7 +1219,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     task_response_claim: &mut watcher_task_response_claim,
                 },
             ));
-            let body = watcher_will_direct_send.then_some((channel_id, tmux_session_name.as_str()));
+            // A task response claims inside its own send, after its Wait and delivered checks.
+            let body = (watcher_will_direct_send && task_notification_kind.is_none())
+                .then_some((channel_id, tmux_session_name.as_str()));
             let sent = o_delegated_arm::claim_then_direct_send(body, send).await;
             // O took the channel since the peek: retry, and the next pass consumes it for O.
             retry_terminal_delivery_from_offset |= sent.is_none();

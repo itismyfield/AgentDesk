@@ -9,6 +9,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::inflight::opt_message_id;
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 
 struct PreparedWatcherTaskResponse {
     claim: task_delivery::ResponseDeliveryClaimOutcome,
@@ -403,7 +404,8 @@ pub(super) async fn apply_watcher_task_response(
                         );
                         let card_transport =
                             task_delivery::DiscordTaskCardTransport::new(shared.clone());
-                        let send_result =
+                        // The response is the body: only this send claims the channel, as it starts.
+                        let send = || {
                             task_delivery::send_task_response_chunks_with_card_repair(
                                 shared.pg_pool.as_ref(),
                                 &prepared.clients,
@@ -413,7 +415,16 @@ pub(super) async fn apply_watcher_task_response(
                                 claim.clone(),
                                 relay_text,
                             )
-                            .await;
+                        };
+                        let body = BodyClaim::tmux(channel_id.get(), Some(tmux_session_name));
+                        let send_result = match claim_then_send(Some(body), send).await {
+                            Ok(BodySend::Sent(result)) => result,
+                            Ok(BodySend::OwnedByO) | Err(_) => {
+                                Err(task_delivery::ResponseChunkDeliveryError::Transient(
+                                    "O owns this channel's body".to_string(),
+                                ))
+                            }
+                        };
                         let send_result = match send_result {
                             Ok((messages, rebound)) => {
                                 claim = rebound;

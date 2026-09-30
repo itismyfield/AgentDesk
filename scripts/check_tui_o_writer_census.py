@@ -288,7 +288,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "tmux_watcher/provider_output_guard.rs": ("W02b", "COV:W02"),
     "tmux_watcher/streaming_status_tick.rs": ("W02", "CUT_D"),
     "tmux_watcher/streaming_status_tick/existing_panel_update.rs": ("1-A-panel", "KEEP_NONBODY"),
-    "tmux_watcher/task_response_authority.rs": ("W01g", "COV:W01"),
+    "tmux_watcher/task_response_authority.rs": ("W01g", "CUT_D"),
     "tmux_watcher/terminal_abort_exits.rs": ("1-A-notice", "KEEP_NONBODY"),
     "tmux_watcher/terminal_direct_fallback.rs": ("W01a-c", "COV:W01"),
     "tmux_watcher/terminal_long_chunks.rs": ("W01e-f", "COV:W01"),
@@ -363,6 +363,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/tmux_watcher/o_delegated_arm.rs": (
         "claim_then_direct_send:claim",
+    ),
+    "src/services/discord/tmux_watcher/task_response_authority.rs": (
+        "apply_watcher_task_response:claim",
     ),
     "src/services/discord/tmux_watcher/streaming_status_tick.rs": (
         "update_streaming_status_tick:peek",
