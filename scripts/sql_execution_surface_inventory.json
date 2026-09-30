@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "2daf80faedf2e64dfbf3fd1d9a8ce7151318da8e",
+  "measured_at_sha": "5a840853f082059cab39bc89393e40243fefe92b",
   "records": [
     {
       "root": "migrations/postgres",
@@ -6921,6 +6921,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:78a644a48013636101b819a26909f2190bd9cfb7e904554c6c279692815d466d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:945fc54dda41ecabd0c542eb47b30e9a6fc39a476a95d76405777701d899d652"
     },
     {
@@ -6958,6 +6967,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:a85938c5530301c77204e225b8a0e6894fae2a2648e1444687a100b45bc93613"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ba1d06befab68e10deb382917be4e33dc5ec916006f6189461f7801022390721"
     },
     {
       "root": "src",
@@ -7048,6 +7066,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:f0b574b07ae7837acb6cd9711e6ffba84bc123abbbca66b6b44ed205261675d3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f2d83bae4e324796578ec32adc512e272cab4c8ad465a2289de4ba6ff60b16f9"
     },
     {
       "root": "src",
@@ -7542,7 +7569,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:be1ecf12ad9b207fc3e5cb2d529c2c229c48d0159fb93b96de6857240a0d58ad"
+      "fingerprint": "sha256:e62831e44db20a34c13dc7c8a4a51700c26fdf4d0d6a2991b028405381c0b57e"
     },
     {
       "root": "src",
@@ -7551,25 +7578,16 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:df02d2ecf933b652f1427c7331cea55a126bd2da4f028b2faedf3ecfc75273e4"
+      "fingerprint": "sha256:f5e55be31e435b858aa440d1a26f744846cbd1007d815cd37aa912b54bce3f12"
     },
     {
       "root": "src",
       "kind": "RUST",
       "path": "src/db/dispatched_sessions/hosted_execution.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
+      "api": "sqlx::query",
+      "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:28973f3de843349ca69084033b9da483c4ce5b3e074708464722dadcb87af10f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/dispatched_sessions/hosted_execution.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:f8bbacd66afbe55be41611d505b3baa6301393743e2bd84c381a9c8829ef7e2f"
+      "fingerprint": "sha256:f65bb5662a93acd6ee115990b0e7cf14f0c58ff3f56acbe1611c2ca0d4134461"
     },
     {
       "root": "src",
@@ -7920,16 +7938,16 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:b867a0133b5041d186a5a4b7e57f2d9ce757726577c664aa359365a29e687b7a"
+      "fingerprint": "sha256:8a3bffe8451c13fa44f9620ee7fc627768cfbcf2e4b5ee0a76ee60ea7b92b9c4"
     },
     {
       "root": "src",
       "kind": "RUST",
       "path": "src/db/dispatched_sessions/thread_gc.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
+      "api": "sqlx::query",
+      "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:2f3acea2dd67a66884cd361573fdcb3f480bac6ac197072a2bf99996694e671d"
+      "fingerprint": "sha256:dbc909495a65e6108c91563df744f85855c9bb7d14a3c145fe53f35d5d93ae7a"
     },
     {
       "root": "src",
