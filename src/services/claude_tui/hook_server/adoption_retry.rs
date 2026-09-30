@@ -123,11 +123,16 @@ pub(crate) fn adopt_from_hook(
     let tmux = resolve_tmux_session_name("claude", command_session_id.trim()).unwrap_or_default();
     // Adoption and artifact cutover share the pane authority so a retry cannot rewrite them late.
     with_tmux_source_authority(&tmux, |_| {
-        // A hook naming another session replaces a recorded Pending still waiting for its file.
+        // A hook naming another session replaces a recorded Pending still waiting for its file,
+        // once the new session's own evidence is durable.
         if claude_session_rotation_for_tmux(&tmux).is_none()
             && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != payload_session_id)
         {
-            pop_front(&tmux);
+            let http = settle(&tmux, &request, false).http;
+            if matches!(http, AdoptionHttp::Durable(_)) {
+                pop_front(&tmux);
+            }
+            return http;
         }
         let Some((own_recorded, own_is_front)) = own_entry(&tmux, payload_session_id) else {
             if !deferred().contains_key(&tmux) {
@@ -140,11 +145,13 @@ pub(crate) fn adopt_from_hook(
         let settles_now = own_is_front && claude_session_rotation_for_tmux(&tmux).is_none();
         match own_recorded {
             true => {
-                // The entry is already durable; settling it now only saves the poll's delay.
-                if let Some(own) = front(&tmux).filter(|_| settles_now) {
-                    settle(&tmux, &own, true);
+                // Settling now only saves the poll's delay, but an adoption this hook could not
+                // persist or was refused is still its answer.
+                let settled = front(&tmux).filter(|_| settles_now);
+                match settled.map(|own| settle(&tmux, &own, true).http) {
+                    Some(http @ (AdoptionHttp::NotDurable(_) | AdoptionHttp::Skipped(_))) => http,
+                    _ => AdoptionHttp::Durable(DurableKind::AlreadyRecorded),
                 }
-                AdoptionHttp::Durable(DurableKind::AlreadyRecorded)
             }
             false if settles_now => front(&tmux).map_or(
                 AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
@@ -169,6 +176,17 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
     let provider = "claude";
     let command_session_id = request.command_session_id.as_str();
     let payload_session_id = request.payload_session_id.as_str();
+    // A queued entry whose command session now names another pane cannot settle on its own pane.
+    if queued
+        && resolve_tmux_session_name(provider, command_session_id.trim()).as_deref() != Some(tmux)
+    {
+        pop_front(tmux);
+        let http = AdoptionHttp::Skipped(AdoptSkip::UnmappedCommandSession);
+        return SettleOutcome {
+            http,
+            queue: QueueStep::Pop,
+        };
+    }
     match adopt_claude_continuation_explained(command_session_id, payload_session_id, &request.hook)
     {
         Ok((adopted, skip)) => {

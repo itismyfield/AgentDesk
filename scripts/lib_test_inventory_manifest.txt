@@ -6833,9 +6833,11 @@ services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_bi
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_launch_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_corrupt_log_keeps_the_pass_from_registering_launch_a
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_gives_way_to_the_next_session_with_a_file
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_waits_for_its_own_file_and_never_a_newer_one
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pending_b_behind_an_existing_launch_a_is_seeded_after_a_is_registered
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pending_b_is_bound_by_the_pass_when_launch_a_never_existed
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_resolved_b_stays_bound_over_launch_a_on_every_later_pass
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_alias_conflict_keeps_original_pane_unready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_completion_accepts_adoption_advanced_binding
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_nonce_replacement_preserves_new_failure
@@ -9627,6 +9629,7 @@ services::tui_prompt_dedupe::binding_events::lane_tests::crash_leaves_log_and_me
 services::tui_prompt_dedupe::binding_events::lane_tests::fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent_a
 services::tui_prompt_dedupe::binding_events::lane_tests::launch_cause_comes_from_the_execution_context_only_once
 services::tui_prompt_dedupe::binding_events::lane_tests::log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_hook
+services::tui_prompt_dedupe::pending::tests::a_late_hook_refused_as_older_leaves_the_waiting_pending_queued
 services::tui_prompt_dedupe::pending::tests::a_pending_refused_before_the_restart_stays_refused_until_it_resolves
 services::tui_prompt_dedupe::pending::tests::a_transcript_gone_after_the_judgment_is_waited_for
 services::tui_prompt_dedupe::pending::tests::a_waiting_pending_holds_only_its_own_pane_and_the_poll_returns

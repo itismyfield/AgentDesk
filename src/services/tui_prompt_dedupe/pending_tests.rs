@@ -13,10 +13,11 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     APPEND_FAULT, BINDING_EVENTS_DIR, forget_channel_for_tests, records_strict, set_test_root,
 };
 use crate::services::tui_prompt_dedupe::{
-    TEST_LOCK, TuiRuntimeBinding, adopt_claude_continuation_session, clear_claude_session_rotation,
-    lock_claude_session_rotations_for_tests, register_launched_tmux_runtime_binding,
-    register_provider_session, register_rehydrated_tmux_runtime_binding, register_tmux_channel,
-    reset_state_for_tests, resolve_tmux_session_name, runtime_binding_for_tmux_session,
+    AdoptSkip, TEST_LOCK, TuiRuntimeBinding, adopt_claude_continuation_session,
+    clear_claude_session_rotation, lock_claude_session_rotations_for_tests,
+    register_launched_tmux_runtime_binding, register_provider_session,
+    register_rehydrated_tmux_runtime_binding, register_tmux_channel, reset_state_for_tests,
+    resolve_tmux_session_name, runtime_binding_for_tmux_session,
 };
 use std::fs;
 use std::sync::MutexGuard;
@@ -804,4 +805,44 @@ fn a_waiting_pending_holds_only_its_own_pane_and_the_poll_returns() {
         BindingTarget::Resolved { .. }
     ));
     assert_eq!(bound_session(p1), Some(b1));
+}
+
+#[test]
+fn a_late_hook_refused_as_older_leaves_the_waiting_pending_queued() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_518, "p2b-late-hook");
+    let a = launched(&lane, channel, tmux);
+    let (b, c, d) = (uuid(), uuid(), uuid());
+    let mtime = |secs: i64| {
+        let c_mtime = fs::metadata(lane.path(&c)).unwrap().modified().unwrap();
+        let shift = std::time::Duration::from_secs(secs.unsigned_abs());
+        if secs < 0 {
+            c_mtime - shift
+        } else {
+            c_mtime + shift
+        }
+    };
+    let pin = |path: &Path, at| {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+    };
+    lane.touch(&c);
+    let b_path = lane.touch(&b);
+    pin(&b_path, mtime(-60)).unwrap();
+    let adopted = AdoptionHttp::Durable(DurableKind::Adopted);
+    assert_eq!(adopt_from_hook(&a, &c, &clear(&lane.path(&c))), adopted);
+    assert!(clear_claude_session_rotation(tmux));
+    let pending = AdoptionHttp::Durable(DurableKind::Pending);
+    assert_eq!(adopt_from_hook(&a, &d, &clear(&lane.path(&d))), pending);
+
+    let late = adopt_from_hook(&a, &b, &clear(&b_path));
+    assert_eq!(late, AdoptionHttp::Skipped(AdoptSkip::OlderThanBound));
+    assert_eq!(deferred_adoption_count(), 1, "D stays queued");
+    let d_path = lane.touch(&d);
+    pin(&d_path, mtime(60)).unwrap();
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound_session(tmux), Some(d));
 }

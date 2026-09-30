@@ -648,7 +648,8 @@ pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
 /// deliberately limited to an existing ClaudeTui binding reached through the
 /// command UUID and to a real sibling transcript file. For a second or later
 /// continuation hop, the candidate must also be newer than the transcript
-/// currently bound to that pane. It never guesses across project directories.
+/// currently bound to that pane, unless that is a restored one not written yet.
+/// It never guesses across project directories.
 pub(crate) fn adopt_claude_continuation_session(
     command_session_id: &str,
     payload_session_id: &str,
@@ -737,14 +738,13 @@ fn adopt_continuation(
         && current_session_id != payload_session_id
     {
         *skip = Some(AdoptSkip::MtimeUnreadable);
-        let current_mtime = std::fs::metadata(&old_output_path)
-            .and_then(|metadata| metadata.modified())
-            .ok()?;
+        let current_mtime =
+            super::pending::bound_transcript_mtime(&tmux_session_name, &binding.value)?;
         let candidate_mtime = std::fs::metadata(&new_output_path)
             .and_then(|metadata| metadata.modified())
             .ok()?;
         *skip = unlogged;
-        if candidate_mtime <= current_mtime {
+        if current_mtime.is_some_and(|current| candidate_mtime <= current) {
             *skip = Some(AdoptSkip::OlderThanBound);
             let reject =
                 |p: &Proposal| binding_events::record_rejected(p, "older_than_bound_transcript");

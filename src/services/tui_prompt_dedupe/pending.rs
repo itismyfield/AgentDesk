@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::SystemTime;
 
 use crate::services::claude_tui::hook_server::adoption_retry;
 use crate::services::tmux_common::with_tmux_source_authority;
@@ -367,6 +368,19 @@ pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding)
     )
 }
 
+/// The bound transcript's mtime for the newer-candidate check; `Some(None)` for a restored binding
+/// still waiting for its file, which any existing candidate follows.
+pub(crate) fn bound_transcript_mtime(
+    tmux_session: &str,
+    binding: &TuiRuntimeBinding,
+) -> Option<Option<SystemTime>> {
+    match std::fs::metadata(&binding.output_path).and_then(|m| m.modified()) {
+        Ok(mtime) => Some(Some(mtime)),
+        Err(_) if awaits_exact_path(tmux_session, binding) => Some(None),
+        Err(_) => None,
+    }
+}
+
 /// Restores `tmux_session`'s durable Pending before the rehydrate pass judges its binding; `None`
 /// is a bound pane whose restore already settled. `bind` builds a transcript's binding.
 pub(crate) fn restore_claude_pane(
@@ -375,8 +389,11 @@ pub(crate) fn restore_claude_pane(
     launch: Option<LaunchTranscript>,
     bind: impl Fn(&str, &Path) -> TuiRuntimeBinding,
 ) -> Option<PendingRestore> {
-    let settled = last_restore_outcome(tmux_session).is_some_and(|o| o.memo());
-    if settled && runtime_binding_for_tmux_session(tmux_session).is_some() {
+    let bound = runtime_binding_for_tmux_session(tmux_session).is_some();
+    let settled = last_restore_outcome(tmux_session).filter(PendingRestore::memo);
+    // A binding restored from the log keeps the launch refresh off until the log or nonce moves on.
+    let protected = |o: &PendingRestore| matches!(o, PendingRestore::BoundFromLedger { .. });
+    if bound && settled.is_some_and(|o| !protected(&o)) {
         return None;
     }
     let marker = observe_spawn_nonce_marker(tmux_session);
@@ -392,6 +409,7 @@ pub(crate) fn restore_claude_pane(
         && *memo == key
         && last_seq.is_some()
         && outcome.memo()
+        && (bound || !outcome.skips_launch_refresh())
     {
         return Some(outcome.clone());
     }

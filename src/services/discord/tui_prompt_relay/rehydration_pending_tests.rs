@@ -313,3 +313,74 @@ fn a_corrupt_log_keeps_the_pass_from_registering_launch_a() {
         "the pass registers nothing over a corrupt log"
     );
 }
+
+#[test]
+fn a_resolved_b_stays_bound_over_launch_a_on_every_later_pass() {
+    use crate::services::tmux_common as tc;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_524, true);
+    let script = tc::session_temp_path(&pane.tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);
+    let launch_a = std::fs::read_to_string(&script).unwrap();
+    pane.touch(&pane.b);
+    retry_deferred_claude_adoptions();
+    assert!(matches!(
+        pane.last_record(),
+        BindingTarget::Resolved { pending_seq: 2, .. }
+    ));
+    // A restart after Resolved B but before the launch artifact moved to B, with no hook memory.
+    std::fs::write(&script, launch_a).unwrap();
+    pane.restart();
+    dedupe::forget_hook_adopted_claude_session_id(&pane.tmux);
+    dedupe::clear_claude_session_rotation(&pane.tmux);
+    let logged = events(pane.channel).len();
+
+    let bound = PendingRestore::BoundFromLedger {
+        pending_seq: 2,
+        exact_wait: None,
+    };
+    assert_eq!(pane.rehydrate(), Some(bound), "B restored from the ledger");
+    pane.expect_bound(&pane.b);
+    pane.rehydrate();
+    pane.expect_bound(&pane.b);
+    assert_eq!(
+        events(pane.channel).len(),
+        logged,
+        "launch A never re-registered"
+    );
+}
+
+#[test]
+fn a_file_less_restored_b_gives_way_to_the_next_session_with_a_file() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_525, false);
+    pane.restart();
+    let waiting = pane.rehydrate();
+    assert!(
+        matches!(
+            waiting,
+            Some(PendingRestore::BoundFromLedger {
+                exact_wait: Some(_),
+                ..
+            })
+        ),
+        "{waiting:?}"
+    );
+
+    // B never gets a file; the pane moves on to C, whose transcript exists before its hook lands.
+    let c = uuid();
+    pane.touch(&c);
+    let clear = serde_json::json!({
+        "session_id": c, "source": "clear", "transcript_path": pane.path(&c),
+    });
+    let status = ingress.claude_hook("SessionStart", &pane.a, &clear, Some(&uuid()));
+    assert_eq!(status, 202, "C is not refused over B's missing file");
+    pane.expect_bound(&c);
+    pane.rehydrate();
+    pane.expect_bound(&c);
+}
