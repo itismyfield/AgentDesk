@@ -121,6 +121,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/reachability/coverage_tests.rs",
         "src/services/discord/health/reachability/ledger_tests.rs",
         "src/services/discord/health/reachability/obligation_tests.rs",
+        "src/services/discord/inflight/host_recovery_guard_keyed_tests.rs",
         "src/services/discord/inflight/removal/boot_custody_tests.rs",
         "src/services/discord/inflight/removal/custody_notice_tests.rs",
         "src/services/discord/inflight/rebind_reap/tests.rs",

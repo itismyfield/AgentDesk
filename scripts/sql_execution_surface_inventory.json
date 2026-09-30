@@ -25367,6 +25367,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/inflight/host_recovery_guard_keyed_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c3a62c39e96ddd0320a44361ca755db2e6c9d8b341410caddcf1dfa2b5ac2c68"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/inflight/removal/custody_notice.rs",
       "api": "sqlx::query",
       "symbol": "query",
