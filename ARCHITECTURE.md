@@ -743,6 +743,9 @@ src/
 │   │   │   │   └── token.rs
 │   │   │   ├── exact_lease.rs
 │   │   │   └── source_epoch_observer.rs
+│   │   ├── execution_identity/
+│   │   │   ├── herdr_observation.rs
+│   │   │   └── herdr_observation_tests.rs
 │   │   ├── footer_view_reconciler/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
@@ -1659,6 +1662,7 @@ src/
 │   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
+│   │   ├── session_idle_cleanup_tests.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -1965,6 +1969,7 @@ src/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── blob.rs
@@ -2110,6 +2115,8 @@ src/
 │   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
+│   ├── herdr_launch.rs
+│   ├── herdr_launch_tests.rs
 │   ├── issue_announcements.rs
 │   ├── kakao.rs
 │   ├── kakao_message.rs

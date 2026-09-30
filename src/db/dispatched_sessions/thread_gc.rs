@@ -140,7 +140,7 @@ where
                AND active_dispatch_id IS NULL
                AND COALESCE(active_children, 0) = 0
                AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour'
-               AND hosted_execution IS NOT DISTINCT FROM $2::JSONB
+               AND hosted_execution::TEXT IS NOT DISTINCT FROM $2::JSONB::TEXT
                AND provider IS NOT DISTINCT FROM $3 AND identity_kind IS NOT DISTINCT FROM $4
                AND discord_token_hash IS NOT DISTINCT FROM $5
                AND channel_id IS NOT DISTINCT FROM $6 AND session_key IS NOT DISTINCT FROM $7
