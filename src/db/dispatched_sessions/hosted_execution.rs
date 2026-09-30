@@ -463,7 +463,8 @@ fn plan_state_change(
     Ok(next)
 }
 
-/// Single-statement CAS on row id, canonical identity and the exact observed value.
+/// Single-statement CAS on row id, canonical identity and the observed value's jsonb text,
+/// so a numerically equal respelling the decoder reads differently counts as a change.
 async fn compare_and_set_pg(
     pool: &PgPool,
     observed: &HostedObservation,
@@ -479,7 +480,7 @@ async fn compare_and_set_pg(
     let updated = sqlx::query(
         "UPDATE sessions SET hosted_execution = $2
          WHERE id = $1
-           AND hosted_execution IS NOT DISTINCT FROM $3::JSONB
+           AND hosted_execution::TEXT IS NOT DISTINCT FROM $3::JSONB::TEXT
            AND identity_kind = 'discord_channel'
            AND provider = $4
            AND discord_token_hash = $5
@@ -502,7 +503,7 @@ async fn compare_and_set_pg(
 }
 
 /// One sessions row as ordinary cleanup reads it before deleting it.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct CleanupRow {
     pub(crate) id: i64,
     pub(crate) session_key: Option<String>,
@@ -597,7 +598,7 @@ pub(crate) async fn delete_disconnected_sessions_pg(pool: &PgPool) -> Result<u64
         let delete = sqlx::query(
             "DELETE FROM sessions
              WHERE id = $1 AND status = 'disconnected'
-               AND hosted_execution IS NOT DISTINCT FROM $2::JSONB
+               AND hosted_execution::TEXT IS NOT DISTINCT FROM $2::JSONB::TEXT
                AND provider IS NOT DISTINCT FROM $3 AND identity_kind IS NOT DISTINCT FROM $4
                AND discord_token_hash IS NOT DISTINCT FROM $5
                AND channel_id IS NOT DISTINCT FROM $6 AND session_key IS NOT DISTINCT FROM $7
@@ -615,32 +616,69 @@ pub(crate) async fn delete_disconnected_sessions_pg(pool: &PgPool) -> Result<u64
     Ok(deleted)
 }
 
-/// Explicit delete of a row already locked by the caller's locator resolution.
-/// A row cleanup must keep refuses the delete instead of reporting zero rows.
-pub(crate) async fn delete_locked_session_pg(
-    tx: &mut Transaction<'_, Postgres>,
+/// Reads one row as cleanup judges it; alias keys are ordered so two reads compare equal.
+pub(crate) async fn load_cleanup_row_pg<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     session_id: i64,
-) -> Result<u64, String> {
+) -> Result<Option<CleanupRow>, String> {
     let row = sqlx::query(
         "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
                 s.channel_id, s.hosted_execution,
                 ARRAY(SELECT a.session_key FROM session_key_aliases a
-                      WHERE a.session_id = s.id) AS aliases
+                      WHERE a.session_id = s.id ORDER BY a.session_key) AS aliases
          FROM sessions s WHERE s.id = $1",
     )
     .bind(session_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(executor)
     .await
     .map_err(|error| format!("load session hosted execution: {error}"))?;
-    let Some(row) = row else {
-        return Ok(0);
+    row.as_ref()
+        .map(CleanupRow::read)
+        .transpose()
+        .map_err(|error| format!("decode session hosted execution: {error}"))
+}
+
+impl CleanupRow {
+    /// No hosted record at all and no non-tmux marker on any locator.
+    pub(crate) fn is_legacy_tmux(&self) -> bool {
+        self.raw.is_none() && self.deletable()
+    }
+}
+
+/// Judges an explicit delete, marker files included, before any row lock is taken.
+/// A row cleanup must keep refuses the delete instead of reporting zero rows.
+pub(crate) async fn judge_session_delete_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<Option<CleanupRow>, String> {
+    let resolved = resolve_session_row_pg(pool, Some(session_key), None, None)
+        .await
+        .map_err(|error| format!("resolve session delete locator: {error:?}"))?;
+    let Some((session_id, _)) = resolved else {
+        return Ok(None);
     };
-    let row = CleanupRow::read(&row)
-        .map_err(|error| format!("decode session hosted execution: {error}"))?;
-    if !row.deletable() {
+    let row = load_cleanup_row_pg(pool, session_id).await?;
+    if row.as_ref().is_some_and(|row| !row.deletable()) {
         return Err(format!(
             "session {session_id} keeps a live, unowned or unreadable hosted execution record \
              or a non-tmux host marker"
+        ));
+    }
+    Ok(row)
+}
+
+/// Deletes a row the caller has locked only if it still reads exactly as judged.
+pub(crate) async fn delete_locked_session_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    session_id: i64,
+    judged: Option<&CleanupRow>,
+) -> Result<u64, String> {
+    let Some(current) = load_cleanup_row_pg(&mut **tx, session_id).await? else {
+        return Ok(0);
+    };
+    if judged != Some(&current) {
+        return Err(format!(
+            "session {session_id} changed after its hosted execution check; retry the delete"
         ));
     }
     sqlx::query(
