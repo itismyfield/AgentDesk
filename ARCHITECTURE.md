@@ -1606,6 +1606,8 @@ src/
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
+│   │   ├── host_key_derivation.rs
+│   │   ├── host_key_derivation_tests.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_recap.rs
