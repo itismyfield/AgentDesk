@@ -1272,49 +1272,51 @@ test("active monitor defers every unresolved host in both loops and refreshes it
     ...["probe_failed", "herdr", "host_unknown", "host_conflict", "row_conflict", "session_missing", "lookup_failed"]
       .map((reason) => ({ state: "unknown", reason }))
   ];
-  for (const observed of observations) {
-    for (const hasInflight of [false, true]) {
-      const sessionKey = "claude/tok/mac-mini:__proto__";
-      const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: "pending" };
-      let observation = observed;
-      const { policy, state } = loadPolicy("policies/timeouts.js", {
-        sessionHost() { return Object.assign({ session_id: 7, tmux_name: "__proto__" }, observation); },
-        inflights: hasInflight ? [{
-          session_key: sessionKey, tmux_session_name: "__proto__", provider: "codex",
-          channel_id: "test-channel", dispatch_id: "d1", request_owner_user_id: 1,
-          started_at: timestampMinutesAgo(45), updated_at: timestampMinutesAgo(35)
-        }] : [],
-        timeouts: { staleWorkingSessions: [row], deadlockCandidates: [row] }
-      });
-      const key = "deadlock_check:" + sessionKey;
-      state.kv.set(key, "preserved");
-      policy._section_I();
-      const defer = observed.state === "unknown";
-      const recover = !defer && (observed.state === "dead" || !hasInflight);
-      const repair = (fail) => ({ sessionKey, request: {
-        session_id: 7, active_dispatch_id: "d1", observed: observed.state, fail_dispatch: fail,
-        fail_reason: fail ? "Stale working session recovery — no active tmux session after 10min" : "",
-        clear_active_dispatch_id: fail
-      } });
-      const label = JSON.stringify(observed) + " inflight=" + hasInflight;
-      assert.deepEqual(toPlain(state.timeoutRepairCalls), recover ? [repair(true), repair(false)] : [], label);
-      assert.equal(state.dispatchMarkFailedCalls.length, 0, label);
-      assert.equal(state.kv.has(key), defer, label);
-      assert.equal(state.logs.warn.filter((line) => line.includes("(" + observed.reason + "); deferring")).length, defer ? 1 : 0, label);
-      assert.deepEqual(state.timeoutHostObservations, [sessionKey], label);
-      assert.equal(state.execCalls.length, 0);
-      assert.equal(state.sessionKillCalls.length, 0);
-      assert.equal(state.httpPosts.length, 0);
-      assert.equal(state.timeoutTerminationRecords.length, 0);
-      assert.equal(state.timeoutInactiveCounterCleanups, 1);
-      assert.equal(state.timeoutClearFreshCounterCalls.length, 1);
-      assert.equal(state.timeoutHistoryCleanupCalls.length, 1);
-      observation = { state: "dead" };
-      policy._section_I();
-      assert.deepEqual(state.timeoutHostObservations, [sessionKey, sessionKey], label);
-      assert.equal(state.timeoutRepairCalls.length, (recover ? 2 : 0) + 2, label);
-      assert.equal(state.kv.has(key), false, label);
-    }
+  const cases = observations.flatMap((observed) => [false, true].flatMap((hasInflight) =>
+    (observed.state === "dead" ? ["pending", "dispatched", "completed"] : ["pending"])
+      .map((dispatchStatus) => ({ observed, hasInflight, dispatchStatus }))));
+  for (const { observed, hasInflight, dispatchStatus } of cases) {
+    const sessionKey = "claude/tok/mac-mini:__proto__";
+    const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: dispatchStatus };
+    let observation = observed;
+    const { policy, state } = loadPolicy("policies/timeouts.js", {
+      sessionHost() { return Object.assign({ session_id: 7, tmux_name: "__proto__" }, observation); },
+      inflights: hasInflight ? [{
+        session_key: sessionKey, tmux_session_name: "__proto__", provider: "codex",
+        channel_id: "test-channel", dispatch_id: "d1", request_owner_user_id: 1,
+        started_at: timestampMinutesAgo(45), updated_at: timestampMinutesAgo(35)
+      }] : [],
+      timeouts: { staleWorkingSessions: [row], deadlockCandidates: [row] }
+    });
+    const key = "deadlock_check:" + sessionKey;
+    state.kv.set(key, "preserved");
+    policy._section_I();
+    const defer = observed.state === "unknown";
+    const recover = !defer && (observed.state === "dead" || !hasInflight);
+    const repair = (stale) => ({ sessionKey, request: {
+      session_id: 7, active_dispatch_id: "d1", observed: observed.state,
+      fail_dispatch: stale && dispatchStatus !== "completed",
+      fail_reason: stale ? "Stale working session recovery — no active tmux session after 10min" : "",
+      clear_active_dispatch_id: stale
+    } });
+    const label = JSON.stringify(observed) + " inflight=" + hasInflight + " dispatch=" + dispatchStatus;
+    assert.deepEqual(toPlain(state.timeoutRepairCalls), recover ? [repair(true), repair(false)] : [], label);
+    assert.equal(state.dispatchMarkFailedCalls.length, 0, label);
+    assert.equal(state.kv.has(key), defer, label);
+    assert.equal(state.logs.warn.filter((line) => line.includes("(" + observed.reason + "); deferring")).length, defer ? 1 : 0, label);
+    assert.deepEqual(state.timeoutHostObservations, [sessionKey], label);
+    assert.equal(state.execCalls.length, 0);
+    assert.equal(state.sessionKillCalls.length, 0);
+    assert.equal(state.httpPosts.length, 0);
+    assert.equal(state.timeoutTerminationRecords.length, 0);
+    assert.equal(state.timeoutInactiveCounterCleanups, 1);
+    assert.equal(state.timeoutClearFreshCounterCalls.length, 1);
+    assert.equal(state.timeoutHistoryCleanupCalls.length, 1);
+    observation = { state: "dead" };
+    policy._section_I();
+    assert.deepEqual(state.timeoutHostObservations, [sessionKey, sessionKey], label);
+    assert.equal(state.timeoutRepairCalls.length, (recover ? 2 : 0) + 2, label);
+    assert.equal(state.kv.has(key), false, label);
   }
 });
 
