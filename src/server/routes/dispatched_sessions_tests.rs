@@ -253,3 +253,133 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{
+        TOKEN, future_schema, owner, record, wire,
+    };
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (tmux_probe, _path_guard) = install_tmux_probe(concat!(
+        "[ \"$1\" = -u ] && shift\n",
+        "echo \"$*\" >> \"$(dirname \"$0\")/calls\"\n",
+        "case \"$3\" in\n",
+        "*probefail*) echo 'permission denied' >&2; exit 1 ;;\n",
+        "esac\n",
+        "echo \"can't find session: $3\" >&2; exit 1",
+    ));
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let state = test_state(pool.clone());
+    let host = crate::services::platform::hostname_short();
+    let tmux = |n: &str| format!("AgentDesk-claude-guard-{n}");
+    let key = |n: &str| format!("{host}:{}", tmux(n));
+    let names = [
+        "legacy",
+        "pending",
+        "bound",
+        "retired",
+        "unknown",
+        "json-null",
+        "traced",
+        "probefail",
+    ];
+    for (index, n) in names.into_iter().enumerate() {
+        let channel = format!("440{index}");
+        let owner = owner(&channel);
+        let raw = match n {
+            "pending" => Some(wire(&record(&owner, "n1", HostedState::Pending))),
+            "bound" => Some(wire(&record(&owner, "n1", HostedState::Bound))),
+            "retired" => Some(wire(&record(&owner, "n1", HostedState::Retired))),
+            "unknown" => Some(future_schema(&owner)),
+            "json-null" => Some(serde_json::Value::Null),
+            _ => None,
+        };
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, last_heartbeat, identity_kind,
+                                   discord_token_hash, channel_id, hosted_execution)
+             VALUES ($1, 'claude', 'idle', NOW() - INTERVAL '7 hours', 'discord_channel', $2, $3, $4)",
+        )
+        .bind(key(n))
+        .bind(TOKEN)
+        .bind(&channel)
+        .bind(raw)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let marker = crate::services::tmux_common::session_temp_path(&tmux("traced"), "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+    let row = |n: &str| {
+        let pool = pool.clone();
+        let key = key(n);
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT to_jsonb(s) FROM sessions s WHERE session_key = $1",
+            )
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let kill = |n: &str, reason: &str| {
+        super::kill_tmux_session(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Path(key(n)),
+            Json(crate::services::dispatched_sessions::KillTmuxOptions {
+                reason: Some(reason.to_string()),
+                minimum_idle_minutes: Some(360),
+            }),
+        )
+    };
+
+    for n in names.into_iter().filter(|n| *n != "legacy") {
+        let before = row(n).await;
+        // A failed probe is preserved whatever the reason, forced ones included.
+        let reason = if n == "probefail" {
+            "operator cleanup"
+        } else {
+            "idle 7시간 초과 — 자동 정리"
+        };
+        let (status, Json(body)) = kill(n, reason).await;
+        assert_eq!(status, StatusCode::OK, "{n}: {body}");
+        assert_eq!(body["tmux_killed"], false, "{n}: {body}");
+        assert_eq!(
+            body["tmux_was_alive"],
+            serde_json::Value::Null,
+            "{n}: {body}"
+        );
+        assert_eq!(body["skipped_provider_activity_guard"], true, "{n}: {body}");
+        let expected = if n == "probefail" {
+            "tmux_probe_failed"
+        } else {
+            "host_not_legacy_tmux"
+        };
+        assert_eq!(body["preserved_reason"], expected, "{n}: {body}");
+        assert_eq!(row(n).await, before, "{n}: no column may change");
+    }
+    let calls = std::fs::read_to_string(tmux_probe.path().join("calls")).unwrap_or_default();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [format!("has-session -t ={}:", tmux("probefail"))],
+        "only a legacy row reaches tmux"
+    );
+
+    // Positive control: a legacy row whose tmux is gone is still reconciled.
+    let (status, Json(body)) = kill("legacy", "idle 7시간 초과 — 자동 정리").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tmux_was_alive"], false, "{body}");
+    assert_eq!(body["session_row_disconnected"], true, "{body}");
+    assert_eq!(row("legacy").await["status"], "disconnected");
+
+    pool.close().await;
+    pg_db.drop().await;
+}

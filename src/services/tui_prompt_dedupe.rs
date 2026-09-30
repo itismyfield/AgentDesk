@@ -57,11 +57,8 @@ const EXTERNAL_INPUT_RELAY_LEASE_TTL: Duration = Duration::from_secs(10 * 60);
 // leaking onto a much-later same-key turn.
 const DEFERRED_ANCHOR_COMPLETION_TTL: Duration = Duration::from_secs(60);
 const OBSERVED_PROMPT_BUFFER: usize = 128;
-// #3540: per-`(provider, tmux)` ring cap on the relayed-entry-id ledger. A
-// single session rarely relays anywhere near this many DISTINCT user prompts
-// inside the 30min entry-id TTL; the cap is a belt-and-braces upper bound so a
-// pathological long-lived session cannot grow the set without limit (TTL purge
-// is the primary bound). Oldest entries are dropped first.
+// Per-`(provider, tmux)` cap on the uuid and prompt-id rings, oldest dropped
+// first; TTL purge is the primary bound. Prompt-id entries also hold their text.
 const RELAYED_ENTRY_ID_RING_CAP: usize = 512;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
@@ -114,6 +111,9 @@ pub struct ObservedTuiPrompt {
     /// publish no lease/SSH state at all.
     pub(crate) external_input_lease_generation: u64,
     pub(crate) ssh_direct_observation_generation: u64,
+    /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
+    /// announcement POST result settles it.
+    pub(crate) hook_prompt_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +255,21 @@ struct TuiPromptDedupeState {
     // (30min) — long enough to span the rotation+self-loop window, bounded so
     // the set cannot grow without limit; additionally ring-capped per key.
     relayed_entry_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<String>>>,
+    // Hook `prompt_id` -> its text, so the idle scanner's later row (`promptId`,
+    // fresh uuid) is suppressed as the same input once the hook was announced.
+    relayed_prompt_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<RelayedPromptId>>>,
+}
+
+#[derive(Clone, Debug)]
+struct RelayedPromptId {
+    prompt_id: String,
+    prompt: String,
+    ambiguous: bool,
+    /// False until the relay's announcement POST was sent or may have been; an
+    /// unannounced id still tracks text conflicts but suppresses nothing.
+    announced: bool,
+    /// Observation generation of the hook that recorded the id; only its POST result settles it.
+    observed_by: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -274,6 +289,7 @@ impl PromptKey {
 
 mod extract;
 mod observation;
+mod prompt_identity;
 mod runtime_binding;
 mod session_rotation;
 mod shadow_peek;
@@ -285,11 +301,19 @@ pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 pub use extract::*;
 use extract::{
     is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    normalize_provider, record_relayed_entry_id, relayed_entry_id_already_seen,
-    take_matching_pending_prompt, take_or_record_recent_observed_prompt,
+    normalize_line_endings, normalize_provider, record_relayed_entry_id,
+    relayed_entry_id_already_seen, take_matching_pending_prompt,
+    take_or_record_recent_observed_prompt,
 };
 use observation::clear_ssh_direct_observation_pending;
 pub use observation::*;
+#[cfg(test)]
+pub(crate) use prompt_identity::age_observed_prompt_records_for_tests;
+pub use prompt_identity::{
+    ClaudePromptId, extract_claude_transcript_prompt_id, extract_prompt_id_from_hook_payload,
+    record_announced_prompt_id, withdraw_unannounced_prompt_id,
+};
+use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
 pub use runtime_binding::*;
 
 #[cfg(test)]

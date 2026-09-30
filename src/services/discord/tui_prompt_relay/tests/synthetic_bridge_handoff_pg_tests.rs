@@ -212,6 +212,7 @@ fn synthetic_bridge_handoff_fixture(
                         prompt: "handoff prompt".into(), observed_at: chrono::Utc::now(),
                         source_event_id: None, external_input_lease_generation: lease.generation,
                         ssh_direct_observation_generation: crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                        hook_prompt_id: None,
                     };
                     let mut inline_lease = lease.clone();
                     assert!(synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(

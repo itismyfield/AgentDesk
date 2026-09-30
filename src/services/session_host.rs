@@ -31,14 +31,14 @@ pub(crate) use process_host::ProcessHost;
 pub(crate) use resolve::{
     HostEvidence, HostWitness, SessionTargetEvidence, host_for, resolve_host_kind,
 };
-// The target resolver and guard have no production consumer yet.
 pub(crate) use tmux_host::{TmuxHost, tmux_key_name};
 pub(crate) use traits::InteractiveSessionHost;
+// Only the keyed teardown gate consumes the resolver and guard so far.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use {
     consumer_guard::{
-        AutomaticEffect, DeferReason, GuardRefusal, GuardVerdict, PolicyProbe, StateChange,
-        guard_first_state_change, probe_for_policy,
+        AutomaticEffect, ClearedHostSession, DeferReason, GuardRefusal, GuardVerdict, PolicyProbe,
+        StateChange, clear_legacy_session, guard_first_state_change, probe_for_policy,
     },
     resolve::{
         ResolvedSessionTarget, SessionTargetEvidenceSource, SessionTargetInput, TargetHost,

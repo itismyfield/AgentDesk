@@ -2484,6 +2484,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                         crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
                     ssh_direct_observation_generation:
                         crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                    hook_prompt_id: None,
                 };
                 let spawned = maybe_spawn_claude_idle_response_tail(
                     shared.clone(),

@@ -2,27 +2,45 @@
 module.exports = function attachActiveMonitor(timeouts, helpers) {
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
 
-  timeouts._tmuxPaneLiveness = function(tmuxName) {
-      if (!tmuxName || !tmuxName.trim()) return "unknown";
+  // Full-key host observation: live/dead only for a legacy tmux row whose probe answered.
+  timeouts._sessionHost = function(sessionKey) {
+      if (!sessionKey || !String(sessionKey).trim()) return { state: "unknown", reason: "session_missing" };
       try {
-        var state = agentdesk.session.hasLivePane(tmuxName);
-        return state === "live" || state === "dead" ? state : "unknown";
+        var observed = agentdesk.timeouts.observeSessionHost(sessionKey);
+        if (observed && (observed.state === "live" || observed.state === "dead")) return observed;
+        return { state: "unknown", reason: (observed && observed.reason) || "unknown" };
       } catch(e) {
-        return "unknown";
+        return { state: "unknown", reason: "error: " + e };
       }
     };
 
   timeouts._section_I = function() {
       // Repair missing/dead sessions; accepted live turns have no silence budget.
+      // A Herdr, unresolved or conflicting host defers the whole row, inflight or not.
       var STALE_SCAN_MINUTES = 30;
-      var liveness = new Map();
-      function paneLiveness(name) {
-        if (!liveness.has(name)) {
-          var state = timeouts._tmuxPaneLiveness(name);
-          liveness.set(name, state);
-          if (state === "unknown") agentdesk.log.warn("[deadlock] Pane liveness unknown; deferring " + name);
+      var hosts = new Map();
+      function sessionHost(key) {
+        if (!hosts.has(key)) {
+          var host = timeouts._sessionHost(key);
+          hosts.set(key, host);
+          if (host.state === "unknown") agentdesk.log.warn("[deadlock] Session host unknown (" + host.reason + "); deferring " + key);
         }
-        return liveness.get(name);
+        return hosts.get(key);
+      }
+      function repair(key, host, row, opts) {
+        var result = agentdesk.timeouts.repairStaleSession(key, {
+          session_id: host.session_id,
+          active_dispatch_id: row.active_dispatch_id || null,
+          active_turn_nonce: row.active_turn_nonce,
+          observed: host.state,
+          fail_dispatch: !!opts.fail_dispatch,
+          fail_reason: opts.fail_reason || "",
+          clear_active_dispatch_id: !!opts.clear_active_dispatch_id
+        });
+        if (!result.repaired) {
+          agentdesk.log.warn("[deadlock] Repair deferred (" + result.deferred + ") for " + key);
+        }
+        return result;
       }
 
       // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
@@ -34,37 +52,37 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       // calls (cargo build, subagents) may not send heartbeats for several minutes.
       var staleWorkingSessions = agentdesk.timeouts.listStaleWorkingSessions(10);
       for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
-        var swKey = staleWorkingSessions[sw].session_key;
-        var tmuxName = (swKey || "").split(":").pop();
-        // #219: Check if tmux session has a live pane (not just session existence).
-        // has-session returns true for zombie sessions with dead panes;
-        // list-panes #{pane_dead} distinguishes live vs dead workers.
-        var tmuxState = paneLiveness(tmuxName);
-        if (tmuxState === "unknown") continue;
+        var swRow = staleWorkingSessions[sw];
+        var swKey = swRow.session_key;
+        // A live-pane probe, not session existence: has-session is true for zombie panes.
+        var swHost = sessionHost(swKey);
+        if (swHost.state === "unknown") continue;
         var inflight;
         try {
-          inflight = findRecentInflightForSession(swKey, tmuxName);
+          inflight = findRecentInflightForSession(swKey, swHost.tmux_name);
         } catch (e) {
           agentdesk.log.warn("[deadlock] Transient error looking up inflight for " + swKey + ": " + e);
           continue; // transient error, retry next time
         }
-        if (tmuxState === "dead" || !inflight) {
-          // #219: Fail any pending dispatch before transitioning to idle.
-          // Without this, the dispatch stays "pending" as an orphan and gets
-          // re-delivered or auto-completed, causing the failure loop.
-          try {
-            if (staleWorkingSessions[sw].active_dispatch_id) {
-              var swDispId = staleWorkingSessions[sw].active_dispatch_id;
-              var swDispStatus = staleWorkingSessions[sw].active_dispatch_status;
-              if (swDispStatus === "pending" || swDispStatus === "dispatched") {
-                agentdesk.dispatch.markFailed(swDispId, "Stale working session recovery — no active tmux session after 10min");
-                agentdesk.log.warn("[deadlock] Failed stale dispatch " + swDispId + " for session " + swKey);
-              }
+        if (swHost.state === "dead" || !inflight) {
+          // Fail a pending dispatch before idling, or it is re-delivered as an orphan.
+          var swDispId = swRow.active_dispatch_id;
+          var swDispStatus = swRow.active_dispatch_status;
+          var failDispatch = !!swDispId && (swDispStatus === "pending" || swDispStatus === "dispatched");
+          var swResult = repair(swKey, swHost, swRow, {
+            fail_dispatch: failDispatch,
+            fail_reason: "Stale working session recovery — no active tmux session after 10min",
+            clear_active_dispatch_id: true
+          });
+          if (!swResult.repaired) continue;
+          if (swResult.dispatch_error) {
+            agentdesk.log.warn("[deadlock] Failed to mark dispatch for " + swKey + ": " + swResult.dispatch_error);
+          } else if (failDispatch) {
+            if (swResult.dispatch_rows_affected === 0) {
+              agentdesk.log.warn("[dispatch.markFailed] no rows affected for " + swDispId + " — already terminal or missing");
             }
-          } catch(dispErr) {
-            agentdesk.log.warn("[deadlock] Failed to mark dispatch for " + swKey + ": " + dispErr);
+            agentdesk.log.warn("[deadlock] Failed stale dispatch " + swDispId + " for session " + swKey);
           }
-          agentdesk.timeouts.markSessionIdle(swKey, { clear_active_dispatch_id: true });
           agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
         }
       }
@@ -75,19 +93,20 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       for (var dl = 0; dl < staleSessions.length; dl++) {
         var sess = staleSessions[dl];
         var deadlockKey = "deadlock_check:" + sess.session_key;
-        var dlTmuxName = (sess.session_key || "").split(":").pop();
-        var dlState = paneLiveness(dlTmuxName);
-        if (dlState === "unknown") continue;
+        var dlHost = sessionHost(sess.session_key);
+        if (dlHost.state === "unknown") continue;
         var inflight;
         try {
-          inflight = findRecentInflightForSession(sess.session_key, dlTmuxName);
+          inflight = findRecentInflightForSession(sess.session_key, dlHost.tmux_name);
         } catch (e) {
           continue;
         }
         agentdesk.kv.delete(deadlockKey);
-        if (dlState === "live" && inflight) continue;
-        agentdesk.timeouts.markSessionIdle(sess.session_key, { clear_active_dispatch_id: false });
-        agentdesk.log.info("[deadlock] Stale working session → idle (no active turn): " + sess.session_key);
+        if (dlHost.state === "live" && inflight) continue;
+        var dlResult = repair(sess.session_key, dlHost, sess, { clear_active_dispatch_id: false });
+        if (dlResult.repaired) {
+          agentdesk.log.info("[deadlock] Stale working session → idle (no active turn): " + sess.session_key);
+        }
       }
 
       // Clean up deadlock counters for sessions no longer working

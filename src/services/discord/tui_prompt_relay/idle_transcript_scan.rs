@@ -68,6 +68,8 @@ pub(super) enum ClaudeIdleTranscriptScan {
         /// window), preventing a phantom synthetic inflight. `None` falls back to
         /// the content-keyed recent-observed dedup (pre-#3540 behavior).
         entry_id: Option<String>,
+        /// The row's `promptId`, matched against the hook-recorded `prompt_id`.
+        prompt_id: Option<String>,
     },
 }
 
@@ -204,6 +206,9 @@ pub(super) fn scan_claude_idle_transcript_for_prompt(
                 prompt_start_offset: line_start_offset,
                 line_end_offset: offset,
                 entry_id,
+                prompt_id: crate::services::tui_prompt_dedupe::extract_claude_transcript_prompt_id(
+                    &json,
+                ),
             });
         }
     }
@@ -311,6 +316,9 @@ pub(super) fn scan_claude_idle_transcript_for_last_prompt(
                 prompt_start_offset: line_start_offset,
                 line_end_offset: offset,
                 entry_id,
+                prompt_id: crate::services::tui_prompt_dedupe::extract_claude_transcript_prompt_id(
+                    &json,
+                ),
             });
         }
     }
@@ -564,6 +572,49 @@ mod tests {
                 line_end_offset: (first.len() + middle.len() + second.len()) as u64,
                 entry_id: Some("second".to_string()),
             })
+        );
+    }
+
+    /// Plumbing only: the row is derived from a captured hook payload, so it does
+    /// not prove the provider's hook/row correspondence.
+    #[test]
+    fn claude_idle_scans_thread_the_row_prompt_id() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hook_payload/claude-2.1.283.json"
+        )))
+        .expect("fixture json");
+        let payload = &fixture["runs"][0]["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|event| event["event"] == "UserPromptSubmit")
+            .expect("UserPromptSubmit")["payload"];
+        let prompt = payload["prompt"].as_str().expect("prompt");
+        let prompt_id =
+            crate::services::tui_prompt_dedupe::extract_prompt_id_from_hook_payload(payload);
+        assert!(prompt_id.is_some());
+        let row = serde_json::json!({"type": "user", "uuid": "row-uuid", "promptId": prompt_id,
+            "message": {"role": "user", "content": prompt}});
+        let tool_result = serde_json::json!({"type": "user", "uuid": "tool-uuid", "promptId": prompt_id,
+            "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}});
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("transcript.jsonl");
+        std::fs::write(&path, format!("{row}\n{tool_result}\n")).expect("write transcript");
+        let expected = ClaudeIdleTranscriptScan::Prompt {
+            prompt: prompt.to_string(),
+            prompt_start_offset: 0,
+            line_end_offset: row.to_string().len() as u64 + 1,
+            entry_id: Some("row-uuid".to_string()),
+            prompt_id,
+        };
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&path, 0).unwrap(),
+            expected
+        );
+        assert_eq!(
+            scan_claude_idle_transcript_for_last_prompt(&path, 0).unwrap(),
+            expected
         );
     }
 }

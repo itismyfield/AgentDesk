@@ -167,7 +167,8 @@ function createAgentdeskMock(options) {
     timeoutClearFreshCounterCalls: [],
     timeoutStaleWorkingScans: [],
     timeoutDeadlockCandidateScans: [],
-    timeoutMarkSessionIdleCalls: [],
+    timeoutHostObservations: [],
+    timeoutRepairCalls: [],
     timeoutDispatchTypeLookups: [],
     timeoutTerminationRecords: [],
     timeoutInactiveCounterCleanups: 0,
@@ -386,12 +387,26 @@ function createAgentdeskMock(options) {
         }
         return clone(timeouts.deadlockCandidates || []);
       },
-      markSessionIdle(sessionKey, optionsArg) {
-        state.timeoutMarkSessionIdleCalls.push({ sessionKey, options: clone(optionsArg || {}) });
-        if (typeof timeouts.markSessionIdle === "function") {
-          return clone(timeouts.markSessionIdle(sessionKey, optionsArg || {}, state));
+      observeSessionHost(sessionKey) {
+        state.timeoutHostObservations.push(sessionKey);
+        if (typeof settings.sessionHost === "function") {
+          return clone(settings.sessionHost(sessionKey, state));
         }
-        return { ok: true, rows_affected: 1 };
+        // Default legacy row: its tmux suffix answers through sessionHasLivePane.
+        const name = String(sessionKey || "").split(":").pop();
+        state.sessionLivenessCalls.push(name);
+        const liveness = settings.sessionHasLivePane ? settings.sessionHasLivePane(name) : "unknown";
+        if (liveness === "live" || liveness === "dead") {
+          return { state: liveness, session_id: 1, tmux_name: name };
+        }
+        return { state: "unknown", reason: "probe_failed" };
+      },
+      repairStaleSession(sessionKey, request) {
+        state.timeoutRepairCalls.push({ sessionKey, request: clone(request || {}) });
+        if (typeof timeouts.repairStaleSession === "function") {
+          return clone(timeouts.repairStaleSession(sessionKey, request || {}, state));
+        }
+        return { ok: true, repaired: true, rows_affected: 1, dispatch_rows_affected: 1, dispatch_error: null };
       },
       getDispatchType(dispatchId) {
         state.timeoutDispatchTypeLookups.push({ dispatchId });

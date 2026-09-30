@@ -877,12 +877,89 @@ struct ScannedFile {
 
 impl ScannedFile {
     /// Whether a bare name bound in `module` is in scope here: declared here or glob-imported.
-    fn sees_bare(&self, here: bool, module: &[String]) -> bool {
-        here || self
-            .leaves
-            .iter()
-            .any(|leaf| leaf.binds.is_none() && absolute_path(&self.module, &leaf.path) == module)
+    fn sees_bare(
+        &self,
+        files: &BTreeMap<String, ScannedFile>,
+        here: bool,
+        module: &[String],
+    ) -> bool {
+        here || self.globs_reach(files, module)
     }
+
+    /// Whether the glob imports here reach `module`, also through modules that glob-import it
+    /// in turn; a crate-relative glob no scanned file answers for may reach it.
+    fn globs_reach(&self, files: &BTreeMap<String, ScannedFile>, module: &[String]) -> bool {
+        let (mut seen, mut queue) = (vec![self.module.clone()], vec![self]);
+        while let Some(file) = queue.pop() {
+            for leaf in file.leaves.iter().filter(|leaf| leaf.binds.is_none()) {
+                let target = resolve_path(files, file, &leaf.path);
+                if target == module {
+                    return true;
+                }
+                match files.values().find(|other| other.module == target) {
+                    Some(next) if !seen.contains(&target) => {
+                        seen.push(target);
+                        queue.push(next);
+                    }
+                    Some(_) => {}
+                    None if matches!(
+                        leaf.path.first().map(String::as_str),
+                        Some("crate" | "self" | "super")
+                    ) =>
+                    {
+                        return true;
+                    }
+                    None => {}
+                }
+            }
+        }
+        false
+    }
+
+    /// The path a `use` here binds `name` to, unless it binds the bare name itself.
+    fn bound(&self, name: &str) -> Option<&[String]> {
+        self.leaves
+            .iter()
+            .find(|leaf| leaf.binds.as_deref() == Some(name) && leaf.path != [name])
+            .map(|leaf| leaf.path.as_slice())
+    }
+}
+
+/// Absolute path `path` names in `file`, following a leading `use`-bound name and any module
+/// another file re-exports under a new name, whether the path starts at a `use` or `crate`.
+fn resolve_path(
+    files: &BTreeMap<String, ScannedFile>,
+    file: &ScannedFile,
+    path: &[String],
+) -> Vec<String> {
+    let local = |scope: &ScannedFile, path: &[String]| {
+        let mut path = path.to_vec();
+        for _ in 0..8 {
+            let head = path.first().map(String::as_str);
+            let Some(bound) = head
+                .filter(|head| !matches!(*head, "crate" | "self" | "super"))
+                .and_then(|head| scope.bound(head))
+            else {
+                break;
+            };
+            path = bound.iter().chain(&path[1..]).cloned().collect();
+        }
+        absolute_path(&scope.module, &path)
+    };
+    let mut resolved = local(file, path);
+    for _ in 0..8 {
+        let reexport = (1..resolved.len()).find_map(|k| {
+            let owner = files.values().find(|other| other.module == resolved[..k])?;
+            Some((k, owner, owner.bound(&resolved[k])?))
+        });
+        let Some((k, owner, bound)) = reexport else {
+            break;
+        };
+        let mut next = local(owner, bound);
+        next.extend(resolved[k + 1..].iter().cloned());
+        resolved = next;
+    }
+    resolved
 }
 
 /// Every file tokenized; a file whose comment or literal never closes is a violation.
@@ -932,6 +1009,14 @@ fn qualifier(code: &str, start: usize) -> Vec<String> {
 
 /// Qualifier path of each whole-word `name` outside `use` declarations and definitions.
 fn word_uses(code: &str, name: &str) -> Vec<Vec<String>> {
+    word_sites(code, name)
+        .into_iter()
+        .map(|(prefix, _)| prefix)
+        .collect()
+}
+
+/// [`word_uses`], with whether a call follows each use; any other use takes it as a value.
+fn word_sites(code: &str, name: &str) -> Vec<(Vec<String>, bool)> {
     if !code.contains(name) {
         return Vec::new();
     }
@@ -949,12 +1034,67 @@ fn word_uses(code: &str, name: &str) -> Vec<Vec<String>> {
                 })
     };
     let imports = use_spans(code);
+    let shadowed = shadowed_spans(code, name, &imports);
     word.find_iter(code)
         .filter(|found| {
             !defines(found.start()) && !imports.iter().any(|span| span.contains(&found.start()))
         })
-        .map(|found| qualifier(code, found.start()))
+        .map(|found| (found.range(), qualifier(code, found.start())))
+        .filter(|(at, prefix)| {
+            !prefix.is_empty() || !shadowed.iter().any(|s| s.contains(&at.start))
+        })
+        .map(|(at, prefix)| {
+            let after = code[at.end..].trim_start();
+            (prefix, after.starts_with('(') || after.starts_with("::<"))
+        })
         .collect()
+}
+
+/// Where a `let` rebinds `name`: its own name, then its block after the statement, cut short
+/// by a `use` naming `name` again. An initializer naming `name` binds the item, so no shadow.
+fn shadowed_spans(
+    code: &str,
+    name: &str,
+    imports: &[std::ops::Range<usize>],
+) -> Vec<std::ops::Range<usize>> {
+    if !code.contains("let") {
+        return Vec::new();
+    }
+    let escaped = regex::escape(name);
+    let binding = regex::Regex::new(&format!(r"\blet\s+(?:mut\s+)?({escaped})\b")).unwrap();
+    let word = regex::Regex::new(&format!(r"\b{escaped}\b")).unwrap();
+    let mut spans = Vec::new();
+    for found in binding.captures_iter(code) {
+        let bound = found.get(1).unwrap();
+        spans.push(bound.range());
+        let (mut depth, mut statement_end) = (0usize, None);
+        let mut end = code.len();
+        for (offset, ch) in code[bound.end()..].char_indices() {
+            let at = bound.end() + offset;
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' if depth == 0 => {
+                    end = at;
+                    break;
+                }
+                '}' | ')' | ']' => depth -= 1,
+                ';' if depth == 0 && statement_end.is_none() => statement_end = Some(at),
+                _ => {}
+            }
+        }
+        let Some(start) = statement_end else {
+            continue;
+        };
+        if word.is_match(&code[bound.end()..start]) {
+            continue;
+        }
+        let reimport = imports
+            .iter()
+            .filter(|span| span.start > start && span.start < end)
+            .find(|span| word.is_match(&code[(*span).clone()]));
+        spans.push(start..reimport.map_or(end, |span| span.start));
+    }
+    spans
 }
 
 /// Uses of `name` in one file's code, plus the names its `use … as` or `type … =` bind it to.
@@ -985,7 +1125,7 @@ fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, S
                 let (Some(last), Some(binds)) = (leaf.path.last(), &leaf.binds) else {
                     continue;
                 };
-                let from = || absolute_path(&file.module, &leaf.path[..leaf.path.len() - 1]);
+                let from = || resolve_path(files, file, &leaf.path[..leaf.path.len() - 1]);
                 let reaches = (last == item && binds != item)
                     || found
                         .iter()
@@ -1041,34 +1181,67 @@ fn guarded_item_violations(
                 ));
             }
         }
-        let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
-        for (relative, file) in &files {
-            let mut used = word_uses(&file.code, needle).len();
-            let mut named = file.code.contains(needle) && word.is_match(&file.code);
-            for (name, at) in &aliases {
-                let module = &files[at].module;
-                let bare = file.sees_bare(at == relative, module);
-                let count = word_uses(&file.code, name)
-                    .iter()
-                    .filter(|prefix| {
-                        bare || (!prefix.is_empty()
-                            && absolute_path(&file.module, prefix) == *module)
-                    })
-                    .count();
-                used += count;
-                named |= at == relative || count > 0;
-            }
-            if !named {
-                continue;
-            }
+        for (relative, (used, values)) in item_uses_by_file(&files, needle, &aliases) {
             if !owners.contains(&relative.as_str()) {
                 violations.push(format!("{relative}: {needle}"));
             } else if *budget != usize::MAX && used > *budget {
                 violations.push(format!("{relative}: {needle} used x{used} > {budget}"));
+            } else if *budget != usize::MAX && values > 0 {
+                // A budget counts calls; a function value could be called any number of times.
+                violations.push(format!("{relative}: {needle} taken as a value x{values}"));
             }
         }
     }
     violations
+}
+
+/// Uses of `needle` and its `aliases` per naming file, and how many take it as a value. An
+/// alias path that cannot be ruled out counts.
+fn item_uses_by_file(
+    files: &BTreeMap<String, ScannedFile>,
+    needle: &str,
+    aliases: &[(String, String)],
+) -> BTreeMap<String, (usize, usize)> {
+    let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
+    // Whether a path reaches `module`: it names it, names no scanned module, or names one
+    // whose glob imports reach it.
+    let reaches = |path: &[String], module: &[String]| {
+        path == module
+            || files
+                .values()
+                .find(|other| other.module == path)
+                .is_none_or(|other| other.sees_bare(files, false, module))
+    };
+    let mut uses = BTreeMap::new();
+    for (relative, file) in files {
+        let mut sites = word_sites(&file.code, needle);
+        // A file names the item by a `use` or a use; a local binding of that name does not.
+        let imported = || {
+            use_spans(&file.code)
+                .iter()
+                .any(|at| word.is_match(&file.code[at.clone()]))
+        };
+        let mut named = !sites.is_empty() || (file.code.contains(needle) && imported());
+        for (name, at) in aliases {
+            let module = &files[at].module;
+            let bare = file.sees_bare(files, at == relative, module);
+            let before = sites.len();
+            sites.extend(
+                word_sites(&file.code, name)
+                    .into_iter()
+                    .filter(|(prefix, _)| {
+                        let path = || resolve_path(files, file, prefix);
+                        bare || (!prefix.is_empty() && reaches(&path(), module))
+                    }),
+            );
+            named |= at == relative || sites.len() > before;
+        }
+        if named {
+            let values = sites.iter().filter(|(_, called)| !called).count();
+            uses.insert(relative.clone(), (sites.len(), values));
+        }
+    }
+    uses
 }
 
 /// Files outside `owners` reaching the `Herdr` variant through `HostKind` or one of
@@ -1086,9 +1259,9 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
                     let module = &files[at].module;
                     *name == path[k]
                         && if k == 0 {
-                            file.sees_bare(at == relative, module)
+                            file.sees_bare(&files, at == relative, module)
                         } else {
-                            absolute_path(&file.module, &path[..k]) == *module
+                            resolve_path(&files, file, &path[..k]) == *module
                         }
                 })
         };
@@ -1117,6 +1290,8 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
 const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
+/// The timeouts policy repair facade: the one production caller of the target guard.
+const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 
 // Dormant guard: no production code reaches a Herdr host. Owners may only name
 // Herdr items, never construct or route to one; everything else may not name them.
@@ -1140,6 +1315,9 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
         (SESSION_RECORD, 1),
+        (POLICY_REPAIR, 2),
+        // Dormant Herdr launch: names the host for the pane location and its marker.
+        ("src/services/herdr_launch.rs", 2),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -1187,7 +1365,10 @@ fn herdr_items_have_no_production_caller() {
             "HostKindMarker",
             &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE],
         ),
-        ("read_host_kind_marker", &[MARKER, CLEANUP_GATE, RESOLVE]),
+        (
+            "read_host_kind_marker",
+            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER],
+        ),
         (
             "host_marker::",
             &[GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, CLAUDE_LAUNCH],
@@ -1242,45 +1423,58 @@ fn herdr_items_have_no_production_caller() {
     );
 }
 
-// Dormant guard: the session target resolver and consumer guard have no production
-// caller. Their owners may only define them; nothing else may name them or an alias.
+// The session target resolver and consumer guard stay with their owners; production
+// reaches them only through the keyed teardown gate and the policy repair facade.
 #[test]
-fn session_target_guard_has_no_production_caller() {
+fn session_target_guard_stays_behind_the_keyed_gate() {
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
     const GUARD: &str = "src/services/session_host/consumer_guard.rs";
     const ROOT: &str = "src/services/session_host.rs";
     const INPUT: &str = "src/services/claude_tui/host_input.rs";
     // Needle, files that may name it, and the calls allowed there beyond its `fn`.
     const ITEMS: &[(&str, &[&str], usize)] = &[
-        ("resolve_session_target", &[RESOLVE, ROOT], 0),
+        (
+            "resolve_session_target",
+            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
+            1,
+        ),
         ("resolve_target_host", &[RESOLVE], 1),
         ("legacy_target_host", &[RESOLVE], 1),
-        ("guard_first_state_change", &[GUARD, ROOT], 0),
-        ("probe_for_policy", &[GUARD, ROOT], 0),
-        ("legacy_ref", &[RESOLVE, GUARD], 1),
-        ("with_inflight_row", &[GUARD_ADAPTER], 0),
+        ("guard_first_state_change", &[GUARD, ROOT, POLICY_REPAIR], 1),
+        ("clear_legacy_session", &[GUARD, ROOT, GUARD_ADAPTER], 1),
+        ("probe_for_policy", &[GUARD, ROOT, POLICY_REPAIR], 1),
+        ("legacy_ref", &[RESOLVE, GUARD, POLICY_REPAIR], 2),
+        ("with_inflight_row", &[GUARD_ADAPTER], 1),
         ("locator_witness", &[GUARD_ADAPTER], 1),
-        ("marker_witness", &[GUARD_ADAPTER], 0),
-        ("session_record_witness", &[SESSION_RECORD, ROOT], 0),
-        ("with_host_marker", &[RESOLVE], 0),
+        ("marker_witness", &[GUARD_ADAPTER], 1),
+        (
+            "session_record_witness",
+            &[SESSION_RECORD, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
+            1,
+        ),
+        ("with_host_marker", &[RESOLVE, POLICY_REPAIR], 1),
         (
             "ResolvedSessionTarget",
-            &[RESOLVE, GUARD, ROOT, INPUT],
+            &[RESOLVE, GUARD, ROOT, INPUT, POLICY_REPAIR],
             usize::MAX,
         ),
         ("from_session_target", &[INPUT], 0),
         (
             "SessionTargetEvidence",
-            &[RESOLVE, ROOT, GUARD_ADAPTER],
+            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
             usize::MAX,
         ),
-        ("SessionTargetInput", &[RESOLVE, ROOT], usize::MAX),
+        (
+            "SessionTargetInput",
+            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
+            usize::MAX,
+        ),
         (
             "HostWitness",
-            &[RESOLVE, ROOT, GUARD_ADAPTER, SESSION_RECORD],
+            &[RESOLVE, ROOT, GUARD_ADAPTER, SESSION_RECORD, POLICY_REPAIR],
             usize::MAX,
         ),
-        ("GuardVerdict", &[GUARD, ROOT], usize::MAX),
+        ("GuardVerdict", &[GUARD, ROOT, POLICY_REPAIR], usize::MAX),
         ("PolicyProbe", &[GUARD, ROOT], usize::MAX),
         ("consumer_guard", &[ROOT], usize::MAX),
         (
@@ -1315,9 +1509,11 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     const ITEMS: &[(&str, &[&str], usize)] = &[
         ("resolve_session_target", &[RESOLVE, ROOT], 0),
         ("resolve_target_host", &[RESOLVE], 1),
+        ("legacy_target_host", &[RESOLVE], 1),
         ("HostWitness", &[RESOLVE, ROOT], usize::MAX),
     ];
     const ALIAS: &str = "pub(crate) use self::resolve_session_target as target;\n";
+    const ROOT_ALIAS: &str = "pub(crate) use resolve::resolve_session_target as target;\n";
     let scan = |extra: &[(&str, &str)]| {
         let mut sources: BTreeMap<String, String> = [
             (
@@ -1432,6 +1628,70 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
             )],
             "termination_audit.rs: HostKind::Herdr import",
         ),
+        (
+            "a HostKind alias glob through a module alias",
+            &[
+                (ROOT, "pub(crate) use model::HostKind as Kind;\n"),
+                (
+                    OTHER,
+                    "use crate::services::session_host as hosts;\nuse hosts::Kind::*;\n\
+                     fn scan_gap() { let _ = hosts::host_for(Herdr); }\n",
+                ),
+            ],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "an item alias through a module alias",
+            &[
+                (ROOT, ROOT_ALIAS),
+                (
+                    OTHER,
+                    "use crate::services::session_host as facade;\nfn f() { facade::target(); }\n",
+                ),
+            ],
+            "termination_audit.rs: resolve_session_target",
+        ),
+        (
+            "an item alias through a re-exported module alias",
+            &[
+                (ROOT, ROOT_ALIAS),
+                (
+                    CHILD,
+                    "pub(crate) use crate::services::session_host as facade;\n",
+                ),
+                (
+                    OTHER,
+                    "use crate::services::session_host::resolve::child::facade;\n\
+                     fn f() { facade::target(); }\n",
+                ),
+            ],
+            "termination_audit.rs: resolve_session_target",
+        ),
+        (
+            "a shadow ends with its block",
+            &[(
+                ROOT,
+                "pub(crate) use resolve::resolve_session_target as target;\n\
+                 fn a() { let target = || (); target(); }\nfn b() { target(); }\n",
+            )],
+            "session_host.rs: resolve_session_target used x1 > 0",
+        ),
+        (
+            "a budgeted function taken as a value",
+            &[(
+                RESOLVE,
+                "fn f() { let g = legacy_target_host; g(); g(); }\n",
+            )],
+            "resolve.rs: legacy_target_host taken as a value x1",
+        ),
+        (
+            "a let that reads the alias",
+            &[
+                (ROOT, "fn a() { let target = target(); }\n"),
+                (ROOT, ROOT_ALIAS),
+            ],
+            "session_host.rs: resolve_session_target used x1 > 0",
+        ),
     ];
     for (label, extra, expected) in caught {
         let found = scan(extra);
@@ -1444,6 +1704,14 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     let clean: &[(&str, Extra)] = &[
         ("an alias stays in its own scope", &[(RESOLVE, ALIAS)]),
         (
+            "a local closure shadows the alias",
+            &[(
+                ROOT,
+                "pub(crate) use resolve::resolve_session_target as target;\n\
+                 fn unrelated() { let target = || (); target(); }\n",
+            )],
+        ),
+        (
             "a comment names the item",
             &[(OTHER, "// resolve_session_target is not used here.\n")],
         ),
@@ -1454,6 +1722,387 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
                 "use crate::services::session_host::HostKind as K;\nuse std::collections::*;\n\
                  enum Other { Herdr }\nfn f() { let _ = (K::Tmux, Other::Herdr); }\n",
             )],
+        ),
+    ];
+    for (label, extra) in clean {
+        assert_eq!(scan(extra), Vec::<String>::new(), "{label}");
+    }
+}
+
+// The name-only teardown entries run without a host guard. Each production call is
+// listed with why it keeps the name; a new call, or a moved caller going back, fails.
+#[test]
+fn name_only_teardown_calls_stay_on_the_reviewed_list() {
+    // Launch clears its session name before the sessions row exists.
+    const SPAWN: &str = "spawn before the sessions row";
+    const W2: &str = "no token hash for the key";
+    const OWNED: &str = "owned by another piece";
+    const MISSING: &str = "a Missing row path keeps it name-only";
+    const ENTRY: &str = "forwarded by the guarded entry";
+    const CALLS: &[(&str, Listed)] = &[
+        (
+            "record_termination_for_tmux",
+            &[
+                ("src/services/termination_audit.rs", 1, ENTRY),
+                ("src/engine/ops/exec_ops.rs", 1, MISSING),
+                (
+                    "src/services/discord/tmux_watcher/pre_emit_guard.rs",
+                    1,
+                    MISSING,
+                ),
+                (
+                    "src/services/discord/tmux_watcher/post_stream_exit.rs",
+                    1,
+                    MISSING,
+                ),
+                (
+                    "src/services/discord/tmux_watcher/terminal_abort_exits.rs",
+                    1,
+                    MISSING,
+                ),
+                (
+                    "src/services/discord/watchers/lifecycle/restore.rs",
+                    1,
+                    MISSING,
+                ),
+                (
+                    "src/services/discord/router/message_handler/provider_isolation.rs",
+                    1,
+                    W2,
+                ),
+                ("src/services/claude.rs", 6, W2),
+                ("src/services/codex.rs", 1, OWNED),
+                (
+                    "src/services/provider/cancel_token_cleanup/executor.rs",
+                    1,
+                    OWNED,
+                ),
+                ("src/services/claude_tui/host_input.rs", 1, OWNED),
+            ],
+        ),
+        (
+            "cleanup_session_temp_files",
+            &[
+                ("src/services/tmux_common.rs", 1, ENTRY),
+                ("src/services/claude/tui_session_launch.rs", 1, SPAWN),
+                ("src/services/claude.rs", 1, SPAWN),
+                ("src/services/codex.rs", 2, SPAWN),
+                ("src/services/qwen/session_lifecycle.rs", 1, SPAWN),
+                (
+                    "src/services/discord/router/message_handler/provider_isolation.rs",
+                    1,
+                    W2,
+                ),
+                ("src/services/discord/tmux_reaper.rs", 2, MISSING),
+                ("src/services/discord/commands/control.rs", 1, MISSING),
+                ("src/services/turn_lifecycle.rs", 1, MISSING),
+            ],
+        ),
+        (
+            "reset_managed_process_session",
+            &[
+                ("src/services/discord/commands/control.rs", 2, MISSING),
+                ("src/services/discord/commands/mod.rs", 0, ENTRY),
+                ("src/services/discord/health/recovery.rs", 1, MISSING),
+            ],
+        ),
+    ];
+    let violations = listed_call_violations(&production_sources(), CALLS);
+    assert!(
+        violations.is_empty(),
+        "name-only teardown calls: {violations:?}"
+    );
+}
+
+/// (file, calls there, why the call keeps the name)
+type Listed = &'static [(&'static str, usize, &'static str)];
+
+/// Each needle's calls per file against its list: an unlisted file, another count, a
+/// listed file with none, or the function taken as a value to call later all fail.
+fn listed_call_violations(
+    sources: &BTreeMap<String, String>,
+    calls: &[(&str, Listed)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let files = scan_files(sources, &mut violations);
+    for (needle, listed) in calls {
+        let uses = item_uses_by_file(&files, needle, &bindings(&files, needle));
+        for (relative, (used, values)) in &uses {
+            if *values > 0 {
+                violations.push(format!("{relative}: {needle} taken as a value x{values}"));
+            }
+            match listed.iter().find(|(file, ..)| file == relative) {
+                None => violations.push(format!("{relative}: unlisted {needle} x{used}")),
+                Some((_, count, why)) if count != used => violations.push(format!(
+                    "{relative}: {needle} x{used}, listed x{count} ({why})"
+                )),
+                Some(_) => {}
+            }
+        }
+        violations.extend(
+            listed
+                .iter()
+                .filter(|(file, ..)| !uses.contains_key(*file))
+                .map(|(file, count, _)| format!("{file}: {needle} listed x{count}, not found")),
+        );
+    }
+    violations
+}
+
+// The list scan above runs on today's tree; these shapes reach a listed cleanup by a
+// fully qualified re-export or as a function value, and an unrelated closure does not.
+#[test]
+fn name_only_scan_follows_reexports_and_function_values() {
+    const COMMON: &str = "src/services/tmux_common.rs";
+    const FACADE: &str = "src/services/facade.rs";
+    const CALLER: &str = "src/services/caller.rs";
+    const OTHER: &str = "src/services/other.rs";
+    const FACADE1: &str = "src/services/facade1.rs";
+    const FACADE2: &str = "src/services/facade2.rs";
+    const FACADE3: &str = "src/services/facade3.rs";
+    const WIPE: (&str, &str) = (
+        COMMON,
+        "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+    );
+    const CALLS: &[(&str, Listed)] = &[(
+        "cleanup_session_temp_files",
+        &[(COMMON, 1, "the one reviewed call")],
+    )];
+    let scan = |extra: &[(&str, &str)]| {
+        let mut sources: BTreeMap<String, String> = BTreeMap::from([(
+            COMMON.to_string(),
+            "pub(crate) fn cleanup_session_temp_files(n: &str) {}\n\
+             fn reviewed(n: &str) { cleanup_session_temp_files(n); }\n"
+                .to_string(),
+        )]);
+        for (file, text) in extra {
+            sources.entry(file.to_string()).or_default().push_str(text);
+        }
+        listed_call_violations(&sources, CALLS)
+    };
+    assert_eq!(scan(&[]), Vec::<String>::new());
+
+    type Extra = &'static [(&'static str, &'static str)];
+    let caught: &[(&str, Extra, &str)] = &[
+        (
+            "a fully qualified path through a re-exported module",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (
+                    FACADE,
+                    "pub(crate) use crate::services::tmux_common as cleanup_mod;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade::cleanup_mod::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a fully qualified path through a glob re-export",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (FACADE, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a fully qualified path through two glob re-exports",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a fully qualified path through three glob re-exports",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (FACADE3, "pub(crate) use super::facade2::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade3::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a glob cycle with one way out to the alias",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::facade2::*;\n"),
+                (
+                    FACADE2,
+                    "pub(crate) use crate::services::facade1::*;\n\
+                     pub(crate) use crate::services::tmux_common::*;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade1::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a module alias re-exported through a glob",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1 as f1;\n"),
+                (FACADE3, "pub(crate) use crate::services::facade2::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade3::f1::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a bare name through two glob imports",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "use crate::services::facade2::*;\nfn go(n: &str) { wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a glob chain through a crate module no file answers for",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::gone::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade1::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "an alias path that names no scanned module",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::gone::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "the item rebound under its own name",
+            &[(
+                COMMON,
+                "fn again(n: &str) {\n\
+                 let cleanup_session_temp_files = crate::services::tmux_common::cleanup_session_temp_files;\n\
+                 cleanup_session_temp_files(n);\ncleanup_session_temp_files(n);\n}\n",
+            )],
+            "tmux_common.rs: cleanup_session_temp_files taken as a value x1",
+        ),
+        (
+            "a function pointer under another name",
+            &[(
+                CALLER,
+                "fn go(n: &str) { let f = crate::services::tmux_common::cleanup_session_temp_files; f(n); }\n",
+            )],
+            "caller.rs: cleanup_session_temp_files taken as a value x1",
+        ),
+        (
+            "a closure of the same name that calls the item",
+            &[(
+                COMMON,
+                "fn again(n: &str) {\n\
+                 let cleanup_session_temp_files = |n: &str| crate::services::tmux_common::cleanup_session_temp_files(n);\n\
+                 cleanup_session_temp_files(n);\n}\n",
+            )],
+            "tmux_common.rs: cleanup_session_temp_files x3, listed x1",
+        ),
+    ];
+    for (label, extra, expected) in caught {
+        let found = scan(extra);
+        assert!(
+            found.iter().any(|v| v.contains(expected)),
+            "{label}: expected {expected:?} in {found:?}"
+        );
+    }
+
+    let clean: &[(&str, Extra)] = &[
+        (
+            "an unrelated local closure",
+            &[(
+                CALLER,
+                "fn go(n: &str) {\n\
+                 let cleanup_session_temp_files = |_: &str| ();\n\
+                 cleanup_session_temp_files(n);\n}\n",
+            )],
+        ),
+        (
+            "a glob cycle that never reaches the alias",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::facade2::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::wipe(n); }\n",
+                ),
+            ],
+        ),
+        (
+            "another module's function of the alias name through two glob re-exports",
+            &[
+                WIPE,
+                (OTHER, "pub(crate) fn wipe(n: &str) {}\n"),
+                (FACADE1, "pub(crate) use crate::services::other::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::wipe(n); }\n",
+                ),
+            ],
+        ),
+        (
+            "another module's function of the alias name through a re-exported module",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (OTHER, "pub(crate) fn wipe(n: &str) {}\n"),
+                (
+                    FACADE,
+                    "pub(crate) use crate::services::other as other_mod;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade::other_mod::wipe(n); }\n",
+                ),
+            ],
         ),
     ];
     for (label, extra) in clean {

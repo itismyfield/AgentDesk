@@ -49,6 +49,7 @@ pub mod github_issue_creation;
 pub(crate) mod hang_forensics;
 pub mod health_active_session_audit;
 pub mod health_diagnostics;
+pub(crate) mod herdr_launch;
 pub mod issue_announcements;
 pub mod kakao;
 pub mod kakao_message;

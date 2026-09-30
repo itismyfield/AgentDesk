@@ -73,6 +73,7 @@ pub fn observe_prompt_by_tmux_at(
         tmux_session_name,
         &[prompt.to_string()],
         None,
+        None,
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -97,6 +98,50 @@ pub fn observe_prompt_by_tmux_with_entry_id_at(
         tmux_session_name,
         &[prompt.to_string()],
         entry_id,
+        None,
+        PromptObservationEffect::NotifyAndLease,
+        observed_at,
+    )
+}
+
+/// Claude hook entry: the submitted `prompt_id` is recorded once its announcement
+/// is sent, so the scanner's later row with that `promptId` and text is suppressed.
+pub fn observe_prompt_by_provider_session_with_prompt_id_at(
+    provider: &str,
+    provider_session_id: &str,
+    prompt: &str,
+    prompt_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    let tmux_session_name = resolve_tmux_session_name(provider, provider_session_id)
+        .unwrap_or_else(|| provider_session_id.trim().to_string());
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        &tmux_session_name,
+        &[prompt.to_string()],
+        None,
+        prompt_id.map(ClaudePromptId::HookSubmit),
+        PromptObservationEffect::NotifyAndLease,
+        observed_at,
+    )
+}
+
+/// Claude idle-scanner entry: the row's `promptId` is only looked up, never
+/// recorded, because a fork rewrites inherited rows to the fork's prompt id.
+pub fn observe_prompt_by_tmux_with_row_ids_at(
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+    entry_id: Option<&str>,
+    prompt_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
+        &[prompt.to_string()],
+        entry_id,
+        prompt_id.map(ClaudePromptId::TranscriptRow),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -112,6 +157,7 @@ pub fn observe_prompt_candidates_by_tmux(
         tmux_session_name,
         prompts,
         None,
+        None,
         PromptObservationEffect::NotifyAndLease,
         Utc::now(),
     )
@@ -126,6 +172,7 @@ pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
         provider,
         tmux_session_name,
         prompts,
+        None,
         None,
         PromptObservationEffect::RelayLeaseOnly,
         Utc::now(),
@@ -143,12 +190,14 @@ fn observe_prompt_candidates_by_tmux_inner(
     tmux_session_name: &str,
     prompts: &[String],
     entry_id: Option<&str>,
+    prompt_id: Option<ClaudePromptId<'_>>,
     effect: PromptObservationEffect,
     observed_at: DateTime<Utc>,
 ) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     let entry_id = entry_id.map(str::trim).filter(|value| !value.is_empty());
+    let prompt_id = prompt_id.filter(|id| !id.value().trim().is_empty());
     let mut candidates = Vec::new();
     for prompt in prompts {
         let prompt = prompt.trim();
@@ -193,10 +242,19 @@ fn observe_prompt_candidates_by_tmux_inner(
             observed_at,
             external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+            hook_prompt_id: None,
         };
         let _ = OBSERVED_PROMPTS.send(event);
         return PromptObservation::PublishedTaskNotification;
     }
+    // The prompt_id text check runs before the uuid return so a known row that
+    // pairs the id with other text still marks the id ambiguous.
+    let prompt_id_match = prompt_id.map(|prompt_id| {
+        let prompt_id = prompt_id.value().trim();
+        let found =
+            check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]);
+        (prompt_id, found)
+    });
     // #3540 (root cause): suppress by STABLE entry identity BEFORE any pending /
     // recent / lease bookkeeping or synthetic-turn mint. If this JSONL entry
     // `uuid` was already relayed for this `(provider, tmux)` pair it is a
@@ -209,6 +267,25 @@ fn observe_prompt_candidates_by_tmux_inner(
     if let Some(entry_id) = entry_id {
         if relayed_entry_id_already_seen(&provider, tmux_session_name, entry_id) {
             return PromptObservation::SuppressedReplayedEntry;
+        }
+    }
+    // Same input seen through its other native key: a hook-recorded prompt_id
+    // with identical text. The row uuid is recorded so later re-scans match it.
+    if let Some((prompt_id, found)) = prompt_id_match {
+        match found {
+            PromptIdMatch::Same => {
+                if let Some(entry_id) = entry_id {
+                    record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+                }
+                return PromptObservation::SuppressedReplayedEntry;
+            }
+            PromptIdMatch::Ambiguous => tracing::warn!(
+                provider = %provider,
+                tmux_session_name,
+                prompt_id,
+                "prompt_id matched a relayed prompt with different text; not suppressed"
+            ),
+            PromptIdMatch::Absent | PromptIdMatch::Unannounced => {}
         }
     }
     let local_only_control = candidates
@@ -262,6 +339,22 @@ fn observe_prompt_candidates_by_tmux_inner(
                 mark_ssh_direct_observation_pending(&provider, tmux_session_name),
             )
         };
+    // A hook's prompt_id is held unannounced and rides the event; the relay's
+    // POST result lets it suppress or withdraws it.
+    let hook_prompt_id = match prompt_id {
+        Some(ClaudePromptId::HookSubmit(prompt_id)) if local_only_control.is_none() => {
+            let prompt_id = prompt_id.trim();
+            record_observed_hook_prompt_id(
+                &provider,
+                tmux_session_name,
+                prompt_id,
+                &candidates[0],
+                ssh_direct_observation_generation,
+            );
+            Some(prompt_id.to_string())
+        }
+        _ => None,
+    };
     let prompt = candidates
         .first()
         .expect("non-empty candidates")
@@ -274,6 +367,7 @@ fn observe_prompt_candidates_by_tmux_inner(
         observed_at,
         external_input_lease_generation,
         ssh_direct_observation_generation,
+        hook_prompt_id,
     };
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect

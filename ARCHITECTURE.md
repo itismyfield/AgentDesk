@@ -215,6 +215,9 @@ src/
 │   │   ├── exec_ops/
 │   │   │   ├── exec_allowlist_tests.rs
 │   │   │   └── session_liveness_tests.rs
+│   │   ├── timeouts_ops/
+│   │   │   ├── host_repair.rs
+│   │   │   └── host_repair_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -732,6 +735,7 @@ src/
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── text_commands.rs
+│   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── delivery_lease_cell/
@@ -740,6 +744,9 @@ src/
 │   │   │   │   └── token.rs
 │   │   │   ├── exact_lease.rs
 │   │   │   └── source_epoch_observer.rs
+│   │   ├── execution_identity/
+│   │   │   ├── herdr_observation.rs
+│   │   │   └── herdr_observation_tests.rs
 │   │   ├── footer_view_reconciler/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
@@ -861,6 +868,7 @@ src/
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
+│   │   │   ├── host_recovery_guard_keyed_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1349,6 +1357,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   └── stale_resume_retry_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
@@ -1438,6 +1447,7 @@ src/
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   └── rowless_receipt_tests.rs
 │   │   │   │   ├── empty_response_recovery/
@@ -1658,6 +1668,7 @@ src/
 │   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
+│   │   ├── session_idle_cleanup_tests.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -1964,6 +1975,7 @@ src/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── blob.rs
@@ -2041,6 +2053,8 @@ src/
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_tests.rs
+│   │   ├── prompt_identity.rs
+│   │   ├── prompt_identity_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs
@@ -2112,6 +2126,8 @@ src/
 │   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
+│   ├── herdr_launch.rs
+│   ├── herdr_launch_tests.rs
 │   ├── issue_announcements.rs
 │   ├── kakao.rs
 │   ├── kakao_message.rs

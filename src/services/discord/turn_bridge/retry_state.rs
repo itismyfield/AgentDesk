@@ -374,6 +374,55 @@ pub(super) fn handle_gemini_retry_boundary(
     had_local_session || should_reset
 }
 
+/// Whether an auto-retry reset ran; the host guard can keep the session untouched.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetryReset {
+    Cleared,
+    KeptByHostGuard,
+}
+
+/// What the auto-retry resets of one turn did. Only the scheduling point records it,
+/// so the empty-sink handoff and the completion session clear read what really happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AutoRetry {
+    queued: bool,
+    kept_by_host_guard: bool,
+}
+
+impl AutoRetry {
+    /// Records the reset and returns the user message the caller queues retry-with-history
+    /// for: only a cleared session with a user message to retry.
+    pub(super) fn queue(
+        &mut self,
+        reset: RetryReset,
+        user_msg_id: Option<MessageId>,
+    ) -> Option<MessageId> {
+        match reset {
+            RetryReset::KeptByHostGuard => {
+                self.kept_by_host_guard = true;
+                None
+            }
+            RetryReset::Cleared => {
+                self.queued |= user_msg_id.is_some();
+                user_msg_id
+            }
+        }
+    }
+
+    /// A retry-with-history was queued and takes over this turn's inflight row.
+    pub(super) fn queued(self) -> bool {
+        self.queued
+    }
+
+    /// The host guard kept a session, so its provider session id must survive the turn.
+    pub(super) fn kept_session(self) -> bool {
+        self.kept_by_host_guard
+    }
+}
+
+/// The host guard decides before the resume state is cleared, so a kept session also
+/// keeps its provider session id.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reset_session_for_auto_retry(
     shared: &Arc<SharedData>,
@@ -384,7 +433,27 @@ pub(super) async fn reset_session_for_auto_retry(
     new_raw_provider_session_id: &mut Option<String>,
     inflight_state: &mut InflightTurnState,
     reason: &str,
-) {
+) -> RetryReset {
+    #[cfg(unix)]
+    let cleared = match cancel_token.tmux_session_name() {
+        Some(name) => {
+            let provider = shared.settings.read().await.provider.clone();
+            let session = crate::services::discord::inflight::clear_channel_session(
+                shared.pg_pool.as_ref(),
+                &provider,
+                channel_id.get(),
+                adk_session_key,
+                &name,
+                "auto_retry_fresh_session",
+            );
+            let Some(session) = session.await else {
+                return RetryReset::KeptByHostGuard;
+            };
+            Some(session)
+        }
+        None => None,
+    };
+
     clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
     let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
         inflight_state,
@@ -412,30 +481,39 @@ pub(super) async fn reset_session_for_auto_retry(
     }
 
     #[cfg(unix)]
-    if let Some(name) = cancel_token.tmux_session_name() {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"
-        );
-        crate::services::termination_audit::record_termination_for_tmux(
-            &name,
-            None,
-            "turn_bridge",
-            "auto_retry_fresh_session",
-            Some(&format!(
-                "forcing fresh session before auto-retry: {reason}"
-            )),
-            None,
-        );
-        record_tmux_exit_reason(
-            &name,
-            &format!("forcing fresh session before auto-retry: {reason}"),
-        );
-        crate::services::platform::tmux::kill_session(
-            &name,
-            &format!("forcing fresh session before auto-retry: {reason}"),
-        );
+    if let Some(session) = cleared {
+        kill_session_before_retry(&session, reason);
     }
+    RetryReset::Cleared
+}
+
+/// Kills the turn's tmux session the host guard admitted, for a fresh retry.
+#[cfg(unix)]
+fn kill_session_before_retry(
+    session: &crate::services::session_host::ClearedHostSession,
+    reason: &str,
+) {
+    let name = session.name();
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
+    crate::services::termination_audit::record_termination_for_cleared(
+        session,
+        None,
+        "turn_bridge",
+        "auto_retry_fresh_session",
+        Some(&format!(
+            "forcing fresh session before auto-retry: {reason}"
+        )),
+        None,
+    );
+    record_tmux_exit_reason(
+        name,
+        &format!("forcing fresh session before auto-retry: {reason}"),
+    );
+    crate::services::platform::tmux::kill_session(
+        name,
+        &format!("forcing fresh session before auto-retry: {reason}"),
+    );
 }
 
 #[cfg(test)]

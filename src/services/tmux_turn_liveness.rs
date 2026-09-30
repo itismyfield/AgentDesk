@@ -4,6 +4,8 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::platform::tmux::{SessionPresence, session_presence};
 use crate::services::provider::ProviderKind;
 
+#[path = "tmux_turn_liveness/cleanup_host.rs"]
+pub(crate) mod cleanup_host;
 #[cfg(test)]
 #[path = "tmux_turn_liveness/tests_pg.rs"]
 mod tests_pg;

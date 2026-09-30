@@ -178,8 +178,9 @@ use recall_feedback::{
 };
 pub(super) use retry_state::spawn_retry_with_history_with_release;
 use retry_state::{
-    bridge_confirmed_response_sent_offset_seed, bridge_should_reclaim_relay_from_missing_watcher,
-    clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
+    AutoRetry, bridge_confirmed_response_sent_offset_seed,
+    bridge_should_reclaim_relay_from_missing_watcher, clear_local_session_state,
+    handle_gemini_retry_boundary, reset_session_for_auto_retry,
     rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
     sync_terminal_error_delivery_state_for_bridge_owner,
 };
@@ -926,6 +927,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 last_status_panel_text,
                 completion_footer_terminal_text,
                 busy_requeue_outcome: terminal_outcome_delivery_output.busy_requeue_outcome,
+                auto_retry: terminal_outcome_delivery_output.auto_retry,
                 spin_idx,
                 status_panel_generation,
                 preserve_inflight_for_cleanup_retry,

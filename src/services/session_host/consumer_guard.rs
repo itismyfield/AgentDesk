@@ -63,6 +63,36 @@ pub(crate) fn guard_first_state_change(
     }
 }
 
+/// A tmux/process session the guard admitted for an automatic change. Only
+/// [`clear_legacy_session`] builds one, so a keyed entry cannot run unguarded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ClearedHostSession {
+    name: String,
+}
+
+impl ClearedHostSession {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// The guard verdict for `change`; `Proceed` also needs a tmux/process ref to act on.
+pub(crate) fn clear_legacy_session(
+    target: &ResolvedSessionTarget,
+    change: StateChange,
+) -> Result<ClearedHostSession, GuardVerdict> {
+    match (
+        guard_first_state_change(target, change),
+        target.legacy_ref(),
+    ) {
+        (GuardVerdict::Proceed, Some(session)) => Ok(ClearedHostSession {
+            name: session.name.to_string(),
+        }),
+        (GuardVerdict::Proceed, None) => Err(GuardVerdict::Refused(GuardRefusal::UnknownHost)),
+        (verdict, _) => Err(verdict),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeferReason {
     Herdr,

@@ -1223,6 +1223,13 @@ pub fn cleanup_session_temp_files(session_name: &str) {
     });
 }
 
+/// [`cleanup_session_temp_files`] for a session the host guard admitted.
+pub(crate) fn cleanup_cleared_session_temp_files(
+    session: &crate::services::session_host::ClearedHostSession,
+) {
+    cleanup_session_temp_files(session.name());
+}
+
 fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
     // All extensions we ever allocate under the session prefix.
     const EXTS: &[&str] = &[

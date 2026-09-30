@@ -461,7 +461,7 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
         preserve_inflight_for_cleanup_retry: output.preserve_inflight_for_cleanup_retry,
         tmux_last_offset: Some(64), watcher_owner_channel_id: channel_id,
         bridge_relay_delegated_to_watcher: false, is_prompt_too_long: false,
-        resume_failure_detected: false, recovery_retry: false, rx_disconnected: false,
+        resume_failure_detected: false, auto_retry: output.auto_retry, recovery_retry: false, rx_disconnected: false,
         tmux_handed_off: false, bridge_output_owner: None,
         terminal_delivery_committed: output.terminal_delivery_committed,
         terminal_session_reset_required: false, transcript_events: Vec::new(),

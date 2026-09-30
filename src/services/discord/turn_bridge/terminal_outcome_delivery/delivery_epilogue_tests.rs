@@ -18,6 +18,8 @@ use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::G
 use crate::services::tui_o::channel_policy::SinkOp;
 use tracing_subscriber::fmt::MakeWriter;
 
+#[cfg(all(test, unix))]
+mod recovery_retry_guard_tests;
 #[cfg(unix)]
 mod rowless_receipt_tests;
 
