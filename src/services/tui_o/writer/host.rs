@@ -32,7 +32,7 @@ pub trait HostIo: Send + Sync + 'static {
     fn lease(&self) -> Self::Lease;
     fn alarms(&self) -> Self::Alarms;
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings>;
-    /// Asked only for a channel with no store yet, before its first `init`.
+    /// Asked only for a channel with no store yet, before its first `init`, while the gate is Owned.
     fn activation_facts(
         &self,
         channel: u64,
@@ -186,10 +186,17 @@ async fn host_channel<I: HostIo>(
     let store = match recover(&runtime_root, channel, owned) {
         Ok(Recovered::Store(store)) => store,
         Ok(Recovered::Fresh(fresh)) => {
-            let facts = io.activation_facts(channel, provider).await;
             let log = bindings.insert(io.bindings(channel, provider));
-            let created =
-                facts.and_then(|facts| activation::activate(&fresh, channel, &facts, &**log));
+            let created = loop {
+                until_owned(&gate).await;
+                let facts = io.activation_facts(channel, provider).await;
+                // Facts read before a lost gate are not acted on; wait for Owned and read again.
+                if !matches!(gate.current(), GatewayOwnership::Owned { .. }) {
+                    continue;
+                }
+                break facts
+                    .and_then(|facts| activation::activate(&fresh, channel, &facts, &**log));
+            };
             if let Err(detail) = created {
                 return hold(&alarms, channel, &format!("first activation: {detail}"));
             }
@@ -214,6 +221,16 @@ async fn host_channel<I: HostIo>(
     readiness.track(channel, Arc::clone(&gate), resumed.clone());
     publish(channel, &readiness, gate.subscribe(), resumed, actor).await;
     drop(stop_tx);
+}
+
+/// Returns once the gate is Owned; a gate not yet acquired at startup is waited on, not held.
+async fn until_owned(gate: &OwnershipGate) {
+    let mut watch = gate.subscribe();
+    while !matches!(*watch.borrow_and_update(), GatewayOwnership::Owned { .. }) {
+        if watch.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 enum Recovered {

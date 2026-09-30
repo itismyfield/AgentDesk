@@ -112,3 +112,65 @@ async fn a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg() 
     pool.close().await;
     fixture.drop().await;
 }
+
+/// Refuses any move to `accepted` in this test database, so an accept attempt fails the tick
+/// before a turn could start.
+async fn refuse_accepts(pool: &PgPool) {
+    sqlx::query(
+        "CREATE FUNCTION refuse_accept() RETURNS trigger AS $$
+         BEGIN RAISE EXCEPTION 'accept attempted'; END $$ LANGUAGE plpgsql",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_accept BEFORE UPDATE ON intake_outbox FOR EACH ROW
+         WHEN (NEW.status = 'accepted') EXECUTE FUNCTION refuse_accept()",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('agent-o', 'Test', 'claude', 'unused')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    refuse_accepts(&pool).await;
+    let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
+    let (_registry, shared) = owner.await;
+    let not_cancelled = || false;
+
+    let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
+    let row = seed(&pool, O, 1).await;
+    let _claim_then_first_check_then_lost = test_probe::answers(&[true, true, false]);
+    let outcome = run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
+    assert!(matches!(outcome.await, Ok(TickOutcome::Held)));
+    let (status, owner, error): (String, Option<String>, Option<String>) = state(&pool, row).await;
+    assert_eq!((status, owner, error), pending(), "returned before accept");
+    let marks: (bool, bool, i32, i32) = sqlx::query_as(
+        "SELECT accepted_at IS NULL, spawned_at IS NULL, retry_count, attempt_no
+         FROM intake_outbox WHERE id = $1",
+    )
+    .bind(row)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        marks,
+        (true, true, 0, 1),
+        "no accept, spawn, retry or new attempt"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intake_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "no retry row was queued");
+
+    pool.close().await;
+    fixture.drop().await;
+}

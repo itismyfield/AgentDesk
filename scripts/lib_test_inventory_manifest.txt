@@ -488,6 +488,7 @@ db::intake_outbox::migration_pg_tests::intake_outbox_status_check_rejects_unreco
 db::intake_outbox::migration_pg_tests::intake_outbox_touch_updated_at_trigger_advances_on_update
 db::intake_outbox::migration_pg_tests::intake_outbox_unique_message_attempt_blocks_duplicate_attempt_no
 db::intake_outbox::migration_pg_tests::migration_0080_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase
+db::intake_outbox::postgres_tests::a_claim_holding_no_channel_runs_the_original_two_parameter_statement
 db::intake_outbox::postgres_tests::cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution
 db::intake_outbox::postgres_tests::claim_pending_for_target_filters_by_row_provider
 db::intake_outbox::postgres_tests::claim_pending_for_target_filters_by_target_instance_id
@@ -2093,6 +2094,7 @@ services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
+services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::intake_worker::tests::fence_between_open_check_and_active_registration_rejects_late_tick
 services::cluster::intake_worker::tests::intake_request_from_row_handles_null_request_owner_name
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_numeric_channel_id
@@ -5401,6 +5403,7 @@ services::discord::runtime_bootstrap::gateway_lease::tests::preferred_node_recog
 services::discord::runtime_bootstrap::gateway_lease::tests::self_id_is_read_from_config_not_from_the_bootstrap_race
 services::discord::runtime_bootstrap::gateway_lease::tests::standby_retry_delay_stays_inside_thirty_to_sixty_seconds
 services::discord::runtime_bootstrap::gateway_lease::tests::yields_only_to_a_preferred_node_that_wants_this_gateway
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
@@ -9584,8 +9587,10 @@ services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor
+services::tui_o::writer::tests::actor::host_start::a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
+services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init

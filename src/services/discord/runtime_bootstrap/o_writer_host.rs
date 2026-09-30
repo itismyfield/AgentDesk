@@ -4,6 +4,7 @@
 use super::*;
 
 use std::future::Future;
+use std::time::Duration;
 
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
 use crate::services::tui_o::alarm::AlarmRouter;
@@ -14,9 +15,27 @@ use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{self, HostIo};
 
+/// How long a first activation waits for the cluster bootstrap to publish this node's id.
+const SELF_ID_WAIT: Duration = Duration::from_secs(10);
+
 struct GatewayHost {
     shared: Arc<SharedData>,
     alarms: Arc<AlarmRouter>,
+    self_id_wait: Duration,
+}
+
+/// The id the cluster bootstrap published; the hostname-PID fallback is never taken for it.
+async fn published_self_id(max_wait: Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + max_wait;
+    loop {
+        if let Some(id) = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get() {
+            return Some(id.clone());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 impl HostIo for GatewayHost {
@@ -57,12 +76,12 @@ impl HostIo for GatewayHost {
         channel: u64,
         provider: ShadowProvider,
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
-        let shared = Arc::clone(&self.shared);
+        let (shared, self_id_wait) = (Arc::clone(&self.shared), self.self_id_wait);
         async move {
             let pool = shared.pg_pool.clone().ok_or("no PG pool")?;
             let id = channel.to_string();
-            let local =
-                crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+            let local = published_self_id(self_id_wait).await;
+            let local = local.ok_or("this node's instance id is not published yet")?;
             let rows = crate::db::o_channel_activation::activation_rows(&pool, &id, &local).await;
             let rows = rows.map_err(|error| format!("activation rows: {error}"))?;
             let agent_node =
@@ -107,10 +126,29 @@ pub(super) fn spawn(
             io: Arc::new(GatewayHost {
                 shared: Arc::clone(shared),
                 alarms,
+                self_id_wait: SELF_ID_WAIT,
             }),
             runtime_root: crate::config::runtime_root(),
             gate: crate::services::tui_o::ownership::gate(provider.as_str()),
             readiness: host::process_readiness(),
         }
     });
+}
+
+#[cfg(test)]
+pub(super) mod test_host {
+    use super::*;
+
+    /// The gateway host over `shared`, waiting `self_id_wait` for the published self id.
+    pub(in crate::services::discord::runtime_bootstrap) fn over(
+        shared: Arc<SharedData>,
+        self_id_wait: Duration,
+    ) -> impl HostIo {
+        let alarms = Arc::new(AlarmRouter::for_process(None, None));
+        GatewayHost {
+            shared,
+            alarms,
+            self_id_wait,
+        }
+    }
 }
