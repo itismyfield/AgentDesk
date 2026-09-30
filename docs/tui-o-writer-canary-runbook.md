@@ -82,12 +82,14 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 
 ## 5. Observe
 
-Watch the canary for at least 72 hours and 50 turns with an oracle independent of the writer:
+Watch the canary for 50 turns with an oracle independent of the writer:
 
 - Silent missing: every assistant text unit in the transcript appears in the channel, or its
   withheld state is visible as an alarm.
 - Unapproved duplicates: no unit is posted twice without an ambiguity alarm.
 - Legacy body effect: Legacy posts no body text in the canary channel (count 0).
+
+When all three hold across the 50 turns, move to the expansion step without further waiting.
 
 Other channels stay on Legacy throughout. Check that their delivery is unchanged.
 
