@@ -131,6 +131,15 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
+          // A host-guard refusal (Herdr or unresolved host) keeps the session and is not a failure.
+          if (killResp && killResp.refused) {
+            agentdesk.log.warn(
+              "[idle-kill] kill-tmux refused by host guard for " + s.session_key +
+              " (" + (killResp.reason || "unknown") + ", not counted toward budget)"
+            );
+            continue;
+          }
+
           if (!killResp || !killResp.ok) {
             agentdesk.log.error("[idle-kill] kill-tmux API failed for " + s.session_key + ": " + JSON.stringify(killResp));
             continue;

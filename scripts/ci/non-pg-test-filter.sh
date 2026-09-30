@@ -52,6 +52,7 @@ NON_PG_SKIP_ARGS=(
   --skip engine::ops::db_ops::tests
   --skip engine::ops::kanban_ops::tests
   --skip engine::ops::message_ops::tests
+  --skip engine::ops::timeouts_ops::host_repair::tests
   --skip github::sync::terminal_open_alert_tests
   --skip high_risk_recovery
   --skip reconcile::dispatch_delivery_reconcile_tests

@@ -1290,6 +1290,8 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
 const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
+/// The timeouts policy repair facade: the one production caller of the target guard.
+const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 
 // Dormant guard: no production code reaches a Herdr host. Owners may only name
 // Herdr items, never construct or route to one; everything else may not name them.
@@ -1313,6 +1315,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
         (SESSION_RECORD, 1),
+        (POLICY_REPAIR, 2),
         // Dormant Herdr launch: names the host for the pane location and its marker.
         ("src/services/herdr_launch.rs", 2),
     ];
@@ -1421,7 +1424,7 @@ fn herdr_items_have_no_production_caller() {
 }
 
 // The session target resolver and consumer guard stay with their owners; production
-// reaches them only through the keyed teardown gate in the inflight guard adapter.
+// reaches them only through the keyed teardown gate and the policy repair facade.
 #[test]
 fn session_target_guard_stays_behind_the_keyed_gate() {
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
@@ -1430,44 +1433,48 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
     const INPUT: &str = "src/services/claude_tui/host_input.rs";
     // Needle, files that may name it, and the calls allowed there beyond its `fn`.
     const ITEMS: &[(&str, &[&str], usize)] = &[
-        ("resolve_session_target", &[RESOLVE, ROOT, GUARD_ADAPTER], 1),
+        (
+            "resolve_session_target",
+            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
+            1,
+        ),
         ("resolve_target_host", &[RESOLVE], 1),
         ("legacy_target_host", &[RESOLVE], 1),
-        ("guard_first_state_change", &[GUARD, ROOT], 1),
+        ("guard_first_state_change", &[GUARD, ROOT, POLICY_REPAIR], 1),
         ("clear_legacy_session", &[GUARD, ROOT, GUARD_ADAPTER], 1),
-        ("probe_for_policy", &[GUARD, ROOT], 0),
-        ("legacy_ref", &[RESOLVE, GUARD], 2),
+        ("probe_for_policy", &[GUARD, ROOT, POLICY_REPAIR], 1),
+        ("legacy_ref", &[RESOLVE, GUARD, POLICY_REPAIR], 2),
         ("with_inflight_row", &[GUARD_ADAPTER], 1),
         ("locator_witness", &[GUARD_ADAPTER], 1),
         ("marker_witness", &[GUARD_ADAPTER], 1),
         (
             "session_record_witness",
-            &[SESSION_RECORD, ROOT, GUARD_ADAPTER],
+            &[SESSION_RECORD, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
             1,
         ),
-        ("with_host_marker", &[RESOLVE], 0),
+        ("with_host_marker", &[RESOLVE, POLICY_REPAIR], 1),
         (
             "ResolvedSessionTarget",
-            &[RESOLVE, GUARD, ROOT, INPUT],
+            &[RESOLVE, GUARD, ROOT, INPUT, POLICY_REPAIR],
             usize::MAX,
         ),
         ("from_session_target", &[INPUT], 0),
         (
             "SessionTargetEvidence",
-            &[RESOLVE, ROOT, GUARD_ADAPTER],
+            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
             usize::MAX,
         ),
         (
             "SessionTargetInput",
-            &[RESOLVE, ROOT, GUARD_ADAPTER],
+            &[RESOLVE, ROOT, GUARD_ADAPTER, POLICY_REPAIR],
             usize::MAX,
         ),
         (
             "HostWitness",
-            &[RESOLVE, ROOT, GUARD_ADAPTER, SESSION_RECORD],
+            &[RESOLVE, ROOT, GUARD_ADAPTER, SESSION_RECORD, POLICY_REPAIR],
             usize::MAX,
         ),
-        ("GuardVerdict", &[GUARD, ROOT], usize::MAX),
+        ("GuardVerdict", &[GUARD, ROOT, POLICY_REPAIR], usize::MAX),
         ("PolicyProbe", &[GUARD, ROOT], usize::MAX),
         ("consumer_guard", &[ROOT], usize::MAX),
         (
