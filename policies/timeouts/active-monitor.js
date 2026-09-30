@@ -31,6 +31,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         var result = agentdesk.timeouts.repairStaleSession(key, {
           session_id: host.session_id,
           active_dispatch_id: row.active_dispatch_id || null,
+          active_turn_nonce: row.active_turn_nonce,
           observed: host.state,
           fail_dispatch: !!opts.fail_dispatch,
           fail_reason: opts.fail_reason || "",

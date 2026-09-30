@@ -243,6 +243,7 @@ fn list_stale_working_sessions_raw(pg_pool: Option<&PgPool>, grace_minutes: i32)
             let rows = sqlx::query(
                 "SELECT s.session_key,
                         s.active_dispatch_id,
+                        s.active_turn_nonce,
                         td.status AS active_dispatch_status
                  FROM sessions s
                  LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
@@ -261,7 +262,8 @@ fn list_stale_working_sessions_raw(pg_pool: Option<&PgPool>, grace_minutes: i32)
                     json!({
                         "session_key": row.try_get::<Option<String>, _>("session_key").ok().flatten(),
                         "active_dispatch_id": row.try_get::<Option<String>, _>("active_dispatch_id").ok().flatten(),
-                        "active_dispatch_status": row.try_get::<Option<String>, _>("active_dispatch_status").ok().flatten()
+                        "active_dispatch_status": row.try_get::<Option<String>, _>("active_dispatch_status").ok().flatten(),
+                        "active_turn_nonce": row.try_get::<Option<String>, _>("active_turn_nonce").ok().flatten()
                     })
                 })
                 .collect::<Vec<_>>();
@@ -297,6 +299,7 @@ fn list_deadlock_candidates_raw(
                 "SELECT session_key,
                         agent_id,
                         active_dispatch_id,
+                        active_turn_nonce,
                         last_heartbeat
                  FROM sessions
                  WHERE status IN ('turn_active', 'working')
@@ -322,6 +325,7 @@ fn list_deadlock_candidates_raw(
                         "session_key": row.try_get::<Option<String>, _>("session_key").ok().flatten(),
                         "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
                         "active_dispatch_id": row.try_get::<Option<String>, _>("active_dispatch_id").ok().flatten(),
+                        "active_turn_nonce": row.try_get::<Option<String>, _>("active_turn_nonce").ok().flatten(),
                         "last_heartbeat": format_ts(last_heartbeat)
                     })
                 })

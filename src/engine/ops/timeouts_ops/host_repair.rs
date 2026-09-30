@@ -195,6 +195,9 @@ pub(super) struct RepairRequest {
     session_id: i64,
     #[serde(default)]
     active_dispatch_id: Option<String>,
+    /// The listed row's `active_turn_nonce` (`null` for none); required so no caller skips it.
+    #[serde(deserialize_with = "Option::deserialize")]
+    active_turn_nonce: Option<String>,
     /// The liveness the decision was made on: `live` or `dead`.
     observed: String,
     #[serde(default)]
@@ -241,7 +244,7 @@ fn not_repaired(deferral: Deferral) -> Value {
 }
 
 /// Re-resolves row and host, then in one transaction fails the observed dispatch, re-checks
-/// the row and dispatch are unchanged and marks it idle; any change rolls it all back.
+/// the row, turn nonce and dispatch are unchanged and marks it idle; any change rolls it back.
 pub(super) async fn repair_stale_session_pg(
     pool: &PgPool,
     session_key: &str,
@@ -308,9 +311,12 @@ pub(super) async fn repair_stale_session_pg(
         }
     }
 
-    // Locked after the dispatch transition, the order every dispatch writer takes.
+    // Locked after the dispatch transition, the order every dispatch writer takes. The
+    // transition never writes the turn nonce, so a different one here is a new turn.
     let row = sqlx::query(
-        "SELECT s.hosted_execution IS NULL AS legacy, s.active_dispatch_id FROM sessions s
+        "SELECT s.hosted_execution IS NULL AS legacy, s.active_dispatch_id,
+                s.active_turn_nonce IS NOT DISTINCT FROM $3 AS same_turn
+         FROM sessions s
          WHERE s.id = $1
            AND (s.session_key = $2 OR EXISTS (SELECT 1 FROM session_key_aliases a
                                                WHERE a.session_id = s.id AND a.session_key = $2))
@@ -318,21 +324,27 @@ pub(super) async fn repair_stale_session_pg(
     )
     .bind(legacy.session_id)
     .bind(session_key)
+    .bind(request.active_turn_nonce.as_deref())
     .fetch_optional(&mut *tx)
     .await
     .map_err(db("recheck session"))?;
-    let unchanged = row.is_some_and(|row| {
-        let is_legacy = row.try_get::<bool, _>("legacy").unwrap_or(false);
-        let active: Option<String> = row.try_get("active_dispatch_id").ok().flatten();
-        let cleared_by_fail = dispatch_changed > 0 && active.is_none();
-        is_legacy && (active == request.active_dispatch_id || cleared_by_fail)
-    });
-    if !unchanged {
+    let changed = match row {
+        None => Some("row or record changed"),
+        Some(row) if !row.try_get::<bool, _>("legacy").unwrap_or(false) => {
+            Some("row or record changed")
+        }
+        Some(row) if !row.try_get::<bool, _>("same_turn").unwrap_or(false) => {
+            Some("turn nonce changed")
+        }
+        Some(row) => {
+            let active: Option<String> = row.try_get("active_dispatch_id").ok().flatten();
+            let cleared_by_fail = dispatch_changed > 0 && active.is_none();
+            (active != request.active_dispatch_id && !cleared_by_fail).then_some("dispatch changed")
+        }
+    };
+    if let Some(detail) = changed {
         tx.rollback().await.map_err(db("rollback repair"))?;
-        return Ok(not_repaired(defer(
-            "row_changed",
-            "row, record or dispatch changed",
-        )));
+        return Ok(not_repaired(defer("row_changed", detail)));
     }
     let rows_affected = sqlx::query(
         "UPDATE sessions

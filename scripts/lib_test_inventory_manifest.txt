@@ -798,8 +798,10 @@ engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
 engine::ops::pipeline_ops::auto_queue_phase_gate_js_contract_tests::quickjs_phase_gate_declarations_match_rust_registry_serialization
 engine::ops::timeouts_ops::host_repair::tests::legacy_row_repairs_match_the_base_policy_writes_pg
 engine::ops::timeouts_ops::host_repair::tests::non_legacy_rows_defer_without_probe_write_or_tmux_command_pg
+engine::ops::timeouts_ops::host_repair::tests::repair_after_a_new_turn_on_the_same_row_writes_nothing_pg
 engine::ops::timeouts_ops::host_repair::tests::repair_after_the_row_changed_since_observation_writes_nothing_pg
 engine::ops::timeouts_ops::host_repair::tests::section_i_defers_herdr_rows_and_repairs_legacy_rows_pg
+engine::ops::timeouts_ops::host_repair::tests::session_command_api_reaches_tmux_only_for_legacy_rows_pg
 engine::ops::timeouts_ops::tests::validation_rejects_empty_session_key
 engine::ops::timeouts_ops::tests::validation_rejects_out_of_range_minutes
 engine::ops::turn_ops::tests::turn_start_host_fn_is_registered

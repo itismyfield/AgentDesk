@@ -172,6 +172,7 @@ async fn repair(
     let request = RepairRequest {
         session_id: id,
         active_dispatch_id: Some(format!("dispatch-{name}")),
+        active_turn_nonce: None,
         observed: observed.to_string(),
         fail_dispatch: fail,
         fail_reason: STALE_REASON.to_string(),
@@ -404,6 +405,228 @@ async fn repair_after_the_row_changed_since_observation_writes_nothing_pg() {
     let result = repair(&pool, "recreated", id, "dead", true, true).await;
     assert_eq!(result["deferred"], "row_changed", "{result}");
     assert_eq!(snapshot(&pool, "recreated").await, before);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Starts a new turn on the row the way the turn-start hook does: same row, same dispatch.
+async fn start_turn(pool: &PgPool, name: &str, index: usize, nonce: &str) {
+    let (key, channel) = (key(name), channel(index));
+    let params = HookSessionUpsert {
+        session_key: &key,
+        instance_id: Some("test-node"),
+        agent_id: Some(AGENT),
+        provider: "claude",
+        status: "turn_active",
+        session_info: None,
+        model: None,
+        tokens: None,
+        cwd: None,
+        active_dispatch_id: None,
+        thread_channel_id: None,
+        channel_id: Some(&channel),
+        claude_session_id: None,
+        raw_provider_session_id: None,
+        turn_start_nonce: Some(nonce),
+        dispatched_origin: false,
+    };
+    let identity = CanonicalSessionIdentity {
+        kind: SessionIdentityKind::DiscordChannel,
+        discord_token_hash: TOKEN,
+        channel_id: &channel,
+    };
+    upsert_hook_session_with_identity_pg(pool, params, Some(identity))
+        .await
+        .unwrap();
+}
+
+// A new turn started on the same row after the observation keeps its row id and dispatch
+// link and changes only the nonce: the repair writes nothing and fails no dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_after_a_new_turn_on_the_same_row_writes_nothing_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = setup().await;
+    let cases = [
+        ("turn-unlinked", "pending", false, true),
+        ("turn-pending", "pending", true, true),
+        ("turn-dispatched", "dispatched", true, true),
+        ("turn-same", "pending", true, false),
+    ];
+    for (index, (name, dispatch, linked, new_turn)) in cases.into_iter().enumerate() {
+        seed(&pool, name, 400 + index, None, dispatch).await;
+        sqlx::query(
+            "UPDATE sessions SET active_turn_nonce = 'turn-a',
+                    active_dispatch_id = CASE WHEN $2 THEN active_dispatch_id END
+             WHERE session_key = $1",
+        )
+        .bind(key(name))
+        .bind(linked)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (observed, _) = observe(&pool, &key(name), HostLiveness::DeadOrAbsent);
+        let id = observed["session_id"].as_i64().unwrap();
+        if new_turn {
+            start_turn(&pool, name, 400 + index, "turn-b").await;
+            assert_eq!(session_id(&pool, name).await, id, "{name}: same row");
+        }
+        let before = snapshot(&pool, name).await;
+        let request = RepairRequest {
+            session_id: id,
+            active_dispatch_id: linked.then(|| format!("dispatch-{name}")),
+            active_turn_nonce: Some("turn-a".to_string()),
+            observed: "dead".to_string(),
+            fail_dispatch: linked,
+            fail_reason: STALE_REASON.to_string(),
+            clear_active_dispatch_id: true,
+        };
+        let result = repair_stale_session_pg(&pool, &key(name), request)
+            .await
+            .unwrap();
+        if !new_turn {
+            assert_eq!(result["repaired"], true, "{name}: {result}");
+            continue;
+        }
+        assert_eq!(result["deferred"], "row_changed", "{name}: {result}");
+        assert_eq!(result["detail"], "turn nonce changed", "{name}: {result}");
+        assert_eq!(snapshot(&pool, name).await, before, "{name}: new turn kept");
+    }
+    assert_eq!(
+        snapshot(&pool, "turn-same").await,
+        json!(["idle", "none", "Dispatch failed", "failed", STALE_REASON, 1])
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Records the tmux side of `session.sendCommand`/`kill`; the kill audit takes `audit_delay`.
+#[derive(Clone, Default)]
+struct RecordingTmux {
+    calls: Arc<Mutex<Vec<String>>>,
+    audit_delay: std::time::Duration,
+}
+
+impl crate::engine::ops::exec_ops::SessionTmux for RecordingTmux {
+    fn send_keys(
+        &self,
+        name: &str,
+        keys: &[&str],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<std::process::Output, String> {
+        let call = format!("send-keys {name} {keys:?} {timeout:?}");
+        self.calls.lock().unwrap().push(call);
+        Err("fake tmux".to_string())
+    }
+
+    fn audit_kill(&self, name: &str) {
+        self.calls.lock().unwrap().push(format!("audit {name}"));
+        std::thread::sleep(self.audit_delay);
+    }
+
+    fn kill(
+        &self,
+        name: &str,
+        reason: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<std::process::Output, String> {
+        let call = format!("kill {name} {reason} {timeout:?}");
+        self.calls.lock().unwrap().push(call);
+        Err("fake tmux".to_string())
+    }
+}
+
+/// Registers the session API over `tmux` and evaluates each JS expression to its JSON result.
+fn call_session_api(pool: &PgPool, tmux: RecordingTmux, calls: &[String]) -> Vec<Value> {
+    let runtime = rquickjs::Runtime::new().unwrap();
+    let context = rquickjs::Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        ctx.globals()
+            .set("agentdesk", Object::new(ctx.clone()).unwrap())
+            .unwrap();
+        crate::engine::ops::exec_ops::register_exec_ops(&ctx).unwrap();
+        crate::engine::ops::exec_ops::register_session_command_ops_for_test(
+            &ctx,
+            Some(pool.clone()),
+            tmux,
+        )
+        .unwrap();
+        let eval =
+            |call: &String| serde_json::from_str(&ctx.eval::<String, _>(call.as_str()).unwrap());
+        calls.iter().map(|call| eval(call).unwrap()).collect()
+    })
+}
+
+// `agentdesk.session.sendCommand/kill` refuse Herdr, missing, unknown and conflicting keys
+// before any tmux call or kill audit; a legacy key reaches tmux once with its exact target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_command_api_reaches_tmux_only_for_legacy_rows_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = setup().await;
+    let bound = Some(wire(&record(
+        &owner(&channel(501)),
+        "n1",
+        HostedState::Bound,
+    )));
+    seed(&pool, "api-legacy", 500, None, "pending").await;
+    seed(&pool, "api-herdr", 501, bound, "pending").await;
+    seed(
+        &pool,
+        "api-future",
+        502,
+        Some(future_schema(&owner(&channel(502)))),
+        "pending",
+    )
+    .await;
+    let foreign = Some(wire(&pending(&owner(&channel(599)), "n9")));
+    seed(&pool, "api-foreign", 503, foreign, "pending").await;
+    let api = |key: &str| {
+        [
+            format!("agentdesk.session.sendCommand({key:?}, '/compact')"),
+            format!("agentdesk.session.kill({key:?})"),
+        ]
+    };
+
+    let refused = [
+        (key("api-herdr"), "herdr_unsupported"),
+        (key("api-absent"), "session_missing"),
+        (key("api-future"), "host_unknown"),
+        (key("api-foreign"), "row_conflict"),
+        (tmux_name("api-legacy"), "session_missing"),
+    ];
+    for (key, reason) in refused {
+        let tmux = RecordingTmux::default();
+        for result in call_session_api(&pool, tmux.clone(), &api(&key)) {
+            assert_eq!(
+                (&result["refused"], &result["reason"]),
+                (&json!(true), &json!(reason))
+            );
+        }
+        assert!(tmux.calls.lock().unwrap().is_empty(), "{key}: no tmux call");
+    }
+
+    let tmux = RecordingTmux::default();
+    call_session_api(&pool, tmux.clone(), &api(&key("api-legacy")));
+    let name = tmux_name("api-legacy");
+    assert_eq!(
+        *tmux.calls.lock().unwrap(),
+        [
+            format!(r#"send-keys {name} ["/compact", "Enter"] None"#),
+            format!("audit {name}"),
+            format!("kill {name} force-kill via agentdesk.session.kill() None"),
+        ]
+    );
+
+    // The kill audit outlasts the bridge budget, so the tmux kill must not start.
+    let budget = std::time::Duration::from_millis(1500);
+    let _deadline = crate::engine::loader::ScopedBridgeDeadline::new(budget);
+    let tmux = RecordingTmux {
+        audit_delay: budget * 2,
+        ..RecordingTmux::default()
+    };
+    let kill = [format!("agentdesk.session.kill({:?})", key("api-legacy"))];
+    let result = call_session_api(&pool, tmux.clone(), &kill);
+    assert_eq!(*tmux.calls.lock().unwrap(), [format!("audit {name}")]);
+    assert_eq!(result[0]["ok"], false, "{result:?}");
     pool.close().await;
     db.drop().await;
 }

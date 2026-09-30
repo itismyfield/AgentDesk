@@ -15129,25 +15129,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:288d55cd3dd04f085137b633fc093e65231060e47e59c8e560cad510c2013b85"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:32785d961e356829a013e8d26c6a22c73ee1b625dd5001d7b1b14d75a94e34b5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:4e4f902e26573c243bc17b11b83188339454f5f41c751ce9bb041cf0d30fafc2"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/engine/ops/timeouts_ops.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:55db28d6e32400df55e77c9bb484908901b84d225d4d2b77acdc3a9038d85cc4"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/engine/ops/timeouts_ops.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:5ba9b6d5409d23bf799c45c7462b5bd062e86757a0580116541a9f083088b01c"
     },
     {
       "root": "src",
@@ -15183,7 +15183,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:5d71b9cb8a6e73be9e57cbb07d82c45b7fecf8f56617843b7391fe89ec6bbbc2"
+      "fingerprint": "sha256:a7858fb564972b0061d70e12d8c7dbf4b8f523bbb91346784666fd26ba0cb201"
     },
     {
       "root": "src",
@@ -15265,6 +15265,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:c2c3f6b8bfd5ef3cd8e3dc1cc46a6cb38c9607035cdecf4b59f632872bf14324"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e233ef8dacb31fb575e38ed46574f54f27170fecb463e87009faf61398283a07"
     },
     {
       "root": "src",

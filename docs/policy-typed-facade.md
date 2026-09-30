@@ -33,7 +33,7 @@ Current typed facade entrypoints:
 | `agentdesk.timeouts` | `listStaleWorkingSessions(grace_minutes)` | Returns stale `turn_active`/`working` sessions plus active dispatch status for safe stale-session recovery. |
 | `agentdesk.timeouts` | `listDeadlockCandidates(stale_scan_minutes, limit)` | Returns bounded stale session candidates ordered by heartbeat without exposing session SQL to JS. |
 | `agentdesk.timeouts` | `observeSessionHost(session_key)` | Resolves the full key to its sessions row and host; returns `live`/`dead` only for a legacy tmux row whose probe answered, otherwise `unknown` with the deferral `reason`. |
-| `agentdesk.timeouts` | `repairStaleSession(session_key, request)` | Re-resolves the row and host, then in one transaction fails the observed pending/dispatched dispatch (optional), re-checks the row and dispatch are unchanged, and marks the session `idle`. Returns `repaired:false` with `deferred` otherwise. |
+| `agentdesk.timeouts` | `repairStaleSession(session_key, request)` | Re-resolves the row and host, then in one transaction fails the observed pending/dispatched dispatch (optional), re-checks the row, the listed `active_turn_nonce` and the dispatch are unchanged, and marks the session `idle`. Returns `repaired:false` with `deferred` otherwise. |
 | `agentdesk.timeouts` | `getDispatchType(dispatch_id)` | Returns a dispatch type or `null` for review-hang targeting. |
 | `agentdesk.timeouts` | `recordDeadlockTermination(payload)` | Inserts the deadlock-policy termination audit row with fixed component/reason fields. |
 | `agentdesk.timeouts` | `cleanupDeadlockCountersForInactiveSessions()` | Deletes `deadlock_check:*` markers whose sessions are no longer active. |

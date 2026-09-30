@@ -644,6 +644,7 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
           session_key: sessionKey,
           agent_id: "agent-1",
           active_dispatch_id: "dispatch-1",
+          active_turn_nonce: null,
           last_heartbeat: "2026-04-29 10:00:00"
         }
       ]
@@ -658,7 +659,7 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
   assert.equal(state.deadlockAlerts.length, 0);
   assert.equal(state.httpPosts.length, 0);
   assert.deepEqual(toPlain(state.timeoutRepairCalls), [{ sessionKey, request: {
-    session_id: 1, active_dispatch_id: "dispatch-1", observed: "live",
+    session_id: 1, active_dispatch_id: "dispatch-1", active_turn_nonce: null, observed: "live",
     fail_dispatch: false, fail_reason: "", clear_active_dispatch_id: false
   } }]);
 });
@@ -1277,7 +1278,7 @@ test("active monitor defers every unresolved host in both loops and refreshes it
       .map((dispatchStatus) => ({ observed, hasInflight, dispatchStatus }))));
   for (const { observed, hasInflight, dispatchStatus } of cases) {
     const sessionKey = "claude/tok/mac-mini:__proto__";
-    const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: dispatchStatus };
+    const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: dispatchStatus, active_turn_nonce: "turn-1" };
     let observation = observed;
     const { policy, state } = loadPolicy("policies/timeouts.js", {
       sessionHost() { return Object.assign({ session_id: 7, tmux_name: "__proto__" }, observation); },
@@ -1294,7 +1295,7 @@ test("active monitor defers every unresolved host in both loops and refreshes it
     const defer = observed.state === "unknown";
     const recover = !defer && (observed.state === "dead" || !hasInflight);
     const repair = (stale) => ({ sessionKey, request: {
-      session_id: 7, active_dispatch_id: "d1", observed: observed.state,
+      session_id: 7, active_dispatch_id: "d1", active_turn_nonce: "turn-1", observed: observed.state,
       fail_dispatch: stale && dispatchStatus !== "completed",
       fail_reason: stale ? "Stale working session recovery — no active tmux session after 10min" : "",
       clear_active_dispatch_id: stale
