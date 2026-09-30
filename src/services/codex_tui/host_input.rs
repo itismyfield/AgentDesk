@@ -8,7 +8,7 @@ use super::input::{PROMPT_READY_CANCELLED_ERROR, TuiInputAction};
 #[cfg(test)]
 pub(crate) use crate::services::claude_tui::host_input::InputRefusal;
 pub(crate) use crate::services::claude_tui::host_input::{
-    InputRun, InputTarget, InputTransport, LegacyTmuxGate, MutationGate, StopCause,
+    InputRun, InputTarget, LegacyTmuxGate, MutationGate, StopCause,
 };
 use crate::services::platform::tmux;
 use crate::services::process::ProcessIdentity;
@@ -17,8 +17,18 @@ use crate::services::session_host::{HostKey, TmuxHost};
 
 const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
 
-/// Codex pane reads and the legacy kill barrier on top of the shared input transport.
-pub(crate) trait CodexTransport: InputTransport {
+/// Pane writes a Codex key plan makes.
+pub(crate) trait CodexWrites {
+    fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String>;
+    fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String>;
+    fn paste_buffer(&mut self, session: &str, buffer: &str, delete: bool)
+    -> Result<Output, String>;
+    fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String>;
+}
+
+/// Codex pane reads and the legacy kill barrier. Codex keeps its own transport
+/// because the Claude one also retires sessions under the Claude termination owner.
+pub(crate) trait CodexTransport: CodexWrites {
     fn capture_ansi(&mut self, session: &str, scroll_back: i32) -> Option<String>;
     fn capture_bounded(
         &mut self,
@@ -26,6 +36,7 @@ pub(crate) trait CodexTransport: InputTransport {
         scroll_back: i32,
         timeout: Duration,
     ) -> Option<String>;
+    fn pane_alive(&mut self, session: &str) -> bool;
     fn pane_pid(&mut self, session: &str) -> Option<u32>;
     fn kill_tree(&mut self, pid: u32, identity: ProcessIdentity) -> bool;
     fn kill_session(&mut self, session: &str, reason: &str) -> bool;
@@ -35,7 +46,7 @@ pub(crate) trait CodexTransport: InputTransport {
 
 struct TmuxCodexInput;
 
-impl InputTransport for TmuxCodexInput {
+impl CodexWrites for TmuxCodexInput {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
         tmux::send_literal(session, text)
     }
@@ -56,18 +67,6 @@ impl InputTransport for TmuxCodexInput {
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
         TmuxHost.send_host_keys(session, keys)
     }
-
-    fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String> {
-        tmux::capture_pane(session, scroll_back)
-    }
-
-    fn pane_alive(&mut self, session: &str) -> bool {
-        crate::services::tmux_diagnostics::tmux_session_has_live_pane(session)
-    }
-
-    fn present(&mut self, session: &str) -> bool {
-        tmux::has_session(session)
-    }
 }
 
 impl CodexTransport for TmuxCodexInput {
@@ -82,6 +81,10 @@ impl CodexTransport for TmuxCodexInput {
         timeout: Duration,
     ) -> Option<String> {
         tmux::capture_pane_timeout(session, scroll_back, timeout)
+    }
+
+    fn pane_alive(&mut self, session: &str) -> bool {
+        crate::services::tmux_diagnostics::tmux_session_has_live_pane(session)
     }
 
     fn pane_pid(&mut self, session: &str) -> Option<u32> {
@@ -143,7 +146,7 @@ pub(crate) struct PlanRun {
 pub(crate) fn run_plan(
     target: &InputTarget,
     gate: &dyn MutationGate,
-    transport: &mut dyn InputTransport,
+    transport: &mut dyn CodexWrites,
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
 ) -> PlanRun {
@@ -180,7 +183,7 @@ pub(crate) fn run_plan(
 struct Plan<'a> {
     session: &'a str,
     gate: &'a dyn MutationGate,
-    transport: &'a mut dyn InputTransport,
+    transport: &'a mut dyn CodexWrites,
     cancel_token: Option<&'a CancelToken>,
     confirmed: usize,
     composer_mutated: bool,
@@ -237,7 +240,7 @@ impl Plan<'_> {
     fn send(
         &mut self,
         action: &TuiInputAction,
-        send: impl FnOnce(&mut dyn InputTransport) -> Result<Output, String>,
+        send: impl FnOnce(&mut dyn CodexWrites) -> Result<Output, String>,
     ) -> Result<(), InputRun> {
         send(&mut *self.transport)
             .and_then(|output| ensure_tmux_success(output, action))
@@ -250,7 +253,7 @@ impl Plan<'_> {
     fn mutate(
         &mut self,
         action: &TuiInputAction,
-        send: impl FnOnce(&mut dyn InputTransport) -> Result<Output, String>,
+        send: impl FnOnce(&mut dyn CodexWrites) -> Result<Output, String>,
     ) -> Result<(), InputRun> {
         self.admit()?;
         self.enter_attempted |= matches!(action, TuiInputAction::Enter);
@@ -423,7 +426,7 @@ pub(super) fn run_actions_with_executor(
 struct ExecutorWrites<'a, E>(&'a mut E);
 
 #[cfg(test)]
-impl<E: TuiActionExecutor> InputTransport for ExecutorWrites<'_, E> {
+impl<E: TuiActionExecutor> CodexWrites for ExecutorWrites<'_, E> {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
         self.0.send_literal(session, text)
     }
@@ -447,18 +450,6 @@ impl<E: TuiActionExecutor> InputTransport for ExecutorWrites<'_, E> {
             .map(|key| crate::services::session_host::tmux_key_name(*key))
             .collect();
         self.0.send_keys(session, &names)
-    }
-
-    fn capture(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {
-        None
-    }
-
-    fn pane_alive(&mut self, _session: &str) -> bool {
-        false
-    }
-
-    fn present(&mut self, _session: &str) -> bool {
-        false
     }
 }
 
@@ -540,7 +531,7 @@ pub(super) mod spy {
         }
     }
 
-    impl InputTransport for Spy {
+    impl CodexWrites for Spy {
         fn send_literal(&mut self, _session: &str, text: &str) -> Result<Output, String> {
             self.send(format!("literal:{text}"))
         }
@@ -559,18 +550,6 @@ pub(super) mod spy {
             let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();
             self.send(format!("keys:{}", names.join("+")))
         }
-
-        fn capture(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {
-            self.read("capture")
-        }
-
-        fn pane_alive(&mut self, _session: &str) -> bool {
-            !self.record("alive").dead
-        }
-
-        fn present(&mut self, _session: &str) -> bool {
-            !self.record("present").dead
-        }
     }
 
     impl CodexTransport for Spy {
@@ -580,6 +559,10 @@ pub(super) mod spy {
 
         fn capture_bounded(&mut self, _s: &str, _b: i32, _timeout: Duration) -> Option<String> {
             self.read("capture_bounded")
+        }
+
+        fn pane_alive(&mut self, _session: &str) -> bool {
+            !self.record("alive").dead
         }
 
         fn pane_pid(&mut self, _session: &str) -> Option<u32> {
@@ -690,13 +673,12 @@ pub(super) mod spy {
 mod tests {
     use std::sync::Arc;
 
-    use super::spy::{Spy, SpyGuard, SpyState, exit, known, non_tmux_targets, resolved};
+    use super::spy::{Spy, SpyGuard, SpyState, exit, non_tmux_targets};
     use super::*;
     use crate::services::codex_tui::input::{
         CodexFollowupPromptSubmitOutcome, CodexPaneBusySignal, CodexPaneBusySignalTracker,
         submit_codex_followup_prompt,
     };
-    use crate::services::session_host::HostKind;
 
     const READY: &str = "\
 ╭──────────────────────────────────────────────────────────────╮
@@ -1011,6 +993,9 @@ mod tests {
         // Positive control: a confirmed tmux session keeps the legacy kill order.
         #[cfg(unix)]
         {
+            use super::spy::{known, resolved};
+            use crate::services::session_host::HostKind;
+
             let tmux = resolved(known(HostKind::Tmux));
             assert_eq!(tmux, InputTarget::Tmux("AgentDesk-codex-p6b".to_string()));
             let guard = SpyGuard::install(SpyState {
