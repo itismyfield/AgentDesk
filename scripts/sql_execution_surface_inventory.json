@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5a840853f082059cab39bc89393e40243fefe92b",
+  "measured_at_sha": "cb9a04c974fe995df2d850b5f2ebee3d5fd751b2",
   "records": [
     {
       "root": "migrations/postgres",
@@ -15147,15 +15147,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:cbf8d82efa7bcb07009c9cab93e481f28439bd3f7ee04f6dfa9fae62185b0e66"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/engine/ops/timeouts_ops.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:cfd668940a84f6767909c08bf2dfed43462f1809e84088af0dcf46c67b7a6d08"
     },
     {
@@ -15166,6 +15157,141 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:ed5f1cc5382d3a67f52c11f447657c068d535d0721b68f600eafbe122765d4a2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5d71b9cb8a6e73be9e57cbb07d82c45b7fecf8f56617843b7391fe89ec6bbbc2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ed75e4ef44aab90ff28090592c9c267ebfbb678a43a20379e363742d08dd7742"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:123e637f87a2be8043d4b17efe80b21e0c0d8df6b782fbfa6a502b4509f79701"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:326b55d9535c42221a38d171dce0d7826f769cd59d0d7dcae647a14191703fbf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:67259003ef1b81e35648f893cf7110c62d2645e1f7720919f6b2b8d3ff61221b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9a7e6d6315430a123da93c0d150d790c89c6994c5779d9ac9803155657fe7638"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:accfbfd03049d444087dca935f75484bb8aa778a610b3c1ffc8438c2ffd8c218"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b2f9ac13bf7ab8c5bbf1f21de3e97e0f8dc8d3130ff5d0d3c5e0d8380f67e5c6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c19b98ca9a09584777987f2cc958b539e1a07e29359a7e5cbc940295e4b87ce4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c2c3f6b8bfd5ef3cd8e3dc1cc46a6cb38c9607035cdecf4b59f632872bf14324"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f0a288ee479c860098a5b437d89cd31c9db14d1a9155872605e27aeae2aa1976"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f9b08aad72b2d31b14a24260311ae1c21434f61b491fe5d75a92f72ed5a2b5c5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3ca0d177fd065ef950b22a0568881c1a32b5a9f4f57d6381460c8e42d75db3f5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:04e4c85448cac28f37e6f0c54cc2e96bc3c7fc6eff97a8ad38aac5175d122ef9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/timeouts_ops/host_repair_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9df10452311a1cdd1885e3278b16a7396b7f269b341e144777791eeaa5e4162c"
     },
     {
       "root": "src",

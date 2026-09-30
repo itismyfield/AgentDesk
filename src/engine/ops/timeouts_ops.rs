@@ -8,7 +8,9 @@ use sqlx::{PgPool, Row as SqlxRow};
 //
 // Replaces raw session/deadlock DB access in policies/timeouts/active-monitor.js
 // with narrow domain operations. Per-key deadlock marker values still use the
-// existing agentdesk.kv facade.
+// existing agentdesk.kv facade. Session host probes and repairs go through `host_repair`.
+
+pub(super) mod host_repair;
 
 pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -44,16 +46,24 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         )?,
     )?;
 
-    let pg_mark_idle = pg_pool.clone();
+    let pg_observe = pg_pool.clone();
     obj.set(
-        "__markSessionIdleRaw",
+        "__observeSessionHostRaw",
+        Function::new(ctx.clone(), move |session_key: String| -> String {
+            host_repair::observe_session_host_raw(pg_observe.as_ref(), &session_key)
+        })?,
+    )?;
+
+    let pg_repair = pg_pool.clone();
+    obj.set(
+        "__repairStaleSessionRaw",
         Function::new(
             ctx.clone(),
-            move |session_key: String, clear_active_dispatch_id: bool| -> String {
-                mark_session_idle_raw(
-                    pg_mark_idle.as_ref(),
+            move |session_key: String, request_json: String| -> String {
+                host_repair::repair_stale_session_raw(
+                    pg_repair.as_ref(),
                     &session_key,
-                    clear_active_dispatch_id,
+                    &request_json,
                 )
             },
         )?,
@@ -83,7 +93,7 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         })?,
     )?;
 
-    let pg_cleanup_history = pg_pool;
+    let pg_cleanup_history = pg_pool.clone();
     obj.set(
         "__cleanupDeadlockHistoryBeforeRaw",
         Function::new(ctx.clone(), move |cutoff_ms: i64| -> String {
@@ -92,6 +102,7 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
     )?;
 
     ad.set("timeouts", obj)?;
+    super::exec_ops::register_session_command_ops(ctx, pg_pool)?;
 
     ctx.eval::<(), _>(
         r#"
@@ -111,11 +122,13 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                 var result = unwrap(JSON.parse(agentdesk.timeouts.__listDeadlockCandidatesRaw(staleScanMinutes, limit || 50)));
                 return result.sessions || [];
             };
-            agentdesk.timeouts.markSessionIdle = function(sessionKey, opts) {
-                opts = opts || {};
-                return unwrap(JSON.parse(agentdesk.timeouts.__markSessionIdleRaw(
+            agentdesk.timeouts.observeSessionHost = function(sessionKey) {
+                return unwrap(JSON.parse(agentdesk.timeouts.__observeSessionHostRaw(sessionKey || "")));
+            };
+            agentdesk.timeouts.repairStaleSession = function(sessionKey, request) {
+                return unwrap(JSON.parse(agentdesk.timeouts.__repairStaleSessionRaw(
                     sessionKey || "",
-                    !!opts.clear_active_dispatch_id
+                    JSON.stringify(request || {})
                 )));
             };
             agentdesk.timeouts.getDispatchType = function(dispatchId) {
@@ -314,44 +327,6 @@ fn list_deadlock_candidates_raw(
                 })
                 .collect::<Vec<_>>();
             Ok(json!({ "sessions": sessions }).to_string())
-        },
-        |error| json!({ "error": error }).to_string(),
-    ) {
-        Ok(result) => result,
-        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
-    }
-}
-
-fn mark_session_idle_raw(
-    pg_pool: Option<&PgPool>,
-    session_key: &str,
-    clear_active_dispatch_id: bool,
-) -> String {
-    let session_key = match valid_session_key(session_key) {
-        Ok(value) => value,
-        Err(error) => return json!({ "error": error }).to_string(),
-    };
-    let Some(pool) = pg_pool else {
-        return unavailable();
-    };
-    match crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            let rows_affected = sqlx::query(
-                "UPDATE sessions
-                 SET status = 'idle',
-                     active_dispatch_id = CASE WHEN $2 THEN NULL ELSE active_dispatch_id END,
-                     last_heartbeat = NOW()
-                 WHERE session_key = $1
-                   AND status IN ('turn_active', 'working')",
-            )
-            .bind(&session_key)
-            .bind(clear_active_dispatch_id)
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| format!("mark session idle {session_key}: {error}"))?
-            .rows_affected();
-            Ok(json!({ "ok": true, "rows_affected": rows_affected }).to_string())
         },
         |error| json!({ "error": error }).to_string(),
     ) {

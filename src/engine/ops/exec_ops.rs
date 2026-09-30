@@ -1,4 +1,4 @@
-use crate::services::discord::session_identity::tmux_name_from_session_key;
+use super::timeouts_ops::host_repair::session_command_target;
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
 use crate::services::session_host::{HostLiveness, HostSessionRef, TmuxHost};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
@@ -359,21 +359,33 @@ fn register_exec_ops_with_runner<'js>(
     "#,
     )?;
 
-    // agentdesk.session.sendCommand(sessionKey, command) — inject a slash command into a tmux session
     let session_obj = rquickjs::Object::new(ctx.clone())?;
     register_session_liveness_op(ctx, &session_obj, |name, budget| {
         TmuxHost.liveness_within(HostSessionRef::tmux(&name), budget)
     })?;
+    ad.set("session", session_obj)?;
+
+    Ok(())
+}
+
+/// `sendCommand`/`kill` resolve the key's sessions row before any tmux call, so the
+/// timeouts registrar, which holds the pool, installs them after `register_exec_ops`.
+pub(super) fn register_session_command_ops<'js>(
+    ctx: &Ctx<'js>,
+    pg_pool: Option<sqlx::PgPool>,
+) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let session_obj: Object<'js> = ad.get("session")?;
+
+    // agentdesk.session.sendCommand(sessionKey, command) — inject a slash command into a tmux session
+    let pg_send = pg_pool.clone();
     session_obj.set(
         "sendCommand",
         rquickjs::Function::new(
             ctx.clone(),
-            |session_key: String, command: String| -> String {
-                // session_key may be legacy `host:tmux` or namespaced
-                // `provider/token/host:tmux`; raw tmux names remain accepted
-                // for policy compatibility.
-                let tmux_name =
-                    tmux_name_from_session_key(&session_key).unwrap_or_else(|| session_key.clone());
+            move |session_key: String, command: String| -> String {
+                // session_key must be the full key of a legacy tmux sessions row;
+                // Herdr, unresolved hosts and raw names are refused before tmux.
                 // #2378/#2404: enforce the current JS eval's bridge-op
                 // deadline for the tmux child itself. The zero-budget branch
                 // preserves the previous preflight behavior, while positive
@@ -385,6 +397,11 @@ fn register_exec_ops_with_runner<'js>(
                         return format!(r#"{{"ok":false,"error":"{}"}}"#, error);
                     }
                 };
+                let tmux_name =
+                    match session_command_target(pg_send.as_ref(), &session_key, "sendCommand") {
+                        Ok(name) => name,
+                        Err(refused) => return refused,
+                    };
                 let send_result = match tmux_timeout {
                     Some(timeout) => crate::services::platform::tmux::send_keys_timeout(
                         &tmux_name,
@@ -416,14 +433,11 @@ fn register_exec_ops_with_runner<'js>(
     )?;
 
     // agentdesk.session.kill(sessionKey) — force-kill a tmux session (for deadlock recovery)
+    let pg_kill = pg_pool;
     session_obj.set(
         "kill",
-        rquickjs::Function::new(ctx.clone(), |session_key: String| -> String {
-            // session_key may be legacy `host:tmux` or namespaced
-            // `provider/token/host:tmux`; tmux interprets colon as a
-            // session:window separator, so extract only the tmux name.
-            let tmux_name =
-                tmux_name_from_session_key(&session_key).unwrap_or_else(|| session_key.clone());
+        rquickjs::Function::new(ctx.clone(), move |session_key: String| -> String {
+            // The tmux name comes from the resolved legacy row, never from a Herdr key.
             // #2378/#2404: keep the existing zero-deadline short-circuit, and
             // use any positive remaining deadline as the timeout for the tmux
             // kill child. The audit record stays after the preflight so it is
@@ -433,6 +447,10 @@ fn register_exec_ops_with_runner<'js>(
                 Err(error) => {
                     return format!(r#"{{"ok":false,"error":"{}"}}"#, error);
                 }
+            };
+            let tmux_name = match session_command_target(pg_kill.as_ref(), &session_key, "kill") {
+                Ok(name) => name,
+                Err(refused) => return refused,
             };
             crate::services::termination_audit::record_termination_for_tmux(
                 &tmux_name,
@@ -469,8 +487,6 @@ fn register_exec_ops_with_runner<'js>(
             }
         }),
     )?;
-
-    ad.set("session", session_obj)?;
 
     Ok(())
 }
