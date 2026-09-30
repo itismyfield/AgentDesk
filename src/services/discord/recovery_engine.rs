@@ -201,9 +201,10 @@ pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_
 // not re-exported.
 pub(in crate::services::discord) use self::completion_delivery::relay_recovered_terminal_text_to_placeholder;
 use self::completion_delivery::{
-    CapturedRecoveryDelivery, RecoveryCompletionOutcome, complete_recovery_visible_turn,
-    relay_captured_recovery_terminal_notice, relay_captured_recovery_terminal_notice_with_gateway,
-    relay_recovery_body_notice, relay_recovery_body_to_placeholder, relay_recovery_terminal_notice,
+    CapturedRecoveryDelivery, RECOVERED_WITHOUT_TEXT, RecoveryCompletionOutcome,
+    complete_recovery_visible_turn, relay_captured_recovery_terminal_notice,
+    relay_captured_recovery_terminal_notice_with_gateway, relay_recovery_body_notice,
+    relay_recovery_body_to_placeholder, relay_recovery_terminal_notice,
     should_advance_recovery_dispatch_after_relay,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;

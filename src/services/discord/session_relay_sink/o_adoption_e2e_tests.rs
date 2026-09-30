@@ -151,7 +151,10 @@ async fn legacy_body_first() {
     let pair = Pair::new().await;
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let check = crate::services::tui_o::channel_policy::BodyCheck::watch(A, &pair.legs[0].body);
+    pair.legs[0].gateway.check.set(check.clone()).unwrap();
     finish(&pair.legs[0]).await;
+    check.assert_settled();
     assert_eq!(
         adoption(A),
         Adoption::Released,

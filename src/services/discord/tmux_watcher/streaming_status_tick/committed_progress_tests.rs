@@ -155,6 +155,8 @@ struct Recorder {
     bodies: Arc<Mutex<Vec<String>>>,
     visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
     terminal_gate: Arc<tokio::sync::Notify>,
+    /// When set, every content-bearing request is checked against the watched adoption on arrival.
+    check: Arc<std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>>,
     http: Arc<serenity::Http>,
     server: tokio::task::AbortHandle,
 }
@@ -197,9 +199,12 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
     let captured_gate = terminal_gate.clone();
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(SERVER_MSG));
     let channel_text = channel.get().to_string();
+    let check = Arc::new(std::sync::OnceLock::<crate::services::tui_o::channel_policy::BodyCheck>::new());
+    let captured_check = check.clone();
     let app = Router::new().fallback(any(move |method: Method, uri: Uri, body: Bytes| {
         let (recorded, channel_text, bodies) =
             (recorded.clone(), channel_text.clone(), captured_bodies.clone());
+        let body_check = captured_check.clone();
         let (visible, terminal_gate, next_id) =
             (captured_visible.clone(), captured_gate.clone(), next_id.clone());
         async move {
@@ -216,6 +221,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
                 return (status, String::new()).into_response();
             }
             if let Some(content) = payload["content"].as_str() {
+                if let Some(check) = body_check.get() { check.sink(content); }
                 bodies.lock().unwrap().push(content.to_owned());
                 if content.encode_utf16().count() > 2000 {
                     return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -255,7 +261,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, bodies, visible, terminal_gate, http, server: server.abort_handle() }
+    Recorder { calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]
@@ -634,6 +640,47 @@ fn o_delegated_rollover_tick_writes_no_body() {
                     "Legacy control must reach the rollover writes"
                 );
             }
+        }
+    });
+}
+
+/// A tick whose unsent text is only whitespace leaves a pending adoption; the tick that writes the
+/// body ends it before the write reaches Discord.
+#[test]
+fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+    use crate::services::tui_o::cutover::test_override;
+    let _boot = test_override::force_channels(&[]);
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::only_a_status_tick_that_writes_a_body_ends_a_pending_adoption"
+    )) {
+        return;
+    }
+    const BODY: &str = "ADK-C1A watcher tick body";
+    let (_lock, guard) = isolate_root();
+    capture_warns(async {
+        for (case, body, expected) in [
+            (16, " \n", Adoption::Pending),
+            (17, "ADK-C1A watcher tick body\n", Adoption::Released),
+        ] {
+            let fx = seed_row(guard.root.path(), case, false, false);
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let _bound = test_override::bind_claude_tui_session(&fx.tmux, &fx.output_path);
+            let _pending = test_override::force_candidates(&[(
+                fx.channel.get(),
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            )]);
+            let check = BodyCheck::watch(fx.channel.get(), BODY);
+            let rec = recorder(fx.channel, true).await;
+            rec.check.set(check.clone()).unwrap();
+            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+            run_tick_body(&mut locals, &rec, &shared, &fx, false, body).await;
+            check.assert_settled();
+            assert_eq!(check.adoption(), expected, "{body:?}");
+            let shown = rec.bodies.lock().unwrap().clone();
+            let writes = shown.iter().filter(|c| c.contains(BODY)).count();
+            assert_eq!(writes > 0, expected == Adoption::Released, "{shown:?}");
         }
     });
 }

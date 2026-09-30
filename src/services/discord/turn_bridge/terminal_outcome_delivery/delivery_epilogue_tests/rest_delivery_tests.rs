@@ -29,6 +29,7 @@ async fn rest_worker_terminal_edits_once_without_a_headless_duplicate() {
         published_bodies: driver.published_bodies.clone(),
         replace: ReplaceBehaviour::Edited,
         yields_per_call: 1,
+        check: driver.body_check.clone(),
     });
     let (ctx, state) = driver.parts();
     let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))

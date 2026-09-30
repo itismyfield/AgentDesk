@@ -707,6 +707,8 @@ struct RelayContractFakeGateway {
     send_calls: AtomicU64,
     sent_contents: Mutex<Vec<String>>,
     on_transport: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// When set, each send or replace is checked against the watched adoption on entry.
+    check: std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>,
 }
 
 impl RelayContractFakeGateway {
@@ -719,6 +721,7 @@ impl RelayContractFakeGateway {
             send_calls: AtomicU64::new(0),
             sent_contents: Mutex::new(Vec::new()),
             on_transport: None,
+            check: std::sync::OnceLock::new(),
         }
     }
 
@@ -736,6 +739,9 @@ impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway
         content: &'a str,
     ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
+            if let Some(check) = self.check.get() {
+                check.sink(content);
+            }
             self.send_calls.fetch_add(1, Ordering::AcqRel);
             self.sent_contents.lock().unwrap().push(content.to_string());
             if let Some(on_transport) = &self.on_transport {
@@ -767,6 +773,9 @@ impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway
         Result<ReplaceLongMessageOutcome, String>,
     > {
         Box::pin(async move {
+            if let Some(check) = self.check.get() {
+                check.sink(_content);
+            }
             self.replace_calls.fetch_add(1, Ordering::AcqRel);
             if let Some(on_transport) = &self.on_transport {
                 on_transport();

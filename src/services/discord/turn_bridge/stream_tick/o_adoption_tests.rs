@@ -1,7 +1,7 @@
 use super::provider_output_guard_tests::CapturingGateway;
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::tui_o::channel_policy::Adoption;
+use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
 use crate::services::tui_o::cutover::test_override;
 
 const BODY: &str = "ADK-C1A-bridge-tick-body";
@@ -126,8 +126,8 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
     assert_eq!(outcome, StreamTickOutcome::Continue);
 }
 
-/// A tick with no unsent body leaves a pending adoption alone; the tick that streams a body ends it
-/// before its edit, and Legacy shows that body once.
+/// A tick with no unsent visible text leaves a pending adoption alone; the tick that streams a
+/// body ends it before its edit, and Legacy shows that body once.
 #[tokio::test(flavor = "current_thread")]
 async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
     let temp = tempfile::TempDir::new().expect("runtime root");
@@ -135,28 +135,24 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
     let channel = ChannelId::new(42_593_310);
     let _candidates =
         test_override::force_candidates(&[(channel.get(), RuntimeHandoffKind::CodexTui)]);
-    let adoption =
-        test_override::with_channels(|boot| boot.unwrap().candidate(channel.get()).cloned());
+    let check = BodyCheck::watch(channel.get(), BODY);
     let gateway = || {
         Arc::new(CapturingGateway {
-            adoption: adoption.clone(),
+            check: Some(check.clone()),
             ..Default::default()
         })
     };
 
-    let empty = gateway();
-    tick(channel, "", empty.clone()).await;
-    assert_eq!(adoption.as_ref().unwrap().peek(), Adoption::Pending);
+    for unsent in ["", " \n"] {
+        tick(channel, unsent, gateway()).await;
+        check.assert_settled();
+        assert_eq!(check.adoption(), Adoption::Pending, "{unsent:?}");
+    }
 
     let body = gateway();
     tick(channel, BODY, body.clone()).await;
-    assert_eq!(adoption.as_ref().unwrap().peek(), Adoption::Released);
+    check.assert_settled();
     let edits = body.edits.lock().unwrap().clone();
     let shown: Vec<_> = edits.iter().filter(|edit| edit.contains(BODY)).collect();
     assert_eq!(shown.len(), 1, "{edits:?}");
-    let seen = body.seen.lock().unwrap().clone();
-    assert!(
-        !seen.is_empty() && seen.iter().all(|state| *state == Adoption::Released),
-        "{seen:?}"
-    );
 }

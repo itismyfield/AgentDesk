@@ -9,14 +9,15 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       production count of each send/edit primitive. A new or moved send fails.
   (b) CENSUS gives every file in (a) a census row and a target. A missing row,
       an unknown target, or a `TBD`/`?` target fails ("zero undecided").
-  (c) EXPECTED_GATES pins, per file under src/, the exact count of each kind of
-      cutover helper token: `claim` (a body is about to be sent, so a pending
-      adoption ends) and `peek` (no body, the adoption is only read). A claim
-      swapped for a peek or back fails its file's pins. CUT_D/CUT_T files and
-      UNREACH_G gate files need at least one claim; R-EVID files (real delivery
-      evidence readers) must have none of either, so a delegated verdict can
-      never be read as Posted evidence. The `O_TUI_WRITER` token itself may
-      appear only in the O_TUI_WRITER_FILES.
+  (c) EXPECTED_GATES pins, per file under src/, each cutover helper token as
+      `enclosing fn:kind` in source order: `claim` (a body is about to be sent,
+      so a pending adoption ends) or `peek` (no body, the adoption is only
+      read). A claim swapped for a peek or back, alone or as a pair within one
+      function, fails its file's pins. CUT_D/CUT_T files and UNREACH_G gate
+      files need at least one claim; R-EVID files (real delivery evidence
+      readers) must have none of either, so a delegated verdict can never be
+      read as Posted evidence. The `O_TUI_WRITER` token itself may appear only
+      in the O_TUI_WRITER_FILES.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -24,7 +25,8 @@ test exists in src/; `--require-flip-ready` turns a false verdict into rc 1.
 
 TO CHANGE A COUNT: edit the map in this file in the same commit that moves the
 call, and say in the commit message which site moved and why. A new file with a
-primitive also needs a CENSUS row.
+primitive also needs a CENSUS row. A branch whose condition is negated while its
+two gates keep their order is not seen; the per-site adoption tests cover that.
 
 LEXICAL LIMITS: this scans stripped production text (comments, strings and
 `#[cfg(test)]` items removed by the durable frontier gate's classifier). It
@@ -69,6 +71,7 @@ GATE_RES = {
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 DEFN_RE = re.compile(r"\bfn\s+$")
+FN_RE = re.compile(r"\bfn\s+(\w+)")
 # The switch is defined in topology.rs; the intake gate and its health probe read it there.
 O_TUI_WRITER_FILES = {
     "src/services/tui_o/cutover.rs",
@@ -309,27 +312,81 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/routing.rs": ("1-E", "KEEP_36"),
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
 }
+# Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is about to be sent here. peek: no body, the adoption is only read.
-EXPECTED_GATES: dict[str, dict[str, int]] = {
-    "src/services/discord/health/recovery.rs": {"claim": 1},
-    "src/services/discord/idle_recap.rs": {"peek": 1},
-    "src/services/discord/recovery_engine/completion_delivery.rs": {"claim": 1},
-    "src/services/discord/recovery_paths/restart.rs": {"claim": 1},
-    "src/services/discord/session_relay_sink.rs": {"claim": 2},
-    "src/services/discord/session_relay_sink/task_notification_context.rs": {"claim": 1},
-    "src/services/discord/tmux_watcher.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/tmux_watcher/completion_producer.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/tmux_restart_handoff.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/tmux_watcher/streaming_status_tick.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": {"claim": 1},
-    "src/services/discord/turn_bridge/stream_tick.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": {"claim": 1, "peek": 1},
-    "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": {"claim": 1},
-    "src/services/discord/turn_finalizer/watcher_backstop.rs": {"peek": 1},
-    "src/services/tui_o/cutover.rs": {"claim": 2, "peek": 2},
+EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/health/recovery.rs": (
+        "maybe_recover_completed_stale_leak:peek",
+        "maybe_recover_completed_stale_leak:claim",
+    ),
+    "src/services/discord/idle_recap.rs": ("probe_relay_integrity:peek",),
+    "src/services/discord/recovery_engine/completion_delivery.rs": (
+        "o_owns_recovery_body:claim",
+        "o_owns_recovery_body:peek",
+    ),
+    "src/services/discord/recovery_paths/restart.rs": (
+        "try_recover_anchor_repost:peek",
+        "try_recover_anchor_repost:claim",
+    ),
+    "src/services/discord/session_relay_sink.rs": (
+        "deliver_response:claim",
+        "deliver_response:claim",
+    ),
+    "src/services/discord/session_relay_sink/task_notification_context.rs": (
+        "task_response_claim_for_card:claim",
+    ),
+    "src/services/discord/tmux_restart_handoff.rs": (
+        "start_restart_handoff_from_state:claim",
+        "start_restart_handoff_from_state:peek",
+    ),
+    "src/services/discord/tmux_watcher.rs": (
+        "tmux_output_watcher_with_restore:claim",
+        "tmux_output_watcher_with_restore:peek",
+    ),
+    "src/services/discord/tmux_watcher/completion_producer.rs": (
+        "complete_watcher_terminal_footer_or_status_panel_with_sniffer:claim",
+        "complete_watcher_terminal_footer_or_status_panel_with_sniffer:peek",
+    ),
+    "src/services/discord/tmux_watcher/streaming_status_tick.rs": (
+        "update_streaming_status_tick:claim",
+        "update_streaming_status_tick:peek",
+    ),
+    "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": (
+        "handle_watcher_runtime_handoff:claim",
+    ),
+    "src/services/discord/turn_bridge/stream_tick.rs": (
+        "run_bridge_stream_tick:peek",
+        "run_bridge_stream_tick:claim",
+    ),
+    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": (
+        "<module>:claim",
+        "<module>:peek",
+    ),
+    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
+        "bridge_o_body_cut_decision:claim",
+        "bridge_o_body_peek_decision:peek",
+    ),
+    "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": (
+        "run_terminal_outcome_delivery:peek",
+        "run_terminal_outcome_delivery:claim",
+    ),
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": (
+        "handle_cancel_prompt_replace:peek",
+        "handle_cancel_prompt_replace:claim",
+    ),
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": (
+        "resume_with_gateway:peek",
+        "resume_with_gateway:claim",
+    ),
+    "src/services/discord/turn_finalizer/watcher_backstop.rs": (
+        "watcher_backstop_turn_is_terminal:peek",
+    ),
+    "src/services/tui_o/cutover.rs": (
+        "<module>:claim",
+        "<module>:claim",
+        "<module>:peek",
+        "<module>:peek",
+    ),
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
@@ -378,6 +435,39 @@ def _count(pattern: re.Pattern[str], text: str) -> int:
     )
 
 
+def _fn_bodies(text: str) -> list[tuple[str, int, int]]:
+    """Each named fn's body span in stripped text (strings and comments are already blank)."""
+    bodies = []
+    for match in FN_RE.finditer(text):
+        at = match.end()
+        while at < len(text) and text[at] not in "{;":
+            at += 1
+        if at >= len(text) or text[at] == ";":
+            continue
+        depth, end = 0, at
+        while end < len(text):
+            depth += {"{": 1, "}": -1}.get(text[end], 0)
+            if depth == 0:
+                break
+            end += 1
+        bodies.append((match.group(1), at, end))
+    return bodies
+
+
+def _gate_sites(text: str) -> list[str]:
+    """Each gate token as `innermost enclosing fn:kind`, in source order."""
+    bodies = _fn_bodies(text)
+    found = []
+    for kind, pattern in GATE_RES.items():
+        for match in pattern.finditer(text):
+            if DEFN_RE.search(text[max(0, match.start() - 40) : match.start()]):
+                continue
+            owners = [b for b in bodies if b[1] < match.start() < b[2]]
+            owner = max(owners, key=lambda b: b[1])[0] if owners else "<module>"
+            found.append((match.start(), f"{owner}:{kind}"))
+    return [site for _, site in sorted(found)]
+
+
 def measure(root: Path, pinned_test_only_files=None):
     classifier = _load_classifier()
     if pinned_test_only_files is None:
@@ -385,7 +475,7 @@ def measure(root: Path, pinned_test_only_files=None):
     files, skips = classifier._scan_inputs(root, pinned_test_only_files)
     compiled = {name: re.compile(regex) for name, regex in PRIMITIVES.items()}
     primitives: dict[str, dict[str, int]] = {}
-    gates: dict[str, int] = {}
+    gates: dict[str, list[str]] = {}
     flags: dict[str, int] = {}
     for path in files:
         if path in skips:
@@ -396,9 +486,8 @@ def measure(root: Path, pinned_test_only_files=None):
             for name, pattern in compiled.items():
                 if n := _count(pattern, text):
                     primitives.setdefault(rel[len(PRIMITIVE_ROOT) :], {})[name] = n
-        for kind, pattern in GATE_RES.items():
-            if n := _count(pattern, text):
-                gates.setdefault(rel, {})[kind] = n
+        if sites := _gate_sites(text):
+            gates[rel] = sites
         if n := len(FLAG_RE.findall(text)):
             flags[rel] = n
     return primitives, gates, flags
@@ -430,15 +519,13 @@ def problems_for(primitives, gates, flags) -> list[str]:
             problems.append(f"census: {rel} has undecided target {target!r}")
             continue
         gate_file = PRIMITIVE_ROOT + (row[2] if len(row) > 2 else rel)
-        if target in {"CUT_D", "CUT_T", "UNREACH_G"} and gates.get(gate_file, {}).get("claim", 0) < 1:
+        claims = [site for site in gates.get(gate_file, []) if site.endswith(":claim")]
+        if target in {"CUT_D", "CUT_T", "UNREACH_G"} and not claims:
             problems.append(f"census: {target} row {row[0]} has no claim gate in {gate_file}")
     for rel in sorted(set(EXPECTED_GATES) | set(gates)):
-        want, have = EXPECTED_GATES.get(rel, {}), gates.get(rel, {})
-        for kind in GATE_RES:
-            if want.get(kind, 0) != have.get(kind, 0):
-                problems.append(
-                    f"gate {kind}: {rel} has {have.get(kind, 0)}x, expected {want.get(kind, 0)}x"
-                )
+        want, have = list(EXPECTED_GATES.get(rel, ())), gates.get(rel, [])
+        if want != have:
+            problems.append(f"gate sites: {rel} has {have}, expected {want}")
         if gates.get(rel) and any(
             rel == evid or (evid.endswith("/") and rel.startswith(evid)) for evid in R_EVID
         ):
@@ -506,7 +593,7 @@ def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
         )
     return True, (
         f"OK: TUI O writer census: {sites} send sites in {len(primitives)} files, "
-        f"{sum(sum(g.values()) for g in gates.values())} cutover gate tokens in {len(gates)} files, "
+        f"{sum(map(len, gates.values()))} cutover gate sites in {len(gates)} files, "
         f"{len(deferred)} rows deferred; lexical scan (see docstring)"
     )
 

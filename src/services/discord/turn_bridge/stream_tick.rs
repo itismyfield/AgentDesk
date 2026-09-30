@@ -524,13 +524,15 @@ pub(super) async fn run_bridge_stream_tick(
         status_panel_dirty = false;
     }
     // O posts this body: consume streamed bytes so no anchor, rollover or edit carries them.
-    // Only a tick with unsent body text may end a pending adoption; an empty one just reads it.
-    let o_body_decision =
-        if response_portion_after_offset(&full_response, response_sent_offset).is_empty() {
-            super::terminal_controller_cutover::bridge_o_body_peek_decision
-        } else {
-            super::terminal_controller_cutover::bridge_o_body_cut_decision
-        };
+    // Only a tick with unsent visible text may end a pending adoption; any other just reads it.
+    let o_body_decision = if response_portion_after_offset(&full_response, response_sent_offset)
+        .trim()
+        .is_empty()
+    {
+        super::terminal_controller_cutover::bridge_o_body_peek_decision
+    } else {
+        super::terminal_controller_cutover::bridge_o_body_cut_decision
+    };
     let o_body_cut = o_body_decision(channel_id, &inflight_state, gateway.can_deliver_directly());
     let body_held = o_body_cut.unwrap_or(true);
     if o_body_cut == Ok(true) {
@@ -1135,17 +1137,15 @@ pub(super) mod provider_output_guard_tests {
         pub(in crate::services::discord::turn_bridge) sends: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) edits: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) deletes: Mutex<Vec<u64>>,
-        /// When set, the adoption each send or edit found, read at the moment it was made.
-        pub(in crate::services::discord::turn_bridge) adoption:
-            Option<crate::services::tui_o::channel_policy::Candidate>,
-        pub(in crate::services::discord::turn_bridge) seen:
-            Mutex<Vec<crate::services::tui_o::channel_policy::Adoption>>,
+        /// When set, every send or edit is checked against the watched adoption as it is made.
+        pub(in crate::services::discord::turn_bridge) check:
+            Option<crate::services::tui_o::channel_policy::BodyCheck>,
     }
 
     impl CapturingGateway {
-        fn observe(&self) {
-            if let Some(candidate) = &self.adoption {
-                self.seen.lock().expect("seen lock").push(candidate.peek());
+        fn observe(&self, content: &str) {
+            if let Some(check) = &self.check {
+                check.sink(content);
             }
         }
     }
@@ -1156,7 +1156,7 @@ pub(super) mod provider_output_guard_tests {
             _channel_id: ChannelId,
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<MessageId, String>> {
-            self.observe();
+            self.observe(_content);
             self.sends
                 .lock()
                 .expect("sends lock")
@@ -1170,7 +1170,7 @@ pub(super) mod provider_output_guard_tests {
             _message_id: MessageId,
             content: &'a str,
         ) -> GatewayFuture<'a, Result<(), String>> {
-            self.observe();
+            self.observe(content);
             self.edits
                 .lock()
                 .expect("edits lock")
@@ -1184,6 +1184,7 @@ pub(super) mod provider_output_guard_tests {
             _message_id: MessageId,
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            self.observe(_content);
             Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
         }
 

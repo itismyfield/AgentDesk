@@ -427,8 +427,9 @@ pub(super) async fn resume_with_gateway(
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
+    let o_owns = |gate: fn(u64, _) -> Result<bool, _>| gate(snapshot.channel_id, kind);
     let Ok(o_owns_body) =
-        crate::services::tui_o::cutover::o_owns_tui_output_for_channel(snapshot.channel_id, kind)
+        o_owns(crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel)
     else {
         return Ok(false);
     };
@@ -459,6 +460,15 @@ pub(super) async fn resume_with_gateway(
         // Recheck after acquiring; an actor may have completed just before this
         // lease became available. NoRange remains the existing honest exemption.
         delivered = decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+        // Only the post itself may end a pending adoption, so it is claimed after every skip above.
+        if !delivered {
+            let Ok(o_owns_body) =
+                o_owns(crate::services::tui_o::cutover::o_owns_tui_output_for_channel)
+            else {
+                return Ok(false);
+            };
+            delivered = o_owns_body;
+        }
         if !delivered {
             // Reuse the ordinary chunk formatter and gateway. Persist each
             // acknowledged prefix before another await, while the SAME source

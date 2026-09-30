@@ -1975,6 +1975,8 @@ src/
 │   │   └── mod.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
+│   │   │   ├── adoption/
+│   │   │   │   └── body_check.rs
 │   │   │   ├── adoption.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/

@@ -272,6 +272,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
+        "src/services/tui_o/channel_policy/adoption/body_check.rs",
         "src/services/discord/runtime_bootstrap/gateway_handback_mock.rs",
         "src/services/kakao/test_support.rs",
         "src/config/test_env.rs",

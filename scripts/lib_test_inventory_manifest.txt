@@ -4798,6 +4798,7 @@ services::discord::recovery_engine::manual_rebind_override::tests::health_rebind
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_symlink_escape_from_allowed_root
 services::discord::recovery_engine::o_recovery_cut_tests::o_delegated_captured_recovery_range_is_consumed_without_send
 services::discord::recovery_engine::o_recovery_cut_tests::o_delegated_recovery_body_posts_only_the_marker_without_evidence
+services::discord::recovery_engine::o_recovery_cut_tests::only_a_recovered_body_ends_a_pending_adoption
 services::discord::recovery_engine::phase_policy::tests::adoption_quadrants_restores_absent_root
 services::discord::recovery_engine::phase_policy::tests::adoption_quadrants_restores_present_root
 services::discord::recovery_engine::phase_policy::tests::orphaned_synthetic_watcher_row_adoption_quadrants
@@ -4940,6 +4941,7 @@ services::discord::recovery_paths::controller_cutover::tests::sent_fallback_maps
 services::discord::recovery_paths::controller_cutover::tests::should_cutover_pins_each_condition
 services::discord::recovery_paths::controller_cutover::tests::should_cutover_truth_table
 services::discord::recovery_paths::o_anchor_repost_tests::o_delegated_anchor_repost_is_skipped
+services::discord::recovery_paths::o_anchor_repost_tests::only_an_anchor_repost_that_posts_ends_a_pending_adoption
 services::discord::recovery_paths::restart::tests::anchor_panel_channel_must_match_delivery_channel
 services::discord::recovery_paths::restart::tests::anchor_probe_reposts_only_on_message_gone
 services::discord::recovery_paths::restart::tests::anchor_probe_sequence_reposts_only_when_all_candidates_are_gone
@@ -6351,6 +6353,7 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::rowless_cancelled_native_terminal_preserves_exact_ack_at_eof
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::watcher_direct_idle_commit_passes_mailbox_gate_only_when_idle
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::o_delegated_rollover_tick_writes_no_body
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::only_a_status_tick_that_writes_a_body_ends_a_pending_adoption
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::recovered_session_bound_codex_stream_tick_reaches_http
@@ -7676,6 +7679,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_short_fallback_settles_original_actor_and_preserves_successor_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_delegated_foreign_custody_follows_destination_membership
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::only_a_foreign_custody_that_posts_ends_a_pending_adoption
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
@@ -9552,6 +9556,7 @@ services::tui_o::channel_policy::tests::a_selected_channel_starts_committed_only
 services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
 services::tui_o::channel_policy::tests::only_an_enabled_home_with_a_list_reads_the_store_and_adopts
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
+services::tui_o::channel_policy::tests::the_body_check_fails_a_bodiless_claim_and_a_body_before_its_claim
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs

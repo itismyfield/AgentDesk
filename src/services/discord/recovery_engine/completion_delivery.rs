@@ -96,7 +96,7 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
     gateway: &dyn super::super::gateway::TurnGateway,
 ) -> CapturedRecoveryDelivery {
     // O posts this channel's TUI body: consume the captured range without sending or recording it.
-    match o_owns_recovery_body(state, state.channel_id) {
+    match o_owns_recovery_body(state, state.channel_id, true) {
         Ok(false) => {}
         Ok(true) => return RecoveryRelayOutcome::Delivered.into(),
         Err(_) => return RecoveryRelayOutcome::TransientFailure.into(),
@@ -180,23 +180,39 @@ async fn relay_recovery_terminal_notice_with_capture(
     }
 }
 
+/// The recovery notice for a turn that left no answer text.
+pub(super) const RECOVERED_WITHOUT_TEXT: &str = "(복구됨 — 응답 텍스트 없음)";
+
 /// Recorded kind counts only for the row's own channel; any other destination is unknown.
+/// Only a relay carrying the recovered answer may end a pending adoption; a bodiless one reads it.
 fn o_owns_recovery_body(
     state: &super::inflight::InflightTurnState,
     destination: u64,
+    body: bool,
 ) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
     let kind = (state.channel_id == destination)
         .then_some(state.runtime_kind)
         .flatten();
-    crate::services::tui_o::cutover::o_owns_tui_output_for_channel(destination, kind)
+    if body {
+        crate::services::tui_o::cutover::o_owns_tui_output_for_channel(destination, kind)
+    } else {
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(destination, kind)
+    }
+}
+
+/// Whether `text` carries the turn's answer: the empty-response notice equals the O marker.
+fn carries_body(state: &super::inflight::InflightTurnState, text: &str) -> bool {
+    text != RECOVERED_WITHOUT_TEXT && text != interrupted_recovery_message(state, "")
 }
 
 /// The body-free marker Notice to show instead of a recovered body on an O-owned destination.
 fn o_recovery_marker(
     state: &super::inflight::InflightTurnState,
     destination: ChannelId,
+    text: &str,
 ) -> Result<Option<String>, crate::services::tui_o::cutover::IdentityError> {
-    Ok(o_owns_recovery_body(state, destination.get())?
+    let body = carries_body(state, text);
+    Ok(o_owns_recovery_body(state, destination.get(), body)?
         .then(|| interrupted_recovery_message(state, "")))
 }
 
@@ -211,7 +227,7 @@ pub(super) async fn relay_recovery_body_to_placeholder(
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
-    let Ok(marker) = o_recovery_marker(state, channel_id) else {
+    let Ok(marker) = o_recovery_marker(state, channel_id, text) else {
         return RecoveryRelayOutcome::TransientFailure;
     };
     let (text, recovery_context) = match marker.as_deref() {
@@ -239,7 +255,7 @@ pub(super) async fn relay_recovery_body_notice(
 ) -> RecoveryRelayOutcome {
     let channel_id = super::inflight::opt_channel_id(state.channel_id);
     let owned = channel_id.map_or(Ok(false), |channel_id| {
-        o_owns_recovery_body(state, channel_id.get())
+        o_owns_recovery_body(state, channel_id.get(), carries_body(state, text))
     });
     let channel_id = match (owned, channel_id) {
         (Ok(true), Some(channel_id)) => channel_id,

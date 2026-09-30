@@ -697,18 +697,17 @@ mod o_cut_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn only_a_handoff_notice_with_the_body_ends_a_pending_adoption() {
         use crate::services::discord::recovery_engine::o_cut_recorder::start_watching;
-        use crate::services::tui_o::channel_policy::Adoption;
+        use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
         use crate::services::tui_o::cutover::test_override;
         const CHANNEL: u64 = 9_425_031;
         let _boot = test_override::force_candidates(&[(CHANNEL, RuntimeHandoffKind::CodexTui)]);
-        let adoption =
-            test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).cloned()).unwrap();
+        let check = BodyCheck::watch(CHANNEL, BODY);
         with_isolated_runtime_root(|| async move {
             let shared = crate::services::discord::make_shared_data_for_tests();
             let handoff = |rebind_origin: bool, current_msg_id: u64| {
-                let (shared, adoption) = (shared.clone(), adoption.clone());
+                let (shared, check) = (shared.clone(), check.clone());
                 async move {
-                    let recorder = start_watching(CHANNEL, adoption).await;
+                    let recorder = start_watching(CHANNEL, check, false).await;
                     let mut state = InflightTurnState::new(
                         ProviderKind::Codex,
                         CHANNEL,
@@ -741,7 +740,12 @@ mod o_cut_tests {
             for (rebind_origin, current_msg_id) in [(true, 0), (false, 0)] {
                 let calls = handoff(rebind_origin, current_msg_id).await;
                 assert!(calls.is_empty(), "no notice: {calls:?}");
-                assert_eq!(adoption.peek(), Adoption::Pending, "rebind={rebind_origin}");
+                check.assert_settled();
+                assert_eq!(
+                    check.adoption(),
+                    Adoption::Pending,
+                    "rebind={rebind_origin}"
+                );
             }
             let calls = handoff(false, 9_425_911).await;
             let shown: Vec<_> = calls
@@ -749,8 +753,8 @@ mod o_cut_tests {
                 .filter(|call| call.content.as_deref().is_some_and(|c| c.contains(BODY)))
                 .collect();
             assert_eq!(shown.len(), 1, "{calls:?}");
-            assert_eq!(shown[0].adoption, Some(Adoption::Released));
-            assert_eq!(adoption.peek(), Adoption::Released);
+            check.assert_settled();
+            assert_eq!(check.adoption(), Adoption::Released);
         })
         .await;
     }

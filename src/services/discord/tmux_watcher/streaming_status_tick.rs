@@ -691,10 +691,11 @@ pub(super) async fn update_streaming_status_tick(
         }
 
         // Withhold Legacy body writes for O ownership or unresolved selected identities. Only a
-        // tick with unsent body text may end a pending adoption; an empty one just reads it.
+        // tick with unsent visible text may end a pending adoption; any other just reads it.
         let has_unsent_body = !full_response
             .get(response_sent_offset..)
             .unwrap_or("")
+            .trim()
             .is_empty();
         let o_owns = if has_unsent_body {
             crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux
