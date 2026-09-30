@@ -57,7 +57,7 @@ impl Candidate {
 
     /// Whether O owns the channel for a body Legacy would otherwise send; a pending adoption is
     /// released first, so O never starts under a body Legacy already took.
-    pub(crate) fn claim(&self, channel: u64) -> bool {
+    pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
         let mut state = self.lock();
         if *state == Adoption::Pending {
             *state = Adoption::Released;

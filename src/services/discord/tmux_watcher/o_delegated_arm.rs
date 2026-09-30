@@ -1,5 +1,5 @@
-//! Watcher terminal arm for channels whose TUI body O posts: Legacy promotes any task card, then
-//! consumes the range with no body transport, lease or evidence and clears its "..." placeholder.
+//! Watcher terminal arms by O ownership. On O's channel Legacy promotes any task card, consumes the
+//! range with no body transport, lease or evidence and clears its "..."; a Legacy send claims first.
 
 use std::sync::Arc;
 
@@ -76,4 +76,18 @@ pub(super) async fn consume_delegated_terminal(
     }
     clear_provider_overload_retry_state(arm.channel_id);
     Ok(())
+}
+
+/// The direct send, claiming the channel first when it carries the body; `None` when O took the
+/// channel since the watcher's peek, so nothing was sent.
+pub(super) async fn claim_then_direct_send(
+    body: Option<(ChannelId, &str)>,
+    send: impl std::future::Future<Output = bool>,
+) -> Option<bool> {
+    use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+    let claim = body.map(|(channel, session)| BodyClaim::tmux(channel.get(), Some(session)));
+    match claim_then_send(claim, || send).await {
+        Ok(BodySend::Sent(relay_ok)) => Some(relay_ok),
+        Ok(BodySend::OwnedByO) | Err(_) => None,
+    }
 }

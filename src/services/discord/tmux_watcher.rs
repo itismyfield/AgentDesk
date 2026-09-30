@@ -926,14 +926,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
-        // O posts this body: consume the range without a lease, a journal or transport. Only a
-        // direct send ends a pending adoption; otherwise the watcher sends no body and just reads it.
-        let o_owns = if watcher_will_direct_send {
-            crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux
-        } else {
-            crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux
-        };
-        let o_ownership = o_owns(channel_id.get(), Some(&tmux_session_name));
+        // O posts this body: consume the range without a lease, journal or transport; read only.
+        let o_ownership = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+            channel_id.get(),
+            Some(&tmux_session_name),
+        );
         let o_delegated_session = o_ownership.unwrap_or(true);
         let o_delegated_terminal = o_ownership == Ok(true) && watcher_will_direct_send;
         let watcher_will_direct_send = watcher_will_direct_send && !o_delegated_session;
@@ -1166,7 +1163,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 }
             }
         } else if watcher_direct_fallback_after_session_bound_ack {
-            terminal_direct_fallback::apply_watcher_direct_fallback_send(
+            // Boxed so the claim below does not hold this large future in the watcher's own.
+            let send = Box::pin(terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
                 &shared,
                 &watcher_provider,
@@ -1220,8 +1218,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     last_observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
                     task_response_claim: &mut watcher_task_response_claim,
                 },
-            )
-            .await
+            ));
+            let body = watcher_will_direct_send.then_some((channel_id, tmux_session_name.as_str()));
+            let sent = o_delegated_arm::claim_then_direct_send(body, send).await;
+            // O took the channel since the peek: retry, and the next pass consumes it for O.
+            retry_terminal_delivery_from_offset |= sent.is_none();
+            sent.unwrap_or(false)
         } else if watcher_direct_fallback_requested {
             false
         } else if relay_decision.suppressed {

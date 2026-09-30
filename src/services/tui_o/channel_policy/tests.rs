@@ -233,32 +233,48 @@ fn a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it(
     );
 }
 
-/// The check the per-site adoption tests rely on: a claim with no body after it, and a body shown
-/// before its claim, each fail it; the body shown after its claim settles it.
+/// The check the site tests rely on: a bodiless claim, a body before its claim, and the body on
+/// another channel each fail it; the body on the watched channel after its claim settles it.
 #[test]
 fn the_body_check_fails_a_bodiless_claim_and_a_body_before_its_claim() {
+    use crate::services::tui_o::channel_policy::SinkOp::{Patch, Post};
     use crate::services::tui_o::cutover::{self, test_override};
     use RuntimeHandoffKind::ClaudeTui;
     let settled = |check: &BodyCheck| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check.assert_settled())).is_ok()
     };
     let claim = |channel| cutover::o_owns_tui_output_for_channel(channel, Some(ClaudeTui));
-    let _candidates = test_override::force_candidates(&[(41, ClaudeTui), (43, ClaudeTui)]);
-    let (claimed, early) = (
+    let channels = [(41, ClaudeTui), (43, ClaudeTui), (45, ClaudeTui)];
+    let _candidates = test_override::force_candidates(&channels);
+    let (claimed, early, elsewhere) = (
         BodyCheck::watch(41, "answer"),
         BodyCheck::watch(43, "answer"),
+        BodyCheck::watch(45, "answer"),
     );
     assert_eq!(claim(41), Ok(false));
-    claimed.sink("a notice without it");
+    claimed.sink(41, Post, "a notice without it");
     assert!(!settled(&claimed), "released with no body shown");
-    claimed.sink("the answer, banner and all");
+    claimed.sink(41, Patch, "the answer, banner and all");
     assert!(settled(&claimed));
 
-    early.sink("the answer");
+    early.sink(43, Post, "the answer");
     assert_eq!(claim(43), Ok(false));
     assert!(
         !settled(&early),
         "the body left while the adoption was pending"
+    );
+
+    assert_eq!(claim(45), Ok(false));
+    elsewhere.sink(46, Post, "the answer");
+    assert!(
+        elsewhere.bodiless_release(),
+        "another channel's body settles nothing"
+    );
+    elsewhere.sink_request("PATCH", "/api/v10/channels/45/messages/7", "the answer");
+    assert!(!elsewhere.bodiless_release());
+    assert!(
+        !settled(&elsewhere),
+        "the body went to another channel first"
     );
 }
 

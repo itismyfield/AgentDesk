@@ -12,6 +12,7 @@ use serenity::{ChannelId, MessageId};
 
 use super::{ProviderKind, SharedData, single_message_panel as smp};
 use crate::services::agent_protocol::StatusEvent;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 
 mod registry;
 
@@ -36,6 +37,8 @@ pub(in crate::services::discord) enum FooterViewWriter<'a> {
     Watcher {
         shared: &'a Arc<SharedData>,
         http: &'a Arc<serenity::Http>,
+        /// Set for a watcher whose terminal edit is the channel's Legacy body.
+        body: Option<BodyClaim<'a>>,
     },
     #[cfg(test)]
     Test {
@@ -53,7 +56,38 @@ impl<'a> FooterViewWriter<'a> {
         shared: &'a Arc<SharedData>,
         http: &'a Arc<serenity::Http>,
     ) -> Self {
-        Self::Watcher { shared, http }
+        Self::Watcher {
+            shared,
+            http,
+            body: None,
+        }
+    }
+
+    /// An edit carrying the assistant body claims `claim`'s channel just before it is sent.
+    pub(in crate::services::discord) fn claiming(self, claim: BodyClaim<'a>) -> Self {
+        match self {
+            Self::Watcher { shared, http, .. } => Self::Watcher {
+                shared,
+                http,
+                body: Some(claim),
+            },
+            other => other,
+        }
+    }
+
+    async fn edit_body_message(
+        self,
+        channel_id: ChannelId,
+        msg_id: MessageId,
+        text: &str,
+        carries_body: bool,
+    ) -> Result<(), String> {
+        let claim = match self {
+            Self::Watcher { body, .. } => body.filter(|_| carries_body),
+            _ => None,
+        };
+        let edit = || self.edit_channel_message(channel_id, msg_id, text, true);
+        BodySend::flatten(claim_then_send(claim, edit).await)
     }
 
     #[cfg(test)]
@@ -157,6 +191,8 @@ struct CompletionFooterTerminalEdit {
     remove_after_edit: bool,
     completion_block: Option<String>,
     delivered_terminal_ids: Vec<super::placeholder_live_events::TerminalSlotId>,
+    /// Whether the edit shows assistant text, not only footer chrome.
+    carries_body: bool,
 }
 
 struct CompletedFooterPlan {
@@ -235,8 +271,9 @@ async fn prepare_turn_completed_footer(
         rendered.has_unfinished_entries,
     );
     let mut surviving_prefix = 0;
+    let body = smp::completion_footer_base_body(terminal_text, provider);
     let text = smp::compose_completion_footer_text_tracked(
-        &smp::completion_footer_base_body(terminal_text, provider),
+        &body,
         completion_block.as_deref(),
         &mut surviving_prefix,
     );
@@ -249,6 +286,7 @@ async fn prepare_turn_completed_footer(
             completion_block,
             delivered_terminal_ids: rendered
                 .surviving_terminal_ids(surviving_prefix.min(merged_prefix)),
+            carries_body: !body.trim().is_empty(),
         });
     CompletedFooterPlan {
         supersede_edit,
@@ -305,11 +343,11 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
         return true;
     };
     let edited = match writer
-        .edit_channel_message(
+        .edit_body_message(
             channel_id,
             terminal_edit.message_id,
             &terminal_edit.text,
-            true,
+            terminal_edit.carries_body,
         )
         .await
     {
@@ -443,7 +481,7 @@ pub(in crate::services::discord) async fn note_footer_suppressed_for_tui_mirror(
         return true;
     };
     match writer
-        .edit_channel_message(channel_id, msg_id, &finalized, true)
+        .edit_body_message(channel_id, msg_id, &finalized, !finalized.trim().is_empty())
         .await
     {
         Ok(()) => true,

@@ -33,7 +33,8 @@ enum Use {
     Peek,
 }
 
-/// For a caller about to send a TUI body; a pending adoption is released to Legacy first.
+/// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy. Callers
+/// outside it are pinned with their reason in the writer census.
 pub(crate) fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
@@ -61,6 +62,89 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
     decide(channel_id, Use::Peek, || session_kind(session))
+}
+
+/// Where a Legacy body goes, with how the destination's runtime kind is found.
+#[derive(Clone, Copy)]
+pub(crate) struct BodyClaim<'a> {
+    channel_id: u64,
+    kind: KindOf<'a>,
+    direct: bool,
+}
+
+#[derive(Clone, Copy)]
+enum KindOf<'a> {
+    Known(Option<RuntimeHandoffKind>),
+    Tmux(Option<&'a str>),
+}
+
+impl<'a> BodyClaim<'a> {
+    pub(crate) fn new(channel_id: u64, kind: Option<RuntimeHandoffKind>) -> Self {
+        let kind = KindOf::Known(kind);
+        Self {
+            channel_id,
+            kind,
+            direct: true,
+        }
+    }
+
+    pub(crate) fn tmux(channel_id: u64, session: Option<&'a str>) -> Self {
+        let kind = KindOf::Tmux(session);
+        Self {
+            channel_id,
+            kind,
+            direct: true,
+        }
+    }
+
+    /// A caller without a direct gateway cannot skip for O, so an O-owned channel is held.
+    pub(crate) fn direct(self, direct: bool) -> Self {
+        Self { direct, ..self }
+    }
+
+    fn claim(self) -> Result<bool, IdentityError> {
+        let owned = match self.kind {
+            KindOf::Known(kind) => o_owns_tui_output_for_channel(self.channel_id, kind),
+            KindOf::Tmux(session) => o_owns_tui_output_for_channel_tmux(self.channel_id, session),
+        }?;
+        if owned && !self.direct {
+            return Err(IdentityError::NonDirectGateway.hold(self.channel_id));
+        }
+        Ok(owned)
+    }
+}
+
+/// What became of a body offered to [`claim_then_send`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BodySend<T> {
+    /// O owns the channel, so nothing was sent.
+    OwnedByO,
+    Sent(T),
+}
+
+impl<T> BodySend<Result<T, String>> {
+    /// The send's own result, with O owning the channel or a held identity as a failed send.
+    pub(crate) fn flatten(sent: Result<Self, IdentityError>) -> Result<T, String> {
+        match sent {
+            Ok(Self::Sent(result)) => result,
+            Ok(Self::OwnedByO) => Err("O owns this channel's body".to_string()),
+            Err(error) => Err(format!("TUI output identity held: {error}")),
+        }
+    }
+}
+
+/// The one place a Legacy body ends a pending adoption: claim, then send at once unless O owns
+/// the channel. Callers settle guards and no-ops on a peek first; `None` sends without a claim.
+pub(crate) async fn claim_then_send<T, F: std::future::Future<Output = T>>(
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Result<BodySend<T>, IdentityError> {
+    if let Some(claim) = claim
+        && claim.claim()?
+    {
+        return Ok(BodySend::OwnedByO);
+    }
+    Ok(BodySend::Sent(send().await))
 }
 
 fn session_kind(session: Option<&str>) -> Option<RuntimeHandoffKind> {

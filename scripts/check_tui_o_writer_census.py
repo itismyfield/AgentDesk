@@ -18,6 +18,9 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       readers) must have none of either, so a delegated verdict can never be
       read as Posted evidence. The `O_TUI_WRITER` token itself may appear only
       in the O_TUI_WRITER_FILES.
+  (d) A claim is the `claim_then_send` helper, which claims just before the
+      send it runs. A raw claim (a claiming gate fn or `candidate.claim(`) may
+      appear only in the RAW_CLAIM_SITES functions, each listed with its reason.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -65,8 +68,10 @@ PRIMITIVES: dict[str, str] = {
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
 _OWNS = r"o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?"
+_RAW_CLAIM = rf"\b(?:{_OWNS}|bridge_o_body_cut_decision)\b|\bcandidate\s*\.\s*claim\s*\("
+RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
 GATE_RES = {
-    "claim": re.compile(rf"\b(?:{_OWNS}|bridge_o_body_cut_decision)\b"),
+    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
@@ -125,7 +130,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "commands/tui_passthrough.rs": {".say": 8},
     "commands/voice.rs": {".say": 6},
     "discord_io.rs": {".send_message": 1},
-    "footer_view_reconciler/mod.rs": {"edit_channel_message*": 7},
+    "footer_view_reconciler/mod.rs": {"edit_channel_message*": 6},
     "formatting/delivery.rs": {".say": 3, "send_channel_message*": 6, "send_long_message*": 2},
     "formatting/long_send_rollback.rs": {"send_channel_message*": 6, "send_long_message*": 5},
     "formatting/replace_long_message.rs": {"edit_channel_message*": 1, "replace_long_message*": 5, "send_channel_message*": 1, "send_long_message*": 1},
@@ -271,7 +276,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "session_relay_sink/journal.rs": ("W20b", "COV:W20"),
     "session_relay_sink/short_controller.rs": ("W20a", "COV:W20"),
     "session_relay_sink/task_notification_context.rs": ("W20d,W21", "COV:W20"),
-    "standby_relay.rs": ("W06", "UNREACH_G", "turn_bridge/runtime_handoff_loop/watcher_handoff.rs"),
+    "standby_relay.rs": ("W06", "CUT_D"),
     "startup_reclaim.rs": ("1-D-notice", "KEEP_NONBODY"),
     "task_notification_delivery/response_chunks.rs": ("W21", "COV:W20"),
     "terminal_ui_obligation.rs": ("1-B-panel", "KEEP_NONBODY"),
@@ -313,54 +318,64 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
 }
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
-# claim: a body is about to be sent here. peek: no body, the adoption is only read.
+# claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/footer_view_reconciler/mod.rs": (
+        "edit_body_message:claim",
+    ),
     "src/services/discord/health/recovery.rs": (
         "maybe_recover_completed_stale_leak:peek",
         "maybe_recover_completed_stale_leak:claim",
     ),
-    "src/services/discord/idle_recap.rs": ("probe_relay_integrity:peek",),
+    "src/services/discord/idle_recap.rs": (
+        "probe_relay_integrity:peek",
+    ),
     "src/services/discord/recovery_engine/completion_delivery.rs": (
-        "o_owns_recovery_body:claim",
+        "relay_captured_recovery_terminal_notice_with_gateway:claim",
         "o_owns_recovery_body:peek",
+        "relay_recovery_body_to_placeholder:claim",
+        "relay_recovery_body_notice:claim",
     ),
     "src/services/discord/recovery_paths/restart.rs": (
         "try_recover_anchor_repost:peek",
         "try_recover_anchor_repost:claim",
     ),
     "src/services/discord/session_relay_sink.rs": (
-        "deliver_response:claim",
+        "deliver_response:peek",
         "deliver_response:claim",
     ),
     "src/services/discord/session_relay_sink/task_notification_context.rs": (
-        "task_response_claim_for_card:claim",
+        "task_response_claim_for_card:peek",
+    ),
+    "src/services/discord/standby_relay.rs": (
+        "run_standby_relay:claim",
     ),
     "src/services/discord/tmux_restart_handoff.rs": (
-        "start_restart_handoff_from_state:claim",
         "start_restart_handoff_from_state:peek",
+        "start_restart_handoff_from_state:claim",
     ),
     "src/services/discord/tmux_watcher.rs": (
-        "tmux_output_watcher_with_restore:claim",
         "tmux_output_watcher_with_restore:peek",
+        "tmux_output_watcher_with_restore:claim",
     ),
     "src/services/discord/tmux_watcher/completion_producer.rs": (
-        "complete_watcher_terminal_footer_or_status_panel_with_sniffer:claim",
         "complete_watcher_terminal_footer_or_status_panel_with_sniffer:peek",
     ),
+    "src/services/discord/tmux_watcher/o_delegated_arm.rs": (
+        "claim_then_direct_send:claim",
+    ),
     "src/services/discord/tmux_watcher/streaming_status_tick.rs": (
-        "update_streaming_status_tick:claim",
         "update_streaming_status_tick:peek",
+        "update_streaming_status_tick:claim",
+        "update_streaming_status_tick:claim",
     ),
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": (
-        "handle_watcher_runtime_handoff:claim",
+        "handle_watcher_runtime_handoff:peek",
     ),
     "src/services/discord/turn_bridge/stream_tick.rs": (
+        "guarded_bridge_rollover_edit:claim",
         "run_bridge_stream_tick:peek",
         "run_bridge_stream_tick:claim",
-    ),
-    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": (
-        "<module>:claim",
-        "<module>:peek",
     ),
     "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
         "bridge_o_body_cut_decision:claim",
@@ -382,11 +397,32 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "watcher_backstop_turn_is_terminal:peek",
     ),
     "src/services/tui_o/cutover.rs": (
-        "<module>:claim",
-        "<module>:claim",
-        "<module>:peek",
-        "<module>:peek",
+        "claim_for_placement:claim",
     ),
+    "src/services/tui_o/cutover/channel_gate.rs": (
+        "claim:claim",
+        "claim:claim",
+        "decide_with_snapshot:claim",
+    ),
+}
+# Functions where a raw claim may stand outside `claim_then_send`, keyed by file.
+RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
+    # The helper's own claim, and the adoption transition it reaches.
+    "src/services/tui_o/cutover/channel_gate.rs": ("claim", "decide_with_snapshot"),
+    # Re-exports; a placement releases a pending adoption by design, with no body.
+    "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
+    "src/services/discord/turn_bridge/terminal_controller_cutover.rs": ("<module>",),
+    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
+        "bridge_o_body_cut_decision",
+    ),
+    # Dispatches whose every arm left after the claim sends the body: the no-send arms are
+    # decided before it, and the send is spread over many transports.
+    "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": (
+        "run_terminal_outcome_delivery",
+    ),
+    "src/services/discord/session_relay_sink.rs": ("deliver_response",),
+    # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
+    "src/services/discord/health/recovery.rs": ("maybe_recover_completed_stale_leak",),
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
@@ -454,13 +490,19 @@ def _fn_bodies(text: str) -> list[tuple[str, int, int]]:
     return bodies
 
 
-def _gate_sites(text: str) -> list[str]:
-    """Each gate token as `innermost enclosing fn:kind`, in source order."""
+USE_RE = re.compile(r"(?:^|[;{}])\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\s[^;]*$")
+
+
+def _gate_sites(text: str, patterns=None) -> list[str]:
+    """Each gate token as `innermost enclosing fn:kind`, in source order. Gate pins skip `use`
+    items; the raw-claim scan (explicit `patterns`) keeps them, so a re-export is still seen."""
     bodies = _fn_bodies(text)
     found = []
-    for kind, pattern in GATE_RES.items():
+    for kind, pattern in (patterns or GATE_RES).items():
         for match in pattern.finditer(text):
             if DEFN_RE.search(text[max(0, match.start() - 40) : match.start()]):
+                continue
+            if patterns is None and USE_RE.search(text[max(0, match.start() - 400) : match.start()]):
                 continue
             owners = [b for b in bodies if b[1] < match.start() < b[2]]
             owner = max(owners, key=lambda b: b[1])[0] if owners else "<module>"
@@ -476,6 +518,7 @@ def measure(root: Path, pinned_test_only_files=None):
     compiled = {name: re.compile(regex) for name, regex in PRIMITIVES.items()}
     primitives: dict[str, dict[str, int]] = {}
     gates: dict[str, list[str]] = {}
+    raw: dict[str, list[str]] = {}
     flags: dict[str, int] = {}
     for path in files:
         if path in skips:
@@ -488,13 +531,20 @@ def measure(root: Path, pinned_test_only_files=None):
                     primitives.setdefault(rel[len(PRIMITIVE_ROOT) :], {})[name] = n
         if sites := _gate_sites(text):
             gates[rel] = sites
+        if sites := _gate_sites(text, {"raw": RAW_CLAIM_RE}):
+            raw[rel] = [site.removesuffix(":raw") for site in sites]
         if n := len(FLAG_RE.findall(text)):
             flags[rel] = n
-    return primitives, gates, flags
+    return primitives, gates, flags, raw
 
 
-def problems_for(primitives, gates, flags) -> list[str]:
+def problems_for(primitives, gates, flags, raw) -> list[str]:
     problems: list[str] = []
+    for rel, owners in sorted(raw.items()):
+        for owner in sorted(set(owners) - set(RAW_CLAIM_SITES.get(rel, ()))):
+            problems.append(
+                f"raw claim: {rel} claims in {owner} outside claim_then_send and RAW_CLAIM_SITES"
+            )
     for rel in sorted(set(EXPECTED_PRIMITIVES) | set(primitives)):
         want, have = EXPECTED_PRIMITIVES.get(rel, {}), primitives.get(rel, {})
         for name in sorted(set(want) | set(have)):
@@ -579,10 +629,10 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
 
 def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
     try:
-        primitives, gates, flags = measure(root, pinned_test_only_files)
+        primitives, gates, flags, raw = measure(root, pinned_test_only_files)
     except RuntimeError as exc:
         return False, str(exc)
-    problems = problems_for(primitives, gates, flags)
+    problems = problems_for(primitives, gates, flags, raw)
     sites = sum(sum(m.values()) for m in primitives.values())
     deferred = sorted(rel for rel, row in CENSUS.items() if DEFER_RE.fullmatch(row[1]))
     if problems:

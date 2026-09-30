@@ -647,10 +647,10 @@ impl SessionBoundDiscordRelaySink {
         let channel_id = delivery.channel_id;
         // Resolve an unknown destination before formatting; ownership gates only the body below.
         if channel_id == 0 {
-            crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id, None)
+            crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id, None)
                 .map_err(|error| {
-                    RelaySinkError::Transient(format!("TUI output identity held: {error}"))
-                })?;
+                RelaySinkError::Transient(format!("TUI output identity held: {error}"))
+            })?;
         }
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
@@ -886,7 +886,8 @@ impl SessionBoundDiscordRelaySink {
             );
             return Ok(SessionRelayDeliveryOutcome::Delivered);
         }
-        // O posts this body: consume the range without transport or delivery evidence.
+        // O posts this body: consume the range without transport or delivery evidence. Every
+        // route below sends this body, so the channel is claimed here, after the no-send exits.
         if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
             channel_id,
             Some(&delivery.session_name),

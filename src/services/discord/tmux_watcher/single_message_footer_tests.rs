@@ -30,6 +30,7 @@ async fn watcher_single_message_completion_footer_emits_background_agent_pending
         "⠸",
         false,
         true,
+        crate::services::tui_o::cutover::BodyClaim::tmux(channel_id.get(), None),
     )
     .await;
 
@@ -171,8 +172,8 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
     }
 }
 
-/// A footer with no assistant body to rewrite (no target, or a placeholder with empty text) leaves
-/// a pending adoption; the footer that rewrites the body ends it before its edit and shows it once.
+/// A footer with no assistant body to show (no target, empty or chrome-only text, or a clean mirror
+/// body needing no edit) leaves a pending adoption; the one that shows the body ends it first.
 #[tokio::test(flavor = "current_thread")]
 async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
     use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
@@ -190,7 +191,8 @@ async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
     let _bound = test_override::bind_claude_tui_session(&tmux, "/tmp/adk-o-adopt-footer.jsonl");
     let shared = crate::services::discord::make_shared_data_for_tests();
     let placeholder = Some(serenity::all::MessageId::new(9_425_941));
-    let complete = |target: Option<&str>, placeholder, last_edit_text: &'static str| {
+    let complete = |target: Option<&str>, placeholder, last_edit_text: &str, mirror: bool| {
+        let last_edit_text = last_edit_text.to_string();
         let (shared, tmux, check) = (shared.clone(), tmux.clone(), check.clone());
         let target = target.map(|text| WatcherCompletionFooterTerminalTarget {
             msg_id: serenity::all::MessageId::new(9_425_941),
@@ -208,7 +210,7 @@ async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
                 &mut 0,
                 target,
                 placeholder,
-                last_edit_text,
+                &last_edit_text,
                 None,
                 &mut String::new(),
                 None,
@@ -216,15 +218,22 @@ async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
                 |_| async { false },
                 Some(CHANNEL + 1),
                 false,
-                false,
+                mirror,
                 false,
             )
             .await;
             recorder.contents()
         }
     };
-    for (placeholder, text) in [(None, BODY), (placeholder, ""), (placeholder, " \n")] {
-        let shown = complete(None, placeholder, text).await;
+    let chrome = crate::services::discord::formatting::build_processing_status_block("⠸");
+    let chrome_only = [
+        (None, BODY),
+        (placeholder, ""),
+        (placeholder, " \n"),
+        (placeholder, &chrome),
+    ];
+    for (placeholder, text) in chrome_only {
+        let shown = complete(None, placeholder, text, false).await;
         assert!(!shown.iter().any(|c| c.contains(BODY)), "{shown:?}");
         check.assert_settled();
         assert_eq!(
@@ -234,7 +243,15 @@ async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
         );
     }
 
-    let shown = complete(Some(BODY), placeholder, "").await;
+    let shown = complete(Some(BODY), placeholder, BODY, true).await;
+    assert!(
+        shown.is_empty(),
+        "a clean mirror body needs no edit: {shown:?}"
+    );
+    check.assert_settled();
+    assert_eq!(check.adoption(), Adoption::Pending);
+
+    let shown = complete(Some(BODY), placeholder, "", false).await;
     assert_eq!(
         shown.iter().filter(|c| c.contains(BODY)).count(),
         1,

@@ -7,7 +7,7 @@ use crate::services::tui_o::cutover::test_override;
 const BODY: &str = "ADK-C1A-bridge-tick-body";
 
 /// One real bridge stream tick for a Codex TUI turn whose anchor already exists.
-async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGateway>) {
+async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGateway>, done: bool) {
     let mut inflight_state = InflightTurnState::new(
         ProviderKind::Codex,
         channel.get(),
@@ -70,7 +70,7 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
                     77_010, 0,
                 ),
             status_panel_started_at: 0,
-            done: false,
+            done,
             dispatch_id: None,
             adk_session_key: None,
             adk_session_name: None,
@@ -126,8 +126,8 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
     assert_eq!(outcome, StreamTickOutcome::Continue);
 }
 
-/// A tick with no unsent visible text leaves a pending adoption alone; the tick that streams a
-/// body ends it before its edit, and Legacy shows that body once.
+/// A tick that streams no body (no unsent visible text, or a done tick that leaves the answer to
+/// the terminal delivery) leaves a pending adoption; the tick that streams one ends it first.
 #[tokio::test(flavor = "current_thread")]
 async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
     let temp = tempfile::TempDir::new().expect("runtime root");
@@ -143,14 +143,23 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
         })
     };
 
-    for unsent in ["", " \n"] {
-        tick(channel, unsent, gateway()).await;
+    for (unsent, done) in [("", false), (" \n", false), (BODY, true)] {
+        let quiet = gateway();
+        tick(channel, unsent, quiet.clone(), done).await;
+        assert!(
+            quiet
+                .edits
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|edit| !edit.contains(BODY))
+        );
         check.assert_settled();
         assert_eq!(check.adoption(), Adoption::Pending, "{unsent:?}");
     }
 
     let body = gateway();
-    tick(channel, BODY, body.clone()).await;
+    tick(channel, BODY, body.clone(), false).await;
     check.assert_settled();
     let edits = body.edits.lock().unwrap().clone();
     let shown: Vec<_> = edits.iter().filter(|edit| edit.contains(BODY)).collect();

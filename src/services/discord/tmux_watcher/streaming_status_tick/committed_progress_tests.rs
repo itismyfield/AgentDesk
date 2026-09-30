@@ -221,7 +221,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
                 return (status, String::new()).into_response();
             }
             if let Some(content) = payload["content"].as_str() {
-                if let Some(check) = body_check.get() { check.sink(content); }
+                if let Some(check) = body_check.get() { check.sink_request(method.as_str(), uri.path(), content); }
                 bodies.lock().unwrap().push(content.to_owned());
                 if content.encode_utf16().count() > 2000 {
                     return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -644,8 +644,8 @@ fn o_delegated_rollover_tick_writes_no_body() {
     });
 }
 
-/// A tick whose unsent text is only whitespace leaves a pending adoption; the tick that writes the
-/// body ends it before the write reaches Discord.
+/// A tick that writes no body (whitespace only, a frame the provider guard holds, or a display
+/// already shown) leaves a pending adoption; the tick that writes the body ends it first.
 #[test]
 fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
@@ -662,6 +662,7 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
     capture_warns(async {
         for (case, body, expected) in [
             (16, " \n", Adoption::Pending),
+            (18, "safe prefix [SYSTEM NOTIF", Adoption::Pending),
             (17, "ADK-C1A watcher tick body\n", Adoption::Released),
         ] {
             let fx = seed_row(guard.root.path(), case, false, false);
@@ -682,6 +683,29 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
             let writes = shown.iter().filter(|c| c.contains(BODY)).count();
             assert_eq!(writes > 0, expected == Adoption::Released, "{shown:?}");
         }
+
+        let fx = seed_row(guard.root.path(), 19, false, false);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let _bound = test_override::bind_claude_tui_session(&fx.tmux, &fx.output_path);
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+        run_tick_body(&mut locals, &rec, &shared, &fx, false, BODY).await;
+        let shown_before = rec.bodies.lock().unwrap().len();
+        assert!(shown_before > 0, "the first tick shows the body with O off");
+        let _pending = test_override::force_candidates(&[(
+            fx.channel.get(),
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
+        let check = BodyCheck::watch(fx.channel.get(), BODY);
+        locals.spin = 0;
+        run_tick_body(&mut locals, &rec, &shared, &fx, false, BODY).await;
+        assert_eq!(
+            rec.bodies.lock().unwrap().len(),
+            shown_before,
+            "the same display is not rewritten"
+        );
+        check.assert_settled();
+        assert_eq!(check.adoption(), Adoption::Pending);
     });
 }
 

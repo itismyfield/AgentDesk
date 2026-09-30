@@ -15,6 +15,7 @@ use std::{
 };
 
 use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::GatewayFuture};
+use crate::services::tui_o::channel_policy::SinkOp;
 use tracing_subscriber::fmt::MakeWriter;
 
 #[cfg(unix)]
@@ -365,9 +366,9 @@ struct DriverGateway {
 }
 
 impl DriverGateway {
-    fn sink(&self, content: &str) {
+    fn sink(&self, channel: ChannelId, op: SinkOp, content: &str) {
         if let Some(check) = self.check.get() {
-            check.sink(content);
+            check.sink(channel.get(), op, content);
         }
     }
 
@@ -385,11 +386,11 @@ impl DriverGateway {
 impl TurnGateway for DriverGateway {
     fn send_message<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         self.observe(DriverCall::Send);
-        self.sink(_content);
+        self.sink(channel_id, SinkOp::Post, _content);
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
         let bodies = self.published_bodies.clone();
@@ -417,12 +418,12 @@ impl TurnGateway for DriverGateway {
 
     fn edit_message<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
         self.observe(DriverCall::Edit);
-        self.sink(_content);
+        self.sink(channel_id, SinkOp::Patch, _content);
         let yields = self.yields_per_call;
         Box::pin(async move {
             Yields(yields).await;
@@ -445,12 +446,12 @@ impl TurnGateway for DriverGateway {
 
     fn replace_message_with_outcome<'a>(
         &'a self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
         self.observe(DriverCall::Replace);
-        self.sink(_content);
+        self.sink(channel_id, SinkOp::Patch, _content);
         let (yields, behaviour) = (self.yields_per_call, self.replace);
         let completed = Arc::clone(&self.completed_publications);
         let bodies = self.published_bodies.clone();

@@ -160,18 +160,19 @@ pub(super) async fn ensure_card_and_route(
 }
 
 /// Durable response claim for a confirmed task card. None when O posts the
-/// response, so a delegated turn leaves no Legacy claim behind.
+/// response, so a delegated turn leaves no Legacy claim behind. Ownership is only
+/// read here: a Wait or an already-delivered response sends no body.
 async fn task_response_claim_for_card(
     shared: &Arc<SharedData>,
     delivery: &super::SessionRelayDelivery,
     card: Option<MessageId>,
 ) -> Result<Option<ResponseDeliveryClaimOutcome>, RelaySinkError> {
-    let response_claim = if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+    let o_owns = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
         delivery.channel_id,
         Some(&delivery.session_name),
     )
-    .map_err(|error| RelaySinkError::Transient(format!("TUI output identity held: {error}")))?
-    {
+    .map_err(|error| RelaySinkError::Transient(format!("TUI output identity held: {error}")))?;
+    let response_claim = if o_owns {
         None
     } else if card.is_some()
         && delivery.task_notification_context.is_some()
@@ -984,6 +985,77 @@ mod tests {
             row.is_none(),
             "no Owned, sent or delivered row for an O-posted response"
         );
+    }
+
+    // A response left to the watcher or already delivered sends no body, so preparing it only
+    // reads a pending adoption.
+    #[tokio::test]
+    async fn a_task_response_that_sends_no_body_leaves_a_pending_adoption() {
+        use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+        use crate::services::tui_o::cutover::test_override;
+        if !test_override::isolated_binding_case(concat!(
+            module_path!(),
+            "::a_task_response_that_sends_no_body_leaves_a_pending_adoption"
+        )) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let mut delivery = super::super::SessionRelayDelivery {
+            provider: ProviderKind::Claude,
+            channel_id: 4_055_920,
+            session_name: "AgentDesk-claude-4055-o-pending".to_string(),
+            response_text: "answer".to_string(),
+            task_notification_kind: Some(TaskNotificationKind::Background),
+            task_notification_context: Some(context("o-pending")),
+            terminal_consumed_end: None,
+            frame_turn_user_msg_id: 0,
+            frame_turn_started_at: "2026-07-11T01:38:00Z".to_string(),
+            frame_turn_start_offset: None,
+            relay_range: None,
+            relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
+        };
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let jsonl = temp.path().join("pending.jsonl");
+        let _tui = test_override::bind_claude_tui_session(
+            &delivery.session_name,
+            &jsonl.to_string_lossy(),
+        );
+        let _candidates = test_override::force_candidates(&[(
+            delivery.channel_id,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
+        let check = BodyCheck::watch(delivery.channel_id, "answer");
+        let card = Some(MessageId::new(4_055_921));
+
+        let wait = task_response_claim_for_card(&shared, &delivery, card).await;
+        assert!(
+            matches!(wait, Ok(Some(ResponseDeliveryClaimOutcome::Wait))),
+            "{wait:?}"
+        );
+        assert_eq!(check.adoption(), Adoption::Pending);
+
+        (
+            delivery.frame_turn_start_offset,
+            delivery.terminal_consumed_end,
+        ) = (Some(4_055), Some(4_300));
+        let Ok(Some(ResponseDeliveryClaimOutcome::Owned(claim))) =
+            task_response_claim_for_card(&shared, &delivery, card).await
+        else {
+            panic!("the first claimant owns the response");
+        };
+        mark_task_response_delivered(None, &claim).await.unwrap();
+        let delivered = task_response_claim_for_card(&shared, &delivery, card).await;
+        assert!(
+            matches!(
+                delivered,
+                Ok(Some(ResponseDeliveryClaimOutcome::Delivered { .. }))
+            ),
+            "{delivered:?}"
+        );
+        check.assert_settled();
+        assert_eq!(check.adoption(), Adoption::Pending);
     }
 
     #[test]

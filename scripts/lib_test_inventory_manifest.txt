@@ -5641,6 +5641,7 @@ services::discord::session_relay_sink::orphan_reclaim::tests::registered_but_shu
 services::discord::session_relay_sink::orphan_reclaim::tests::send_point_re_gate_sends_only_the_uncommitted_tail
 services::discord::session_relay_sink::orphan_reclaim::tests::send_point_re_gate_skips_a_fully_delivered_body
 services::discord::session_relay_sink::relay_state_contract_refs::relay_state_contract_symbol_references_compile
+services::discord::session_relay_sink::task_notification_context::tests::a_task_response_that_sends_no_body_leaves_a_pending_adoption
 services::discord::session_relay_sink::task_notification_context::tests::card_is_confirmed_before_referenced_answer_is_allowed
 services::discord::session_relay_sink::task_notification_context::tests::coordinate_less_task_response_defers_until_watcher_has_a_consumed_end
 services::discord::session_relay_sink::task_notification_context::tests::giant_sink_wires_card_gate_before_reference_send
@@ -9558,6 +9559,7 @@ services::tui_o::channel_policy::tests::only_an_enabled_home_with_a_list_reads_t
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
 services::tui_o::channel_policy::tests::the_body_check_fails_a_bodiless_claim_and_a_body_before_its_claim
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
+services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition

@@ -501,14 +501,13 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     let kind = (anchor.panel_channel_id == state.channel_id)
         .then_some(state.runtime_kind)
         .flatten();
-    let o_skip = |gate: fn(u64, _) -> Result<bool, _>| match gate(anchor.panel_channel_id, kind) {
-        Ok(false) => None,
-        Ok(true) => Some(AnchorRepostOutcome::NotReposted),
-        Err(_) => Some(AnchorRepostOutcome::RefusedPreserveRow),
-    };
-    if let Some(skip) = o_skip(crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel)
-    {
-        return skip;
+    match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        anchor.panel_channel_id,
+        kind,
+    ) {
+        Ok(false) => {}
+        Ok(true) => return AnchorRepostOutcome::NotReposted,
+        Err(_) => return AnchorRepostOutcome::RefusedPreserveRow,
     }
 
     // G4: the anchor is gone → send a NEW message (placeholder = None → send-new,
@@ -600,19 +599,26 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
             (anchor.panel_channel_id, anchor.panel_msg_id),
         )
         .with_record_channel_id(record_channel_id);
-    // Only the repost itself may end a pending adoption, so it is claimed after every refusal.
-    if let Some(skip) = o_skip(crate::services::tui_o::cutover::o_owns_tui_output_for_channel) {
-        return skip;
-    }
-    let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
-        http,
-        shared,
-        anchor_channel_id,
-        None,
-        terminal_text,
-        Some(&recovery_context),
-    )
-    .await;
+    // Only the repost itself claims the channel, after every refusal above.
+    let repost = || {
+        super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
+            http,
+            shared,
+            anchor_channel_id,
+            None,
+            terminal_text,
+            Some(&recovery_context),
+        )
+    };
+    let claim = crate::services::tui_o::cutover::BodyClaim::new(anchor.panel_channel_id, kind);
+    let outcome = match crate::services::tui_o::cutover::claim_then_send(Some(claim), repost).await
+    {
+        Ok(crate::services::tui_o::cutover::BodySend::Sent(outcome)) => outcome,
+        Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {
+            return AnchorRepostOutcome::NotReposted;
+        }
+        Err(_) => return AnchorRepostOutcome::RefusedPreserveRow,
+    };
 
     // #3918: the answer reached Discord — record the durable idempotency marker
     // NOW, before the caller's `dispose_*` clears the row, so that if the clear

@@ -16,7 +16,10 @@ use crate::services::tui_o::writer::WriterAlarm;
 mod adoption;
 pub(crate) use adoption::{Adoption, Candidate, Site};
 #[cfg(test)]
-pub(crate) use adoption::{body_check::BodyCheck, stored};
+pub(crate) use adoption::{
+    body_check::{BodyCheck, SinkOp},
+    stored,
+};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BootChannels {

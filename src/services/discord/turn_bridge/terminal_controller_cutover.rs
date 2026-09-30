@@ -117,7 +117,9 @@ pub(super) fn bridge_long_chunks_cutover_decision(
 }
 
 mod o_body;
-pub(super) use o_body::{bridge_o_body_cut_decision, bridge_o_body_peek_decision};
+pub(super) use o_body::{
+    bridge_body_claim, bridge_o_body_cut_decision, bridge_o_body_peek_decision,
+};
 
 /// #3089 A5: pure no-double-acquire gate. The legacy site-5 arm acquires its OWN
 /// `BridgeDeliveryLease` over `cutover_range` (mod.rs ~6134). When the

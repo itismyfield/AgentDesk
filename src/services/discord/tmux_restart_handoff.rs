@@ -287,14 +287,9 @@ pub(super) async fn start_restart_handoff_from_state(
         .then_some(state.runtime_kind)
         .flatten();
     let target = restart_handoff_notice_target(&state);
-    // Only a notice carrying the saved body may end a pending adoption; cleanup just reads it.
-    let o_owns = match target {
-        RestartHandoffNoticeTarget::Edit(_) if !best_response.trim().is_empty() => {
-            crate::services::tui_o::cutover::o_owns_tui_output_for_channel
-        }
-        _ => crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel,
-    };
-    let Ok(o_owns_body) = o_owns(channel_id.get(), kind) else {
+    let Ok(o_owns_body) =
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id.get(), kind)
+    else {
         return false;
     };
     let stale_text =
@@ -303,15 +298,23 @@ pub(super) async fn start_restart_handoff_from_state(
         RestartHandoffNoticeTarget::Edit(current_msg_id) => {
             let current_msg_id = serenity::MessageId::new(current_msg_id);
             forget_completion_footer_for_restart_handoff(channel_id, current_msg_id);
-            let relay_ok = super::formatting::replace_long_message_raw(
-                http,
-                channel_id,
-                current_msg_id,
-                &stale_text,
-                shared,
-            )
-            .await
-            .is_ok();
+            // Only a notice carrying the saved body claims the channel, as it is sent.
+            let claim = (!o_owns_body && !best_response.trim().is_empty())
+                .then(|| crate::services::tui_o::cutover::BodyClaim::new(channel_id.get(), kind));
+            let replace = || {
+                let text = &stale_text;
+                super::formatting::replace_long_message_raw(
+                    http,
+                    channel_id,
+                    current_msg_id,
+                    text,
+                    shared,
+                )
+            };
+            let relay_ok = matches!(
+                crate::services::tui_o::cutover::claim_then_send(claim, replace).await,
+                Ok(crate::services::tui_o::cutover::BodySend::Sent(Ok(_)))
+            );
             if !relay_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(

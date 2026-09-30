@@ -82,7 +82,7 @@ async fn serve(
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             let content = payload["content"].as_str().map(str::to_owned);
             if let (Some(check), Some(content)) = (&check, &content) {
-                check.sink(content);
+                check.sink_request(method.as_str(), uri.path(), content);
             }
             recorded.lock().unwrap().push(Call {
                 content: content.clone(),
