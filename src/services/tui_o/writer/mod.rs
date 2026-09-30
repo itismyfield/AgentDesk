@@ -3,6 +3,7 @@
 
 pub mod activation;
 pub mod actor;
+pub mod adoption;
 pub mod binding;
 pub mod confirm;
 pub mod deliver;

@@ -109,6 +109,10 @@ impl HostIo for TestIo {
     fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<bool, String> {
         self.custody.lock().unwrap().clone()
     }
+
+    fn legacy(&self) -> Arc<dyn crate::services::tui_o::writer::adoption::LegacyView> {
+        Arc::new(crate::services::tui_o::writer::adoption::NoLegacy)
+    }
 }
 
 /// This thread's adoption of a selected channel.
@@ -531,7 +535,7 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
         ("no PG gateway lease", facts(|_| ()), startup, b"", false),
         ("no source is bound", facts(|_| ()), unbound, b"", true),
         (
-            "already holds",
+            "legacy cursor not established",
             facts(|_| ()),
             startup,
             b"legacy answer\n",

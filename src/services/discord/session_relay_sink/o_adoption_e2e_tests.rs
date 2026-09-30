@@ -2,10 +2,14 @@
 //! first Legacy body and the first `init` comes first owns the channel, and each unit posts once.
 
 use super::*;
+use crate::services::discord::SharedData;
+use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::channel_policy::{self, Adoption, BootChannels, Candidate};
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::store::{OStore, StoreConfig};
+use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 use crate::services::tui_o::writer::activation::{self, test_hook};
+use crate::services::tui_o::writer::adoption::{self as held, LegacyView};
+use crate::services::tui_o::writer::binding::BindingEvents;
 use crate::services::tui_o::writer::host::{self, HostIo, HostParts, Readiness, test_io::TestHost};
 use std::time::{Duration, Instant};
 
@@ -15,6 +19,7 @@ const B: u64 = 640031;
 /// Candidate `A` beside Legacy neighbour `B`, each with an empty transcript and an open turn.
 struct Pair {
     root: PathBuf,
+    shared: Arc<SharedData>,
     legs: [Leg; 2],
     io: Arc<TestHost>,
     gate: Arc<OwnershipGate>,
@@ -37,6 +42,7 @@ impl Pair {
         gate.acquired();
         Self {
             root,
+            shared,
             legs,
             io,
             gate,
@@ -264,19 +270,40 @@ async fn a_body_judged_while_the_first_init_is_written_waits_for_it_and_goes_to_
     }
 }
 
+/// Seals the era over another channel, so the candidate's first `init` is written by itself.
+fn seal_era(root: &Path) {
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root);
+    let store = store.unwrap().unwrap();
+    let other = 640099;
+    let init = |channel| {
+        Ok(Initialized {
+            channel,
+            sources: Vec::new(),
+            initial_anchor: 0,
+            build_digest: "e2e".into(),
+            at: chrono::Utc::now(),
+        })
+    };
+    store.begin_era(&[other], chrono::Utc::now(), init).unwrap();
+}
+
 async fn failure_after_publication() {
     let pair = Pair::new().await;
+    seal_era(&pair.root);
     let candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
-    test_hook::set(A, test_hook::Step::AfterWrite, || {
-        Err("injected I/O error".into())
+    let dir = pair.root.join("o_store").join(A.to_string());
+    // The init is linked and synced, then unlinking its temp name fails and leaves that alias.
+    test_hook::set(A, test_hook::Step::AfterWrite, move || {
+        std::fs::hard_link(dir.join("init"), dir.join("init.e2e.tmp")).unwrap();
+        Err("injected temp unlink failure".into())
     });
     let hosts = pair.host(&pair.io);
     settle().await;
     assert_eq!(
         adoption(A),
-        Adoption::Held,
-        "a failure after a store write keeps O's hold"
+        Adoption::Committed,
+        "a failure after a readable init keeps the channel with O"
     );
     assert!(
         pair.init_exists(),
@@ -286,8 +313,8 @@ async fn failure_after_publication() {
     settle().await;
     assert_eq!(
         pair.posts(&pair.io, 0),
-        (0, 0),
-        "held: neither writer posts in this process"
+        (1, 0),
+        "O posts the unit in this process and Legacy only consumes it"
     );
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
     drop(candidates);
@@ -303,19 +330,288 @@ async fn failure_after_publication() {
     let io = TestHost::new([(A, pair.legs[0].source())]);
     let hosts = pair.host(&io);
     settle().await;
+    assert_eq!(pair.posts(&io, 0), (0, 0), "the restart posts nothing more");
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_store_failure_after_the_init_is_readable_commits_the_channel_and_a_restart_posts_nothing_more()
+ {
+    if isolated(
+        "adoption::a_store_failure_after_the_init_is_readable_commits_the_channel_and_a_restart_posts_nothing_more",
+    ) {
+        failure_after_publication().await;
+    }
+}
+
+const SECOND_STARTED: &str = "2026-09-30T00:05:00Z";
+
+/// The rows of the leg's first turn as `Leg::finish_turn` writes them.
+fn first_turn(body: &str) -> String {
+    let rows = [
+        serde_json::json!({"type":"assistant", "uuid":"row-answer", "apiBlockIndex":0,
+            "message":{"id":"answer", "content":[{"type":"text", "text":body}]}}),
+        serde_json::json!({"type":"result", "result":body}),
+    ];
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
+
+/// A's rows for its second turn, carrying a unit no other turn carries.
+fn second_turn(body: &str) -> String {
+    let text = format!("{body} second");
+    let rows = [
+        serde_json::json!({"type":"user", "uuid":"row-second-q", "message":{"content":"again"}}),
+        serde_json::json!({"type":"assistant", "uuid":"row-second", "apiBlockIndex":0,
+            "message":{"id":"answer-second", "content":[{"type":"text", "text":text}]}}),
+        serde_json::json!({"type":"result", "result":text}),
+    ];
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
+
+fn transcript_len(path: &str) -> u64 {
+    std::fs::metadata(path).unwrap().len()
+}
+
+/// Appends the second turn as the TUI writes it, without any Legacy judgement; returns its start.
+fn write_second(path: &str, body: &str) -> (u64, String) {
+    use std::io::Write;
+    let (start, rows) = (transcript_len(path), second_turn(body));
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(rows.as_bytes()).unwrap();
+    (start, rows)
+}
+
+/// Hands the second turn to A's Legacy sink over its own open turn, as its tail would.
+async fn deliver_second(leg: &Leg, start: u64, rows: &str) {
+    let session = &leg.binding.expected_session_name;
+    let mut row =
+        inflight_with_identity_offset(leg.channel, session, 711, SECOND_STARTED, Some(start));
+    row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    row.current_msg_id = 88011;
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+    let end = start + rows.len() as u64;
+    let mut frame =
+        terminal_frame_offset(&leg.binding, rows, 1, end, 711, SECOND_STARTED, Some(start));
+    frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
+    let outcome = leg.sink.deliver(&frame).await;
+    assert!(
+        matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+        "{outcome:?}"
+    );
+}
+
+/// Legacy's cursor where a rehydrate pass of this process leaves it: the transcript's length.
+fn rehydrated(leg: &Leg) -> u64 {
+    let end = transcript_len(&leg.binding.expected_rollout_path);
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &leg.binding.expected_session_name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: leg.binding.expected_rollout_path.clone(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("e2e".into()),
+            last_offset: end,
+            relay_last_offset: None,
+        },
+    );
+    crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
+    end
+}
+
+fn legacy_cursor(leg: &Leg) -> u64 {
+    let session = &leg.binding.expected_session_name;
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session);
+    binding.unwrap().last_offset
+}
+
+impl Pair {
+    /// O reads this process's real Legacy relay state for A, under A's own tmux session.
+    fn read_legacy(&self) -> Arc<dyn LegacyView> {
+        let legacy: Arc<dyn LegacyView> = Arc::new(LegacyRelay::new(self.shared.clone()));
+        *self.io.legacy.lock().unwrap() = Some(Arc::clone(&legacy));
+        let session = self.legs[0].binding.expected_session_name.clone();
+        self.io.sessions.lock().unwrap().insert(A, session);
+        legacy
+    }
+
+    /// A's first turn, delivered by Legacy before A was selected; returns Legacy's cursor after it.
+    async fn delivered_history(&self) -> u64 {
+        let unselected = cutover::test_override::force_channels(&[]);
+        finish(&self.legs[0]).await;
+        drop(unselected);
+        assert_eq!(self.legs[0].legacy_posts(), 1);
+        self.read_legacy();
+        rehydrated(&self.legs[0])
+    }
+
+    fn o_start(&self) -> u64 {
+        let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &self.root);
+        let init = store.unwrap().unwrap().read_init(A).unwrap().unwrap();
+        let current = self.legs[0].source();
+        let start = init.sources.iter().find(|s| s.source_id == current);
+        start
+            .expect("A's current source is attached")
+            .delivery_start
+    }
+
+    fn held_for(&self, reason: &str) {
+        let alarms = self.io.alarms.0.lock().unwrap();
+        let held = |(channel, alarm): &(u64, _)| {
+            *channel == A
+                && matches!(alarm, crate::services::tui_o::writer::WriterAlarm::Halted { detail } if detail.contains(reason))
+        };
+        assert!(alarms.iter().any(held), "held for {reason}: {alarms:?}");
+    }
+}
+
+async fn unit_after_the_pin() {
+    let pair = Pair::new().await;
+    let cursor = pair.delivered_history().await;
+    let _candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let written = Arc::new(std::sync::Mutex::new(None));
+    let slot = Arc::clone(&written);
+    let path = pair.legs[0].binding.expected_rollout_path.clone();
+    let body = pair.legs[0].body.clone();
+    test_hook::set(A, test_hook::Step::BeforeLock, move || {
+        *slot.lock().unwrap() = Some(write_second(&path, &body));
+        Ok(())
+    });
+    let hosts = pair.host(&pair.io);
+    settle().await;
+    assert_eq!(adoption(A), Adoption::Released);
+    assert!(!pair.init_exists(), "a moved transcript writes no init");
+    pair.held_for("length moved");
+    let (start, rows) = written
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the unit was written");
+    assert_eq!(start, cursor, "the unit starts at Legacy's cursor");
+    deliver_second(&pair.legs[0], start, &rows).await;
+    settle().await;
     assert_eq!(
-        pair.posts(&io, 0),
-        (1, 0),
-        "the restart posts the unit once, through O"
+        pair.posts(&pair.io, 0),
+        (0, 2),
+        "Legacy posts the unit from its cursor"
     );
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_store_failure_after_the_init_is_public_holds_the_channel_and_a_restart_posts_once() {
+async fn a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_cursor() {
     if isolated(
-        "adoption::a_store_failure_after_the_init_is_public_holds_the_channel_and_a_restart_posts_once",
+        "adoption::a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_cursor",
     ) {
-        failure_after_publication().await;
+        unit_after_the_pin().await;
+    }
+}
+
+async fn undelivered_closed_turn() {
+    let pair = Pair::new().await;
+    // A's turn reached the transcript but no Legacy delivery covered it yet.
+    let leg = &pair.legs[0];
+    std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
+    pair.read_legacy();
+    rehydrated(&pair.legs[0]);
+    let _candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let hosts = pair.host(&pair.io);
+    settle().await;
+    assert_eq!(adoption(A), Adoption::Released);
+    pair.held_for("frontier 0 is outside");
+    // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
+    finish(&pair.legs[0]).await;
+    settle().await;
+    assert_eq!(
+        pair.posts(&pair.io, 0),
+        (0, 1),
+        "Legacy posts the turn once"
+    );
+    assert!(!pair.init_exists());
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_closed_turn_legacy_has_not_delivered_keeps_the_channel_on_legacy() {
+    if isolated("adoption::a_closed_turn_legacy_has_not_delivered_keeps_the_channel_on_legacy") {
+        undelivered_closed_turn().await;
+    }
+}
+
+async fn unit_after_the_recheck() {
+    let pair = Pair::new().await;
+    let cursor = pair.delivered_history().await;
+    let _candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let (paused_tx, paused) = std::sync::mpsc::channel();
+    let (resume, resume_rx) = std::sync::mpsc::channel::<()>();
+    test_hook::set(A, test_hook::Step::BeforeWrite, move || {
+        paused_tx.send(Instant::now()).unwrap();
+        resume_rx.recv().unwrap();
+        Ok(())
+    });
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &pair.root);
+    let store = store.unwrap().unwrap();
+    let (log, adopting) = (pair.io.bindings(A, ShadowProvider::Claude), candidate(A));
+    let legacy = pair.io.legacy();
+    let activation = std::thread::spawn(move || {
+        let events = log.binding_events_since(A, 0)?;
+        let snapshot = held::pin(&*legacy, &events, A)?;
+        let sources = || snapshot.recheck(&*legacy, &*log, A);
+        let facts = Ok(Default::default());
+        let asked = Instant::now();
+        let result = activation::activate_with(&store, A, facts, || Ok(false), &adopting, sources);
+        result.map(|()| asked.elapsed())
+    });
+    let locked_at = paused.recv().unwrap();
+    let leg = &pair.legs[0];
+    let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        resume.send(()).unwrap();
+    });
+    let judged = Instant::now();
+    deliver_second(&pair.legs[0], start, &rows).await;
+    let waited = judged.elapsed();
+    release.join().unwrap();
+    let held_for = activation.join().unwrap().unwrap();
+    eprintln!(
+        "T3c adoption over history: lock held {held_for:?} with a 300 ms pause since {:?}; \
+         A's body judgement waited {waited:?}",
+        locked_at.elapsed()
+    );
+    assert!(
+        waited >= Duration::from_millis(250),
+        "the judgement waited: {waited:?}"
+    );
+    assert_eq!(adoption(A), Adoption::Committed);
+    assert_eq!(
+        (pair.o_start(), legacy_cursor(&pair.legs[0])),
+        (cursor, cursor),
+        "O starts at the cursor Legacy reads from"
+    );
+    assert_eq!(
+        pair.legs[0].legacy_posts(),
+        1,
+        "Legacy consumed the second turn"
+    );
+    let hosts = pair.host(&pair.io);
+    settle().await;
+    let seconds = pair.io.posts.to(A);
+    assert_eq!(
+        seconds.len(),
+        1,
+        "O posts the second turn's unit only: {seconds:?}"
+    );
+    assert!(seconds[0].ends_with("second"), "{seconds:?}");
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_unit_written_after_the_recheck_goes_to_o_from_legacys_cursor() {
+    if isolated("adoption::a_unit_written_after_the_recheck_goes_to_o_from_legacys_cursor") {
+        unit_after_the_recheck().await;
     }
 }

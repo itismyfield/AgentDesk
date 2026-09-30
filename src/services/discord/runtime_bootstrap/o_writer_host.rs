@@ -7,11 +7,13 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
+use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::alarm::AlarmRouter;
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
+use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{self, HostIo};
 
@@ -135,6 +137,10 @@ impl HostIo for GatewayHost {
         Ok(pending_start
             || super::super::inflight::inflight_state_file_exists(&kind, channel)
             || super::super::terminal_delivery_custody::retains_channel(channel)?)
+    }
+
+    fn legacy(&self) -> Arc<dyn LegacyView> {
+        Arc::new(LegacyRelay::new(Arc::clone(&self.shared)))
     }
 }
 

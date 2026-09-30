@@ -11,6 +11,23 @@ struct View {
     peers: Vec<String>,
 }
 thread_local! { static VIEW: RefCell<Option<View>> = const { RefCell::new(None) }; }
+/// Read by every thread when set, so a pass the relay runs on its blocking pool sees it too.
+static SHARED_VIEW: std::sync::Mutex<Option<View>> = std::sync::Mutex::new(None);
+/// Each thread that read `SHARED_VIEW`.
+static SHARED_READERS: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// This thread's view, else the shared one.
+fn view<T>(read: impl Fn(&View) -> T) -> Option<T> {
+    if let Some(seen) = VIEW.with_borrow(|v| v.as_ref().map(&read)) {
+        return Some(seen);
+    }
+    let shared = SHARED_VIEW.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = shared.as_ref().map(&read)?;
+    let mut readers = SHARED_READERS.lock().unwrap_or_else(|e| e.into_inner());
+    readers.push(std::thread::current().id());
+    Some(seen)
+}
 struct Reset;
 impl Drop for Reset {
     fn drop(&mut self) {
@@ -21,33 +38,25 @@ impl Drop for Reset {
 }
 
 pub(super) fn claude_session_names() -> Result<Vec<String>, String> {
-    if let Some(names) = VIEW.with_borrow(|v| {
-        v.as_ref()
-            .map(|v| std::iter::once(&v.tmux).chain(&v.peers).cloned().collect())
-    }) {
+    if let Some(names) = view(|v| std::iter::once(&v.tmux).chain(&v.peers).cloned().collect()) {
         return Ok(names);
     }
     crate::services::platform::tmux::list_session_names()
 }
 pub(super) fn claude_pane_live(tmux: &str) -> bool {
-    if let Some(live) = VIEW.with_borrow(|v| {
-        v.as_ref()
-            .map(|v| v.tmux == tmux || v.peers.iter().any(|p| p == tmux))
-    }) {
+    if let Some(live) = view(|v| v.tmux == tmux || v.peers.iter().any(|p| p == tmux)) {
         return live;
     }
     crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux)
 }
 pub(super) fn claude_channel(tmux: &str) -> Option<u64> {
-    if let Some(channel) =
-        VIEW.with_borrow(|v| v.as_ref().map(|v| (v.tmux == tmux).then_some(v.channel)))
-    {
+    if let Some(channel) = view(|v| (v.tmux == tmux).then_some(v.channel)) {
         return channel;
     }
     resolve_rehydrated_claude_tmux_channel_id(tmux)
 }
 pub(super) fn claude_home() -> Option<PathBuf> {
-    VIEW.with_borrow(|v| v.as_ref().map(|v| v.home.clone()))
+    view(|v| v.home.clone())
 }
 
 fn outer_failure(alias: bool, header: bool) {
@@ -626,4 +635,167 @@ fn registration_alias_conflict_keeps_original_pane_unready() {
         ),
         (1, 0, 2)
     );
+}
+
+const NEIGHBOUR_CHILD: &str = "ADK_T3BB_NEIGHBOUR_CHILD";
+
+/// Runs `name` alone in a child process with its own runtime root; true inside that child. A
+/// child still running after a minute fails the test.
+fn in_child(name: &str) -> bool {
+    if std::env::var_os(NEIGHBOUR_CHILD).is_some() {
+        return true;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &qualified, "--nocapture"])
+        .env(NEIGHBOUR_CHILD, "1")
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .env("TMPDIR", root.path())
+        .env_remove(crate::services::tui_o::cutover::test_override::CHILD_ENV)
+        .env_remove("DATABASE_URL")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("{name} did not finish: the neighbour's rehydration waited on the adoption");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    false
+}
+
+/// Legacy has started; the stalled pin never reads anything else.
+struct Started;
+
+impl crate::services::tui_o::writer::adoption::LegacyView for Started {
+    fn started(&self) -> bool {
+        true
+    }
+    fn cursor(&self, _: &str) -> crate::services::tui_o::writer::adoption::LegacyCursor {
+        crate::services::tui_o::writer::adoption::LegacyCursor::Unbound
+    }
+    fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+        None
+    }
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration() {
+    if !in_child("a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration") {
+        return;
+    }
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_o::shadow::ShadowProvider;
+    use crate::services::tui_o::writer::activation::test_hook;
+    use crate::services::tui_o::writer::host::{self, HostParts, Readiness, test_io::TestHost};
+    let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    // B: a live Legacy pane this process has never bound, named only by its launch script.
+    let (tmux, neighbour, session) = (format!("t3bb-{}", uuid()), 7_493, uuid());
+    let (home, cwd) = (root.join("claude-home"), root.join("project"));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        &cwd,
+        &session,
+        Some(&home),
+    )
+    .unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"summary\"}\n").unwrap();
+    let script = tc::session_temp_path(&tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);
+    std::fs::create_dir_all(Path::new(&script).parent().unwrap()).unwrap();
+    let launch = format!(
+        "cd '{}'\nexec 'claude' '--session-id' '{session}'\n",
+        cwd.display()
+    );
+    std::fs::write(&script, launch).unwrap();
+    *SHARED_VIEW.lock().unwrap() = Some(View {
+        tmux: tmux.clone(),
+        channel: neighbour,
+        home,
+        peers: Vec::new(),
+    });
+    // A: a candidate that holds output, its pin stalled until the test ends.
+    let candidate = 7_494;
+    let a_path = root.join("candidate.jsonl");
+    std::fs::write(&a_path, "{\"type\":\"result\"}\n").unwrap();
+    let source = crate::services::tui_o::shadow::binding_reader::source_id_for("t3bb", &a_path);
+    let io = TestHost::new([(candidate, source.unwrap())]);
+    *io.legacy.lock().unwrap() = Some(Arc::new(Started));
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    test_hook::set(candidate, test_hook::Step::Snapshot, move || {
+        entered_tx.send(()).unwrap();
+        let _ = released.recv();
+        Err("the test ended".into())
+    });
+    let _candidates = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+        candidate,
+        RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let gate = Arc::new(crate::services::tui_o::ownership::OwnershipGate::default());
+    gate.acquired();
+    let parts = || HostParts {
+        io,
+        runtime_root: Some(root.clone()),
+        gate,
+        readiness: Arc::new(Readiness::default()),
+    };
+    // The host starts first, so an adoption blocking the runtime would stall the relay too.
+    let hosts = host::start(ShadowProvider::Claude, true, parts);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    spawn_claude_idle_transcript_relay(shared);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let registered = loop {
+        let bound = dedupe::runtime_binding_for_tmux_session(&tmux);
+        if let Some(bound) = bound {
+            break bound;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B was never rehydrated"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert!(
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok(),
+        "A's pin started"
+    );
+    let adoption = crate::services::tui_o::cutover::test_override::with_channels(|boot| {
+        boot.unwrap().candidate(candidate).unwrap().peek()
+    });
+    assert_eq!(
+        adoption,
+        crate::services::tui_o::channel_policy::Adoption::Pending,
+        "A's pin is still stalled"
+    );
+    let len = std::fs::metadata(&transcript).unwrap().len();
+    assert_eq!(
+        (registered.output_path.as_str(), registered.last_offset),
+        (transcript.to_str().unwrap(), len),
+        "B's first cursor is its transcript's length, as without the candidate"
+    );
+    let me = std::thread::current().id();
+    let readers = SHARED_READERS.lock().unwrap().clone();
+    assert!(
+        readers.iter().any(|reader| *reader != me),
+        "the relay's own rehydrate thread read the fixture: {readers:?}"
+    );
+    release.send(()).unwrap();
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
