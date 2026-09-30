@@ -1,6 +1,5 @@
-//! Session-lifetime hosted execution record in `sessions.hosted_execution`. NULL is legacy;
-//! an unreadable payload is `Unknown` and keeps the row. Writes CAS the exact value last read.
-//! Ordinary cleanup deletes a row only through [`CleanupRow::deletable`].
+//! Session-lifetime hosted execution record in `sessions.hosted_execution`; writes CAS the
+//! exact value last read. Ordinary cleanup deletes a row only through [`CleanupRow::deletable`].
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde::{Deserialize, Deserializer, Serialize};
