@@ -256,7 +256,7 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
 }
 
 macro_rules! dispatch_pinned_terminal {
-    ($shared:ident $gateway:ident $provider:ident $owner:ident $inflight:ident $end:ident $admitted:ident $channel:ident $message:ident $body:ident $start:ident $dispatch:ident $session:ident $turn:ident $long:ident $full:ident $footer_mode:ident $committed:ident $visible:ident $sent:ident $footer:ident $preserve:ident $skip_owner:ident $handled:ident $outcome:ident) => {{
+    ($shared:ident $gateway:ident $provider:ident $owner:ident $inflight:ident $end:ident $admitted:ident $channel:ident $message:ident $body:ident $start:ident $dispatch:ident $session:ident $turn:ident $long:ident $full:ident $footer_mode:ident $committed:ident $visible:ident $sent:ident $footer:ident $preserve:ident $skip_owner:ident $handled:ident $outcome:ident $claim:ident) => {{
         if $admitted.is_some() {
             #[cfg(test)]
             if let Some(hook) = $crate::services::discord::turn_bridge::stream_loop::types::terminal_prepare_test::for_channel($channel) {
@@ -299,7 +299,7 @@ macro_rules! dispatch_pinned_terminal {
                             $session.as_deref(),
                             Some($turn.as_str()),
                         ),
-                        claim: Some($crate::services::discord::turn_bridge::terminal_controller_cutover::bridge_body_claim($channel, &$inflight, true)),
+                        claim: $claim,
                     };
                     let (mut did_commit, fallback, anchor) = transport.deliver(pinned, $long).await;
                     if $long && did_commit {

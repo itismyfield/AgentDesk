@@ -535,3 +535,8 @@ pub(super) async fn apply_watcher_task_response(
         external_input_lease_consumed_by_relay,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    include!("task_response_authority_tests.rs");
+}

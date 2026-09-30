@@ -1219,6 +1219,85 @@ mod tests {
         );
     }
 
+    /// A recovered body that posts nothing (another holder has the fresh-send lease, or the range
+    /// is durably delivered) leaves a pending O adoption; the relay that posts it ends it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_recovery_relay_that_posts_nothing_leaves_a_pending_adoption() {
+        use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
+        use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_temp, _reset) = set_runtime_root();
+        let provider = ProviderKind::Codex;
+        let mut state = state(provider.clone(), 44_021);
+        state.runtime_kind = Some(CodexTui);
+        let tmux = state.tmux_session_name.as_deref().unwrap();
+        write_generation_marker(tmux);
+        inflight::save_inflight_state(&state).expect("save inflight");
+        std::fs::write(state.output_path.as_deref().unwrap(), vec![b'x'; 512]).unwrap();
+        let channel = ChannelId::new(state.channel_id);
+        let _pending = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+            state.channel_id,
+            CodexTui,
+        )]);
+        let check = BodyCheck::watch(state.channel_id, "answer");
+        let recorder =
+            super::super::o_cut_recorder::start_watching(state.channel_id, check.clone(), false)
+                .await;
+        let context = |shared: &Arc<SharedData>| {
+            RecoveryDeliveryContext::from_state(
+                shared,
+                &provider,
+                &state,
+                Some((128, 256)),
+                shared.restart.current_generation,
+            )
+            .expect("non-zero test channel id")
+        };
+        let relay = |shared: &Arc<SharedData>, context: Option<RecoveryDeliveryContext>| {
+            let (http, shared, state) = (recorder.http.clone(), shared.clone(), state.clone());
+            async move {
+                super::super::relay_recovery_body_to_placeholder(
+                    &http,
+                    &shared,
+                    &state,
+                    channel,
+                    None,
+                    "answer",
+                    context.as_ref(),
+                )
+                .await
+            }
+        };
+
+        let shared = make_shared_data_for_tests();
+        let held = context(&shared)
+            .try_acquire_fresh_send_lease(&shared, "answer")
+            .expect("another holder takes the fresh-send lease");
+        let busy = relay(&shared, Some(context(&shared))).await;
+        assert_eq!(busy, RecoveryRelayOutcome::TransientFailure);
+        drop(held);
+        let mut lease = context(&shared)
+            .try_acquire_fresh_send_lease(&shared, "answer")
+            .expect("the lease is free again");
+        assert!(lease.commit(LeaseOutcome::Delivered));
+        record_fresh_send_for_test(&context(&shared), MessageId::new(77_021), "answer");
+        lease.release();
+        let restarted = make_shared_data_for_tests();
+        let durable = relay(&restarted, Some(context(&restarted))).await;
+        assert_eq!(durable, RecoveryRelayOutcome::Delivered);
+        assert!(recorder.calls().is_empty(), "{:?}", recorder.contents());
+        assert_eq!(check.adoption(), Adoption::Pending);
+
+        let posted = relay(&restarted, None).await;
+        assert_eq!(posted, RecoveryRelayOutcome::Delivered);
+        assert_eq!(recorder.contents(), vec!["answer".to_string()]);
+        check.assert_settled();
+        assert_eq!(check.adoption(), Adoption::Released);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn gone_anchor_repost_context_records_replacement_to_matched_record_channel() {

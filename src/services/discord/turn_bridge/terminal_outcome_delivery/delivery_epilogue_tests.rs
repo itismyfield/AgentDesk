@@ -1538,3 +1538,44 @@ async fn only_a_terminal_or_stop_with_text_ends_a_pending_adoption() {
         assert_eq!(bodies, usize::from(with_body), "{case}");
     }
 }
+
+/// A terminal whose delivery lease another holder keeps sends no body, so a pending adoption
+/// stays pending.
+#[tokio::test]
+async fn a_terminal_that_loses_its_delivery_lease_leaves_a_pending_adoption() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    driver.inflight.runtime_kind = Some(ClaudeTui);
+    driver.inflight.turn_start_offset = Some(0);
+    crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+        .expect("seed the TUI-kind row");
+    let _candidates = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+        DRIVER_CHANNEL_ID,
+        ClaudeTui,
+    )]);
+    let check = BodyCheck::watch(DRIVER_CHANNEL_ID, DRIVER_BODY);
+    driver.body_check.set(check.clone()).unwrap();
+    let channel = ChannelId::new(DRIVER_CHANNEL_ID);
+    let generation = driver.shared.restart.current_generation;
+    let key = bridge_delivery_lease_key_for_inflight(channel, generation, &driver.inflight);
+    let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 7 };
+    let deadline = crate::services::discord::lease_now_ms() + 60_000;
+    let cell = driver.shared.delivery_lease(channel);
+    assert!(
+        cell.try_acquire(key, holder, 0, 64, deadline),
+        "another holder takes the lease"
+    );
+    let (mut ctx, state) = driver.parts();
+    ctx.tmux_last_offset = Some(64);
+    tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("terminal outcome delivery must not hang");
+    let shown = driver.published_bodies.lock().unwrap().clone();
+    assert!(
+        !shown.iter().any(|body| body.contains(DRIVER_BODY)),
+        "{shown:?}"
+    );
+    check.assert_settled();
+    assert_eq!(check.adoption(), Adoption::Pending);
+}

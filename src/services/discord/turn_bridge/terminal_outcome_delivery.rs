@@ -370,11 +370,15 @@ pub(super) async fn run_terminal_outcome_delivery(
             &inflight_state,
             can_deliver_directly,
         );
-        let body_claim = terminal_controller_cutover::bridge_body_claim(
-            channel_id,
-            &inflight_state,
-            can_deliver_directly,
-        );
+        // An empty-response notice or TUI chrome is no answer, so it sends without a claim.
+        let answerless = no_answer(&full_response, response_sent_offset, &delivery_response);
+        let body_claim = (!answerless).then(|| {
+            terminal_controller_cutover::bridge_body_claim(
+                channel_id,
+                &inflight_state,
+                can_deliver_directly,
+            )
+        });
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
@@ -438,7 +442,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome body_claim);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
@@ -480,7 +484,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
-                            Some(body_claim),
+                            body_claim,
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -521,7 +525,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             inflight_state.user_msg_id,
-                            Some(body_claim),
+                            body_claim,
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -584,7 +588,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
-                            Some(body_claim),
+                            body_claim,
                             terminal_controller_cutover::BridgeShortReplaceLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -646,7 +650,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                     &delivery_response,
                                 )
                             };
-                            let replaced = claim_then_send(Some(body_claim), replace).await;
+                            let replaced = claim_then_send(body_claim, replace).await;
                             if !matches!(replaced, Ok(BodySend::Sent(_))) {
                                 // Nothing was sent: O owns the channel or its identity is held.
                                 if let Some(lease) = lease {
@@ -752,7 +756,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                         },
                     );
                 let enqueue = || enqueue_headless_delivery(delivery_arguments);
-                let enqueued = claim_then_send(Some(body_claim), enqueue).await;
+                let enqueued = claim_then_send(body_claim, enqueue).await;
                 let disposition = match &enqueued {
                     Ok(BodySend::Sent(delivery_outcome)) => {
                         super::headless_delivery::headless_delivery_disposition(&delivery_outcome)

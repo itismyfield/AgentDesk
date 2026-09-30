@@ -1312,6 +1312,7 @@ src/
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── task_response_authority.rs
+│   │   │   ├── task_response_authority_tests.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_delivery_types.rs
