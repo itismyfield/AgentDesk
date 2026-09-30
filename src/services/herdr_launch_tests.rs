@@ -343,6 +343,24 @@ async fn herdr_launch_creates_nothing_unless_its_own_pending_commits_pg() {
         );
     }
     assert_eq!(stored(&pool).await, None);
+
+    // A failed launch script leaves no Pending; a failed marker leaves Pending without a pane.
+    seed_row(&pool, None).await;
+    let host = Arc::new(FakeHost::created("pane-1"));
+    let failed = |_: &PreparedIncarnation| Err("launch script".to_string());
+    let result = launch_herdr_session(&pool, launch(Some(endpoint())), failed, host.clone());
+    assert!(matches!(result.await, Err(HerdrLaunchError::Prepare(_))));
+    assert_eq!(stored(&pool).await, None);
+    let marker_path =
+        crate::services::tmux_common::session_temp_path(&owner.logical_key, HOST_KIND_TEMP_EXT);
+    std::fs::create_dir(&marker_path).unwrap();
+    let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone());
+    assert!(matches!(result.await, Err(HerdrLaunchError::Marker(_))));
+    let HostedRecord::Known(left) = decoded(stored(&pool).await) else {
+        panic!("Pending stays");
+    };
+    assert_eq!(left, pending(&owner, &left.execution_nonce));
+    assert_eq!(host.creates.load(Ordering::SeqCst), 0);
     pool.close().await;
     db.drop().await;
 }
