@@ -373,10 +373,12 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/tmux_watcher.rs": (
         "tmux_output_watcher_with_restore:peek",
-        "tmux_output_watcher_with_restore:peek",
     ),
     "src/services/discord/tmux_watcher/completion_producer.rs": (
         "complete_watcher_terminal_footer_or_status_panel_with_sniffer:peek",
+    ),
+    "src/services/discord/tmux_watcher/o_delegated_arm.rs": (
+        "o_took_channel:peek",
     ),
     "src/services/discord/tmux_watcher/streaming_status_tick.rs": (
         "update_streaming_status_tick:peek",

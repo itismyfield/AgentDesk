@@ -77,3 +77,21 @@ pub(super) async fn consume_delegated_terminal(
     clear_provider_overload_retry_state(arm.channel_id);
     Ok(())
 }
+
+/// The claim a direct terminal body sends under, taken at each arm's own transport; a task
+/// response claims inside its own send instead.
+pub(super) fn direct_body_claim(
+    claims: bool,
+    channel: ChannelId,
+    session: &str,
+) -> Option<crate::services::tui_o::cutover::BodyClaim<'_>> {
+    claims.then(|| crate::services::tui_o::cutover::BodyClaim::tmux(channel.get(), Some(session)))
+}
+
+/// Whether O took (or holds) the channel since the watcher's peek, so nothing Legacy sent counts.
+pub(super) fn o_took_channel(channel: ChannelId, session: &str) -> bool {
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+        channel.get(),
+        Some(session),
+    ) != Ok(false)
+}

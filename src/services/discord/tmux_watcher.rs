@@ -1163,14 +1163,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 }
             }
         } else if watcher_direct_fallback_after_session_bound_ack {
-            // Each non-task arm claims at its own transport; a task response claims inside its send.
-            let body_claim = (watcher_will_direct_send && task_notification_kind.is_none())
-                .then(|| {
-                    crate::services::tui_o::cutover::BodyClaim::tmux(
-                        channel_id.get(),
-                        Some(tmux_session_name.as_str()),
-                    )
-                });
+            let claims = watcher_will_direct_send && task_notification_kind.is_none();
+            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name);
             let sent = Box::pin(terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
                 &shared,
@@ -1229,11 +1223,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             ))
             .await;
             // O took the channel since the peek: retry, and the next pass consumes it for O.
-            retry_terminal_delivery_from_offset |= !sent
-                && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-                    channel_id.get(),
-                    Some(&tmux_session_name),
-                ) != Ok(false);
+            retry_terminal_delivery_from_offset |=
+                !sent && o_delegated_arm::o_took_channel(channel_id, &tmux_session_name);
             sent
         } else if watcher_direct_fallback_requested {
             false
