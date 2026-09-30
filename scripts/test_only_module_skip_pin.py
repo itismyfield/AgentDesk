@@ -241,6 +241,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_view_reconciler/tests.rs",
         "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs",
         "src/services/discord/watchers/dispatched_origin_ghost_tests.rs",
+        "src/services/discord/watchers/lifecycle/liveness_tests.rs",
         "src/services/discord/watchers/lifecycle/restore_tests.rs",
         "src/services/discord/watchers/lifecycle/tests.rs",
         "src/services/observability/events/capture_stress_tests.rs",

@@ -1,5 +1,6 @@
 use super::*;
-use crate::services::session_host::legacy_collapse::tmux_live_pane_bool;
+use crate::services::discord::host_liveness;
+use crate::services::provider::session_probe::SessionLiveness;
 
 pub(crate) fn evaluate_liveness_probe(
     marker_present: bool,
@@ -16,16 +17,21 @@ pub(crate) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool
     let marker_path = crate::services::tmux_common::session_dead_marker_path(tmux_session_name);
     let marker_present = std::path::Path::new(&marker_path).exists();
 
-    let pane_alive = tokio::time::timeout(
+    let observed = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({
             let name = tmux_session_name.to_string();
-            move || tmux_live_pane_bool(&name)
+            move || host_liveness::observe_liveness(&name, None)
         }),
     )
-    .await
-    .unwrap_or(Ok(false))
-    .unwrap_or(false);
+    .await;
+    let pane_alive = match observed {
+        Ok(Ok(SessionLiveness::Alive)) => true,
+        Ok(Ok(SessionLiveness::Missing)) => false,
+        // Another host is never dead here; an unanswered probe is dead only by the wrapper's marker.
+        Ok(Ok(SessionLiveness::Unknown)) => return true,
+        _ => return !marker_present,
+    };
 
     match evaluate_liveness_probe(marker_present, pane_alive) {
         LivenessProbeOutcome::StaleMarkerClearAndAlive => {
@@ -89,11 +95,25 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
     shared: &Arc<SharedData>,
     tmux_session_name: &str,
     output_path: &str,
-    _watcher_provider: &ProviderKind,
+    watcher_provider: &ProviderKind,
     prompt_too_long_killed: bool,
     terminal_delivery_observed: bool,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
+    // The host guard runs before the cancel tombstone is consumed or a restart is handed off.
+    let (channel, dead) = (channel_id.get(), SessionLiveness::Missing);
+    let caller = "watcher_observed_death";
+    let admitted = host_liveness::admits_tmux_verdict(
+        shared,
+        watcher_provider,
+        channel,
+        tmux_session_name,
+        dead,
+        caller,
+    );
+    if !admitted.await {
+        return;
+    }
     let diagnostic = build_tmux_death_diagnostic(tmux_session_name, Some(output_path));
     if let Some(diag) = diagnostic.as_deref() {
         tracing::info!(
@@ -174,3 +194,7 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
                 .await;
     }
 }
+
+#[cfg(test)]
+#[path = "liveness_tests.rs"]
+mod tests;

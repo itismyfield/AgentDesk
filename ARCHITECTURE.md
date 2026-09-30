@@ -1584,6 +1584,7 @@ src/
 │   │   │   │   ├── claims.rs
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
+│   │   │   │   ├── liveness_tests.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
@@ -1620,6 +1621,7 @@ src/
 │   │   ├── health.rs
 │   │   ├── host_key_derivation.rs
 │   │   ├── host_key_derivation_tests.rs
+│   │   ├── host_liveness.rs
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs

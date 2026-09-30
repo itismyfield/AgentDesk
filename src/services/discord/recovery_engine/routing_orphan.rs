@@ -19,6 +19,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use crate::services::discord::SharedData;
+use crate::services::discord::host_liveness;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::recovery_paths::restart::dispose_recovery_relay_outcome;
 use crate::services::discord::settings::BotChannelRoutingGuardFailure;
@@ -75,6 +76,31 @@ fn routing_orphan_pane_alive(liveness: PaneLiveness) -> bool {
     !matches!(liveness, PaneLiveness::DeadOrAbsent)
 }
 
+/// The disposition's `tmux_alive`: `false` only with no session name, or when tmux confirms
+/// the pane dead and the host guard admits it. Another host is never probed as tmux.
+async fn routing_orphan_tmux_alive(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    tmux_session_name: Option<&str>,
+) -> bool {
+    let Some(name) = tmux_session_name else {
+        return false;
+    };
+    let liveness = host_liveness::observe_liveness(name, Some(state));
+    let caller = "recovery_routing_orphaned";
+    routing_orphan_pane_alive(host_liveness::as_pane_liveness(liveness))
+        || !host_liveness::admits_tmux_verdict(
+            shared,
+            provider,
+            state.channel_id,
+            name,
+            liveness,
+            caller,
+        )
+        .await
+}
+
 /// Finalize a restart-time inflight row whose bot/channel routing CHANGED while
 /// dcserver was down (e.g. the channel was re-bound to a different provider).
 /// Such a row is genuinely orphaned — no same-provider sibling bot will adopt
@@ -106,11 +132,7 @@ async fn cleanup_routing_orphaned_inflight(
     // DEFINITIVE dead/absent pane (or no session name at all) permits the budget
     // force-clear path; a transient probe ERROR is treated as maybe-alive and
     // preserves the row (re-notify next boot) — never budget-clear a live pane.
-    let tmux_alive = tmux_session_name.map_or(false, |name| {
-        routing_orphan_pane_alive(
-            crate::services::tmux_diagnostics::tmux_session_pane_liveness(name),
-        )
-    });
+    let tmux_alive = routing_orphan_tmux_alive(shared, provider, state, tmux_session_name).await;
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] 🧹 recovery: inflight routing changed for channel {} ({reason}) — finalizing orphaned turn instead of stranding it for the sweeper (#3869)",
@@ -154,6 +176,59 @@ mod tests {
         RecoveryRelayOutcome, RowDisposition, unrecoverable_relay_disposition,
     };
     use crate::services::platform::tmux::PaneLiveness;
+
+    // The disposition's `tmux_alive` is false only for a pane tmux confirms dead whose stored
+    // rows the host guard admits; any other host or a failed probe keeps the row.
+    #[tokio::test]
+    async fn routing_orphan_reads_dead_only_for_an_admitted_dead_pane_pg() {
+        use crate::services::discord::host_teardown_gate::test_support::{
+            Stored, channel_key, seed, shared_on,
+        };
+        use crate::services::discord::inflight::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+        use crate::services::session_host::test_support::InjectedLivenessGuard;
+        use crate::services::session_host::{HostLiveness, HostSessionRef};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = shared_on(&pool).await;
+        let provider = ProviderKind::Claude;
+        let probe_error = (Stored::Legacy, HostLiveness::ProbeError);
+        let cases = Stored::ALL
+            .into_iter()
+            .map(|stored| (stored, HostLiveness::DeadOrAbsent))
+            .chain([probe_error]);
+        for (n, (stored, pane)) in cases.enumerate() {
+            let channel = 1_479_671_301_387_110_000 + n as u64;
+            let name = provider.build_tmux_session_name(&format!("p4b1-orphan-{n}"));
+            seed(&pool, &channel_key(&shared, &name), &name, channel, stored).await;
+            let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(&name), pane);
+            let text = "p4b1 orphan".to_string();
+            let tmux = Some(name.clone());
+            let state = InflightTurnState::new(
+                provider.clone(),
+                channel,
+                None,
+                1,
+                2,
+                3,
+                text,
+                None,
+                tmux,
+                None,
+                None,
+                0,
+            );
+
+            let alive =
+                super::routing_orphan_tmux_alive(&shared, &provider, &state, Some(&name)).await;
+            let admitted = pane == HostLiveness::DeadOrAbsent
+                && matches!(stored, Stored::Legacy | Stored::Missing);
+            assert_eq!(alive, !admitted, "{stored:?} {pane:?}");
+        }
+        pool.close().await;
+        db.drop().await;
+    }
 
     #[test]
     fn probe_error_is_treated_as_alive_not_dead() {
