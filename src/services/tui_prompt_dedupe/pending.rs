@@ -12,7 +12,7 @@ use crate::services::claude_tui::source_verify::{
     Observation, OpenedTranscript, PinJudgment, is_top_level_transcript, judge_pin,
     observe_transcript,
 };
-use crate::services::tmux_common::with_tmux_source_authority;
+use crate::services::tmux_common::{TmuxSourceAuthority, with_tmux_source_authority};
 use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, observe_spawn_nonce_marker,
 };
@@ -535,13 +535,28 @@ pub(crate) fn restore_claude_pane(
     restored
 }
 
+/// Reads the log, judges it and registers, seeds and memoizes the result in one hold of the pane's
+/// source authority, so a hook adoption lands wholly before the judgment or after its registration.
 fn restore_pane(
     tmux_session: &str,
     channel_id: u64,
     launch: Option<LaunchTranscript>,
     bind: impl Fn(&str, &Path) -> TuiRuntimeBinding,
 ) -> Option<PendingRestore> {
-    let bound = runtime_binding_for_tmux_session(tmux_session).is_some();
+    with_tmux_source_authority(tmux_session, |authority| {
+        restore_under_source_authority(authority, channel_id, launch, bind)
+    })
+}
+
+fn restore_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    channel_id: u64,
+    launch: Option<LaunchTranscript>,
+    bind: impl Fn(&str, &Path) -> TuiRuntimeBinding,
+) -> Option<PendingRestore> {
+    let tmux_session = authority.session();
+    let runtime = || runtime_binding_for_tmux_session_under_source_authority(authority);
+    let bound = runtime().is_some();
     let settled = last_restore_outcome(tmux_session).filter(PendingRestore::memo);
     // A binding restored from the log keeps the launch refresh off until the log or nonce moves on.
     let protected = |o: &PendingRestore| matches!(o, PendingRestore::BoundFromLedger { .. });
@@ -580,38 +595,31 @@ fn restore_pane(
         #[cfg(test)]
         crate::services::tui_prompt_dedupe::after_check();
         // A held binding keeps its read offsets and only gets its record logged; any other is replaced.
-        let held = with_tmux_source_authority(tmux_session, |authority| {
-            let held = runtime_binding_for_tmux_session_under_source_authority(authority)?;
-            let cause = CauseSource::Observed;
-            let proposal =
-                Proposal::for_binding(Some(channel_id), tmux_session, &held, None, cause);
-            let persist = |proposal: Proposal| record.persist(&proposal).ok();
-            target(&held).then(|| proposal.map_or(Some(record.unlogged()), persist))
-        });
-        let persisted = match held {
-            // A kept binding completes a registration an earlier pass left unready, as the pass would.
-            Some(persisted) => {
+        let persisted = match runtime().filter(target) {
+            Some(held) => {
+                let cause = CauseSource::Observed;
+                let proposal =
+                    Proposal::for_binding(Some(channel_id), tmux_session, &held, None, cause);
+                let persist = |proposal: Proposal| record.persist(&proposal).ok();
+                let persisted = proposal.map_or(Some(record.unlogged()), persist);
+                // A kept binding completes a registration an earlier pass left unready, as the pass would.
                 if persisted.is_some_and(Persisted::published) {
-                    pane_registration::note_claude_pane_registration(
-                        tmux_session,
-                        Some(session),
-                        true,
+                    let launch = Some(session);
+                    pane_registration::note_claude_pane_registered_under_source_authority(
+                        authority, launch,
                     );
                 }
                 persisted
             }
-            None => {
-                let binding = bind(session, transcript);
-                pane_registration::register_claude_pane_with(
-                    tmux_session,
-                    channel_id,
-                    binding,
-                    record,
-                )
-            }
+            None => pane_registration::register_claude_pane_under_source_authority(
+                authority,
+                channel_id,
+                bind(session, transcript),
+                record,
+            ),
         };
-        let binding = persisted.is_some_and(Persisted::published)
-            && runtime_binding_for_tmux_session(tmux_session).is_some_and(|b| target(&b));
+        let binding =
+            persisted.is_some_and(Persisted::published) && runtime().is_some_and(|b| target(&b));
         let alias = || resolve_tmux_session_name("claude", launch_session);
         if binding && alias().is_none() {
             register_provider_session("claude", launch_session, tmux_session);
@@ -648,7 +656,7 @@ fn restore_pane(
             let outcome = seed.outcome(registered);
             if matches!(outcome, PendingRestore::Seeded { .. }) {
                 let (command, payload) = (&launch.session_id, &seed.payload_session_id);
-                adoption_retry::seed_restored(tmux_session, command, payload, &seed.hook);
+                adoption_retry::seed_restored(authority, command, payload, &seed.hook);
             }
             outcome
         }

@@ -291,9 +291,9 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
 }
 
 /// Queues a Pending restored from the log as recorded, so the poll adopts it once its transcript
-/// is verified and a hook naming another session replaces it.
+/// is verified and a hook naming another session replaces it. The restore holds the pane's authority.
 pub(crate) fn seed_restored(
-    tmux_session_name: &str,
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
@@ -305,9 +305,7 @@ pub(crate) fn seed_restored(
         recorded: true,
         pending: true,
     };
-    with_tmux_source_authority(tmux_session_name, |_| {
-        queue_behind(tmux_session_name, &request);
-    });
+    queue_behind(authority.session(), &request);
 }
 
 /// Re-runs each pane's deferred adoptions in hook order with their original evidence.
