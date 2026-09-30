@@ -389,7 +389,7 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
         changed.push("config_hot_reload");
     }
     if crate::services::tui_o::channel_policy::boot()
-        .map(|boot| boot.channels().clone())
+        .map(|boot| boot.selected().clone())
         .unwrap_or_else(|| crate::services::tui_o::channel_policy::configured_channels(old))
         != crate::services::tui_o::channel_policy::configured_channels(new)
     {

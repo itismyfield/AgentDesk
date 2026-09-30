@@ -102,16 +102,25 @@ fn writer_config(channels: &[u64], cluster: serde_json::Value) -> Config {
 #[test]
 fn only_an_enabled_home_with_a_list_reads_the_store_and_adopts() {
     use serde_json::json;
-    let untouched = |_: &BTreeSet<u64>| -> BTreeMap<u64, Adoption> { panic!("store read") };
-    let found = |_: &BTreeSet<u64>| BTreeMap::from([(41, Adoption::Committed)]);
+    type Stored = std::io::Result<BTreeMap<u64, Adoption>>;
+    let untouched = |_: &BTreeSet<u64>, _: bool| -> Stored { panic!("store read") };
+    let found = |_: &BTreeSet<u64>, _: bool| Ok(BTreeMap::from([(41, Adoption::Committed)]));
     let off = json!({});
     let boot =
         |channels: &[u64], cluster| BootChannels::validate(&writer_config(channels, cluster));
-    let seeded = boot(&[41], off.clone()).unwrap().seeded(false, untouched);
+    fn seed(
+        boot: Result<BootChannels>,
+        enabled: bool,
+        stored: impl FnOnce(&BTreeSet<u64>, bool) -> Stored,
+    ) -> BootChannels {
+        let config = writer_config(&[41], serde_json::json!({}));
+        boot.unwrap().seeded(enabled, &config, stored).unwrap()
+    }
+    let seeded = seed(boot(&[41], off.clone()), false, untouched);
     assert!(seeded.candidate(41).is_none(), "writer off");
-    let seeded = boot(&[], off.clone()).unwrap().seeded(true, untouched);
+    let seeded = seed(boot(&[], off.clone()), true, untouched);
     assert!(seeded.candidate(41).is_none(), "empty list");
-    let seeded = boot(&[41], off).unwrap().seeded(true, found);
+    let seeded = seed(boot(&[41], off), true, found);
     assert_eq!(
         seeded.candidate(41).map(Candidate::peek),
         Some(Adoption::Committed)
@@ -128,7 +137,7 @@ fn only_an_enabled_home_with_a_list_reads_the_store_and_adopts() {
     let foreign = boot(&[41], foreign).unwrap();
     assert_eq!(foreign.site(), &Site::Foreign { home: "a".into() });
     assert!(
-        foreign.seeded(true, found).candidate(41).is_none(),
+        seed(Ok(foreign), true, found).candidate(41).is_none(),
         "a non-home node adopts nothing"
     );
     for unnamed in [
@@ -357,4 +366,168 @@ fn a_placement_never_waits_on_another_channels_adoption_in_progress() {
         ]
     );
     assert_eq!(candidate(41).peek(), Adoption::Pending);
+}
+
+/// Runs `test` once per role, each in a child process with its own runtime root, and returns
+/// `None`; inside such a child returns its role.
+fn boot_role(test: &str, roles: &[&str]) -> Option<String> {
+    const ROLE: &str = "ADK_TEST_WRITER_BOOT_ROLE";
+    if let Ok(role) = std::env::var(ROLE) {
+        return Some(role);
+    }
+    for role in roles {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!("services::tui_o::channel_policy::tests::{test}");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture"])
+            .env(ROLE, role)
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{role}: {stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed; 0 failed; 0 ignored"),
+            "{role}: {stdout}"
+        );
+    }
+    None
+}
+
+/// A config registering each channel as a Claude TUI and selecting `selected`.
+fn boot_config(selected: &[u64], registered: &[u64], cluster: serde_json::Value) -> Config {
+    let agent = |id: &u64| {
+        let binding = serde_json::json!({"claude": {"id": id.to_string(), "runtime": "tui"}});
+        serde_json::json!({"id": format!("a{id}"), "name": "A", "channels": binding})
+    };
+    let agents: Vec<_> = registered.iter().map(agent).collect();
+    serde_json::from_value(serde_json::json!({
+        "server": {}, "cluster": cluster, "agents": agents,
+        "tui_o": {"writer": {"channels": selected}},
+    }))
+    .unwrap()
+}
+
+/// Commits `era` through the era and `later` by a first `init` after it, in this child's root.
+fn commit_on_disk(era: &[u64], later: &[u64]) -> std::path::PathBuf {
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    let root = crate::config::runtime_root().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
+    let store = store.unwrap().unwrap();
+    let at = chrono::Utc::now();
+    let init = |channel| Initialized {
+        channel,
+        sources: Vec::new(),
+        initial_anchor: 0,
+        build_digest: "b".into(),
+        at,
+    };
+    store.begin_era(era, at, |c| Ok(init(c))).unwrap();
+    for &channel in later {
+        store.init_channel(&init(channel)).unwrap();
+    }
+    root.join(crate::services::tui_o::store::STORE_DIR_NAME)
+}
+
+fn selection_missing() -> Vec<String> {
+    let reasons = crate::services::tui_o::alarm::health_reasons();
+    let missing = reasons
+        .into_iter()
+        .filter(|r| r.contains(":selection_missing:"));
+    missing.collect()
+}
+
+fn o_owns(channel: u64) -> bool {
+    let owns = super::super::cutover::o_owns_tui_output_for_channel;
+    owns(channel, Some(RuntimeHandoffKind::ClaudeTui)).unwrap()
+}
+
+/// On the home, a channel committed on disk stays O's when the selection drops it, with one alarm
+/// per such channel; a full list and the empty list boot as before.
+#[test]
+fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
+    let test = "a_committed_channel_left_out_of_the_selection_stays_o_on_the_home";
+    let roles = ["dropped", "listed", "empty", "unregistered"];
+    let Some(role) = boot_role(test, &roles) else {
+        return;
+    };
+    let store = commit_on_disk(&[41, 42], &[43]);
+    std::fs::create_dir(store.join("44")).unwrap();
+    std::fs::write(store.join("44/init"), b"{").unwrap();
+    std::fs::create_dir(store.join("045")).unwrap();
+    std::fs::write(store.join("045/init"), b"{").unwrap();
+    let registered = [41, 42, 43, 44, 46];
+    let selected: &[u64] = match role.as_str() {
+        "dropped" | "unregistered" => &[41],
+        "listed" => &[41, 42, 43, 44],
+        _ => &[],
+    };
+    let registered = if role == "unregistered" {
+        &registered[..2]
+    } else {
+        &registered[..]
+    };
+    let config = boot_config(selected, registered, serde_json::json!({}));
+    if role == "unregistered" {
+        let error = install(&config).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("o_store: channel 43 is not registered"),
+            "{error:#}"
+        );
+        return;
+    }
+    install(&config).unwrap();
+    let owned: Vec<_> = [41, 42, 43, 44, 46]
+        .into_iter()
+        .filter(|&c| o_owns(c))
+        .collect();
+    let held = boot().unwrap().candidate(44).map(Candidate::peek);
+    if role == "empty" {
+        assert_eq!((owned, held), (vec![], None), "the empty list is O off");
+    } else {
+        assert_eq!((owned, held), (vec![41, 42, 43, 44], Some(Adoption::Held)));
+    }
+    let missing = match role.as_str() {
+        "dropped" => vec![42, 43, 44],
+        _ => vec![],
+    };
+    let missing: Vec<_> = missing
+        .into_iter()
+        .map(|c| format!("tui_o:selection_missing:{c}"))
+        .collect();
+    assert_eq!(selection_missing(), missing);
+    install(&config).unwrap();
+    let changes = crate::config_live_reload::restart_required_changes(&config, &config);
+    assert!(!changes.contains(&"tui_o.writer.channels"), "{changes:?}");
+}
+
+/// The unsupported two-node drift: the home keeps its committed channel with an alarm, while a
+/// standby whose selection also dropped it places it as an ordinary Legacy channel.
+#[test]
+fn a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby() {
+    use crate::services::tui_o::cutover::intake_route::{IntakeRoute, route_for_placement};
+    let test = "a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby";
+    let Some(role) = boot_role(test, &["home", "standby"]) else {
+        return;
+    };
+    // The standby's store is a leftover it must not act on.
+    commit_on_disk(&[41], &[42]);
+    let local = if role == "home" { "a" } else { "b" };
+    let cluster = serde_json::json!({
+        "enabled": true, "instance_id": local, "gateway_preferred_instance_id": "a",
+    });
+    install(&boot_config(&[41], &[41, 42], cluster)).unwrap();
+    let placed = route_for_placement("claude", 42);
+    if role == "home" {
+        assert!(o_owns(42));
+        assert!(matches!(placed, IntakeRoute::Hold(_)), "{placed:?}");
+        assert_eq!(selection_missing(), ["tui_o:selection_missing:42"]);
+    } else {
+        assert!(!o_owns(42));
+        assert_eq!(placed, IntakeRoute::Unselected);
+        assert!(selection_missing().is_empty());
+        let held = route_for_placement("claude", 41);
+        assert!(matches!(held, IntakeRoute::Hold(d) if d.contains("O home a")));
+    }
 }

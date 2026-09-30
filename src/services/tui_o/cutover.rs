@@ -3,7 +3,8 @@
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
 /// The one O writer build switch, shared with the intake topology so both flip together.
-/// On, only the channels the boot list selects move to O; an empty list leaves all to Legacy.
+/// On, only the boot selection and the O home's committed channels move to O; an empty selection
+/// leaves all to Legacy.
 pub(crate) use super::topology::O_TUI_WRITER;
 
 use super::channel_policy::{self, Candidate, Site};

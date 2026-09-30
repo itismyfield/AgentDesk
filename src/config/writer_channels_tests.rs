@@ -142,3 +142,62 @@ fn writer_channels_disk_loader_normalizes_and_reports_restart_required() {
     assert_eq!(roundtrip_channels(&unordered), serde_json::json!([41, 42]));
     assert!(crate::config_live_reload::restart_required_changes(&unordered, &ordered).is_empty());
 }
+
+// `all_tui` selects the TUI bindings and skips the rest, never sits beside a non-empty list, and
+// applies at restart; the list mode serializes as before.
+#[test]
+fn writer_all_tui_selects_only_tui_bindings_and_applies_on_restart() {
+    use crate::config_live_reload::restart_required_changes;
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::tui_o::channel_policy::BootChannels;
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let path = root.path().join("agentdesk.yaml");
+    let data_dir = serde_json::to_string(&root.path().join("data")).unwrap();
+    let load = |cluster: &str, writer: &str| {
+        let agents = "agents:\n  - id: tui\n    name: TUI\n    channels:\n      \
+            claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: tui}\n      \
+            gemini: {id: '43'}\n  - id: pipe\n    name: Pipe\n    channels:\n      \
+            claude: {id: '44', runtime: pipe}\n      codex: {id: '45'}\n";
+        let yaml = format!("server: {{}}\ndata:\n  dir: {data_dir}\n{cluster}{agents}{writer}\n");
+        std::fs::write(&path, yaml).unwrap();
+        load_from_path(&path)
+    };
+    let all = load("", "tui_o: {writer: {all_tui: true}}").unwrap();
+    let boot = BootChannels::validate(&all).unwrap();
+    assert_eq!(
+        boot.channels().iter().copied().collect::<Vec<_>>(),
+        [41, 42]
+    );
+    assert_eq!(
+        (boot.kind(41), boot.kind(42)),
+        (Some(ClaudeTui), Some(CodexTui))
+    );
+    let pointer = |config: &Config| {
+        let value = serde_json::to_value(config).unwrap();
+        value.pointer("/tui_o/writer/all_tui").cloned()
+    };
+    assert_eq!(pointer(&all), Some(serde_json::json!(true)));
+
+    let listed = load("", "tui_o: {writer: {channels: [41, 42]}}").unwrap();
+    assert_eq!(pointer(&listed), None);
+    assert!(restart_required_changes(&listed, &all).is_empty());
+    let one = load("", "tui_o: {writer: {channels: [41]}}").unwrap();
+    for (old, new) in [(&one, &all), (&all, &one)] {
+        let changes = restart_required_changes(old, new);
+        assert!(changes.contains(&"tui_o.writer.channels"), "{changes:?}");
+    }
+
+    let both = load("", "tui_o: {writer: {all_tui: true, channels: [41]}}").unwrap_err();
+    assert!(
+        format!("{both:#}").contains("cannot be combined"),
+        "{both:#}"
+    );
+    load("", "tui_o: {writer: {all_tui: true, channels: []}}").unwrap();
+    let unnamed = "cluster: {enabled: true, instance_id: a}\n";
+    let home = load(unnamed, "tui_o: {writer: {all_tui: true}}").unwrap_err();
+    assert!(
+        format!("{home:#}").contains("cluster.gateway_preferred_instance_id"),
+        "{home:#}"
+    );
+    load(unnamed, "tui_o: {writer: {all_tui: false}}").unwrap();
+}

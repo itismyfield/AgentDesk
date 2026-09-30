@@ -98,6 +98,26 @@ pub(crate) enum Site {
     },
 }
 
+/// `stored` over the selection and every channel the local store committed: an `init` entry or
+/// an era member. The whole store is searched before the selection joins it.
+pub(crate) fn stored_with_committed(
+    runtime_root: Option<&Path>,
+    selected: &BTreeSet<u64>,
+) -> std::io::Result<BTreeMap<u64, Adoption>> {
+    let committed = match runtime_root.and_then(OStore::existing) {
+        Some(store) => {
+            let mut committed = store.channels_with_init()?;
+            if let Ok(Some(era)) = store.read_era() {
+                committed.extend(era.initial_channels);
+            }
+            committed
+        }
+        None => BTreeSet::new(),
+    };
+    let channels = selected.union(&committed).copied().collect();
+    Ok(stored(runtime_root, &channels))
+}
+
 /// The adoption each selected channel starts with, from the local store as it is on disk.
 /// A readable `init` commits; unreadable, orphaned or era-only state holds; absent is pending.
 pub(crate) fn stored(
