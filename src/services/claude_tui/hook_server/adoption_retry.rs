@@ -193,19 +193,21 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             // An adopted source stays queued until its rotation settles and a recorded Pending until
             // its transcript exists, so later hooks wait behind it; a later queued session replaces it.
             let pending = adopted.is_none() && skip.is_none();
+            // An entry whose pane lost its channel mapping keeps its place until the next pass restores it.
+            let no_channel = skip == Some(AdoptSkip::ChannelNotRestored);
             let held = if pending {
                 !(queued && queued_count(tmux) > 1)
             } else {
-                adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some()
+                no_channel || adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some()
             };
             let queue = if held {
                 QueueStep::Hold
             } else {
                 QueueStep::Pop
             };
-            if queued && held {
+            if queued && held && !no_channel {
                 mark_front_recorded(tmux, pending);
-            } else if queued {
+            } else if queued && !held {
                 pop_front(tmux);
             } else if pending {
                 let (recorded, pending) = (true, true);

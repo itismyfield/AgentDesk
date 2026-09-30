@@ -402,6 +402,17 @@ pub(crate) fn restore_claude_pane(
     launch: Option<LaunchTranscript>,
     bind: impl Fn(&str, &Path) -> TuiRuntimeBinding,
 ) -> Option<PendingRestore> {
+    let restored = restore_pane(tmux_session, channel_id, launch, bind);
+    keep_channel(tmux_session, channel_id);
+    restored
+}
+
+fn restore_pane(
+    tmux_session: &str,
+    channel_id: u64,
+    launch: Option<LaunchTranscript>,
+    bind: impl Fn(&str, &Path) -> TuiRuntimeBinding,
+) -> Option<PendingRestore> {
     let bound = runtime_binding_for_tmux_session(tmux_session).is_some();
     let settled = last_restore_outcome(tmux_session).filter(PendingRestore::memo);
     // A binding restored from the log keeps the launch refresh off until the log or nonce moves on.
@@ -428,7 +439,7 @@ pub(crate) fn restore_claude_pane(
         })
         .map(|(_, outcome)| outcome.clone());
     if let Some(outcome) = memoized {
-        return Some(kept_channel(tmux_session, channel_id, outcome));
+        return Some(outcome);
     }
     let records = records_strict(channel_id);
     let register = |session: &str, transcript: &Path, launch_session: &str| {
@@ -488,14 +499,13 @@ pub(crate) fn restore_claude_pane(
         }
     };
     note(tmux_session, key, &outcome);
-    Some(kept_channel(tmux_session, channel_id, outcome))
+    Some(outcome)
 }
 
-/// A binding the pass keeps still needs its channel mapping, or a later hook's Pending is never logged.
-fn kept_channel(tmux_session: &str, channel_id: u64, outcome: PendingRestore) -> PendingRestore {
-    let kept =
-        outcome.skips_launch_refresh() && runtime_binding_for_tmux_session(tmux_session).is_some();
-    if kept && channel_id != 0 {
+/// Every pass that reaches a bound pane renews its channel mapping, whichever way the restore
+/// returned, so the mapping's TTL cannot lapse under a live binding the hook still logs through.
+fn keep_channel(tmux_session: &str, channel_id: u64) {
+    if channel_id != 0 && runtime_binding_for_tmux_session(tmux_session).is_some() {
         let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
         state.purge_expired();
         let recorded_at = std::time::Instant::now();
@@ -507,7 +517,6 @@ fn kept_channel(tmux_session: &str, channel_id: u64, outcome: PendingRestore) ->
             .channel_by_tmux
             .insert(tmux_session.to_owned(), mapping);
     }
-    outcome
 }
 
 fn note(tmux_session: &str, key: MemoKey, outcome: &PendingRestore) {

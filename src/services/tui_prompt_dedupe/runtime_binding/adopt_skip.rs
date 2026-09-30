@@ -11,6 +11,8 @@ pub(crate) enum AdoptSkip {
     MalformedBindingPath,
     /// Adopted in memory only: the pane has no channel, so there is no log to write.
     NoChannel,
+    /// A file-less candidate on a pane the rehydrate pass maps, whose channel mapping lapsed.
+    ChannelNotRestored,
     MtimeUnreadable,
     OlderThanBound,
 }
