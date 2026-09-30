@@ -1605,4 +1605,169 @@ mod verified_adoption {
         assert!(pinned(channel, tmux));
         assert_eq!(bound(tmux), registered);
     }
+
+    /// Makes `path` unopenable, or openable again, while a stat of it still succeeds.
+    fn readable(path: &Path, readable: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if readable { 0o644 } else { 0o000 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn a_pinned_current_behind_a_later_pending_is_judged_by_its_pin_before_the_seed() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b, c) = (7_770, "n2a-pin-behind-pending", uuid(), uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, None);
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, None);
+        let clear = signal("session_start", Some("clear"), Some(&b_path));
+        assert_eq!(adopt(&a, &b, &clear), (None, None));
+        at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        let (pin, resolved) = (source(&b, &b_path), log(channel).pop().unwrap());
+        // C waits as a Pending behind B; the launch selector now names B.
+        let c_path = at(home.path(), "-work-a", &c, None);
+        let c_clear = signal("session_start", Some("clear"), Some(&c_path));
+        assert_eq!(adopt(&a, &c, &c_clear), (None, None));
+        let pending_seq = log(channel).pop().unwrap().seq;
+        let logged = log(channel).len();
+
+        // Unreadable, the pinned B is neither bound nor logged, and the next poll judges it again.
+        readable(&b_path, false);
+        restart(channel);
+        let unreadable = restore(channel, tmux, &b, &b_path);
+        readable(&b_path, true);
+        let down = PendingRestore::Unavailable(Unavailable::TranscriptUnreadable);
+        assert_eq!(unreadable, down);
+        assert!(!unreadable.memo());
+        assert!(runtime_binding_for_tmux_session(tmux).is_none());
+
+        // Its own file binds B, and C is seeded behind it; nothing is logged again.
+        restart(channel);
+        let seeded = restore(channel, tmux, &b, &b_path);
+        assert_eq!(seeded, PendingRestore::Seeded { pending_seq });
+        assert_eq!(bound(tmux).output_path, b_path.display().to_string());
+        assert_eq!(deferred_adoption_count(), 1);
+        assert_eq!(log(channel).len(), logged);
+
+        // Replaced, it stays pinned to I1 and nothing binds over it.
+        replace(&b_path, &first_row(&b));
+        restart(channel);
+        let line = resolved.seq;
+        assert_eq!(
+            restore(channel, tmux, &b, &b_path),
+            PendingRestore::Anomaly { line }
+        );
+        assert_eq!(log(channel).len(), logged, "no new identity logged");
+        forget_channel_for_tests(channel);
+        assert_eq!(pinned_source(channel, tmux).unwrap(), Some(pin));
+        assert!(runtime_binding_for_tmux_session(tmux).is_none());
+        assert_eq!(deferred_adoption_count(), 0, "nothing is seeded");
+    }
+
+    #[test]
+    fn a_stat_registration_of_a_replaced_pinned_transcript_is_refused() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_780, "n2a-stat-pin", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        let pin = source(&b, &b_path);
+        let logged = log(channel).len();
+
+        replace(&b_path, &first_row(&b));
+        restart(channel);
+        let registered = claude(&b_path, &b);
+        assert!(!register_rehydrated_tmux_runtime_binding(
+            "claude", tmux, channel, registered
+        ));
+        assert_eq!(
+            log(channel).len(),
+            logged,
+            "the replaced file is not logged"
+        );
+        forget_channel_for_tests(channel);
+        assert_eq!(pinned_source(channel, tmux).unwrap(), Some(pin));
+        assert!(runtime_binding_for_tmux_session(tmux).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_unpinned_current_waits_as_a_durable_pending() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_790, "n2a-unpinned-unreadable", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        // A registration without a check, as a record from before the check existed.
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        register_tmux_runtime_binding(tmux, claude(&b_path, &b));
+        assert!(!pinned(channel, tmux));
+        let before = bound(tmux);
+
+        readable(&b_path, false);
+        let pending = AdoptionHttp::Durable(DurableKind::Pending);
+        let answered = adopt_from_hook(&a, &b, &stop(&b_path));
+        readable(&b_path, true);
+        assert_eq!(answered, pending);
+        forget_channel_for_tests(channel);
+        let on_disk = records_strict(channel).unwrap().unwrap();
+        let waiting = on_disk.last().unwrap();
+        let expected = BindingTarget::Pending {
+            payload_session_id: b.clone(),
+            payload_transcript_path: Some(b_path.display().to_string()),
+        };
+        assert_eq!(waiting.new, expected);
+        assert_eq!(bound(tmux), before);
+
+        retry_deferred_claude_adoptions();
+        let (pending_seq, source) = (waiting.seq, source(&b, &b_path));
+        let resolved = BindingTarget::Resolved {
+            pending_seq,
+            source,
+        };
+        assert_eq!(last(channel), resolved);
+        assert!(pinned(channel, tmux));
+        assert_eq!(bound(tmux), before, "binding and cursor kept");
+    }
+
+    #[test]
+    fn an_unreadable_pinned_current_refuses_the_hook_and_keeps_its_binding() {
+        let _lane = Lane::new();
+        let home = tempfile::tempdir().unwrap();
+        let (channel, tmux, a, b) = (7_795, "n2a-pinned-unreadable", uuid(), uuid());
+        let a_path = at(home.path(), "-work-a", &a, Some(&first_row(&a)));
+        pane(channel, tmux, &a, &a_path);
+        let b_path = at(home.path(), "-work-a", &b, Some(&first_row(&b)));
+        let registered = TuiRuntimeBinding {
+            last_offset: 12,
+            ..claude(&b_path, &b)
+        };
+        register_tmux_runtime_binding(tmux, registered.clone());
+        assert!(adopt(&a, &b, &stop(&b_path)).0.is_some());
+        assert!(pinned(channel, tmux));
+        let logged = log(channel).len();
+        let payload = serde_json::json!({ "session_id": b, "transcript_path": b_path });
+        let observe = || {
+            let headers = axum::http::HeaderMap::new();
+            observe_binding_hook("claude", "stop", Some(&a), Some(&b), &payload, &headers)
+        };
+
+        readable(&b_path, false);
+        let refused = observe();
+        readable(&b_path, true);
+        assert_eq!(
+            refused,
+            IngressOutcome::Unavailable(UnavailableReason::SourceUnreadable)
+        );
+        assert_eq!(bound(tmux), registered, "binding and cursor kept");
+        assert_eq!(log(channel).len(), logged, "nothing is logged");
+        assert!(pinned(channel, tmux));
+
+        assert_eq!(observe(), IngressOutcome::Durable(DurableKind::Adopted));
+        assert_eq!(bound(tmux), registered);
+        assert_eq!(log(channel).len(), logged);
+    }
 }

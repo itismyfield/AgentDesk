@@ -1,4 +1,4 @@
-//! Decides whether a Claude hook names a transcript the pane may bind to.
+//! Decides whether a Claude hook, restore or registration names a transcript the pane may bind to.
 //! Payload path, session id, opened-file identity and first record decide; mtime never does.
 
 use std::collections::HashSet;
@@ -504,7 +504,7 @@ mod tests {
                     (session, format!("{record}\n"))
                 })
                 .collect();
-        let mut replayed = std::collections::HashSet::new();
+        let (mut replayed, mut synthetic) = (HashSet::new(), HashSet::new());
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("projects");
         // Captured paths are <claude home>/projects/<project>/<file>; replay them under a temp home.
@@ -544,11 +544,12 @@ mod tests {
                 let path = rebase(&payload["transcript_path"]);
                 let session = payload["session_id"].as_str().unwrap().to_string();
                 if event["transcript_exists_at_hook"] == true && !path.exists() {
-                    // Sessions whose transcript was not captured, like the TUI's /clear target, get a
-                    // synthetic first line.
-                    let captured = first_records.get(&session).inspect(|_| {
-                        replayed.insert(session.clone());
-                    });
+                    // Only a session whose transcript was not captured gets a synthetic first line.
+                    let captured = first_records.get(&session);
+                    match captured {
+                        Some(_) => replayed.insert(session.clone()),
+                        None => synthetic.insert(session.clone()),
+                    };
                     write(&path, captured.map_or(&first_row(&session), |line| line));
                 }
                 payload["transcript_path"] = json!(path);
@@ -584,10 +585,23 @@ mod tests {
             );
             assert_eq!(history.last().unwrap().path, parsed.transcript_path);
         }
+        // Every run's transcript is replayed from its capture; only the TUI's /clear target, whose
+        // file was never captured, is synthetic, so a lost capture fails here instead of passing.
+        let runs = fixture["runs"].as_array().unwrap();
+        let tui_events = runs.iter().find(|run| run["name"] == tui).unwrap()["events"].clone();
+        let clear_target = tui_events.as_array().unwrap().iter().find(|event| {
+            event["event"] == "SessionStart" && event["payload"]["source"] == "clear"
+        });
+        let clear_target = clear_target.unwrap()["payload"]["session_id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(synthetic, HashSet::from([clear_target.to_owned()]));
+        let captured: HashSet<String> = first_records.keys().cloned().collect();
+        assert_eq!(replayed, captured, "every captured first line replayed");
         assert_eq!(
             replayed.len(),
-            first_records.len(),
-            "every captured first line replayed"
+            3,
+            "the three captured runs' own transcripts"
         );
     }
 

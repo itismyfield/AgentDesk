@@ -9777,12 +9777,14 @@ services::tui_prompt_dedupe::pending::tests::verified_adoption::a_current_source
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_front_held_by_an_unreadable_log_keeps_its_pending_mark
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_payload_spelled_through_a_symlinked_root_is_adopted_under_the_bound_spelling
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_payload_transcript_that_fails_the_check_is_refused_and_audited
+services::tui_prompt_dedupe::pending::tests::verified_adoption::a_pinned_current_behind_a_later_pending_is_judged_by_its_pin_before_the_seed
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_pinned_resolved_replaced_before_the_restart_is_an_anomaly_and_keeps_its_pin
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_replaced_bound_transcript_stops_instead_of_rebinding
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_restored_pending_in_another_project_dir_is_seeded
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_restored_pending_whose_file_names_another_session_is_blocked
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_restored_transcript_replaced_before_its_record_is_checked_again_next_poll
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_resume_into_another_worktree_follows_the_payload_transcript
+services::tui_prompt_dedupe::pending::tests::verified_adoption::a_stat_registration_of_a_replaced_pinned_transcript_is_refused
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_transcript_before_its_first_record_is_pending_until_it_is_verified
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_transcript_replaced_between_its_check_and_its_record_waits_for_the_next_check
 services::tui_prompt_dedupe::pending::tests::verified_adoption::a_verified_record_keeps_the_identity_the_check_read
@@ -9790,6 +9792,8 @@ services::tui_prompt_dedupe::pending::tests::verified_adoption::a_verified_sourc
 services::tui_prompt_dedupe::pending::tests::verified_adoption::an_unpinned_current_source_is_pinned_once_and_the_pin_survives_a_restart
 services::tui_prompt_dedupe::pending::tests::verified_adoption::an_unreadable_binding_log_refuses_the_hook_until_it_loads
 services::tui_prompt_dedupe::pending::tests::verified_adoption::an_unreadable_new_transcript_is_kept_as_a_durable_pending
+services::tui_prompt_dedupe::pending::tests::verified_adoption::an_unreadable_pinned_current_refuses_the_hook_and_keeps_its_binding
+services::tui_prompt_dedupe::pending::tests::verified_adoption::an_unreadable_unpinned_current_waits_as_a_durable_pending
 services::tui_prompt_dedupe::prompt_identity::tests::a_known_row_with_other_text_still_makes_its_prompt_id_ambiguous
 services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_match_also_records_the_row_uuid
 services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_seen_with_other_text_stops_suppressing_either_text
