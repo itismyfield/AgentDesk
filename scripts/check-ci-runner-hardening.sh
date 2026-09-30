@@ -979,7 +979,7 @@ targets = {
     "label" => "PR library sweep job",
     "name" => "Library test sweep",
     "needs" => "changes",
-    "if" => "needs.changes.outputs.rust_or_policy == 'true'",
+    "if" => "needs.changes.outputs.rust_tests == 'true'",
     "runs_on" => "ubuntu-latest",
     # #5185 re-pins after giving this lane the PostgreSQL service its own
     # selection requires: the canonical filters are substring matches over
@@ -991,7 +991,7 @@ targets = {
     # source-verified non-PG false positives after the adjudicated sweep.
     # #6104 re-pins after renaming the replay call; its list is now generated
     # from the PG manifest instead of hand-kept.
-    "job_sha256" => "2bb3b9c8cc7881f855226b5659b69199508d4dde2cb41d8b2f502d57cf3fbdb9",
+    "job_sha256" => "c94384bd806521e5f796bbdd0d9b813841131ce8c4e3c80d5bcde36bbc541bc9",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => [
