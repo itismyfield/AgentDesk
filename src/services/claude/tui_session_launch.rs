@@ -196,8 +196,9 @@ mod host_marker_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod herdr_off_tests {
+    #[cfg(unix)]
     #[test]
     fn claude_launch_entry_stays_on_tmux_and_starts_no_herdr_preparation() {
         use super::prepare_and_create_claude_tui_session as launch;

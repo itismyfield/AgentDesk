@@ -5,8 +5,14 @@
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, ProcessStamp,
 };
-use crate::services::session_host::HostKind;
-use crate::services::tmux_common::host_marker::HostKindMarker;
+/// The session's `.host_kind` marker as its reader classified it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HerdrMarkerEvidence {
+    Herdr,
+    OtherHost,
+    /// Absent, unreadable or unrecognized.
+    Lost,
+}
 
 /// What a reader saw for the pane now. `None` means the value could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +21,7 @@ pub(crate) struct HerdrCurrentExecution {
     pub binding_nonce: Option<String>,
     pub root: Option<ProcessStamp>,
     pub provider_process: Option<ProcessStamp>,
-    pub marker: HostKindMarker,
+    pub marker: HerdrMarkerEvidence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,10 +74,10 @@ pub(crate) fn compare_herdr_execution(
     if location.pane_id != now.pane_id {
         return Mismatch(HerdrMismatch::OtherPane);
     }
-    match &current.marker {
-        HostKindMarker::Known(HostKind::Herdr) => {}
-        HostKindMarker::Known(_) => return Mismatch(HerdrMismatch::OtherHostMarker),
-        _ => return Unknown(HerdrUnknown::MarkerLost),
+    match current.marker {
+        HerdrMarkerEvidence::Herdr => {}
+        HerdrMarkerEvidence::OtherHost => return Mismatch(HerdrMismatch::OtherHostMarker),
+        HerdrMarkerEvidence::Lost => return Unknown(HerdrUnknown::MarkerLost),
     }
     let checks = [
         (

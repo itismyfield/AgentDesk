@@ -15,7 +15,7 @@ fn unchanged(stored: &HostedExecution) -> HerdrCurrentExecution {
         binding_nonce: Some(stored.execution_nonce.clone()),
         root: Some(evidence.root),
         provider_process: Some(evidence.provider_process),
-        marker: HostKindMarker::Known(HostKind::Herdr),
+        marker: HerdrMarkerEvidence::Herdr,
     }
 }
 
@@ -77,17 +77,12 @@ fn herdr_stored_execution_matches_only_when_every_stored_field_is_confirmed() {
         ),
         (
             "lost marker",
-            |c| c.marker = HostKindMarker::Absent,
-            Unknown(HerdrUnknown::MarkerLost),
-        ),
-        (
-            "unreadable marker",
-            |c| c.marker = HostKindMarker::ReadFailed("eio".into()),
+            |c| c.marker = HerdrMarkerEvidence::Lost,
             Unknown(HerdrUnknown::MarkerLost),
         ),
         (
             "marker names tmux",
-            |c| c.marker = HostKindMarker::Known(HostKind::Tmux),
+            |c| c.marker = HerdrMarkerEvidence::OtherHost,
             Mismatch(HerdrMismatch::OtherHostMarker),
         ),
         (
