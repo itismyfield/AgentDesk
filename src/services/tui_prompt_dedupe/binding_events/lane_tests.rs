@@ -1,11 +1,13 @@
 use super::*;
 use crate::services::claude_tui::hook_server::HookEventKind;
-use crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests;
+use crate::services::claude_tui::hook_server::adoption_retry::{
+    AdoptionHttp, DurableKind, adopt_from_hook, reset_deferred_adoptions_for_tests,
+};
 use crate::services::tui_prompt_dedupe::{
-    TEST_LOCK, adopt_claude_continuation_session, lock_claude_session_rotations_for_tests,
-    register_launched_tmux_runtime_binding, register_provider_session,
-    register_rehydrated_tmux_runtime_binding, register_tmux_channel, register_tmux_runtime_binding,
-    reset_state_for_tests, runtime_binding_for_tmux_session,
+    TEST_LOCK, adopt_claude_continuation_session, claude_session_rotation_for_tmux,
+    lock_claude_session_rotations_for_tests, register_launched_tmux_runtime_binding,
+    register_provider_session, register_rehydrated_tmux_runtime_binding, register_tmux_channel,
+    register_tmux_runtime_binding, reset_state_for_tests, runtime_binding_for_tmux_session,
 };
 
 /// Serialises the dedupe state and points the log at a scratch root for one test.
@@ -265,6 +267,63 @@ fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent
 }
 
 #[test]
+fn clear_run_through_the_hook_is_pending_first_and_bound_by_the_next_hook() {
+    let lane = Lane::new();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/hook_payload/claude-2.1.283.json"
+    );
+    let fixture: serde_json::Value = serde_json::from_slice(&fs::read(fixture).unwrap()).unwrap();
+    let runs = fixture["runs"].as_array().unwrap();
+    let run = runs
+        .iter()
+        .find(|run| run["name"] == "tui_startup_clear_compact_exit");
+    let switches: Vec<&serde_json::Value> = run.unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["command_session_id"] != step["payload"]["session_id"])
+        .collect();
+    let a = switches[0]["command_session_id"].as_str().unwrap();
+    let b = switches[0]["payload"]["session_id"].as_str().unwrap();
+    let (channel, tmux) = (7_025, "p5-clear-run");
+    let a_path = lane.transcript(a);
+    let b_path = lane.dir.path().join(format!("{b}.jsonl"));
+    register_provider_session("claude", a, tmux);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, a));
+
+    for (index, step) in switches.iter().enumerate() {
+        if step["transcript_exists_at_hook"] == true && !b_path.exists() {
+            fs::write(&b_path, b"{}\n").unwrap();
+        }
+        let event = HookEventKind::from_path(step["event"].as_str().unwrap());
+        let signal = HookSignal::from_payload(event.as_str(), &step["payload"]);
+        let http = adopt_from_hook(a, b, &signal);
+        if index == 0 {
+            assert_eq!(http, AdoptionHttp::Durable(DurableKind::Pending));
+            let last = events(channel).last().unwrap().new.clone();
+            assert!(
+                matches!(last, BindingTarget::Pending { .. }),
+                "the /clear hook is Pending before B exists: {last:?}"
+            );
+            assert_eq!(bound(tmux).0, a_path.display().to_string());
+        } else {
+            assert_eq!(http, AdoptionHttp::Durable(DurableKind::AlreadyRecorded));
+            let bound_b = (b_path.display().to_string(), Some(b.to_owned()));
+            assert_eq!(bound(tmux), bound_b, "the next hook binds B at once");
+        }
+    }
+    let log = events(channel);
+    let resolved = BindingTarget::Resolved {
+        pending_seq: 2,
+        source: src(&b_path, b),
+    };
+    assert_eq!(log.len(), 3, "later hooks add nothing");
+    assert_eq!(log[2].new, resolved);
+}
+
+#[test]
 fn crash_leaves_log_and_memory_on_the_same_source() {
     let lane = Lane::new();
     let (channel, tmux) = (7_030, "p5-crash");
@@ -304,9 +363,19 @@ fn crash_leaves_log_and_memory_on_the_same_source() {
     // A failed fsync publishes nothing and leaves no line for a reader or a reload.
     let size = fs::metadata(lane.log(channel)).unwrap().len();
     let rx = subscribe_binding_events(channel).unwrap();
+    let held = || {
+        let binding = runtime_binding_for_tmux_session(tmux);
+        (binding, claude_session_rotation_for_tmux(tmux))
+    };
+    let before = held();
     APPEND_FAULT.with(|fault| fault.set(Some("sync")));
     assert!(adopt_claude_continuation_session(&a, &c, &hook("stop", None)).is_err());
+    let after_failure = held();
     APPEND_FAULT.with(|fault| fault.set(None));
+    assert_eq!(
+        after_failure, before,
+        "binding offsets and rotation unchanged right after the failure"
+    );
     assert_eq!(bound(tmux).0, b_path.display().to_string(), "fail-closed");
     assert_eq!(fs::metadata(lane.log(channel)).unwrap().len(), size);
     APPEND_FAULT.with(|fault| fault.set(Some("write")));

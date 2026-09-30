@@ -85,11 +85,16 @@
 //! (caller emits `Done`).
 
 use std::collections::HashSet;
+#[cfg(test)]
 use std::process::Output;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::host_input;
+#[cfg(test)]
+use super::host_input::{TuiActionExecutor, run_actions_with_executor};
 use crate::services::provider::{CancelToken, cancel_requested};
+use crate::services::session_host::HostKey;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
@@ -103,7 +108,6 @@ mod composer_lock;
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
 
-const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
@@ -408,10 +412,8 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     // ANSI capture is the canonical snapshot. Its deterministic plain-text
     // projection keeps marker and draft classification tied to the same pane
     // revision, while retaining the dim-placeholder signal plain capture loses.
-    let pane_with_escapes = crate::services::platform::tmux::capture_pane_with_escapes(
-        session_name,
-        PROMPT_READY_CAPTURE_SCROLLBACK,
-    );
+    let (pane_with_escapes, tmux_pane_alive) =
+        host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
     let (composer_marker_detected, prompt_draft_detected, pane_tail) = pane_with_escapes
         .as_deref()
         .map(prompt_readiness_from_ansi_pane)
@@ -419,9 +421,7 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     PromptReadinessSnapshot {
         composer_marker_detected,
         prompt_draft_detected,
-        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-            session_name,
-        ),
+        tmux_pane_alive,
         capture_available: pane_with_escapes.is_some(),
         pane_tail,
     }
@@ -858,120 +858,6 @@ impl FastPathFallback for (HookFastPathOutcome, Option<PromptReadinessSnapshot>)
     }
 }
 
-trait TuiActionExecutor {
-    fn send_literal(&mut self, session_name: &str, text: &str) -> Result<Output, String>;
-    fn load_buffer(&mut self, buffer_name: &str, text: &str) -> Result<Output, String>;
-    fn paste_buffer(
-        &mut self,
-        session_name: &str,
-        buffer_name: &str,
-        delete: bool,
-    ) -> Result<Output, String>;
-    fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String>;
-}
-
-struct TmuxTuiActionExecutor {
-    composer_mutated: bool,
-    enter_attempted: bool,
-}
-
-impl TmuxTuiActionExecutor {
-    fn new() -> Self {
-        Self {
-            composer_mutated: false,
-            enter_attempted: false,
-        }
-    }
-}
-
-impl TuiActionExecutor for TmuxTuiActionExecutor {
-    fn send_literal(&mut self, session_name: &str, text: &str) -> Result<Output, String> {
-        let output = crate::services::platform::tmux::send_literal(session_name, text)?;
-        self.composer_mutated |= output.status.success();
-        Ok(output)
-    }
-
-    fn load_buffer(&mut self, buffer_name: &str, text: &str) -> Result<Output, String> {
-        crate::services::platform::tmux::load_buffer(buffer_name, text)
-    }
-
-    fn paste_buffer(
-        &mut self,
-        session_name: &str,
-        buffer_name: &str,
-        delete: bool,
-    ) -> Result<Output, String> {
-        let output =
-            crate::services::platform::tmux::paste_buffer(session_name, buffer_name, delete)?;
-        self.composer_mutated |= output.status.success();
-        Ok(output)
-    }
-
-    fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String> {
-        self.enter_attempted |= keys.contains(&"Enter");
-        crate::services::platform::tmux::send_keys(session_name, keys)
-    }
-}
-
-fn run_actions_with_executor(
-    session_name: &str,
-    actions: &[TuiInputAction],
-    cancel_token: Option<&CancelToken>,
-    executor: &mut impl TuiActionExecutor,
-) -> Result<(), String> {
-    for action in actions {
-        check_prompt_cancel(cancel_token)?;
-        if matches!(action, TuiInputAction::Enter) {
-            // Match the Claude TUI precedent: let the composer apply the last
-            // literal/paste mutation before Enter so a re-mount cannot drop or
-            // reorder the submit key. Re-check cancellation after the settle
-            // so /stop cannot arrive inside this window and still submit.
-            std::thread::sleep(PROMPT_INPUT_BEFORE_ENTER_SETTLE);
-            check_prompt_cancel(cancel_token)?;
-        }
-        let output = match action {
-            TuiInputAction::Literal(text) => executor.send_literal(session_name, text)?,
-            TuiInputAction::PasteBuffer(text) => {
-                let buffer_name = format!("agentdesk-codex-tui-input-{}", uuid::Uuid::new_v4());
-                let load_output = executor.load_buffer(&buffer_name, text)?;
-                ensure_tmux_success(load_output, action)?;
-                check_prompt_cancel(cancel_token)?;
-                executor.paste_buffer(session_name, &buffer_name, true)?
-            }
-            TuiInputAction::Enter => executor.send_keys(session_name, &["Enter"])?,
-            TuiInputAction::Escape => executor.send_keys(session_name, &["Escape"])?,
-        };
-        ensure_tmux_success(output, action)?;
-    }
-    Ok(())
-}
-
-fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String> {
-    if cancel_requested(cancel_token) {
-        Err(PROMPT_READY_CANCELLED_ERROR.to_string())
-    } else {
-        Ok(())
-    }
-}
-
-fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), String> {
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let action_name = match action {
-        TuiInputAction::Literal(_) => "literal",
-        TuiInputAction::PasteBuffer(_) => "paste-buffer",
-        TuiInputAction::Enter => "enter",
-        TuiInputAction::Escape => "escape",
-    };
-    if stderr.is_empty() {
-        Err(format!("tmux send {action_name} failed: {}", output.status))
-    } else {
-        Err(format!("tmux send {action_name} failed: {stderr}"))
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptSubmitConfirmation {
     /// Continue by tailing the pinned rollout. This also covers historical
@@ -1002,6 +888,10 @@ pub(crate) enum CodexFollowupPromptSubmitOutcome {
     Unconfirmed {
         error: String,
         snapshot: PromptReadinessSnapshot,
+    },
+    /// The gate refused a pane write; nothing after it was sent or retried.
+    Refused {
+        run: host_input::InputRun,
     },
 }
 
@@ -1073,9 +963,9 @@ fn active_composer_visible_prompt_draft_in_pane(pane: &str) -> Option<&str> {
 fn clear_cancelled_partial_prompt_draft(
     session_name: &str,
     expected_prompt: &str,
-    executor: &TmuxTuiActionExecutor,
+    submit: &host_input::PlanRun,
 ) {
-    if !executor.composer_mutated || executor.enter_attempted {
+    if !submit.composer_mutated || submit.enter_attempted {
         return;
     }
     let snapshot = prompt_readiness_snapshot(session_name);
@@ -1086,7 +976,7 @@ fn clear_cancelled_partial_prompt_draft(
     if !matches_partial {
         return;
     }
-    match crate::services::platform::tmux::send_keys(session_name, &["C-u"]) {
+    match host_input::legacy_keys(session_name, &[HostKey::CtrlU]) {
         Ok(output) if output.status.success() => {}
         Ok(output) => tracing::warn!(
             tmux_session_name = session_name,
@@ -1182,6 +1072,7 @@ fn steering_submit_outcome_to_result(
         CodexFollowupPromptSubmitOutcome::Cancelled => {
             Err("codex tui steering prompt submission was cancelled".to_string())
         }
+        CodexFollowupPromptSubmitOutcome::Refused { run } => Err(host_input::refusal_error(&run)),
     }
 }
 
@@ -1261,19 +1152,21 @@ fn submit_codex_followup_prompt_under_lock(
             error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
         };
     }
-    let mut executor = TmuxTuiActionExecutor::new();
-    let action_result =
-        run_actions_with_executor(session_name, &actions, cancel_token, &mut executor);
+    let submit = host_input::run_legacy(session_name, &actions, cancel_token);
+    if host_input::refused_by_gate(&submit.run) {
+        return CodexFollowupPromptSubmitOutcome::Refused { run: submit.run };
+    }
+    let action_result = host_input::legacy_result(submit.run.clone());
     if action_result
         .as_ref()
         .err()
         .is_some_and(|error| is_prompt_ready_cancelled_error(error))
     {
-        clear_cancelled_partial_prompt_draft(session_name, prompt, &executor);
+        clear_cancelled_partial_prompt_draft(session_name, prompt, &submit);
         return CodexFollowupPromptSubmitOutcome::Cancelled;
     }
     if let Err(error) = action_result.as_ref()
-        && !executor.enter_attempted
+        && !submit.enter_attempted
     {
         return CodexFollowupPromptSubmitOutcome::NotSubmitted {
             error: error.clone(),
@@ -1435,11 +1328,9 @@ impl CodexPaneBusySignalTracker {
     }
 
     pub(crate) fn probe_tmux(&mut self, session_name: &str) -> CodexPaneBusySignal {
-        let Some(pane) = crate::services::platform::tmux::capture_pane_timeout(
-            session_name,
-            -80,
-            CODEX_ACTIVE_TURN_CAPTURE_TIMEOUT,
-        ) else {
+        let Some(pane) =
+            host_input::capture_bounded(session_name, -80, CODEX_ACTIVE_TURN_CAPTURE_TIMEOUT)
+        else {
             return CodexPaneBusySignal::Unavailable;
         };
         self.observe_capture_at(&pane, std::time::Instant::now())

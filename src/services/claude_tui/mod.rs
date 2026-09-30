@@ -10,7 +10,7 @@ pub mod hook_relay;
 pub mod hook_server;
 #[cfg(test)]
 mod hook_server_memento_tests;
-mod host_input;
+pub(crate) mod host_input;
 #[cfg(unix)]
 pub(crate) mod hosting;
 pub mod input;

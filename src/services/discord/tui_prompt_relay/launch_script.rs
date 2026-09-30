@@ -1,12 +1,5 @@
-//! #3479: Claude TUI launch-*script* parsing helpers.
-//!
-//! Behavior-preserving extraction of the launch-script parsing cluster from the
-//! `tui_prompt_relay` parent module: the parsed `ClaudeTuiLaunchInfo` record, the
-//! file/content parsers, and the minimal single-quote shell-word splitter. The
-//! bodies stay byte-identical; every dependency is reached via `use super::*;`.
-//! `parse_claude_tui_launch_script` is re-imported by the parent so the
-//! `claude_tui_launch_context` caller and the sibling `rehydration` module (via
-//! the parent's glob) keep byte-identical call sites.
+//! Claude TUI launch-script parsing, and the launch transcript and binding a rehydrate derives
+//! from it.
 
 use super::*;
 
@@ -23,6 +16,49 @@ pub(super) fn parse_claude_tui_launch_script(path: &Path) -> Result<ClaudeTuiLau
         .map_err(|error| format!("read Claude TUI launch script {}: {error}", path.display()))?;
     parse_claude_tui_launch_script_content(&script)
         .ok_or_else(|| format!("parse Claude TUI launch script {}", path.display()))
+}
+
+/// The launch session of `tmux_session_name` and where its transcript is, whether or not it exists.
+#[cfg(unix)]
+pub(super) fn claude_tui_launch_transcript(
+    tmux_session_name: &str,
+    home: Option<&Path>,
+) -> Option<crate::services::tui_prompt_dedupe::pending::LaunchTranscript> {
+    let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+    )?;
+    let launch = parse_claude_tui_launch_script(Path::new(&launch_script_path)).ok()?;
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        &launch.working_dir,
+        &launch.session_id,
+        home,
+    )
+    .ok()?;
+    let session_id = launch.session_id;
+    Some(
+        crate::services::tui_prompt_dedupe::pending::LaunchTranscript {
+            session_id,
+            transcript,
+        },
+    )
+}
+
+/// The binding a rehydrate registers for `session_id`, read from the transcript's current end.
+#[cfg(unix)]
+pub(super) fn claude_tui_rehydrated_binding(
+    session_id: &str,
+    transcript_path: &Path,
+) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+    crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        output_path: transcript_path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(session_id.to_owned()),
+        last_offset: claude_tui_rehydrate_start_offset(transcript_path),
+        relay_last_offset: None,
+    }
 }
 
 #[cfg(unix)]

@@ -673,6 +673,7 @@ src/
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
@@ -839,6 +840,7 @@ src/
 │   │   │   │   │   ├── completion_preserve.rs
 │   │   │   │   │   ├── guarded_read.rs
 │   │   │   │   │   ├── heartbeat.rs
+│   │   │   │   │   ├── host_locator.rs
 │   │   │   │   │   ├── runtime_stamp.rs
 │   │   │   │   │   ├── stamp_merge.rs
 │   │   │   │   │   └── stream_loop_patch.rs
@@ -1373,6 +1375,7 @@ src/
 │   │   │   ├── local_model_queue_wake_e2e.rs
 │   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
+│   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── session_rotation_settle.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
@@ -1933,6 +1936,7 @@ src/
 │   │   ├── model.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
+│   │   ├── session_record.rs
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs

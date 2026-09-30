@@ -301,7 +301,6 @@ pub(crate) enum CorruptKind {
 
 /// Every record of `channel_id`, or the first line that is unreadable or out of `seq` order.
 /// A torn tail is not corruption: it was never published and the writer cuts it off on load.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(Ok(Vec::new()));
@@ -484,10 +483,14 @@ impl Writer {
         }
         match &record.new {
             BindingTarget::Source(source) => pane.current = Some(source.clone()),
-            BindingTarget::Pending { .. } => {
+            BindingTarget::Pending {
+                payload_session_id, ..
+            } => {
                 pane.pending = Some(record.clone());
-                // A new candidate's refusal must reach the log again: restore reads it.
-                pane.rejected = None;
+                // The refused session is a candidate again, so its next refusal must reach the log.
+                if pane.rejected.as_ref() == Some(payload_session_id) {
+                    pane.rejected = None;
+                }
             }
             BindingTarget::Resolved {
                 pending_seq,
