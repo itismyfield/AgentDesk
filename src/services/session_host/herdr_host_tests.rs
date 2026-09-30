@@ -883,10 +883,37 @@ impl ScannedFile {
         here: bool,
         module: &[String],
     ) -> bool {
-        here || self
-            .leaves
-            .iter()
-            .any(|leaf| leaf.binds.is_none() && resolve_path(files, self, &leaf.path) == module)
+        here || self.globs_reach(files, module)
+    }
+
+    /// Whether the glob imports here reach `module`, also through modules that glob-import it
+    /// in turn; a crate-relative glob no scanned file answers for may reach it.
+    fn globs_reach(&self, files: &BTreeMap<String, ScannedFile>, module: &[String]) -> bool {
+        let (mut seen, mut queue) = (vec![self.module.clone()], vec![self]);
+        while let Some(file) = queue.pop() {
+            for leaf in file.leaves.iter().filter(|leaf| leaf.binds.is_none()) {
+                let target = resolve_path(files, file, &leaf.path);
+                if target == module {
+                    return true;
+                }
+                match files.values().find(|other| other.module == target) {
+                    Some(next) if !seen.contains(&target) => {
+                        seen.push(target);
+                        queue.push(next);
+                    }
+                    Some(_) => {}
+                    None if matches!(
+                        leaf.path.first().map(String::as_str),
+                        Some("crate" | "self" | "super")
+                    ) =>
+                    {
+                        return true;
+                    }
+                    None => {}
+                }
+            }
+        }
+        false
     }
 
     /// The path a `use` here binds `name` to, unless it binds the bare name itself.
@@ -1177,7 +1204,7 @@ fn item_uses_by_file(
 ) -> BTreeMap<String, (usize, usize)> {
     let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
     // Whether a path reaches `module`: it names it, names no scanned module, or names one
-    // that glob-imports it.
+    // whose glob imports reach it.
     let reaches = |path: &[String], module: &[String]| {
         path == module
             || files
@@ -1823,6 +1850,13 @@ fn name_only_scan_follows_reexports_and_function_values() {
     const FACADE: &str = "src/services/facade.rs";
     const CALLER: &str = "src/services/caller.rs";
     const OTHER: &str = "src/services/other.rs";
+    const FACADE1: &str = "src/services/facade1.rs";
+    const FACADE2: &str = "src/services/facade2.rs";
+    const FACADE3: &str = "src/services/facade3.rs";
+    const WIPE: (&str, &str) = (
+        COMMON,
+        "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+    );
     const CALLS: &[(&str, Listed)] = &[(
         "cleanup_session_temp_files",
         &[(COMMON, 1, "the one reviewed call")],
@@ -1872,6 +1906,89 @@ fn name_only_scan_follows_reexports_and_function_values() {
                 (
                     CALLER,
                     "fn go(n: &str) { crate::services::facade::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a fully qualified path through two glob re-exports",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a fully qualified path through three glob re-exports",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (FACADE3, "pub(crate) use super::facade2::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade3::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a glob cycle with one way out to the alias",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::facade2::*;\n"),
+                (
+                    FACADE2,
+                    "pub(crate) use crate::services::facade1::*;\n\
+                     pub(crate) use crate::services::tmux_common::*;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade1::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a module alias re-exported through a glob",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1 as f1;\n"),
+                (FACADE3, "pub(crate) use crate::services::facade2::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade3::f1::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a bare name through two glob imports",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "use crate::services::facade2::*;\nfn go(n: &str) { wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a glob chain through a crate module no file answers for",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::gone::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade1::wipe(n); }\n",
                 ),
             ],
             "caller.rs: unlisted cleanup_session_temp_files x1",
@@ -1936,6 +2053,31 @@ fn name_only_scan_follows_reexports_and_function_values() {
                  let cleanup_session_temp_files = |_: &str| ();\n\
                  cleanup_session_temp_files(n);\n}\n",
             )],
+        ),
+        (
+            "a glob cycle that never reaches the alias",
+            &[
+                WIPE,
+                (FACADE1, "pub(crate) use crate::services::facade2::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::wipe(n); }\n",
+                ),
+            ],
+        ),
+        (
+            "another module's function of the alias name through two glob re-exports",
+            &[
+                WIPE,
+                (OTHER, "pub(crate) fn wipe(n: &str) {}\n"),
+                (FACADE1, "pub(crate) use crate::services::other::*;\n"),
+                (FACADE2, "pub(crate) use crate::services::facade1::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade2::wipe(n); }\n",
+                ),
+            ],
         ),
         (
             "another module's function of the alias name through a re-exported module",
