@@ -17,6 +17,8 @@ use crate::services::{disk_monitor, health_diagnostics};
 
 use super::AppState;
 
+#[cfg(test)]
+mod host_guard_tests;
 /// Disclosure rules for the unauthenticated `/api/health` body.
 mod public_projection;
 mod runtime_profile;

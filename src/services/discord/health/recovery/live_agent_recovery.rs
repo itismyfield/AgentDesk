@@ -292,6 +292,7 @@ fn recovery_metadata(
 #[cfg(test)]
 mod tests {
     use super::recovery_metadata;
+
     #[test]
     fn recovery_metadata_is_a_role_bound_persistent_routine_when_requested() {
         let metadata =
@@ -300,5 +301,74 @@ mod tests {
         assert_eq!(metadata["agent_id"], "claude");
         assert_eq!(metadata["execution_strategy"], "persistent");
         assert_eq!(metadata["agent_recovery"]["mode"], "restore");
+    }
+}
+
+#[cfg(test)]
+mod host_guard_tests {
+    // The fence reads the stored rows before its force-kill; only a found legacy row is
+    // stopped, and a refusal returns before the kill, the death check or the launch.
+    #[tokio::test]
+    async fn recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg() {
+        use crate::services::agent_recovery::{
+            OperationPlan, PendingOperation, RecoveryLease, RestorePlan, RestoreSessionMode,
+        };
+        use crate::services::discord::host_teardown_gate::test_support::{
+            Stored, busy_turn, channel_key, runtime, seed, turn_kept,
+        };
+        use crate::services::provider::ProviderKind;
+        use poise::serenity_prelude::ChannelId;
+
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        let claude = ProviderKind::Claude;
+        for (n, stored) in Stored::ALL.into_iter().enumerate() {
+            let channel = ChannelId::new(1_479_671_301_387_059_700 + n as u64);
+            let name = format!("AgentDesk-claude-p4a-fence-{n}");
+            seed(
+                &pool,
+                &channel_key(&shared, &name),
+                &name,
+                channel.get(),
+                stored,
+            )
+            .await;
+            let token = busy_turn(&shared, channel, &name).await;
+            let fenced = super::fence_runtime(&registry, &claude, channel).await;
+            let stopped = !turn_kept(&shared, channel, &token).await;
+            assert_eq!(stopped, stored == Stored::Legacy, "{stored:?}");
+            if stored == Stored::Legacy {
+                continue;
+            }
+            assert!(!fenced, "{stored:?}");
+            let lease = RecoveryLease {
+                channel_id: channel.get().to_string(),
+                generation: 1,
+                active_writer_agent_id: "claude".to_string(),
+            };
+            let plan = RestorePlan {
+                channel_id: channel.get().to_string(),
+                owner_agent_id: "claude".to_string(),
+                fallback_agent_id: "codex".to_string(),
+                session_mode: RestoreSessionMode::Fresh,
+                packet: "continue".to_string(),
+                owner_intake: None,
+                fallback_intake: None,
+            };
+            let operation = PendingOperation {
+                lease,
+                owner_provider: claude.clone(),
+                fallback_provider: ProviderKind::Codex,
+                plan: OperationPlan::Restore(plan),
+            };
+            super::execute_operation(&registry, operation).await;
+            assert!(turn_kept(&shared, channel, &token).await, "{stored:?}");
+            let queued = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+            assert!(queued.intervention_queue.is_empty(), "{stored:?}");
+        }
+        pool.close().await;
+        db.drop().await;
     }
 }

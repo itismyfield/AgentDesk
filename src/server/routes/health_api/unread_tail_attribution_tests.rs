@@ -1,14 +1,11 @@
-//! HTTP entry tests for the unread-tail refusal record at the manual reattach and
-//! stale-mailbox sites; real tmux, skipped (NO VERDICT) without it. No decision changes.
+//! HTTP entry tests for the unread-tail refusal record at the manual reattach site; real
+//! tmux, skipped (NO VERDICT) without it. The stale-mailbox site's is in `host_guard_tests`.
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::services::discord::relay_recovery::unread_tail_seed::{UnreadTailSeed, UnreadTailShape};
-use crate::services::discord::relay_recovery::{
-    UNREAD_TAIL_SITE_STALE_MAILBOX, stale_mailbox_idle_tail_admits,
-};
 
 async fn post(seed: &UnreadTailSeed, uri: &str, body: String) -> (StatusCode, serde_json::Value) {
     let app = super::tests::test_api_router_with_config_and_registry(
@@ -107,40 +104,4 @@ async fn manual_reattach_records_nothing_for_a_measured_backlog() {
         return;
     };
     assert!(refusals.is_empty(), "{refusals:?}");
-}
-
-/// The stale-mailbox route still answers 409 for an UNMEASURED tail, names it, and records it once.
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail() {
-    let Some(seed) = UnreadTailSeed::start(5_996_120_001, UnreadTailShape::RowOutputMissing).await
-    else {
-        return;
-    };
-    let body = serde_json::json!({"channel_id": seed.channel.get(), "provider": "claude"});
-    for _ in 0..2 {
-        let (status, json) = post(&seed, "/doctor/stale-mailbox/repair", body.to_string()).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{json}");
-        assert_eq!(json["safety_gate"], "tmux_present", "{json}");
-        assert_eq!(json["unread_tail"], "tail_not_measured", "{json}");
-        assert!(seed.turn_kept(), "the idle turn must survive: {json}");
-    }
-    let refusals = seed.refusals();
-    assert_eq!(refusals.len(), 1, "{refusals:?}");
-    assert_eq!(refusals[0]["site"], UNREAD_TAIL_SITE_STALE_MAILBOX);
-    assert_eq!(refusals[0]["decided_by"], "tail_not_measured");
-
-    // A fresh episode another conjunct already refused records nothing.
-    let mut fresh_episode = seed
-        .registry
-        .snapshot_watcher_state_for_provider(&seed.provider, seed.channel.get())
-        .await
-        .expect("fixture snapshot");
-    fresh_episode.mailbox_active_user_msg_id = Some(1);
-    assert!(!stale_mailbox_idle_tail_admits(
-        &seed.provider,
-        &fresh_episode,
-        false
-    ));
-    assert_eq!(seed.refusals().len(), 1, "{:?}", seed.refusals());
 }

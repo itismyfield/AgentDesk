@@ -37,7 +37,7 @@ pub(super) fn keyed_host_gate<'a>(
 }
 
 /// Only a confirmed missing session reads absent; a failed probe never finalizes a turn.
-fn absent_only_if_missing(presence: HostPresence) -> bool {
+pub(super) fn absent_only_if_missing(presence: HostPresence) -> bool {
     presence == HostPresence::Missing
 }
 

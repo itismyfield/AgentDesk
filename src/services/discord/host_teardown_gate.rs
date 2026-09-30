@@ -73,3 +73,6 @@ pub(in crate::services::discord) async fn shared_teardown(
     )
     .await
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;

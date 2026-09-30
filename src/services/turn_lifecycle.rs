@@ -844,3 +844,54 @@ fn compute_queue_preserved(
     let (before, after) = (pre.disk_present?, post.disk_present?);
     Some((!before || after) && post.queue_depth >= pre.queue_depth)
 }
+
+#[cfg(all(test, unix))]
+mod host_guard_tests {
+    use super::*;
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, busy_turn, channel_key, runtime, seed, stop_recorded, turn_kept,
+    };
+
+    // A force-kill the registry can key reads the stored rows before its tombstone, stop
+    // or kill; a missing row keeps main's name-only path, any other trace keeps the turn.
+    #[tokio::test]
+    async fn force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        for (n, stored) in Stored::ALL.into_iter().enumerate() {
+            let channel = ChannelId::new(1_479_671_301_387_059_800 + n as u64);
+            let name = format!("AgentDesk-claude-p4a-kill-{n}");
+            seed(
+                &pool,
+                &channel_key(&shared, &name),
+                &name,
+                channel.get(),
+                stored,
+            )
+            .await;
+            let token = busy_turn(&shared, channel, &name).await;
+            let target = TurnLifecycleTarget {
+                provider: Some(ProviderKind::Claude),
+                channel_id: Some(channel),
+                tmux_name: name.clone(),
+            };
+            let result = force_kill_turn(Some(&registry), &target, "p4a host guard", "p4a").await;
+            let admitted = matches!(stored, Stored::Legacy | Stored::Missing);
+            assert_eq!(
+                result.lifecycle_path != HOST_GUARD_KEPT_PATH,
+                admitted,
+                "{stored:?}"
+            );
+            assert_eq!(
+                !turn_kept(&shared, channel, &token).await,
+                admitted,
+                "{stored:?}"
+            );
+            assert_eq!(stop_recorded(channel), admitted, "{stored:?}");
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+}

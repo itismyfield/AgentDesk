@@ -28,6 +28,12 @@ pub(crate) enum UnreadTailShape {
 
 pub(crate) struct UnreadTailSeed {
     pub(crate) registry: Arc<HealthRegistry>,
+    pub(crate) shared: Arc<SharedData>,
+    /// The database a [`Self::start_on_postgres`] runtime reads, created under the env lock.
+    pub(crate) postgres: Option<(
+        crate::db::auto_queue::test_support::TestPostgresDb,
+        sqlx::PgPool,
+    )>,
     pub(crate) provider: ProviderKind,
     pub(crate) channel: ChannelId,
     pub(crate) tmux_session: String,
@@ -40,6 +46,15 @@ pub(crate) struct UnreadTailSeed {
 impl UnreadTailSeed {
     /// `None` when tmux is unavailable: the caller skips and gives NO VERDICT.
     pub(crate) async fn start(channel: u64, shape: UnreadTailShape) -> Option<Self> {
+        Self::start_inner(channel, shape, false).await
+    }
+
+    /// [`Self::start`] with a runtime on a fresh database, for callers whose host guard reads rows.
+    pub(crate) async fn start_on_postgres(channel: u64, shape: UnreadTailShape) -> Option<Self> {
+        Self::start_inner(channel, shape, true).await
+    }
+
+    async fn start_inner(channel: u64, shape: UnreadTailShape, postgres: bool) -> Option<Self> {
         let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         if !crate::services::platform::tmux::is_available() {
             eprintln!("skipping #5996 unread-tail entry fixture: tmux unavailable");
@@ -51,7 +66,15 @@ impl UnreadTailSeed {
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(channel);
         let registry = Arc::new(HealthRegistry::new());
-        let shared: Arc<SharedData> = crate::services::discord::make_shared_data_for_tests();
+        let postgres = if postgres {
+            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            Some((db, pool))
+        } else {
+            None
+        };
+        let pool = postgres.as_ref().map(|(_, pool)| pool.clone());
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
         registry
             .register(provider.as_str().to_string(), shared.clone())
             .await;
@@ -133,6 +156,8 @@ impl UnreadTailSeed {
 
         Some(Self {
             registry,
+            shared,
+            postgres,
             provider,
             channel,
             tmux_session,

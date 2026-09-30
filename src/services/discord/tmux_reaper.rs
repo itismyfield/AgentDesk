@@ -3,6 +3,8 @@ use super::*;
 use futures::future::BoxFuture;
 
 mod host_guard;
+#[cfg(all(test, unix))]
+mod host_guard_tests;
 
 use super::host_teardown_gate::shared_teardown;
 use super::inflight::KeyedTeardown;
@@ -978,6 +980,15 @@ mod tests {
         _: &'a str,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async { true })
+    }
+
+    #[test]
+    fn a_failed_presence_probe_never_reads_as_absent() {
+        use super::host_guard::absent_only_if_missing;
+        use crate::services::session_host::HostPresence;
+        assert!(absent_only_if_missing(HostPresence::Missing));
+        assert!(!absent_only_if_missing(HostPresence::Present));
+        assert!(!absent_only_if_missing(HostPresence::ProbeFailed));
     }
 
     #[test]
