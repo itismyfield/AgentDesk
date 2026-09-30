@@ -99,7 +99,7 @@ impl Lane {
             &marker,
             Some(&launch),
             Path::is_file,
-            transcript_state,
+            observe_transcript,
         )
     }
 }
@@ -196,7 +196,7 @@ fn exact(step: RestoreStep) -> ExactBinding {
 const REGISTERED: Registration = Registration {
     binding: true,
     command_alias: true,
-    logged: true,
+    persisted: Some(Persisted::Logged),
 };
 
 #[test]
@@ -347,7 +347,7 @@ fn launch_seed_needs_the_launch_binding_and_its_alias_first() {
         Registration {
             binding,
             command_alias,
-            logged: binding,
+            persisted: binding.then_some(Persisted::Logged),
         }
     };
 
@@ -552,7 +552,7 @@ fn pending_without_a_current_execution_is_never_restored() {
             &unreadable,
             Some(&launch),
             |_| true,
-            transcript_state,
+            observe_transcript,
         )
     };
     let down = |why| RestoreStep::Finished(PendingRestore::Unavailable(why));
@@ -1387,7 +1387,7 @@ mod verified_adoption {
             &marker,
             Some(&launch),
             Path::is_file,
-            transcript_state,
+            observe_transcript,
         )
     }
 

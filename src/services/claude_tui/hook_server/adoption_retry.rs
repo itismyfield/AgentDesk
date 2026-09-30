@@ -195,8 +195,11 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             let pending = adopted.is_none() && skip.is_none();
             // An entry whose pane lost its channel mapping keeps its place until the next pass restores it.
             let no_channel = skip == Some(AdoptSkip::ChannelNotRestored);
-            // An unreadable log decided nothing, so the entry keeps its place and its marks.
-            let transient = skip == Some(AdoptSkip::HistoryUnreadable);
+            // An unreadable log or pinned file decided nothing, so the entry keeps its place and marks.
+            let transient = matches!(
+                skip,
+                Some(AdoptSkip::HistoryUnreadable | AdoptSkip::SourceUnreadable)
+            );
             let held = if pending {
                 !(queued && queued_count(tmux) > 1)
             } else {

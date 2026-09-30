@@ -25,6 +25,8 @@ pub(crate) enum AdoptSkip {
     SourceRejected(crate::services::claude_tui::source_verify::SourceRejection),
     /// The bound transcript was replaced or rewritten; the pane stays as it is.
     SourceAnomaly,
+    /// The bound transcript's pinned file could not be read; the hook is retried.
+    SourceUnreadable,
 }
 
 impl AdoptSkip {

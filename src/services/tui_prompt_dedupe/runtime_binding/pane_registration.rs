@@ -21,7 +21,8 @@ pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntime
     register_claude_pane_with(tmux, channel, binding, Record::Stat);
 }
 
-/// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published.
+/// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
+/// an unpublished `Persisted` when the pane's pin refused it.
 pub(crate) fn register_claude_pane_with(
     tmux: &str,
     channel: u64,
@@ -43,7 +44,7 @@ pub(crate) fn register_claude_pane_with(
     if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
         complete();
     }
-    finish_registration(&key, registered.is_some());
+    finish_registration(&key, registered.is_some_and(Persisted::published));
     registered
 }
 

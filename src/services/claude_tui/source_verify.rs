@@ -131,6 +131,93 @@ pub(crate) fn observe_transcript(path: &Path) -> io::Result<OpenedTranscript> {
     })
 }
 
+/// One look at a source's transcript: a check's descriptor, a stat, or an identity already checked.
+pub(crate) enum Observation<'a> {
+    /// `observe_transcript`: identity and first record read from one descriptor.
+    Opened(Result<&'a OpenedTranscript, &'a io::Error>),
+    /// Only the (dev, ino) a stat of the path found; the first record is not read.
+    Stat(io::Result<(u64, u64)>),
+    /// An identity a check verified from its own first record.
+    Checked(&'a SourceId),
+}
+
+/// What an observation proves once the pane's pin judges it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PinJudgment {
+    /// The pinned file itself, or an unpinned source's first verification: bind this identity.
+    Verified(SourceId),
+    /// A stat of a source no pin holds: logged as the stat finds it, not verified.
+    Unpinned,
+    /// No pin and no verified transcript yet: a durable Pending, never acknowledged as bound.
+    Pending,
+    /// The pinned file could not be read: binding and cursor stay, nothing succeeds, judged again.
+    Recheck,
+    /// The pinned file was replaced, rewritten or removed: the pin stays and nothing binds over it.
+    Anomaly,
+    /// A complete first record naming another session, or none.
+    Foreign,
+    /// Its own first record but no file identity to pin.
+    Unidentified,
+}
+
+/// The one rule every hook, restore and registration of a Claude source goes through: a pin on
+/// `session`'s `path` admits only its own file, and without one only a verified first record binds.
+pub(crate) fn judge_pin(
+    pin: Option<&SourceId>,
+    session: &str,
+    path: &Path,
+    seen: Observation,
+) -> PinJudgment {
+    use PinJudgment::{Anomaly, Foreign, Pending, Recheck, Unidentified, Unpinned, Verified};
+    let pin = pin.filter(|pin| pin.session_id == session && pin.path == path);
+    let pinned_file = pin.map(|pin| (pin.dev, pin.ino));
+    let (file, first) = match seen {
+        Observation::Checked(source) => {
+            return match pinned_file {
+                Some(file) if file != (source.dev, source.ino) => Anomaly,
+                _ => Verified(source.clone()),
+            };
+        }
+        Observation::Stat(Ok(file)) => {
+            return match pin {
+                Some(pin) if pinned_file == Some(file) => Verified(pin.clone()),
+                Some(_) => Anomaly,
+                None => Unpinned,
+            };
+        }
+        Observation::Stat(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return if pin.is_some() { Anomaly } else { Pending };
+        }
+        Observation::Opened(Ok(OpenedTranscript::Missing)) => {
+            return if pin.is_some() { Anomaly } else { Pending };
+        }
+        Observation::Stat(Err(_)) | Observation::Opened(Err(_)) => {
+            return if pin.is_some() { Recheck } else { Pending };
+        }
+        Observation::Opened(Ok(OpenedTranscript::Opened { file, first })) => (file, first),
+    };
+    let identity = match file {
+        #[cfg(unix)]
+        SourceFileIdentity::Unix { dev, ino } => Some((*dev, *ino)),
+        SourceFileIdentity::Unavailable => None,
+    };
+    let own = matches!(first, FirstRecord::Session(id) if id == session);
+    match (pin, identity) {
+        // A file rewritten or truncated in place keeps its inode, so its first record decides too.
+        (Some(pin), Some(file)) if own && pinned_file == Some(file) => Verified(pin.clone()),
+        (Some(_), _) => Anomaly,
+        (None, _) if *first == FirstRecord::NotWritten => Pending,
+        (None, _) if !own => Foreign,
+        (None, None) => Unidentified,
+        (None, Some((dev, ino))) => Verified(SourceId {
+            session_id: session.to_owned(),
+            path: path.to_path_buf(),
+            dev,
+            ino,
+        }),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceVerdict {
     /// The hook is about the bound source; same path, (dev, ino) and first record.
@@ -139,8 +226,10 @@ pub(crate) enum SourceVerdict {
     Confirm(ClaudeSource),
     /// A newly verified source takes over from the bound one.
     Rotate(ClaudeSource),
-    /// Path and id agree, but the file or its first record does not exist yet.
+    /// Path and id agree, but the file or its first record does not exist yet, or it is unreadable.
     Pending,
+    /// The bound source's pinned file could not be read; the pane keeps its binding meanwhile.
+    Recheck,
     /// A resume back to a session the pane left; arrival order cannot tell it from a late hook.
     PendingConflict,
     Rejected(SourceRejection),
@@ -164,10 +253,12 @@ pub(crate) enum SourceRejection {
 pub(crate) fn verify_claude_source(
     hook: &ClaudeHookSource,
     projects_root: &Path,
-    opened: &OpenedTranscript,
+    opened: Result<&OpenedTranscript, &io::Error>,
     history: &[ClaudeSource],
 ) -> SourceVerdict {
-    use SourceVerdict::{Anomaly, Confirm, Current, Pending, PendingConflict, Rejected, Rotate};
+    use SourceVerdict::{
+        Anomaly, Confirm, Current, Pending, PendingConflict, Recheck, Rejected, Rotate,
+    };
     if let Some(rejection) = precheck(hook, projects_root) {
         return Rejected(rejection);
     }
@@ -181,37 +272,41 @@ pub(crate) fn verify_claude_source(
             Rejected(SourceRejection::Regression)
         };
     }
-    let pinned = current.and_then(|source| Some((source, source.file?)));
-    let (file, first) = match opened {
-        OpenedTranscript::Missing if pinned.is_some() => return Anomaly,
-        OpenedTranscript::Missing => return Pending,
-        OpenedTranscript::Opened { file, first } => (*file, first),
-    };
-    if let Some((bound, bound_file)) = pinned {
-        // A verified file rewritten or truncated in place keeps its inode, so its first record is rechecked.
-        let own_first = matches!(first, FirstRecord::Session(id) if *id == hook.session_id);
-        let same = bound.path == hook.transcript_path && bound_file == file && own_first;
-        return if same { Current } else { Anomaly };
+    let pin = current.and_then(ClaudeSource::source_id);
+    // The bound session named at another path is not the file its pin holds.
+    if pin
+        .as_ref()
+        .is_some_and(|pin| pin.path != hook.transcript_path)
+    {
+        return Anomaly;
     }
-    match first {
-        FirstRecord::NotWritten => return Pending,
-        FirstRecord::Session(id) if *id == hook.session_id => {}
-        FirstRecord::Session(_) | FirstRecord::Unnamed => {
-            return Rejected(SourceRejection::FirstRecordMismatch);
+    let seen = Observation::Opened(opened);
+    match judge_pin(pin.as_ref(), &hook.session_id, &hook.transcript_path, seen) {
+        PinJudgment::Verified(id) if pin.as_ref() == Some(&id) => Current,
+        PinJudgment::Verified(id) => {
+            #[cfg(unix)]
+            let file = SourceFileIdentity::Unix {
+                dev: id.dev,
+                ino: id.ino,
+            };
+            #[cfg(not(unix))]
+            let file = SourceFileIdentity::Unavailable;
+            let source = ClaudeSource {
+                session_id: id.session_id,
+                path: id.path,
+                file: Some(file),
+            };
+            if current.is_some() {
+                Confirm(source)
+            } else {
+                Rotate(source)
+            }
         }
-    }
-    if matches!(file, SourceFileIdentity::Unavailable) {
-        return Rejected(SourceRejection::IdentityUnavailable);
-    }
-    let source = ClaudeSource {
-        session_id: hook.session_id.clone(),
-        path: hook.transcript_path.clone(),
-        file: Some(file),
-    };
-    if current.is_some() {
-        Confirm(source)
-    } else {
-        Rotate(source)
+        PinJudgment::Pending | PinJudgment::Unpinned => Pending,
+        PinJudgment::Recheck => Recheck,
+        PinJudgment::Anomaly => Anomaly,
+        PinJudgment::Foreign => Rejected(SourceRejection::FirstRecordMismatch),
+        PinJudgment::Unidentified => Rejected(SourceRejection::IdentityUnavailable),
     }
 }
 
@@ -349,7 +444,7 @@ mod tests {
         hook: &ClaudeHookSource,
     ) -> SourceVerdict {
         let opened = observe_transcript(&hook.transcript_path).unwrap();
-        let verdict = verify_claude_source(hook, root, &opened, history);
+        let verdict = verify_claude_source(hook, root, Ok(&opened), history);
         match &verdict {
             SourceVerdict::Confirm(source) => *history.last_mut().unwrap() = source.clone(),
             SourceVerdict::Rotate(source) => history.push(source.clone()),
@@ -364,6 +459,7 @@ mod tests {
             SourceVerdict::Confirm(_) => "confirm",
             SourceVerdict::Rotate(_) => "rotate",
             SourceVerdict::Pending => "pending",
+            SourceVerdict::Recheck => "recheck",
             SourceVerdict::PendingConflict => "conflict",
             SourceVerdict::Rejected(_) => "rejected",
             SourceVerdict::Anomaly => "anomaly",
@@ -532,7 +628,7 @@ mod tests {
         let resume = ClaudeHookSource::from_signal(B, &signal, transcript(root, B));
         let opened = observe_transcript(&resume.transcript_path).unwrap();
         assert_eq!(
-            verify_claude_source(&resume, root, &opened, &history),
+            verify_claude_source(&resume, root, Ok(&opened), &history),
             SourceVerdict::PendingConflict
         );
     }

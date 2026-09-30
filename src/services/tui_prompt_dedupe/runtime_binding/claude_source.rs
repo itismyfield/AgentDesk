@@ -8,7 +8,7 @@ use super::*;
 use crate::services::claude_tui::source_verify::{
     self, ClaudeHookSource, ClaudeSource, OpenedTranscript, SourceRejection, SourceVerdict,
 };
-use binding_events::SourceId;
+use binding_events::{Committed, SourceId};
 
 /// What a registration writes to the binding event log before it publishes the binding.
 #[derive(Clone, Debug)]
@@ -28,17 +28,35 @@ pub(crate) enum Persisted {
     Logged,
     /// Nothing verified was logged; the pane waits on its exact path and the next pass checks again.
     AwaitingExact,
+    /// The pinned file was replaced or is gone: nothing was logged or published.
+    Anomaly,
+    /// The pinned file could not be looked at: nothing was logged or published, judged again later.
+    Recheck,
+}
+
+impl Persisted {
+    /// Whether the registration may publish its binding.
+    pub(crate) fn published(self) -> bool {
+        matches!(self, Self::Logged | Self::AwaitingExact)
+    }
 }
 
 impl Record {
     pub(crate) fn persist(&self, proposal: &Proposal) -> io::Result<Persisted> {
+        let persisted = |committed| match committed {
+            Committed::Appended | Committed::Unchanged => Persisted::Logged,
+            Committed::Stale => Persisted::AwaitingExact,
+            Committed::Anomaly => Persisted::Anomaly,
+            Committed::Recheck => Persisted::Recheck,
+        };
         match self {
-            Self::Stat => binding_events::record_source(proposal).map(|()| Persisted::Logged),
-            // A file replaced since the check is left unlogged for the next check to judge.
+            Self::Stat => binding_events::record_source(proposal).map(persisted),
             Self::Verified(source) if binding_events::codex::source_file_matches(source) => {
-                binding_events::record_verified(proposal, source).map(|()| Persisted::Logged)
+                binding_events::record_verified(proposal, source).map(persisted)
             }
-            Self::Verified(_) | Self::AwaitFirstRecord => Ok(Persisted::AwaitingExact),
+            // A file replaced since the check is judged against the pin, or left for the next check.
+            Self::Verified(_) => binding_events::judge_moved(proposal).map(persisted),
+            Self::AwaitFirstRecord => Ok(Persisted::AwaitingExact),
         }
     }
 
@@ -53,12 +71,14 @@ impl Record {
 
 /// What the check decided for a candidate.
 enum Checked {
-    /// The bound source itself, already pinned or its file momentarily unreadable.
+    /// The bound source itself, its pinned file read again.
     Bound,
     /// A verified source: the bound one on its first check, a corrected path, or a new session.
     Verified(SourceId),
     /// Named correctly but without a verified transcript yet; it waits as a Pending.
     Waiting,
+    /// The bound source's pinned file could not be read; the hook is refused until it can be.
+    Recheck,
     Refused(AdoptSkip, &'static str),
 }
 
@@ -129,6 +149,10 @@ impl Candidate<'_> {
                 *skip = unlogged;
                 return wait(failure);
             }
+            Ok(Checked::Recheck) => {
+                *skip = Some(AdoptSkip::SourceUnreadable);
+                return false;
+            }
             Ok(Checked::Refused(refusal, reason)) => {
                 *skip = Some(refusal);
                 if reject(reason) {
@@ -169,21 +193,38 @@ impl Candidate<'_> {
         after_check();
         // The path must still name the file the check read; a replaced one waits for the next check,
         // the bound source too, which keeps its binding and cursor meanwhile.
-        if !binding_events::codex::source_file_matches(&source) {
-            return wait(failure);
+        let recorded = match (
+            proposal,
+            binding_events::codex::source_file_matches(&source),
+        ) {
+            (None, true) => None,
+            (None, false) => return wait(failure),
+            (Some(p), true) => Some(binding_events::record_verified(p, &source)),
+            (Some(p), false) => Some(binding_events::judge_moved(p)),
+        };
+        match recorded {
+            Some(Err(error)) => {
+                tracing::error!(
+                    tmux,
+                    payload,
+                    %error,
+                    "binding event log append failed; Claude continuation not adopted"
+                );
+                *failure = Some(persist_error(error));
+                false
+            }
+            // The log's pin refused the identity: the pane stays on its pinned file.
+            Some(Ok(Committed::Anomaly)) => {
+                *skip = Some(AdoptSkip::SourceAnomaly);
+                false
+            }
+            Some(Ok(Committed::Recheck)) => {
+                *skip = Some(AdoptSkip::SourceUnreadable);
+                false
+            }
+            Some(Ok(Committed::Stale)) => wait(failure),
+            _ => true,
         }
-        let recorded = proposal.map(|p| binding_events::record_verified(p, &source));
-        if let Some(Err(error)) = recorded {
-            tracing::error!(
-                tmux,
-                payload,
-                %error,
-                "binding event log append failed; Claude continuation not adopted"
-            );
-            *failure = Some(persist_error(error));
-            return false;
-        }
-        true
     }
 
     /// Judges the candidate against the pane's bound source; `Err` when its log cannot be loaded.
@@ -206,18 +247,11 @@ impl Candidate<'_> {
             file,
         }];
         let source = ClaudeHookSource::from_signal(payload, self.hook, candidate.into());
-        let same_bound = history[0].session_id == payload && candidate == bound.output_path;
-        let verdict = match self.opened {
-            Ok(opened) => source_verify::verify_claude_source(&source, self.root, opened, &history),
-            Err(error) => {
-                tracing::warn!(candidate, %error, "Claude transcript unreadable; the candidate waits");
-                match source_verify::precheck(&source, self.root) {
-                    Some(rejection) => SourceVerdict::Rejected(rejection),
-                    None if same_bound => SourceVerdict::Current,
-                    None => SourceVerdict::Pending,
-                }
-            }
-        };
+        if let Err(error) = self.opened {
+            tracing::warn!(candidate, %error, "Claude transcript unreadable; judged against its pin");
+        }
+        let verdict =
+            source_verify::verify_claude_source(&source, self.root, self.opened.as_ref(), &history);
         Ok(match verdict {
             SourceVerdict::Current => Checked::Bound,
             SourceVerdict::Confirm(source) | SourceVerdict::Rotate(source) => {
@@ -227,6 +261,7 @@ impl Candidate<'_> {
                 }
             }
             SourceVerdict::Pending => Checked::Waiting,
+            SourceVerdict::Recheck => Checked::Recheck,
             // A one-entry history names no left session, so a conflict is refused like a regression.
             SourceVerdict::PendingConflict => refused(SourceRejection::Regression),
             SourceVerdict::Rejected(rejection) => refused(rejection),

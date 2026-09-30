@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use super::TuiRuntimeBinding;
 use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::claude_tui::source_verify::{Observation, PinJudgment, judge_pin};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
@@ -385,9 +386,29 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     Ok(log.notify.subscribe())
 }
 
-/// Appends what `proposal` changes for its pane, if anything; `Ok` means the binding may be published.
-pub(crate) fn record_source(proposal: &Proposal) -> io::Result<()> {
-    commit(proposal, Plan::Stat).map(|_| ())
+/// What a commit left in the log for its proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Committed {
+    Appended,
+    /// The log already says what the proposal says.
+    Unchanged,
+    /// The path no longer names the file its check read, and no pin holds it: nothing was logged.
+    Stale,
+    /// The pinned file was replaced or is gone: nothing was logged and nothing may be bound.
+    Anomaly,
+    /// The pinned file could not be looked at: nothing was logged, and it is judged again.
+    Recheck,
+}
+
+/// What a plan does to the log: append a record and whether its source was verified, or keep it.
+enum Planned {
+    Append(BindingEvent, bool),
+    Keep(Committed),
+}
+
+/// Appends what `proposal`'s stat changes for its pane, if anything, as the pane's pin admits it.
+pub(crate) fn record_source(proposal: &Proposal) -> io::Result<Committed> {
+    commit(proposal, Plan::Stat)
 }
 
 /// How a Pending judgment stands in the log once `record_pending` returns.
@@ -402,19 +423,39 @@ pub(crate) enum PendingRecord {
 /// Only a matching Pending stands in for the record; a current source naming the candidate does not.
 pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
     match commit(proposal, Plan::ForcePending)? {
-        true => Ok(PendingRecord::Recorded),
-        false => Ok(PendingRecord::AlreadyPending),
+        Committed::Appended => Ok(PendingRecord::Recorded),
+        _ => Ok(PendingRecord::AlreadyPending),
     }
 }
 
-/// Records exactly `source`, the identity the check read; the path is not looked at again.
-pub(crate) fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<()> {
-    commit(proposal, Plan::Verified(source)).map(|_| ())
+/// Records exactly `source`, the identity the check read, unless the pane's pin holds another file;
+/// the path is not looked at again.
+pub(crate) fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<Committed> {
+    commit(proposal, Plan::Verified(source))
+}
+
+/// Judges a path that no longer names the file its check read: under the pane's pin that is an
+/// anomaly, or a recheck while unreadable; otherwise the check is stale and waits.
+pub(crate) fn judge_moved(proposal: &Proposal) -> io::Result<Committed> {
+    let committed = commit_with(proposal.channel_id, |writer| {
+        let stat = fs::metadata(proposal.path).map(|meta| file_identity(&meta));
+        Planned::Keep(
+            match writer.pin_judgment(proposal, Observation::Stat(stat)) {
+                PinJudgment::Anomaly => Committed::Anomaly,
+                PinJudgment::Recheck => Committed::Recheck,
+                _ => Committed::Stale,
+            },
+        )
+    })?;
+    Ok(match committed {
+        Committed::Unchanged => Committed::Stale,
+        committed => committed,
+    })
 }
 
 /// Audits a candidate the binding judgment refused; `true` when this judgment was newly logged.
 pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<bool> {
-    commit(proposal, Plan::Rejected(reason))
+    commit(proposal, Plan::Rejected(reason)).map(|c| c == Committed::Appended)
 }
 
 /// The pane's current source, when a verified record pinned it.
@@ -423,7 +464,7 @@ pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<O
     commit_with(channel_id, |writer| {
         let pane = writer.panes.get(tmux_session).filter(|pane| pane.verified);
         pinned = pane.and_then(|pane| pane.current.clone());
-        None
+        Planned::Keep(Committed::Unchanged)
     })?;
     Ok(pinned)
 }
@@ -447,17 +488,17 @@ pub(crate) fn pinned_file(
     Ok(current.map(pin))
 }
 
-fn commit(proposal: &Proposal, mode: Plan) -> io::Result<bool> {
+fn commit(proposal: &Proposal, mode: Plan) -> io::Result<Committed> {
     commit_with(proposal.channel_id, |writer| writer.plan(proposal, mode))
 }
 
-/// `plan` returns the record to append and whether its source was verified, or `None` for no change.
+/// Runs `plan` on the channel's writer and appends the record it returns.
 fn commit_with(
     channel_id: u64,
-    plan: impl FnOnce(&mut Writer) -> Option<(BindingEvent, bool)>,
-) -> io::Result<bool> {
+    plan: impl FnOnce(&mut Writer) -> Planned,
+) -> io::Result<Committed> {
     let Some(path) = log_path(channel_id)? else {
-        return Ok(false);
+        return Ok(Committed::Unchanged);
     };
     let mut logs = lock_logs();
     let log = logs.entry(path.clone()).or_insert_with(|| ChannelLog {
@@ -475,10 +516,11 @@ fn commit_with(
         log.writer = Some(writer);
     }
     let Some(writer) = log.writer.as_mut() else {
-        return Ok(false);
+        return Ok(Committed::Unchanged);
     };
-    let Some((record, verified)) = plan(writer) else {
-        return Ok(false);
+    let (record, verified) = match plan(writer) {
+        Planned::Append(record, verified) => (record, verified),
+        Planned::Keep(committed) => return Ok(committed),
     };
     if let Err(error) = writer.append(&path, &record, verified) {
         // A line that could not be cut back off is re-read from disk before the next append.
@@ -489,7 +531,7 @@ fn commit_with(
     }
     writer.apply(&record, verified);
     log.notify.send_replace(record.seq);
-    Ok(true)
+    Ok(Committed::Appended)
 }
 
 fn source_id(session: Option<&str>, path: &str, (dev, ino): (u64, u64)) -> SourceId {
@@ -601,7 +643,34 @@ impl Writer {
         }
     }
 
-    fn plan(&mut self, p: &Proposal, mode: Plan) -> Option<(BindingEvent, bool)> {
+    /// What the pane's pin makes of `seen`, an observation of the proposal's path.
+    fn pin_judgment(&self, p: &Proposal, seen: Observation) -> PinJudgment {
+        let pane = self.panes.get(p.tmux_session).filter(|pane| pane.verified);
+        let pin = pane.and_then(|pane| pane.current.as_ref());
+        let session = p.session().or(pin.map(|pin| pin.session_id.as_str()));
+        judge_pin(pin, session.unwrap_or_default(), Path::new(p.path), seen)
+    }
+
+    fn plan(&mut self, p: &Proposal, mode: Plan) -> Planned {
+        let stat =
+            matches!(mode, Plan::Stat).then(|| fs::metadata(p.path).map(|m| file_identity(&m)));
+        // Only a stat reads the file; a Pending judgment has none and a verified one brings its own.
+        let file = match mode {
+            Plan::Stat => stat.as_ref().and_then(|stat| stat.as_ref().ok().copied()),
+            Plan::Verified(source) => Some((source.dev, source.ino)),
+            Plan::ForcePending | Plan::Rejected(_) => None,
+        };
+        let seen = match (mode, stat) {
+            (Plan::Verified(source), _) => Some(Observation::Checked(source)),
+            (_, Some(stat)) => Some(Observation::Stat(stat)),
+            _ => None,
+        };
+        // Every source a registration or a check logs is held to the pane's pin first.
+        match seen.map(|seen| self.pin_judgment(p, seen)) {
+            Some(PinJudgment::Anomaly) => return Planned::Keep(Committed::Anomaly),
+            Some(PinJudgment::Recheck) => return Planned::Keep(Committed::Recheck),
+            _ => {}
+        }
         let pane = self.panes.entry(p.tmux_session.to_owned()).or_default();
         let session = p.session();
         let replaced = p.replaced.filter(|(path, id)| {
@@ -614,19 +683,13 @@ impl Writer {
         });
         let old = pane.current.clone().or(replaced);
         let payload_session_id = session.unwrap_or_default().to_owned();
-        // Only a stat reads the file; a Pending judgment has none and a verified one brings its own.
-        let file = match mode {
-            Plan::Stat => fs::metadata(p.path).ok().map(|meta| file_identity(&meta)),
-            Plan::Verified(source) => Some((source.dev, source.ino)),
-            Plan::ForcePending | Plan::Rejected(_) => None,
-        };
         let pending = pane.pending.as_ref();
         let pending = pending.filter(|e| pending_matches(e, session, p.path));
         // A verified source is no change only once its record is pinned and no Pending waits on it.
         let unsettled = matches!(mode, Plan::Verified(_)) && (!pane.verified || pending.is_some());
         let (new, inherited) = if let Plan::ForcePending = mode {
             if pending.is_some() {
-                return None;
+                return Planned::Keep(Committed::Unchanged);
             }
             let payload_transcript_path = p.payload_path();
             let new = BindingTarget::Pending {
@@ -637,7 +700,7 @@ impl Writer {
         } else if let Plan::Rejected(reason) = mode {
             let judged = (payload_session_id.clone(), reason.to_owned());
             if pane.rejected.as_ref() == Some(&judged) {
-                return None;
+                return Planned::Keep(Committed::Unchanged);
             }
             let payload_transcript_path = p.payload_path();
             let reason = reason.to_owned();
@@ -653,10 +716,10 @@ impl Writer {
             .is_some_and(|current| same_source(current, session, p.path, file))
             && !unsettled
         {
-            return None;
+            return Planned::Keep(Committed::Unchanged);
         } else {
             match (file, pending) {
-                (None, Some(_)) => return None,
+                (None, Some(_)) => return Planned::Keep(Committed::Unchanged),
                 (None, None) => {
                     let payload_transcript_path = p.payload_path();
                     let new = BindingTarget::Pending {
@@ -734,7 +797,7 @@ impl Writer {
             },
             committed_at: Utc::now(),
         };
-        Some((event, verified))
+        Planned::Append(event, verified)
     }
 
     /// Append and fsync one line; on failure the line is cut back off so no reader sees it.

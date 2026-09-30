@@ -59,6 +59,7 @@ pub(crate) enum UnavailableReason {
     ChannelNotRestored,
     RuntimeNotRestored,
     HistoryUnreadable,
+    SourceUnreadable,
 }
 
 impl IngressOutcome {
@@ -200,6 +201,7 @@ fn classify_skip(
         AdoptSkip::SourceRejected(_) => NotApplicable(NotApplicableReason::SourceRejected),
         AdoptSkip::SourceAnomaly => NotApplicable(NotApplicableReason::SourceAnomaly),
         AdoptSkip::HistoryUnreadable => Unavailable(UnavailableReason::HistoryUnreadable),
+        AdoptSkip::SourceUnreadable => Unavailable(UnavailableReason::SourceUnreadable),
     }
 }
 

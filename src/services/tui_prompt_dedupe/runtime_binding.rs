@@ -140,7 +140,7 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
         CauseSource::Observed,
         Record::Stat,
     )
-    .is_some()
+    .is_some_and(Persisted::published)
 }
 
 /// Launch paths let the execution's context name the cause of a new source.
@@ -157,10 +157,12 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat).is_some()
+    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
+        .is_some_and(Persisted::published)
 }
 
-/// Persists the binding event first; if that fails the binding is not published (`None`).
+/// Persists the binding event first; if that fails the binding is not published (`None`), nor when
+/// the pane's pin refused it (`Some` of an unpublished outcome).
 fn publish_runtime_binding(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
@@ -198,6 +200,7 @@ fn publish_runtime_binding(
                 );
                 return None;
             }
+            Some(Ok(persisted)) if !persisted.published() => return Some(persisted),
             Some(Ok(persisted)) => persisted,
             None => record.unlogged(),
         };
@@ -236,10 +239,11 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
         binding,
         Record::Stat,
     )
-    .is_some()
+    .is_some_and(Persisted::published)
 }
 
-/// `None` when nothing was published; otherwise what the record left in the log.
+/// `None` when nothing was published; otherwise what the record left in the log, published only when
+/// `Persisted::published` says so.
 fn register_rehydrated_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
@@ -261,6 +265,9 @@ fn register_rehydrated_under_source_authority(
     let session_id = binding.session_id.clone();
     let cause = CauseSource::Observed;
     let persisted = publish_runtime_binding(authority, binding, Some(channel_id), cause, record)?;
+    if !persisted.published() {
+        return Some(persisted);
+    }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.channel_by_tmux.insert(

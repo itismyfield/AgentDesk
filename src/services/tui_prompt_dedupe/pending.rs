@@ -9,9 +9,9 @@ use std::time::SystemTime;
 
 use crate::services::claude_tui::hook_server::adoption_retry;
 use crate::services::claude_tui::source_verify::{
-    FirstRecord, OpenedTranscript, is_top_level_transcript, observe_transcript,
+    Observation, OpenedTranscript, PinJudgment, is_top_level_transcript, judge_pin,
+    observe_transcript,
 };
-use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, observe_spawn_nonce_marker,
@@ -43,6 +43,8 @@ pub(crate) enum Unavailable {
     LaunchUnreadable,
     /// The binding or the launch-session alias the restore depends on was not registered.
     NotRegistered,
+    /// The pinned transcript could not be read; the pane keeps what it has and is judged again.
+    TranscriptUnreadable,
 }
 
 /// The pane was bound to a transcript not verified yet: only this exact path may bind it,
@@ -93,7 +95,7 @@ impl PendingRestore {
                 | Self::BoundFromLedger { .. }
                 | Self::BlockedCorrupt(_)
                 | Self::Anomaly { .. }
-                | Self::Unavailable(Unavailable::NotRegistered)
+                | Self::Unavailable(Unavailable::NotRegistered | Unavailable::TranscriptUnreadable)
         )
     }
 }
@@ -105,24 +107,40 @@ pub(crate) struct LaunchTranscript {
 }
 
 /// What the caller registered before the restore; hooks keep naming the launch session, so its
-/// alias to the pane is as necessary as the binding. `logged` is set when the log names the source.
+/// alias to the pane is as necessary as the binding. `persisted` is what its record left in the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Registration {
     pub binding: bool,
     pub command_alias: bool,
-    pub logged: bool,
+    pub persisted: Option<Persisted>,
 }
 
 impl Registration {
     fn complete(self) -> bool {
         self.binding && self.command_alias
     }
+
+    /// The outcome when the log's pin refused the record; `line` is the record the pin came from.
+    fn refused(self, line: u64) -> Option<PendingRestore> {
+        match self.persisted? {
+            Persisted::Anomaly => Some(PendingRestore::Anomaly { line }),
+            Persisted::Recheck => Some(PendingRestore::Unavailable(
+                Unavailable::TranscriptUnreadable,
+            )),
+            Persisted::Logged | Persisted::AwaitingExact => None,
+        }
+    }
 }
 
-/// Launch A is on disk and B is Pending: register A and its alias, then seed B for adoption.
+/// B is Pending behind the pane's verified current, or else launch A on disk: register that source
+/// and the launch alias, then seed B for adoption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LaunchSeed {
     pub pending_seq: u64,
+    /// The record a refusal of the registration names.
+    pub line: u64,
+    /// The verified current bound instead of the launch transcript, already judged against its pin.
+    pub pinned: Option<SourceId>,
     pub launch: LaunchTranscript,
     pub payload_session_id: String,
     pub hook: HookSignal,
@@ -130,6 +148,9 @@ pub(crate) struct LaunchSeed {
 
 impl LaunchSeed {
     pub(crate) fn outcome(&self, registered: Registration) -> PendingRestore {
+        if let Some(refused) = registered.refused(self.line) {
+            return refused;
+        }
         if !registered.complete() {
             return PendingRestore::Unavailable(Unavailable::NotRegistered);
         }
@@ -138,44 +159,13 @@ impl LaunchSeed {
     }
 }
 
-/// What a restored Pending's transcript holds; only its own first record verifies it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TranscriptState {
-    /// Missing, first record not written yet, or unreadable for now: bound, waited for.
-    Unverified,
-    Own(SourceId),
-    /// A complete first record of another session, or none.
-    Foreign,
-}
-
-/// Reads `path`'s first record and identity from one descriptor, as a hook's check does.
-pub(crate) fn transcript_state(path: &Path, session: &str) -> TranscriptState {
-    let (file, first) = match observe_transcript(path) {
-        Ok(OpenedTranscript::Opened { file, first }) => (file, first),
-        Ok(OpenedTranscript::Missing) | Err(_) => return TranscriptState::Unverified,
-    };
-    let (dev, ino) = match (first, file) {
-        (FirstRecord::NotWritten, _) => return TranscriptState::Unverified,
-        #[cfg(unix)]
-        (FirstRecord::Session(id), SourceFileIdentity::Unix { dev, ino }) if id == session => {
-            (dev, ino)
-        }
-        _ => return TranscriptState::Foreign,
-    };
-    let (session_id, path) = (session.to_owned(), path.to_path_buf());
-    TranscriptState::Own(SourceId {
-        session_id,
-        path,
-        dev,
-        ino,
-    })
-}
-
 /// Publish exactly `transcript` for `session_id` and map the launch session to the pane.
 /// `pending_seq` is the Pending, or the verified source record, the binding is restored from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExactBinding {
     pub pending_seq: u64,
+    /// The record a refusal of the registration names.
+    pub line: u64,
     pub session_id: String,
     pub transcript: PathBuf,
     pub launch_session_id: String,
@@ -185,12 +175,15 @@ pub(crate) struct ExactBinding {
 
 impl ExactBinding {
     pub(crate) fn outcome(&self, registered: Registration) -> PendingRestore {
+        if let Some(refused) = registered.refused(self.line) {
+            return refused;
+        }
         if !registered.complete() {
             return PendingRestore::Unavailable(Unavailable::NotRegistered);
         }
         // Only a verified identity the registration logged settles the pane; a transcript replaced
         // or gone after the judgment is waited for like one never written.
-        let settled = self.verified.is_some() && registered.logged;
+        let settled = self.verified.is_some() && registered.persisted == Some(Persisted::Logged);
         let exact_wait = (!settled).then(|| ExactPathWait {
             session_id: self.session_id.clone(),
             transcript: self.transcript.clone(),
@@ -299,24 +292,37 @@ fn current_record<'a>(
     })
 }
 
-/// A verified current binds only while its path still names the pinned file; a replaced, missing
-/// or unreadable one is an anomaly, judged again next poll.
-fn pinned_exact(
-    pin: &SourceId,
+/// Binds exactly `session`'s `path` as the pane's pin judges what the path holds now: a pinned
+/// file only while it is the same, an unpinned one verified or waited for, another session's never.
+fn judged(
+    pin: Option<&SourceId>,
+    (session, path): (&str, &Path),
     (pending_seq, line): (u64, u64),
     launch: &LaunchTranscript,
-    transcript_state: impl Fn(&Path, &str) -> TranscriptState,
+    observe: &impl Fn(&Path) -> io::Result<OpenedTranscript>,
 ) -> RestoreStep {
-    match transcript_state(&pin.path, &pin.session_id) {
-        TranscriptState::Own(id) if id == *pin => RestoreStep::PublishExact(ExactBinding {
-            pending_seq,
-            session_id: pin.session_id.clone(),
-            transcript: pin.path.clone(),
-            launch_session_id: launch.session_id.clone(),
-            verified: Some(pin.clone()),
-        }),
-        _ => RestoreStep::Finished(PendingRestore::Anomaly { line }),
-    }
+    let opened = observe(path);
+    let verified = match judge_pin(pin, session, path, Observation::Opened(opened.as_ref())) {
+        PinJudgment::Verified(source) => Some(source),
+        PinJudgment::Pending | PinJudgment::Unpinned => None,
+        PinJudgment::Recheck => {
+            let why = Unavailable::TranscriptUnreadable;
+            return RestoreStep::Finished(PendingRestore::Unavailable(why));
+        }
+        PinJudgment::Anomaly => return RestoreStep::Finished(PendingRestore::Anomaly { line }),
+        PinJudgment::Foreign | PinJudgment::Unidentified => {
+            let kind = CorruptKind::PathMismatch;
+            return RestoreStep::Finished(PendingRestore::BlockedCorrupt(Corrupt { line, kind }));
+        }
+    };
+    RestoreStep::PublishExact(ExactBinding {
+        pending_seq,
+        line,
+        session_id: session.to_owned(),
+        transcript: path.to_path_buf(),
+        launch_session_id: launch.session_id.clone(),
+        verified,
+    })
 }
 
 /// Whether `path` is a top-level transcript of `session` under the launch's projects root.
@@ -361,7 +367,7 @@ pub(crate) fn judge_restore(
     marker: &SpawnNonceMarker,
     launch: Option<&LaunchTranscript>,
     launch_exists: impl Fn(&Path) -> bool,
-    transcript_state: impl Fn(&Path, &str) -> TranscriptState,
+    observe: impl Fn(&Path) -> io::Result<OpenedTranscript>,
 ) -> RestoreStep {
     use PendingRestore::{BlockedCorrupt, NotEligible as Skip, Unavailable as Down};
     let done = RestoreStep::Finished;
@@ -383,12 +389,12 @@ pub(crate) fn judge_restore(
             && record.execution_nonce.as_deref() == known
             && under_launch_root(launch, &source.path, &source.session_id)
     });
-    let current_or = |otherwise| match restorable {
-        Some(((record, pin), launch)) => {
-            pinned_exact(pin, (record.seq, record.seq), launch, &transcript_state)
-        }
-        None => done(otherwise),
-    };
+    let bind_current =
+        |((record, pin), launch): ((&BindingEvent, &SourceId), &LaunchTranscript)| {
+            let target = (pin.session_id.as_str(), pin.path.as_path());
+            judged(pinned, target, (record.seq, record.seq), launch, &observe)
+        };
+    let current_or = |otherwise| restorable.map_or(done(otherwise), bind_current);
     let live = match fold(tmux_session, &records) {
         Fold::Live(live) => live,
         Fold::Empty => return current_or(PendingRestore::HealthyNoPending),
@@ -429,39 +435,36 @@ pub(crate) fn judge_restore(
         return mismatch(live.pending.seq);
     };
     let exact = |line| {
-        let verified = match transcript_state(&transcript, live.session) {
-            TranscriptState::Own(source) => Some(source),
-            TranscriptState::Unverified => None,
-            TranscriptState::Foreign => return mismatch(line),
-        };
-        RestoreStep::PublishExact(ExactBinding {
-            pending_seq: live.pending.seq,
-            session_id: live.session.to_owned(),
-            transcript: transcript.clone(),
-            launch_session_id: launch.session_id.clone(),
-            verified,
-        })
+        let target = (live.session, transcript.as_path());
+        judged(pinned, target, (live.pending.seq, line), launch, &observe)
     };
     if let Some((record, source)) = live.resolved {
         if source.path != transcript {
             return mismatch(record.seq);
         }
-        // A pinned identity is kept; only a source never verified is checked afresh and pinned.
-        let pin = verified
-            .filter(|(_, pin)| pin.session_id == source.session_id && pin.path == source.path);
-        if let Some((_, pin)) = pin {
-            let seq = (live.pending.seq, record.seq);
-            return pinned_exact(pin, seq, launch, &transcript_state);
-        }
         return exact(record.seq);
     }
+    let seed = |line, pinned| LaunchSeed {
+        pending_seq: live.pending.seq,
+        line,
+        pinned,
+        launch: launch.clone(),
+        payload_session_id: live.session.to_owned(),
+        hook: restored_hook(live.pending, live.path),
+    };
+    // The verified current is bound as its pin admits it, never re-registered by a stat, and the
+    // Pending is seeded behind it.
+    if let Some(bound) = restorable.filter(|((_, pin), _)| pin.session_id != live.session) {
+        return match bind_current(bound) {
+            RestoreStep::PublishExact(exact) => {
+                RestoreStep::SeedAfterLaunch(seed(exact.line, exact.verified))
+            }
+            refused => refused,
+        };
+    }
     if live.session != launch.session_id && launch_exists(&launch.transcript) {
-        return RestoreStep::SeedAfterLaunch(LaunchSeed {
-            pending_seq: live.pending.seq,
-            launch: launch.clone(),
-            payload_session_id: live.session.to_owned(),
-            hook: restored_hook(live.pending, live.path),
-        });
+        let line = verified.map_or(live.pending.seq, |(record, _)| record.seq);
+        return RestoreStep::SeedAfterLaunch(seed(line, None));
     }
     exact(live.pending.seq)
 }
@@ -588,7 +591,7 @@ fn restore_pane(
         let persisted = match held {
             // A kept binding completes a registration an earlier pass left unready, as the pass would.
             Some(persisted) => {
-                if persisted.is_some() {
+                if persisted.is_some_and(Persisted::published) {
                     pane_registration::note_claude_pane_registration(
                         tmux_session,
                         Some(session),
@@ -607,18 +610,17 @@ fn restore_pane(
                 )
             }
         };
-        let binding = persisted.is_some()
+        let binding = persisted.is_some_and(Persisted::published)
             && runtime_binding_for_tmux_session(tmux_session).is_some_and(|b| target(&b));
         let alias = || resolve_tmux_session_name("claude", launch_session);
         if binding && alias().is_none() {
             register_provider_session("claude", launch_session, tmux_session);
         }
         let command_alias = alias().as_deref() == Some(tmux_session);
-        let logged = persisted == Some(Persisted::Logged);
         Registration {
             binding,
             command_alias,
-            logged,
+            persisted,
         }
     };
     let outcome = match judge_restore(
@@ -628,13 +630,21 @@ fn restore_pane(
         &marker,
         launch.as_ref(),
         Path::is_file,
-        transcript_state,
+        observe_transcript,
     ) {
         RestoreStep::Finished(outcome) => outcome,
         RestoreStep::SeedAfterLaunch(seed) => {
             let launch = &seed.launch;
-            let (session, transcript) = (&launch.session_id, &launch.transcript);
-            let registered = register(session, transcript, session, Record::Stat);
+            let command = &launch.session_id;
+            let registered = match &seed.pinned {
+                Some(pin) => register(
+                    &pin.session_id,
+                    &pin.path,
+                    command,
+                    Record::Verified(pin.clone()),
+                ),
+                None => register(command, &launch.transcript, command, Record::Stat),
+            };
             let outcome = seed.outcome(registered);
             if matches!(outcome, PendingRestore::Seeded { .. }) {
                 let (command, payload) = (&launch.session_id, &seed.payload_session_id);
