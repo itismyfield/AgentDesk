@@ -633,6 +633,7 @@ jobs:
               - 'src/services/discord/runtime_bootstrap.rs'
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/runtime_store.rs'
+              - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/settings/**'
               - 'src/services/discord/terminal_delivery_custody/**'
               - 'src/services/discord/terminal_ui_obligation.rs'
