@@ -322,3 +322,52 @@ async fn a_store_failure_after_the_init_is_public_holds_the_channel_and_a_restar
         failure_after_publication().await;
     }
 }
+
+/// Another holder's lease on the range leaves the sink's controller sending nothing, so the
+/// candidate stays pending for the next body.
+async fn lost_lease() {
+    use crate::services::discord::{LeaseHolder, lease_now_ms};
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared
+        .http
+        .cached_bot_token
+        .set("test-token".into())
+        .unwrap();
+    let registry = Arc::new(HealthRegistry::new());
+    registry.register("claude".into(), shared.clone()).await;
+    let leg = Leg::new(A, &registry);
+    let _candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let check = crate::services::tui_o::channel_policy::BodyCheck::watch(A, &leg.body);
+    leg.gateway.check.set(check.clone()).unwrap();
+    let channel = ChannelId::new(A);
+    let session = &leg.binding.expected_session_name;
+    let generation = shared.restart.current_generation;
+    let key = crate::services::discord::tmux::pinned_delivery_lease_key_for_test(
+        channel, generation, None, session, 1, 0,
+    );
+    let watcher = LeaseHolder::Watcher { instance_id: 7 };
+    let deadline = lease_now_ms() + 60_000;
+    let cell = shared.delivery_lease(channel);
+    assert!(cell.try_acquire(key, watcher, 0, u64::MAX, deadline));
+
+    let outcome = leg.finish_turn().await;
+    assert!(
+        matches!(outcome, Err(RelaySinkError::Transient(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        leg.legacy_posts(),
+        0,
+        "the lease holder delivers this range"
+    );
+    check.assert_settled();
+    assert_eq!(adoption(A), Adoption::Pending);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sink_that_loses_its_delivery_lease_leaves_a_pending_adoption() {
+    if isolated("adoption::a_sink_that_loses_its_delivery_lease_leaves_a_pending_adoption") {
+        lost_lease().await;
+    }
+}
