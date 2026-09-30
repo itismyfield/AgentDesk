@@ -23,15 +23,15 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use model::{
-    HostCapabilities, HostError, HostKind, HostKindResolution, HostKindSource, HostLiveness,
-    HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,
+    HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
+    HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,
 };
 pub(crate) use process_host::ProcessHost;
 pub(crate) use resolve::{
     HostEvidence, HostWitness, SessionTargetEvidence, host_for, resolve_host_kind,
 };
 // The target resolver and guard have no production consumer yet.
-pub(crate) use tmux_host::TmuxHost;
+pub(crate) use tmux_host::{TmuxHost, tmux_key_name};
 pub(crate) use traits::InteractiveSessionHost;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use {

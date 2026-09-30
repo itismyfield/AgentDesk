@@ -808,6 +808,7 @@ fn session_target_guard_has_no_production_caller() {
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
     const GUARD: &str = "src/services/session_host/consumer_guard.rs";
     const ROOT: &str = "src/services/session_host.rs";
+    const INPUT: &str = "src/services/claude_tui/host_input.rs";
     // Needle, files that may name it, and the calls allowed there beyond its `fn`.
     const ITEMS: &[(&str, &[&str], usize)] = &[
         ("resolve_session_target", &[RESOLVE, ROOT], 0),
@@ -819,7 +820,12 @@ fn session_target_guard_has_no_production_caller() {
         ("with_inflight_row", &[GUARD_ADAPTER], 0),
         ("locator_witness", &[GUARD_ADAPTER], 1),
         ("marker_witness", &[GUARD_ADAPTER], 0),
-        ("ResolvedSessionTarget", &[RESOLVE, GUARD, ROOT], usize::MAX),
+        (
+            "ResolvedSessionTarget",
+            &[RESOLVE, GUARD, ROOT, INPUT],
+            usize::MAX,
+        ),
+        ("from_session_target", &[INPUT], 0),
         (
             "SessionTargetEvidence",
             &[RESOLVE, ROOT, GUARD_ADAPTER],
@@ -864,5 +870,37 @@ fn session_target_guard_has_no_production_caller() {
     assert!(
         violations.is_empty(),
         "session target guard production caller: {violations:?}"
+    );
+}
+
+// Dormant guard: the typed probe entries have no production caller outside their
+// owner, so no consumer reads host liveness through them yet.
+#[test]
+fn typed_session_probe_entries_have_no_production_caller() {
+    const OWNER: &str = "src/services/provider/session_probe.rs";
+    const ENTRIES: &[&str] = &[
+        "SessionProbeTarget",
+        "SessionProbe::for_target",
+        "observe_session_liveness",
+    ];
+    let sources = production_sources();
+    let owner = &sources[OWNER];
+    assert!(
+        owner.contains("fn observe_session_liveness(") && owner.contains("fn for_target("),
+        "source scan must see the typed entries"
+    );
+    let violations: Vec<String> = sources
+        .iter()
+        .filter(|(relative, _)| relative.as_str() != OWNER)
+        .flat_map(|(relative, prod)| {
+            ENTRIES
+                .iter()
+                .filter(|entry| prod.contains(**entry))
+                .map(move |entry| format!("{relative}: {entry}"))
+        })
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "typed probe production caller: {violations:?}"
     );
 }

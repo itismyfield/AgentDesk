@@ -103,6 +103,18 @@ impl From<PaneLiveness> for HostLiveness {
     }
 }
 
+/// Keys the input executor may send; each host adapter owns its own key names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostKey {
+    Enter,
+    Escape,
+    CtrlU,
+    CtrlE,
+    Left,
+    Right,
+    Backspace,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostRefusal {
     Unsupported { kind: HostKind, op: &'static str },
