@@ -152,6 +152,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_engine/manual_rebind/post_adoption_guard_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/ready_without_output_tests.rs",
+        "src/services/discord/recovery_engine/routing_orphan_tests.rs",
         "src/services/discord/recovery_paths/o_anchor_repost_tests.rs",
         "src/services/discord/relay_coord_tests.rs",
         "src/services/discord/relay_recovery/tests.rs",
