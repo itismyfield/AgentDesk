@@ -6385,6 +6385,7 @@ services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_su
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::source_span_splits_at_the_same_boundary_as_the_payload
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
+services::discord::tmux::tmux_watcher::task_response_authority::tests::a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::current_zero_id_row_can_complete
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::late_a_preserves_successor_b

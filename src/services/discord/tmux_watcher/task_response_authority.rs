@@ -537,6 +537,5 @@ pub(super) async fn apply_watcher_task_response(
 }
 
 #[cfg(test)]
-mod tests {
-    include!("task_response_authority_tests.rs");
-}
+#[path = "task_response_authority_tests.rs"]
+mod tests;
