@@ -257,6 +257,42 @@ pub(crate) fn try_codex_tui_warm_followup(
     let target = InputTarget::legacy_tmux(tmux_session_name);
     warm_followup_on(
         &target,
+        WarmFollowupRequest {
+            selection,
+            launch_options,
+            force_fresh,
+            session_exists,
+            live_pane,
+            prompt,
+            sender,
+            cancel_token,
+            report_channel_id,
+        },
+    )
+}
+
+/// Turn inputs for [`warm_followup_on`], everything except the input target.
+#[cfg(unix)]
+struct WarmFollowupRequest<'a> {
+    selection: &'a CodexTuiSessionSelection,
+    launch_options: &'a CodexLaunchOptions,
+    force_fresh: bool,
+    session_exists: bool,
+    live_pane: bool,
+    prompt: &'a str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    report_channel_id: Option<u64>,
+}
+
+/// Warm follow-up on `target`: only a confirmed tmux session is reused, killed
+/// or handed back for a relaunch.
+#[cfg(unix)]
+fn warm_followup_on(
+    target: &InputTarget,
+    request: WarmFollowupRequest<'_>,
+) -> CodexWarmFollowupOutcome {
+    let WarmFollowupRequest {
         selection,
         launch_options,
         force_fresh,
@@ -266,25 +302,7 @@ pub(crate) fn try_codex_tui_warm_followup(
         sender,
         cancel_token,
         report_channel_id,
-    )
-}
-
-/// Warm follow-up on `target`: only a confirmed tmux session is reused, killed
-/// or handed back for a relaunch.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn warm_followup_on(
-    target: &InputTarget,
-    selection: &CodexTuiSessionSelection,
-    launch_options: &CodexLaunchOptions,
-    force_fresh: bool,
-    session_exists: bool,
-    live_pane: bool,
-    prompt: &str,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-    report_channel_id: Option<u64>,
-) -> CodexWarmFollowupOutcome {
+    } = request;
     let tmux_session_name = match target {
         InputTarget::Tmux(session) => session.as_str(),
         InputTarget::Refused(refusal) => {
@@ -789,7 +807,18 @@ mod tests {
             let guard = SpyGuard::install(pinned());
             let (sender, _receiver) = std::sync::mpsc::channel();
             let entry = warm_followup_on(
-                &target, &selection, &options, false, true, true, prompt, sender, None, None,
+                &target,
+                WarmFollowupRequest {
+                    selection: &selection,
+                    launch_options: &options,
+                    force_fresh: false,
+                    session_exists: true,
+                    live_pane: true,
+                    prompt,
+                    sender,
+                    cancel_token: None,
+                    report_channel_id: None,
+                },
             );
             assert!(
                 matches!(entry, CodexWarmFollowupOutcome::Terminal(Err(_))),
