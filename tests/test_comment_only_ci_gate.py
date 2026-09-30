@@ -274,7 +274,7 @@ class GateProcessTests(unittest.TestCase):
         self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
         self.assertIn("src/body.rs is read by src/calls.inc:1 include_str!", result.stdout)
 
-    def test_unresolved_include_or_scan_failure_keeps_the_library_sweep(self) -> None:
+    def test_unresolved_include_keeps_the_library_sweep_and_a_scan_failure_writes_false(self) -> None:
         self.write("src/reader.rs", 'const BODY: &str = include_str!(concat!(env!("OUT_DIR"), "/gen.rs"));\n')
         self.base = self.commit("unresolvable include")
         self.write("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n")
@@ -285,8 +285,27 @@ class GateProcessTests(unittest.TestCase):
 
         (self.root / "scripts/ci/rust_include_reads.py").write_text("raise RuntimeError('scan exploded')\n", encoding="utf-8")
         result, output = self.run_gate(head)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
-        self.assertIn("scan exploded", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
+        self.assertIn("include scan error: RuntimeError('scan exploded')", result.stdout)
+
+    def test_line_break_the_judge_erases_inside_a_literal_writes_false(self) -> None:
+        # The judge splits with str.splitlines() and rejoins with LF, so these edits compare equal.
+        for old, new in (("\n", "\u2028"), ("\n", "\r"), ("\n", "\x85"), ("\u2028", "\n")):
+            with self.subTest(old=old, new=new):
+                self.write("src/lib.rs", f'const S: &str = "a{old}b";\n')
+                base = self.commit(f"literal with {old!r}")
+                self.write("src/lib.rs", f'const S: &str = "a{new}b";\n')
+                result, output = self.run_gate(self.commit(f"literal with {new!r}"), base=base)
+                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+                self.assertIn("other than LF/CRLF", result.stdout)
+
+    def test_crlf_comment_edit_still_writes_true(self) -> None:
+        self.git("config", "core.autocrlf", "false")
+        (self.root / "src/lib.rs").write_bytes(b'const S: &str = "a\r\nb";\r\npub fn one() -> u32 {\r\n    1\r\n}\r\n')
+        base = self.commit("crlf source")
+        (self.root / "src/lib.rs").write_bytes(b'const S: &str = "a\r\nb";\r\npub fn one() -> u32 {\r\n    1 // why\r\n}\r\n')
+        result, output = self.run_gate(self.commit("crlf comment"), base=base)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n", result.stdout)
 
     def test_code_change_writes_false_with_the_judge_finding(self) -> None:
         self.write("src/lib.rs", "// chatty\npub fn one() -> u32 {\n    2\n}\n")
@@ -412,13 +431,18 @@ class WorkflowSimulation:
         comment_only: str | None,
         forced: dict[str, str] | None = None,
         rust_tests_skip: str | None = None,
+        gate_outcome: str = "success",
     ):
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
+        outcomes = {"filter": "success", "comment_only": gate_outcome}
 
         def step_lookup(name: str) -> object:
-            _steps, step, _outputs, key = name.split(".")
+            parts = name.split(".")
+            if parts[2:] == ["outcome"]:
+                return outcomes[parts[1]]
+            _steps, step, _outputs, key = parts
             return steps[step].get(key, "")
 
         self.changes = {key: render(value, step_lookup) for key, value in self.jobs["changes"]["outputs"].items()}
@@ -495,10 +519,11 @@ class WorkflowWiringTests(unittest.TestCase):
                     self.assertEqual(run.results[job_id], "skipped", job_id)
                 self.assertPublishedGreen(run)
 
-    def test_gate_false_or_unset_keeps_the_raw_filters(self) -> None:
-        for gate_output in ("false", None, ""):
-            run = WorkflowSimulation(HEAVY_RAW, gate_output, rust_tests_skip="true")
-            with self.subTest(gate_output=gate_output):
+    def test_gate_false_unset_or_failed_keeps_the_raw_filters(self) -> None:
+        # A step that failed after writing both outputs still reads as the full run.
+        for outcome, gate_output in (("success", "false"), ("success", None), ("success", ""), ("failure", "true")):
+            run = WorkflowSimulation(HEAVY_RAW, gate_output, rust_tests_skip="true", gate_outcome=outcome)
+            with self.subTest(outcome=outcome, gate_output=gate_output):
                 self.assertEqual(run.changes["comment_only"], "false")
                 for output, raw_filter in OVERRIDDEN.items():
                     self.assertEqual(run.changes[output], HEAVY_RAW[raw_filter], output)

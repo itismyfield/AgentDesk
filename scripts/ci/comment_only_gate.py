@@ -10,13 +10,16 @@ Environment: ``BASE_SHA``/``HEAD_SHA`` (the pull request's base and head),
 file was edited in place, every other changed file is ``*.md`` on both sides,
 and every file any path filter selected is one of those verified ``.rs`` files
 (so a ``.md`` that selects a filter, or a file the filter saw but git did not,
-keeps the full run). Anything else -- including a missing input or an
-exception -- writes ``comment_only=false``; the workflow reads only ``'true'``.
+keeps the full run), and no changed ``.rs`` file holds a line break other than
+LF/CRLF on either side, since the judge's ``splitlines()`` erases those inside
+literals. Anything else -- including a missing input or an exception --
+writes ``comment_only=false``; the workflow reads only ``'true'``.
 
 ``rust_tests_skip=true`` also lets the library sweep skip. It needs
 ``comment_only=true`` and no ``include!``/``include_str!``/``include_bytes!``
 call in the base or head tree that reads, or may read, a changed file
-(scripts/ci/rust_include_reads.py); tests see those files' comments.
+(scripts/ci/rust_include_reads.py); tests see those files' comments. A scan
+that cannot finish writes ``comment_only=false`` too.
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ JUDGE = REPO_ROOT / "scripts" / "check_comment_only_change.py"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MARKDOWN_STATUSES = {"A", "M", "D", "R", "C"}
 SUMMARY_LINE_LIMIT = 200
+# str.splitlines() boundaries other than LF and CRLF; the judge rejoins split lines with LF.
+OTHER_LINE_BREAK = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 
 
 def decide(
@@ -93,6 +98,30 @@ def include_readers(changed: set[str], sites) -> list[str]:
     )
 
 
+def other_line_breaks(sides: dict[str, bytes]) -> list[str]:
+    """Refusals for each side whose bytes are not UTF-8 or hold a non-LF/CRLF line break."""
+    reasons = []
+    for label, raw in sides.items():
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            reasons.append(f"{label}: not UTF-8")
+            continue
+        found = OTHER_LINE_BREAK.search(text.replace("\r\n", "\n"))
+        if found:
+            reasons.append(f"{label}: line break {found.group()!r} other than LF/CRLF, which the judge cannot compare")
+    return reasons
+
+
+def blob(rev: str, path: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", f"{rev}:{path}"], check=False, capture_output=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git show {rev}:{path} failed: {result.stderr.decode('utf-8', 'replace').strip()}")
+    return result.stdout
+
+
 def git(*args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args], check=False, capture_output=True, text=True
@@ -122,7 +151,12 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
     except json.JSONDecodeError:
         filter_outputs = None
     verdict, reasons = decide(judge.returncode, entries, filter_outputs)
-    if not verdict:
+    if verdict:
+        rust = sorted({new_path for _status, _old, new_path in entries if new_path.endswith(".rs")})
+        reasons = other_line_breaks(
+            {f"{path} ({side})": blob(rev, path) for path in rust for side, rev in (("base", merge_base), ("head", head))}
+        )
+    if not verdict or reasons:
         return False, reasons, judge_log, False, []
     try:
         from rust_include_reads import tree_sites
@@ -131,9 +165,9 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
         sites = tree_sites(str(REPO_ROOT), base) | tree_sites(str(REPO_ROOT), head)
         readers = include_readers(changed, sites)
         notes = [*readers, f"scanned {len(sites)} include calls in the base and head trees"]
-    except Exception as error:  # the sweep keeps running when the scan cannot finish
-        readers, notes = None, [f"include scan error: {error!r}"]
-    return True, [], judge_log, readers == [], notes
+    except Exception as error:  # a scan that cannot finish falls back to the full run
+        return False, [f"include scan error: {error!r}"], judge_log, False, []
+    return True, [], judge_log, not readers, notes
 
 
 def main() -> int:

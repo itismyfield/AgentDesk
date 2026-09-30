@@ -22,7 +22,9 @@ PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인
 `include_bytes!` 호출이 바뀐 파일을 읽거나 인자를 해석할 수 없어 읽을 수도 있으면
 (`scripts/ci/rust_include_reads.py`) 시험이 그 주석을 보므로 `rust_tests`는 원래 값을 유지해
 `library_sweep`만 돈다. `check_fast`·`lint`·Script checks·relay authority·
-dashboard는 원래 조건 그대로 돈다. 판정 오류·입력 누락은 전부 원래 필터값(전체 실행)으로 간다.
+dashboard는 원래 조건 그대로 돈다. 바뀐 `.rs`의 어느 쪽에든 LF·CRLF 외의 줄 경계 문자
+(`\r` 단독, U+2028 등)가 있으면 판정기가 리터럴 안의 차이를 지우므로 주석 전용으로 보지 않는다.
+판정 오류·include 스캔 실패·gate step 실패·입력 누락은 전부 원래 필터값(전체 실행)으로 간다.
 
 Selection observer required gate가 red로 만드는 observer 사망은 **프로세스 수준
 사망**이다. observer의 비정상 종료 코드나 시그널, summary 0줄 또는 2줄 이상,

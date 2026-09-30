@@ -41,15 +41,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
-      # A comment-only PR forces the heavy test filters below to 'false'; the
-      # mirrors read these same outputs, so the skipped jobs still publish green.
-      comment_only: ${{ steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
-      high_risk_recovery: ${{ steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
-      pg_db: ${{ steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.pg_db }}
+      # A comment-only PR whose gate step succeeded forces the heavy test filters below
+      # to 'false'; the mirrors read these same outputs, so the skipped jobs still publish green.
+      comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
+      high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
+      pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       # rust_or_policy for the library sweep, which still runs when an include! call
       # reads a changed file; check_fast and lint keep the raw filter.
-      rust_tests: ${{ steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
+      rust_tests: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half
@@ -61,7 +61,7 @@ jobs:
       # the cross-platform inflight lock primitive is an explicit exception.
       # The stable required-context mirror permits unrelated-path skips and
       # fails closed when this output is true but the Windows lane does not pass.
-      cross_os_rust: ${{ steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.cross_os_rust }}
+      cross_os_rust: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.cross_os_rust }}
       win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
     steps:
       - uses: actions/checkout@v4
@@ -667,7 +667,7 @@ jobs:
               - 'routines/**'
             win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
-      # Any failure here leaves comment_only unset, which the outputs read as the full run.
+      # A failed step, or comment_only left unset, reads as the full run in the outputs above.
       - name: Comment-only gate
         id: comment_only
         continue-on-error: true
