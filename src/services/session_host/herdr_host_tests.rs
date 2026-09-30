@@ -541,34 +541,57 @@ fn herdr_reply_needs_exactly_one_of_result_or_error() {
     ));
 }
 
-/// Lexer-aware end of a comment, string or char literal starting at `i`.
+/// Lexer-aware end of a comment, string or char literal starting at `i`. A comment
+/// or literal that never closes ends past `chars`, so callers can refuse the file.
 fn literal_end(chars: &[char], i: usize) -> Option<usize> {
     let at = |k: usize| chars.get(k).copied();
     let ident = |k: usize| k > 0 && at(k - 1).is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let unclosed = chars.len() + 1;
     let find = |from: usize, pat: &[char]| {
         (from..chars.len())
             .find(|k| chars[*k..].starts_with(pat))
-            .map(|k| k + pat.len())
+            .map_or(unclosed, |k| k + pat.len())
     };
     match (at(i)?, at(i + 1)) {
-        ('/', Some('/')) => Some(find(i, &['\n']).unwrap_or(chars.len())),
-        ('/', Some('*')) => Some(find(i + 2, &['*', '/']).unwrap_or(chars.len())),
+        ('/', Some('/')) => Some(find(i, &['\n']).min(chars.len())),
+        ('/', Some('*')) => {
+            let (mut k, mut depth) = (i + 2, 1);
+            while depth > 0 {
+                if k >= chars.len() {
+                    return Some(unclosed);
+                }
+                let step =
+                    chars[k..].starts_with(&['/', '*']) || chars[k..].starts_with(&['*', '/']);
+                if step {
+                    depth = if chars[k] == '/' {
+                        depth + 1
+                    } else {
+                        depth - 1
+                    };
+                }
+                k += if step { 2 } else { 1 };
+            }
+            Some(k)
+        }
         ('"', _) => {
             let mut k = i + 1;
             while k < chars.len() && chars[k] != '"' {
                 k += if chars[k] == '\\' { 2 } else { 1 };
             }
-            Some(k + 1)
+            Some(if k < chars.len() { k + 1 } else { unclosed })
         }
-        ('r', Some('"' | '#')) if !ident(i) => {
+        // `r"…"`, `r#"…"#` and the byte and C forms `br#"…"#`, `cr#"…"#`.
+        ('r', Some('"' | '#'))
+            if !ident(i) || (matches!(at(i - 1), Some('b' | 'c')) && !ident(i - 1)) =>
+        {
             let hashes = chars[i + 1..].iter().take_while(|c| **c == '#').count();
             if at(i + 1 + hashes) != Some('"') {
                 return None;
             }
             let close: Vec<char> = std::iter::once('"').chain(vec!['#'; hashes]).collect();
-            Some(find(i + 2 + hashes, &close).unwrap_or(chars.len()))
+            Some(find(i + 2 + hashes, &close))
         }
-        ('\'', Some('\\')) => find(i + 3, &['\'']),
+        ('\'', Some('\\')) => Some(find(i + 3, &['\''])),
         ('\'', _) if at(i + 2) == Some('\'') => Some(i + 3),
         _ => None,
     }
@@ -695,12 +718,16 @@ fn production_sources() -> BTreeMap<String, String> {
     sources
 }
 
-/// Code with comments blanked and literals emptied, so a scan sees only tokens.
-fn code_tokens(prod: &str) -> String {
+/// Code with comments blanked and literals emptied, so a scan sees only tokens;
+/// `None` when a comment or literal never closes.
+fn closed_code_tokens(prod: &str) -> Option<String> {
     let chars: Vec<char> = prod.chars().collect();
     let (mut out, mut i) = (String::new(), 0);
     while i < chars.len() {
-        match literal_end(&chars, i) {
+        // Only these characters can open a comment or literal.
+        let opens = matches!(chars[i], '/' | '"' | 'r' | '\'');
+        match opens.then(|| literal_end(&chars, i)).flatten() {
+            Some(end) if end > chars.len() => return None,
             Some(end) => {
                 out.push_str(if chars[i] == '/' { " " } else { "\"\"" });
                 i = end;
@@ -711,27 +738,202 @@ fn code_tokens(prod: &str) -> String {
             }
         }
     }
-    out
+    Some(out)
+}
+
+/// Token-only code for scans of one file; an unclosed literal empties it, and the
+/// whole-tree scans report that file.
+fn code_tokens(prod: &str) -> String {
+    closed_code_tokens(prod).unwrap_or_default()
 }
 
 /// Byte ranges of the `use` declarations in token-only code.
 fn use_spans(code: &str) -> Vec<std::ops::Range<usize>> {
-    let keyword = regex::Regex::new(r"\buse\b").unwrap();
-    keyword
-        .find_iter(code)
-        .filter(|found| !code[..found.start()].ends_with("r#"))
-        .map(|found| {
-            let end = code[found.end()..].find(';');
-            found.start()..end.map_or(code.len(), |k| found.end() + k)
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices("use")
+        .map(|(start, _)| (start, start + 3))
+        .filter(|&(start, end)| {
+            let before = &code[..start];
+            !before.ends_with(ident) && !before.ends_with("r#") && !code[end..].starts_with(ident)
         })
+        .map(|(start, end)| start..code[end..].find(';').map_or(code.len(), |k| end + k))
         .collect()
 }
 
-/// Uses of `name` other than its definition or a plain `use` import, plus the
-/// names a `use … as` or `type … =` binds it to.
-fn item_uses(code: &str, name: &str) -> (usize, Vec<String>) {
+/// One name a `use` tree binds: the full path and the local name, `None` for a glob.
+#[derive(Debug)]
+struct UseLeaf {
+    path: Vec<String>,
+    binds: Option<String>,
+}
+
+fn use_tree(tokens: &[&str], i: &mut usize, mut path: Vec<String>, out: &mut Vec<UseLeaf>) {
+    loop {
+        match tokens.get(*i).copied() {
+            Some("::") => *i += 1,
+            Some("{") => {
+                *i += 1;
+                while !matches!(tokens.get(*i).copied(), None | Some("}")) {
+                    let start = *i;
+                    use_tree(tokens, i, path.clone(), out);
+                    if tokens.get(*i) == Some(&",") || *i == start {
+                        *i += 1;
+                    }
+                }
+                *i += 1;
+                return;
+            }
+            Some("*") => {
+                *i += 1;
+                out.push(UseLeaf { path, binds: None });
+                return;
+            }
+            Some(word) if !matches!(word, "as" | "," | "}" | ";") => {
+                path.push(word.trim_start_matches("r#").to_string());
+                *i += 1;
+                if tokens.get(*i) != Some(&"::") {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    if path.last().is_some_and(|last| last == "self") {
+        path.pop();
+    }
+    let binds = if tokens.get(*i) == Some(&"as") {
+        *i += 2;
+        tokens.get(*i - 1).map(|name| name.to_string())
+    } else {
+        path.last().cloned()
+    };
+    out.push(UseLeaf { path, binds });
+}
+
+/// Every name the `use` declarations of token-only code bind.
+fn use_leaves(code: &str) -> Vec<UseLeaf> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut leaves = Vec::new();
+    for span in use_spans(code) {
+        let (text, mut tokens) = (&code[span], Vec::new());
+        let mut rest = text.trim_start();
+        while let Some(first) = rest.chars().next() {
+            let len = if rest.starts_with("::") {
+                2
+            } else if rest.starts_with("r#") || ident(first) {
+                let body = rest.strip_prefix("r#").unwrap_or(rest);
+                rest.len() - body.len() + body.find(|c: char| !ident(c)).unwrap_or(body.len())
+            } else {
+                first.len_utf8()
+            };
+            tokens.push(&rest[..len]);
+            rest = rest[len..].trim_start();
+        }
+        // Token 0 is the `use` keyword itself.
+        use_tree(&tokens, &mut 1, Vec::new(), &mut leaves);
+    }
+    leaves
+}
+
+/// Module path of a source file: `src/a/b.rs` and `src/a/b/mod.rs` are both `a::b`.
+fn module_of(relative: &str) -> Vec<String> {
+    let path = relative.strip_prefix("src/").unwrap_or(relative);
+    let mut segments: Vec<String> = path
+        .trim_end_matches(".rs")
+        .split('/')
+        .map(str::to_string)
+        .collect();
+    if matches!(
+        segments.last().map(String::as_str),
+        Some("mod" | "lib" | "main")
+    ) {
+        segments.pop();
+    }
+    segments
+}
+
+/// Absolute module path that `path`, written inside `module`, names.
+fn absolute_path(module: &[String], path: &[String]) -> Vec<String> {
+    let (mut base, mut rest) = (module.to_vec(), path);
+    match path.first().map(String::as_str) {
+        Some("crate") => (base, rest) = (Vec::new(), &path[1..]),
+        Some("self") => rest = &path[1..],
+        _ => {}
+    }
+    while rest.first().is_some_and(|segment| segment == "super") {
+        base.pop();
+        rest = &rest[1..];
+    }
+    base.extend(rest.iter().cloned());
+    base
+}
+
+/// Token-only view of one production file.
+struct ScannedFile {
+    code: String,
+    module: Vec<String>,
+    leaves: Vec<UseLeaf>,
+}
+
+impl ScannedFile {
+    /// Whether a bare name bound in `module` is in scope here: declared here or glob-imported.
+    fn sees_bare(&self, here: bool, module: &[String]) -> bool {
+        here || self
+            .leaves
+            .iter()
+            .any(|leaf| leaf.binds.is_none() && absolute_path(&self.module, &leaf.path) == module)
+    }
+}
+
+/// Every file tokenized; a file whose comment or literal never closes is a violation.
+fn scan_files(
+    sources: &BTreeMap<String, String>,
+    violations: &mut Vec<String>,
+) -> BTreeMap<String, ScannedFile> {
+    let mut files = BTreeMap::new();
+    for (relative, prod) in sources {
+        let Some(code) = closed_code_tokens(prod) else {
+            violations.push(format!("{relative}: unterminated comment or literal"));
+            continue;
+        };
+        let leaves = use_leaves(&code);
+        let module = module_of(relative);
+        files.insert(
+            relative.clone(),
+            ScannedFile {
+                code,
+                module,
+                leaves,
+            },
+        );
+    }
+    files
+}
+
+/// Path segments written before the name at `start`, as in `a::b::name`.
+fn qualifier(code: &str, start: usize) -> Vec<String> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let (mut prefix, mut end) = (Vec::new(), start);
+    while let Some(rest) = code[..end].trim_end().strip_suffix("::") {
+        let rest = rest.trim_end();
+        let begin = rest
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !ident(*c))
+            .map_or(0, |(k, c)| k + c.len_utf8());
+        if begin == rest.len() {
+            break;
+        }
+        prefix.insert(0, rest[begin..].to_string());
+        end = begin;
+    }
+    prefix
+}
+
+/// Qualifier path of each whole-word `name` outside `use` declarations and definitions.
+fn word_uses(code: &str, name: &str) -> Vec<Vec<String>> {
     if !code.contains(name) {
-        return (0, Vec::new());
+        return Vec::new();
     }
     let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).unwrap();
     let defines = |start: usize| {
@@ -746,32 +948,175 @@ fn item_uses(code: &str, name: &str) -> (usize, Vec<String>) {
                         .is_some_and(|rest| !rest.ends_with(ident))
                 })
     };
-    let renamed = regex::Regex::new(r"^\s+as\s+(\w+)").unwrap();
-    let type_alias = regex::Regex::new(&format!(
-        r"\btype\s+(\w+)[^=;]*=[^;]*\b{}\b",
-        regex::escape(name)
-    ))
-    .unwrap();
     let imports = use_spans(code);
-    let mut aliases: Vec<String> = type_alias
-        .captures_iter(code)
-        .map(|c| c[1].to_string())
+    word.find_iter(code)
+        .filter(|found| {
+            !defines(found.start()) && !imports.iter().any(|span| span.contains(&found.start()))
+        })
+        .map(|found| qualifier(code, found.start()))
+        .collect()
+}
+
+/// Uses of `name` in one file's code, plus the names its `use … as` or `type … =` bind it to.
+fn item_uses(code: &str, name: &str) -> (usize, Vec<String>) {
+    let file = ScannedFile {
+        code: code.to_string(),
+        module: Vec::new(),
+        leaves: use_leaves(code),
+    };
+    let files = BTreeMap::from([(String::new(), file)]);
+    let aliases = bindings(&files, name)
+        .into_iter()
+        .map(|(alias, _)| alias)
         .collect();
-    let mut uses = 0;
-    for found in word.find_iter(code) {
-        if defines(found.start()) {
-            continue;
+    (word_uses(code, name).len(), aliases)
+}
+
+/// Other names `item` is reachable by, with the file binding each: `use … as`,
+/// `type … =` and re-exports, followed through the module each path names.
+fn bindings(files: &BTreeMap<String, ScannedFile>, item: &str) -> Vec<(String, String)> {
+    let type_alias = regex::Regex::new(r"\btype\s+(\w+)\b[^=;]*=([^;]*)").unwrap();
+    let mut found: Vec<(String, String)> = Vec::new();
+    loop {
+        let before = found.len();
+        for (relative, file) in files {
+            let mut fresh = Vec::new();
+            for leaf in &file.leaves {
+                let (Some(last), Some(binds)) = (leaf.path.last(), &leaf.binds) else {
+                    continue;
+                };
+                let from = || absolute_path(&file.module, &leaf.path[..leaf.path.len() - 1]);
+                let reaches = (last == item && binds != item)
+                    || found
+                        .iter()
+                        .any(|(name, at)| name == last && files[at].module == from());
+                if reaches && binds != "_" {
+                    fresh.push(binds.clone());
+                }
+            }
+            let local = found
+                .iter()
+                .filter(|(_, at)| at == relative)
+                .map(|(name, _)| name.as_str())
+                .chain([item]);
+            for name in local.filter(|name| file.code.contains(*name) && file.code.contains("type"))
+            {
+                let named = |rhs: &str| !word_uses(rhs, name).is_empty();
+                fresh.extend(
+                    type_alias
+                        .captures_iter(&file.code)
+                        .filter(|c| named(&c[2]))
+                        .map(|c| c[1].to_string()),
+                );
+            }
+            for name in fresh {
+                if !found.contains(&(name.clone(), relative.clone())) {
+                    found.push((name, relative.clone()));
+                }
+            }
         }
-        if !imports.iter().any(|span| span.contains(&found.start())) {
-            uses += 1;
-        } else if let Some(alias) = renamed.captures(&code[found.end()..]) {
-            aliases.extend((&alias[1] != "_").then(|| alias[1].to_string()));
+        if found.len() == before {
+            return found;
         }
     }
-    (uses, aliases)
+}
+
+/// Guarded items (name, files that may name it, uses allowed there) reached anywhere
+/// else, or used past their budget. An alias shares its item's owners and budget.
+fn guarded_item_violations(
+    sources: &BTreeMap<String, String>,
+    items: &[(&str, &[&str], usize)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let files = scan_files(sources, &mut violations);
+    let mut claimed: BTreeMap<(String, String), &str> = BTreeMap::new();
+    for (needle, owners, budget) in items {
+        let aliases = bindings(&files, needle);
+        for (name, at) in &aliases {
+            let taken = claimed.insert((name.clone(), at.clone()), *needle);
+            let reused = items.iter().any(|(other, ..)| *other == name.as_str());
+            if reused || taken.is_some_and(|t| t != *needle) {
+                violations.push(format!(
+                    "{at}: alias {name} of {needle} reuses a guarded name"
+                ));
+            }
+        }
+        let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
+        for (relative, file) in &files {
+            let mut used = word_uses(&file.code, needle).len();
+            let mut named = file.code.contains(needle) && word.is_match(&file.code);
+            for (name, at) in &aliases {
+                let module = &files[at].module;
+                let bare = file.sees_bare(at == relative, module);
+                let count = word_uses(&file.code, name)
+                    .iter()
+                    .filter(|prefix| {
+                        bare || (!prefix.is_empty()
+                            && absolute_path(&file.module, prefix) == *module)
+                    })
+                    .count();
+                used += count;
+                named |= at == relative || count > 0;
+            }
+            if !named {
+                continue;
+            }
+            if !owners.contains(&relative.as_str()) {
+                violations.push(format!("{relative}: {needle}"));
+            } else if *budget != usize::MAX && used > *budget {
+                violations.push(format!("{relative}: {needle} used x{used} > {budget}"));
+            }
+        }
+    }
+    violations
+}
+
+/// Files outside `owners` reaching the `Herdr` variant through `HostKind` or one of
+/// its aliases: a variant or glob import, or a path to the variant.
+fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let files = scan_files(sources, &mut violations);
+    let kinds = bindings(&files, "HostKind");
+    let variant = regex::Regex::new(r"\b(\w+)\s*::\s*Herdr\b").unwrap();
+    for (relative, file) in files.iter().filter(|(r, _)| !owners.contains(&r.as_str())) {
+        // Whether `path[k]`, reached through `path[..k]`, names HostKind or an alias of it.
+        let kind_at = |path: &[String], k: usize| {
+            path[k] == "HostKind"
+                || kinds.iter().any(|(name, at)| {
+                    let module = &files[at].module;
+                    *name == path[k]
+                        && if k == 0 {
+                            file.sees_bare(at == relative, module)
+                        } else {
+                            absolute_path(&file.module, &path[..k]) == *module
+                        }
+                })
+        };
+        let imported = file.leaves.iter().any(|leaf| {
+            (0..leaf.path.len()).any(|k| {
+                kind_at(&leaf.path, k)
+                    && match leaf.path.get(k + 1) {
+                        Some(next) => next == "Herdr",
+                        None => leaf.binds.is_none(),
+                    }
+            })
+        });
+        let pathed = file.code.contains("Herdr")
+            && variant.captures_iter(&file.code).any(|found| {
+                let name = found.get(1).unwrap();
+                let mut path = qualifier(&file.code, name.start());
+                path.push(name.as_str().to_string());
+                kind_at(&path, path.len() - 1)
+            });
+        if imported || pathed {
+            violations.push(format!("{relative}: HostKind::Herdr import"));
+        }
+    }
+    violations
 }
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
+const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
 
 // Dormant guard: no production code reaches a Herdr host. Owners may only name
 // Herdr items, never construct or route to one; everything else may not name them.
@@ -794,6 +1139,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/discord/inflight/host_locator.rs", 1),
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
+        (SESSION_RECORD, 1),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -854,9 +1200,10 @@ fn herdr_items_have_no_production_caller() {
             &[INFLIGHT_MODEL, GUARD_ADAPTER, IDENTITY_GATE, BINDING_CAS],
         ),
     ];
-    let variant = regex::Regex::new(r"\bHerdr\b|\*").unwrap();
-    let mut violations = Vec::new();
-    for (relative, prod) in &production_sources() {
+    let sources = production_sources();
+    let owner_files: Vec<&str> = OWNERS.iter().map(|(owner, _)| *owner).collect();
+    let mut violations = herdr_variant_violations(&sources, &owner_files);
+    for (relative, prod) in &sources {
         let relative = relative.as_str();
         let owner = OWNERS.iter().find(|(owner, _)| *owner == relative);
         let named = match owner {
@@ -871,16 +1218,8 @@ fn herdr_items_have_no_production_caller() {
                 .map(|n| format!("{relative}: {n}")),
         );
         let code = code_tokens(prod);
-        if item_uses(&code, "herdr_pane").0 > 0 {
+        if !word_uses(&code, "herdr_pane").is_empty() {
             violations.push(format!("{relative}: herdr_pane use"));
-        }
-        // `HostKind::{Herdr}` or a glob import would name the variant without its path.
-        if owner.is_none()
-            && use_spans(&code).into_iter().any(|span| {
-                code[span.clone()].contains("HostKind") && variant.is_match(&code[span])
-            })
-        {
-            violations.push(format!("{relative}: HostKind::Herdr import"));
         }
         violations.extend(
             READERS
@@ -922,6 +1261,7 @@ fn session_target_guard_has_no_production_caller() {
         ("with_inflight_row", &[GUARD_ADAPTER], 0),
         ("locator_witness", &[GUARD_ADAPTER], 1),
         ("marker_witness", &[GUARD_ADAPTER], 0),
+        ("session_record_witness", &[SESSION_RECORD, ROOT], 0),
         ("with_host_marker", &[RESOLVE], 0),
         (
             "ResolvedSessionTarget",
@@ -935,7 +1275,11 @@ fn session_target_guard_has_no_production_caller() {
             usize::MAX,
         ),
         ("SessionTargetInput", &[RESOLVE, ROOT], usize::MAX),
-        ("HostWitness", &[RESOLVE, ROOT, GUARD_ADAPTER], usize::MAX),
+        (
+            "HostWitness",
+            &[RESOLVE, ROOT, GUARD_ADAPTER, SESSION_RECORD],
+            usize::MAX,
+        ),
         ("GuardVerdict", &[GUARD, ROOT], usize::MAX),
         ("PolicyProbe", &[GUARD, ROOT], usize::MAX),
         ("consumer_guard", &[ROOT], usize::MAX),
@@ -946,41 +1290,7 @@ fn session_target_guard_has_no_production_caller() {
         ),
     ];
     let sources = production_sources();
-    let codes: BTreeMap<&str, String> = sources
-        .iter()
-        .map(|(relative, prod)| (relative.as_str(), code_tokens(prod)))
-        .collect();
-    // An alias inherits its item's owners and use budget and is matched as a whole word.
-    let mut items: Vec<(String, &[&str], usize, bool)> = ITEMS
-        .iter()
-        .map(|(needle, owners, calls)| (needle.to_string(), *owners, *calls, false))
-        .collect();
-    let mut violations = Vec::new();
-    let mut next = 0;
-    while let Some((needle, owners, calls, alias)) = items.get(next).cloned() {
-        next += 1;
-        for (relative, code) in &codes {
-            let (used, aliases) = item_uses(code, &needle);
-            for renamed in aliases {
-                if !items.iter().any(|(known, ..)| *known == renamed) {
-                    items.push((renamed, owners, calls, true));
-                }
-            }
-            let named = if alias {
-                used > 0
-            } else {
-                sources[*relative].contains(needle.as_str())
-            };
-            if !named {
-                continue;
-            }
-            if !owners.contains(relative) {
-                violations.push(format!("{relative}: {needle}"));
-            } else if calls != usize::MAX && used > calls {
-                violations.push(format!("{relative}: {needle} used x{used} > {calls}"));
-            }
-        }
-    }
+    let violations = guarded_item_violations(&sources, ITEMS);
     let guard = &sources[GUARD];
     assert!(
         guard.contains("fn guard_first_state_change(")
@@ -991,6 +1301,164 @@ fn session_target_guard_has_no_production_caller() {
         violations.is_empty(),
         "session target guard production caller: {violations:?}"
     );
+}
+
+// The caller scans above run on today's tree, which has none of these shapes; this
+// feeds each shape through the same scan so a regression in it cannot pass silently.
+#[test]
+fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
+    const RESOLVE: &str = "src/services/session_host/resolve.rs";
+    const ROOT: &str = "src/services/session_host.rs";
+    const CHILD: &str = "src/services/session_host/resolve/child.rs";
+    const MODEL: &str = "src/services/session_host/model.rs";
+    const OTHER: &str = "src/services/termination_audit.rs";
+    const ITEMS: &[(&str, &[&str], usize)] = &[
+        ("resolve_session_target", &[RESOLVE, ROOT], 0),
+        ("resolve_target_host", &[RESOLVE], 1),
+        ("HostWitness", &[RESOLVE, ROOT], usize::MAX),
+    ];
+    const ALIAS: &str = "pub(crate) use self::resolve_session_target as target;\n";
+    let scan = |extra: &[(&str, &str)]| {
+        let mut sources: BTreeMap<String, String> = [
+            (
+                RESOLVE,
+                "pub(crate) fn resolve_session_target() {}\n\
+                 fn resolve_target_host() {}\nfn run() { resolve_target_host(); }\n",
+            ),
+            (
+                ROOT,
+                "mod resolve;\npub(crate) use resolve::resolve_session_target;\n",
+            ),
+            (MODEL, "pub(crate) enum HostKind { Tmux, Herdr }\n"),
+            (OTHER, "fn ordinary() { let target = 7; let _ = target; }\n"),
+        ]
+        .into_iter()
+        .map(|(file, text)| (file.to_string(), text.to_string()))
+        .collect();
+        for (file, text) in extra {
+            sources.entry(file.to_string()).or_default().push_str(text);
+        }
+        let mut found = guarded_item_violations(&sources, ITEMS);
+        found.extend(herdr_variant_violations(&sources, &[MODEL]));
+        found
+    };
+    assert_eq!(scan(&[]), Vec::<String>::new());
+
+    type Extra = &'static [(&'static str, &'static str)];
+    let caught: &[(&str, Extra, &str)] = &[
+        (
+            "an alias shares its item's budget",
+            &[(
+                RESOLVE,
+                "use self::resolve_target_host as more;\nfn f() { more(); }\n",
+            )],
+            "resolve.rs: resolve_target_host used x2 > 1",
+        ),
+        (
+            "an alias may not reuse a guarded name",
+            &[(
+                RESOLVE,
+                "use self::resolve_session_target as HostWitness;\nfn f() { let _r = HostWitness; }\n",
+            )],
+            "alias HostWitness of resolve_session_target reuses a guarded name",
+        ),
+        (
+            "a nested block comment",
+            &[(
+                ROOT,
+                "fn g(i: u8) {\n/* outer /* inner */ \" */\nlet _ = resolve_session_target(i);\nlet _ = \"done\";\n}\n",
+            )],
+            "session_host.rs: resolve_session_target used x1 > 0",
+        ),
+        (
+            "a raw byte string",
+            &[(
+                ROOT,
+                "fn g() {\nlet _ = br#\"inner \" quote\"#;\nlet _ = resolve_session_target();\nlet _ = \"done\";\n}\n",
+            )],
+            "session_host.rs: resolve_session_target used x1 > 0",
+        ),
+        (
+            "an unclosed comment",
+            &[(OTHER, "/* never closed\n")],
+            "termination_audit.rs: unterminated comment or literal",
+        ),
+        (
+            "an imported alias",
+            &[
+                (RESOLVE, ALIAS),
+                (
+                    OTHER,
+                    "use crate::services::session_host::resolve::target;\nfn h() { target(); }\n",
+                ),
+            ],
+            "termination_audit.rs: resolve_session_target",
+        ),
+        (
+            "a qualified alias",
+            &[(RESOLVE, ALIAS), (CHILD, "fn c() { super::target(); }\n")],
+            "resolve/child.rs: resolve_session_target",
+        ),
+        (
+            "a glob-imported alias",
+            &[
+                (RESOLVE, ALIAS),
+                (CHILD, "use super::*;\nfn c() { target(); }\n"),
+            ],
+            "resolve/child.rs: resolve_session_target",
+        ),
+        (
+            "a HostKind alias glob",
+            &[(
+                OTHER,
+                "use crate::services::session_host::{host_for, HostKind as Kind6459};\n\
+                 use Kind6459::*;\nfn route() { let _ = host_for(Herdr); }\n",
+            )],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "a HostKind alias group import",
+            &[(
+                OTHER,
+                "use crate::services::session_host::HostKind as K;\nuse K::{Herdr};\n",
+            )],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+        (
+            "a HostKind alias path",
+            &[(
+                OTHER,
+                "use crate::services::session_host::HostKind as K;\nfn f() { let _ = K :: Herdr; }\n",
+            )],
+            "termination_audit.rs: HostKind::Herdr import",
+        ),
+    ];
+    for (label, extra, expected) in caught {
+        let found = scan(extra);
+        assert!(
+            found.iter().any(|v| v.contains(expected)),
+            "{label}: expected {expected:?} in {found:?}"
+        );
+    }
+
+    let clean: &[(&str, Extra)] = &[
+        ("an alias stays in its own scope", &[(RESOLVE, ALIAS)]),
+        (
+            "a comment names the item",
+            &[(OTHER, "// resolve_session_target is not used here.\n")],
+        ),
+        (
+            "an unrelated variant or glob",
+            &[(
+                OTHER,
+                "use crate::services::session_host::HostKind as K;\nuse std::collections::*;\n\
+                 enum Other { Herdr }\nfn f() { let _ = (K::Tmux, Other::Herdr); }\n",
+            )],
+        ),
+    ];
+    for (label, extra) in clean {
+        assert_eq!(scan(extra), Vec::<String>::new(), "{label}");
+    }
 }
 
 /// Byte range of the body of the first `signature` in token-only code.
