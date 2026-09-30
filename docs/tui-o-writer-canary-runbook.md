@@ -67,6 +67,41 @@ another new channel.
 A held store is never initialized again: an era channel whose `init` is missing or damaged, an
 `init` without `o_era`, or a channel directory without `init` all hold.
 
+### Expanding to a channel that already carries a conversation
+
+After the first canary, a Claude TUI channel whose transcript already holds output may be added the
+same way. Codex channels with output are not adopted: they stay on Legacy. O starts at the cursor
+Legacy reads that transcript from in the new process, so neither writer skips or repeats a byte.
+Every check of §1 still applies except the empty-transcript one; in its place all of these must
+hold after the restart, or the channel stays on Legacy for that process with
+`adoption held: <reason>`:
+
+- Legacy's first rehydrate pass ran within 60 seconds (`legacy cursor not established` otherwise),
+  and it holds a cursor on the transcript the binding log bound last.
+- The transcript ends at that cursor on a line boundary, and its last turn is closed: no user or
+  assistant record follows the last turn end.
+- The delivery record is authoritative and its frontier covers that turn end without passing the
+  cursor (`frontier F is outside T..=R`).
+- Earlier transcripts the log bound total at most 64 files and 128 MiB (`past sources exceed
+  budget`).
+- Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
+  response tail runs for the session.
+
+Before editing the list, run both cross-node checks below by hand and keep their output in the lane
+log. If either fails, stop the expansion; neither may be skipped.
+
+1. Panes (F4): on every node, list the tmux sessions and the Legacy binding for each channel being
+   added. A pane for it on any node other than the O home stops the expansion.
+2. Selection (F5): diff `tui_o.writer.channels`, `cluster.gateway_preferred_instance_id` and
+   `cluster.instance_id` across the nodes. Refuse the deploy if any node's list drops a channel
+   another node selects. After the restart, every channel with `<runtime_root>/o_store/<channel>/init`
+   on the O home must still be in its list.
+
+Confirm as in the first canary, except that the channel's `init` lists its current transcript with
+`delivery_start` at Legacy's cursor, which is that transcript's length when it was adopted, and each
+earlier transcript at its length. Replace these manual checks with the automated check once it
+lands.
+
 ## 4. Emergency stop
 
 When output must stop without a drain, stop the provider's gateway process through the managed
