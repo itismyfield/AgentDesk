@@ -18,6 +18,11 @@ pub(super) fn prepare_and_create_claude_tui_session(
     auth_env_lines: &str,
     channel_id: Option<u64>,
 ) -> Result<(String, PreparedIncarnation), String> {
+    use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_admitted_for_claude_launch};
+    // The host is chosen before any launch I/O; only tmux is admitted.
+    if herdr_admitted_for_claude_launch(channel_id) {
+        return Err(HERDR_NOT_ADMITTED.to_string());
+    }
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -188,5 +193,70 @@ mod host_marker_tests {
             read_host_kind_marker(blocked),
             HostKindMarker::ReadFailed(_)
         ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod herdr_off_tests {
+    #[test]
+    fn claude_launch_entry_stays_on_tmux_and_starts_no_herdr_preparation() {
+        use super::prepare_and_create_claude_tui_session as launch;
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::session_host::HostKind;
+        use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
+        use std::os::unix::fs::PermissionsExt;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = tests::fixture_after_shared_test_env_lock();
+        let executable = |name: &str, body: &str| {
+            let path = root.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        executable(
+            "tmux",
+            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n",
+        );
+        let claude = executable("claude", "#!/bin/bash\necho '2.1.0 (Claude Code)'\n");
+        let path = format!(
+            "{}:{}",
+            root.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let _path = Guard::set_value_after_shared_test_env_lock("PATH", path.as_ref());
+        let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &claude);
+        let tmux = "AgentDesk-claude-herdr-off";
+        let id = "11111111-1111-4111-8111-111111111111";
+        let dir = root.path().to_str().unwrap();
+
+        let launched = launch(
+            tmux,
+            dir,
+            root.path(),
+            id,
+            None,
+            None,
+            "".into(),
+            false,
+            "",
+            Some(44),
+        );
+
+        launched.expect("the tmux launch runs as before");
+        let calls = std::fs::read_to_string(root.path().join("tmux.calls")).unwrap();
+        assert!(
+            calls.contains(&format!("new-session -d -s {tmux}")),
+            "{calls}"
+        );
+        assert_eq!(
+            read_host_kind_marker(tmux),
+            HostKindMarker::Known(HostKind::Tmux)
+        );
+        assert_eq!(
+            crate::services::herdr_launch::admissions_on_this_thread(),
+            0
+        );
     }
 }

@@ -2427,6 +2427,35 @@ async fn hosted_execution_explicit_delete_judges_markers_before_the_row_lock_pg(
 }
 
 #[tokio::test]
+async fn hosted_execution_explicit_delete_sees_a_marker_written_during_its_lock_wait_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let name = "AgentDesk-claude-lock-marker-only";
+    let key = format!("test-host:{name}");
+    insert_session(&pool, &key, "idle", None).await;
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM sessions WHERE session_key = $1 FOR UPDATE")
+        .bind(&key)
+        .fetch_all(&mut *lock)
+        .await
+        .unwrap();
+    let (task_pool, task_key) = (pool.clone(), key.clone());
+    let delete = tokio::spawn(async move { delete_session_by_key_pg(&task_pool, &task_key).await });
+    await_lock_wait(&pool, "%FOR UPDATE%").await;
+    // Only the marker changes; the row and its aliases read exactly as first judged.
+    let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+    lock.commit().await.unwrap();
+
+    let result = delete.await.unwrap();
+    assert!(result.is_err_and(|error| error.contains("non-tmux host marker")));
+    assert_eq!(remaining_keys(&pool).await, [key]);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn hosted_execution_bulk_cleanup_rechecks_contended_rows_and_rolls_back_pg() {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
