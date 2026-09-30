@@ -1088,6 +1088,7 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
+server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
 server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
 server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
@@ -9449,9 +9450,11 @@ services::tui_input::durability_tests::supported::reopen_adopted_unsynced_prefix
 services::tui_input::durability_tests::supported::reopen_refuses_handle_when_adopted_prefix_sync_fails
 services::tui_input::durability_tests::supported::replay_stops_at_first_bad_record_and_discards_valid_suffix
 services::tui_input::durability_tests::supported::snapshot_replacement_survives_every_cut_and_resumes_append
+services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
 services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
+services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
@@ -9544,10 +9547,12 @@ services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsy
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
+services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
 services::tui_o::topology::tests::switch_off_keeps_every_intake_worker
 services::tui_o::topology::tests::switch_on_refuses_tui_intake_off_the_gateway_only
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
+services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
 services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening

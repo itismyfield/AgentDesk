@@ -228,7 +228,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             }
             Some(Ok(started)) => started,
         };
-        self.paused = false;
+        // Admitted under an owned gateway, so the pause is over for health as well.
+        if std::mem::take(&mut self.paused) {
+            crate::services::tui_o::alarm::gateway_resumed(channel);
+        }
         let (outcome, held) = match started {
             Started::Done(outcome) => (outcome, Some(held)),
             Started::Running(request) => {
