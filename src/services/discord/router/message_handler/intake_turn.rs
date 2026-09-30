@@ -2379,6 +2379,14 @@ pub(super) async fn handle_text_message(
     }
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+        tmux_session_name.as_deref(),
+    )
+    .await;
     tokio::task::spawn_blocking(move || {
         let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
@@ -2397,6 +2405,7 @@ pub(super) async fn handle_text_message(
                             cancel: cancel_token_clone,
                             remote_profile: remote_profile.as_ref(),
                             tmux_session_name: tmux_session_name.as_deref(),
+                            teardown: teardown_clearance.as_ref(),
                             channel_id: channel_id.get(),
                             model: model_for_turn.as_deref(),
                             native_fast_mode: native_fast_mode_override,

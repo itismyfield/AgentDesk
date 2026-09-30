@@ -103,6 +103,7 @@ pub mod provider_exec;
 pub mod provider_hosting;
 pub(crate) mod provider_output_guard;
 pub mod provider_runtime;
+pub(crate) mod provider_teardown;
 pub mod queue;
 pub mod qwen;
 pub mod qwen_tmux_wrapper;

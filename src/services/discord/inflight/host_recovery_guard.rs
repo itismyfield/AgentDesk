@@ -130,6 +130,28 @@ pub(in crate::services::discord) async fn keyed_teardown(
         (None, _) => HostedLookup::Unknown("no postgres pool".to_string()),
         (_, None) => HostedLookup::Unknown("no session key".to_string()),
     };
+    teardown_for_lookup(
+        lookup,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+        observed,
+        caller,
+    )
+}
+
+/// [`keyed_teardown`] on a sessions-row lookup the caller already ran, with the
+/// same marker and inflight evidence and the same verdict.
+pub(in crate::services::discord) fn teardown_for_lookup(
+    lookup: HostedLookup,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    tmux_name: &str,
+    observed: Option<HostLiveness>,
+    caller: &str,
+) -> KeyedTeardown {
     let mut evidence = SessionTargetEvidence {
         session_key: session_key.map(str::to_string),
         session_name: Some(tmux_name.to_string()),
