@@ -11,6 +11,7 @@ mod cancel_watchdog;
 pub(crate) mod channel_rules;
 mod output_reader;
 mod registry;
+pub(crate) mod session_probe;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
 pub(crate) mod read_fault;
@@ -21,6 +22,7 @@ pub use registry::{
     frozen_first_counterpart_id, intern_provider_id, provider_registry, public_provider_catalog,
     supported_provider_ids,
 };
+pub(crate) use session_probe::SessionProbe;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -1033,117 +1035,6 @@ pub fn tmux_followup_fallback_after_read_error(
         last_offset,
         emit_synthetic_done,
     })
-}
-
-/// Callbacks for session status checks during output file polling.
-pub(crate) struct SessionProbe {
-    /// Returns true if the session process is still running.
-    pub is_alive: Box<dyn Fn() -> bool + Send>,
-    /// Returns true if the session is idle and ready for new input.
-    pub is_ready_for_input: Box<dyn Fn() -> bool + Send>,
-}
-
-impl SessionProbe {
-    pub fn new(
-        is_alive: impl Fn() -> bool + Send + 'static,
-        is_ready_for_input: impl Fn() -> bool + Send + 'static,
-    ) -> Self {
-        Self {
-            is_alive: Box::new(is_alive),
-            is_ready_for_input: Box::new(is_ready_for_input),
-        }
-    }
-
-    #[cfg(unix)]
-    pub fn tmux(session_name: String, provider: ProviderKind) -> Self {
-        let runtime_kind =
-            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&session_name);
-        Self::tmux_with_runtime(session_name, provider, runtime_kind)
-    }
-
-    #[cfg(unix)]
-    pub fn tmux_with_runtime(
-        session_name: String,
-        provider: ProviderKind,
-        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-    ) -> Self {
-        let name_alive = session_name.clone();
-        let name_ready = session_name;
-        let provider_ready = provider;
-        Self::new(
-            move || tmux_session_alive(&name_alive),
-            move || {
-                tmux_session_fallback_ready_for_input(&name_ready, &provider_ready, runtime_kind)
-                    .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
-            },
-        )
-    }
-
-    #[cfg(unix)]
-    pub fn tmux_with_structured_output(
-        session_name: String,
-        provider: ProviderKind,
-        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-        output_path: String,
-    ) -> Self {
-        let name_alive = session_name.clone();
-        let name_ready = session_name;
-        let provider_ready = provider;
-        Self::new(
-            move || tmux_session_alive(&name_alive),
-            move || {
-                crate::services::tui_turn_state::jsonl_ready_for_input(
-                    &provider_ready,
-                    runtime_kind,
-                    std::path::Path::new(&output_path),
-                    None,
-                )
-                .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-                .or_else(|| {
-                    tmux_session_fallback_ready_for_input(
-                        &name_ready,
-                        &provider_ready,
-                        runtime_kind,
-                    )
-                    .map(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
-                })
-                .unwrap_or(false)
-            },
-        )
-    }
-
-    #[cfg(not(unix))]
-    pub fn tmux(_session_name: String, _provider: ProviderKind) -> Self {
-        Self::new(|| false, || false)
-    }
-
-    #[cfg(not(unix))]
-    pub fn tmux_with_runtime(
-        _session_name: String,
-        _provider: ProviderKind,
-        _runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-    ) -> Self {
-        Self::new(|| false, || false)
-    }
-
-    #[cfg(not(unix))]
-    pub fn tmux_with_structured_output(
-        _session_name: String,
-        _provider: ProviderKind,
-        _runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-        _output_path: String,
-    ) -> Self {
-        Self::new(|| false, || false)
-    }
-
-    pub fn process(is_alive: impl Fn() -> bool + Send + 'static) -> Self {
-        Self::new(is_alive, || false)
-    }
-}
-
-#[cfg(unix)]
-fn tmux_session_alive(tmux_session_name: &str) -> bool {
-    crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
 }
 
 pub(crate) fn tmux_capture_indicates_ready_for_input(

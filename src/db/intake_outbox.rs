@@ -572,11 +572,14 @@ pub(crate) async fn sweep_failed_pre_accept_once(
 /// Returns `Ok(Some(row))` on a successful claim; `Ok(None)` when the
 /// queue has no eligible row for this `(target_instance_id, provider)`
 /// pair.
-pub(crate) async fn claim_pending_for_target(
+/// Rows of `held_channels` are skipped: they stay `pending` and unclaimed, so later rows of other
+/// channels are not stuck behind them.
+pub(crate) async fn claim_pending_for_target_except(
     pool: &PgPool,
     target_instance_id: &str,
     provider: &str,
     claim_owner: &str,
+    held_channels: &[String],
 ) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -585,12 +588,14 @@ pub(crate) async fn claim_pending_for_target(
          WHERE io.target_instance_id = $1
            AND io.status = 'pending'
            AND io.provider = $2
+           AND NOT (io.channel_id = ANY($3::TEXT[]))
          ORDER BY io.created_at ASC
          LIMIT 1
          FOR UPDATE OF io SKIP LOCKED",
     )
     .bind(target_instance_id)
     .bind(provider)
+    .bind(held_channels)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -615,6 +620,17 @@ pub(crate) async fn claim_pending_for_target(
 
     tx.commit().await?;
     Ok(Some(row))
+}
+
+/// The claim with no held channel.
+#[cfg(test)]
+pub(crate) async fn claim_pending_for_target(
+    pool: &PgPool,
+    target_instance_id: &str,
+    provider: &str,
+    claim_owner: &str,
+) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
+    claim_pending_for_target_except(pool, target_instance_id, provider, claim_owner, &[]).await
 }
 
 /// Restart-admission rollback: return exactly one owned pre-accept claim to

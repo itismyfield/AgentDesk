@@ -6,6 +6,7 @@ use crate::services::cluster::intake_router_hook::{
 };
 use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 
 mod attachment;
@@ -99,6 +100,12 @@ pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
+    // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
+    let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
+    if let IntakeRoute::Hold(detail) = intake_route::route(provider, destination.get()) {
+        let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
+        return IntakeAdmission::Blocked { reason };
+    }
     let effective_config =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
     let mode = effective_config.mode;

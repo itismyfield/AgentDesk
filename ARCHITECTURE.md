@@ -601,12 +601,14 @@ src/
 │   │   │   ├── edge_case_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
-│   │   │   └── drain_tests.rs
+│   │   │   ├── drain_tests.rs
+│   │   │   └── o_route_tests.rs
 │   │   ├── machine_resources/
 │   │   │   ├── gpu/
 │   │   │   │   ├── macos.rs
@@ -1838,7 +1840,8 @@ src/
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
-│   │   └── registry.rs
+│   │   ├── registry.rs
+│   │   └── session_probe.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
@@ -1922,6 +1925,7 @@ src/
 │   │   ├── model.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
+│   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
 │   ├── settings/
@@ -1960,7 +1964,8 @@ src/
 │   │   ├── channel_policy/
 │   │   │   └── tests.rs
 │   │   ├── cutover/
-│   │   │   └── channel_gate.rs
+│   │   │   ├── channel_gate.rs
+│   │   │   └── intake_route.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs

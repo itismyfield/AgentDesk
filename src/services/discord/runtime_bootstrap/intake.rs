@@ -6,22 +6,8 @@ use super::*;
 /// `cluster::bootstrap`). Observe mode keeps the consumer warm so a later
 /// observe→enforce config reload does not strand forwarded rows. The caller
 /// invokes this only after a gateway or confirmed-standby role is registered.
-/// With the O writer on, a non-gateway node skips it for TUI providers and stays unadvertised.
-pub(super) fn run_bot_maybe_spawn_intake_worker(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    role: crate::services::tui_o::topology::HostRole,
-) {
-    use crate::services::tui_o::topology;
-    if !topology::intake_worker_allowed(topology::O_TUI_WRITER, provider.as_str(), role) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            role = ?role,
-            reason = topology::TUI_OUTPUT_REQUIRES_GATEWAY,
-            "[intake_worker] TUI output requires the gateway node — intake worker not started"
-        );
-        return;
-    }
+/// Every role keeps its worker; the worker itself leaves O channels to their gateway row by row.
+pub(super) fn run_bot_maybe_spawn_intake_worker(shared: &Arc<SharedData>, provider: &ProviderKind) {
     let intake_routing =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
     if intake_routing.worker_consumer_should_spawn() {

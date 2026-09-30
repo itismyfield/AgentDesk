@@ -62,6 +62,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_router_hook/edge_case_tests.rs",
         "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
         "src/services/cluster/intake_router_hook/capacity_tests.rs",
+        "src/services/cluster/intake_router_hook/o_route_tests.rs",
         "src/services/discord/queue_io/transport/tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rest_delivery_tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
@@ -101,6 +102,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_router_hook/execution_requirement_tests.rs",
         "src/services/cluster/intake_worker/dispatch_stamp_tests.rs",
         "src/services/cluster/intake_worker/drain_tests.rs",
+        "src/services/cluster/intake_worker/o_route_tests.rs",
         "src/services/cluster/readiness/tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",
         "src/services/discord/abandon_request_store/probe_contract_tests.rs",
@@ -298,6 +300,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/process/stream_child/stream_queue/test_delay.rs",
         "src/services/process/stream_child/test_fixture.rs",
         "src/services/provider/read_fault.rs",
+        "src/services/session_host/test_support.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
     }
