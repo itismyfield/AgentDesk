@@ -33134,6 +33134,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/session_host/session_record.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:abbcb2a02b75b34c97a853dfea22a79d2585eb939a5da35d6cd46aabdf83c4a2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/session_resume.rs",
       "api": "sqlx::query",
       "symbol": "query",

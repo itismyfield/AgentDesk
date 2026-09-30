@@ -130,6 +130,7 @@ src/services/routines/session_control.rs
 src/services/scheduled_messages/context_snapshot.rs
 src/services/scheduled_messages/postgres_tests.rs
 src/services/session_forwarding.rs
+src/services/session_host/session_record.rs
 src/services/session_resume.rs
 src/services/settings.rs
 src/services/stale_turn_reconciler.rs
@@ -276,6 +277,7 @@ services::routines::session_control::tests
 services::scheduled_messages::context_snapshot::postgres_tests
 services::scheduled_messages::postgres_tests
 services::session_forwarding::tests
+services::session_host::session_record::tests
 services::session_resume::tests
 services::settings::tests
 services::stale_turn_reconciler::tests
@@ -1156,6 +1158,7 @@ services::session_forwarding::tests::cancel_owner_returns_none_when_no_session_e
 services::session_forwarding::tests::cancel_selection_agent_provider_fallback_preserves_remote_owner_pg
 services::session_forwarding::tests::cancel_selection_rejects_overlapping_and_pattern_channel_ids_pg
 services::session_forwarding::tests::cancel_selection_session_key_fallback_preserves_remote_owner_pg
+services::session_host::session_record::tests::only_a_found_null_record_admits_the_legacy_clear_pg
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes
 services::session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime
 services::session_resume::tests::resume_production_path_retains_live_owner_after_teardown

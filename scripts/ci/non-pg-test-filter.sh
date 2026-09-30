@@ -154,6 +154,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
   --skip services::session_forwarding::tests
+  --skip services::session_host::session_record::tests
   --skip services::session_resume::tests
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
