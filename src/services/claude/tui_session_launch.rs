@@ -124,7 +124,17 @@ mod host_marker_tests {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, _env) = tests::fixture_after_shared_test_env_lock();
-        let _tmux = tests::fake_tmux(root.path());
+        // Prepend the fake tmux: concurrent tests must still find system binaries.
+        let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n";
+        let fake_tmux = root.path().join("tmux");
+        std::fs::write(&fake_tmux, stub).unwrap();
+        std::fs::set_permissions(&fake_tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = format!(
+            "{}:{}",
+            root.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let _path = Guard::set_value_after_shared_test_env_lock("PATH", path.as_ref());
         let claude = root.path().join("claude");
         std::fs::write(&claude, "#!/bin/bash\necho '2.1.0 (Claude Code)'\n").unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
