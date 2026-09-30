@@ -153,6 +153,13 @@ impl OStore {
         self.root.join(channel.to_string())
     }
 
+    /// Whether anything of the channel's store may exist, even without its `init`; an unreadable
+    /// entry counts.
+    pub fn has_channel_dir(&self, channel: u64) -> bool {
+        let entry = std::fs::symlink_metadata(self.channel_dir(channel));
+        !matches!(entry, Err(error) if error.kind() == io::ErrorKind::NotFound)
+    }
+
     pub fn read_era(&self) -> Result<Option<OEra>, StoreError> {
         durable::read_json(&self.root.join(ERA_FILE))
     }

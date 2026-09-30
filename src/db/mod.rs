@@ -27,6 +27,7 @@ pub(crate) mod intake_outbox_status;
 pub mod kanban;
 pub mod kanban_cards;
 pub mod meetings;
+pub(crate) mod o_channel_activation;
 pub mod postgres;
 pub mod prompt_manifests;
 pub mod relay_dead_letter;

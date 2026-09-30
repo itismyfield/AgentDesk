@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A deploy whose source has the O writer on must not auto-roll back to a build
-# that is not recorded as an O writer build: the old binary would hand Discord
-# output back to the Legacy relay. With the switch off, rollback is unchanged.
+# that is not recorded as an O writer build, nor ship an external artifact instead
+# of its own build. With the switch off, rollback and artifact deploys are unchanged.
 
 set -euo pipefail
 
@@ -29,7 +29,8 @@ extract_function() {
 }
 
 for fn in _rollback_release_binary _source_o_tui_writer _manifest_o_tui_writer \
-    _rollback_would_revert_o_writer _write_release_source_manifest; do
+    _rollback_would_revert_o_writer _write_release_source_manifest \
+    _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ] || ! bash -n <<<"$body" 2>/dev/null; then
         fail "$fn is not defined in $DEPLOY_SH"
@@ -120,6 +121,8 @@ setup_case "$SWITCH_ON" ""
 expect "switch on, no manifest" refused
 setup_case "$SWITCH_ON" "not json"
 expect "switch on, unreadable manifest" refused
+setup_case "$SWITCH_ON" '{"repo_head":"abc","o_tui_writer":"unknown"}'
+expect "switch on, rollback target switch unknown" refused
 setup_case "$SWITCH_ON" "$O_MANIFEST"
 expect "switch on, O writer rollback target" rolled_back
 
@@ -134,6 +137,33 @@ $SWITCH_OFF
 #[cfg(not(test))]
 $SWITCH_ON" "$LEGACY_MANIFEST"
 expect "two definitions that disagree" refused
+
+echo "== switch on: only this source's own build is deployed =="
+selection="$(awk '
+    /^if _external_artifact_would_skip_o_writer; then$/ { printing = 1 }
+    printing { print }
+    printing && /^fi$/ { exit }
+' "$DEPLOY_SH")"
+[ -n "$selection" ] || fail "the binary selection block does not run the external artifact guard"
+_resolve_default_release_binary() { echo "own-build"; }
+# $1 label, $2 topology.rs body, $3 AGENTDESK_DEPLOY_BINARY, $4 expected binary or "refused"
+expect_binary() {
+    local actual
+    setup_case "$2" ""
+    actual="$(AGENTDESK_DEPLOY_BINARY="$3" bash -c "$(declare -f _source_o_tui_writer \
+        _external_artifact_would_skip_o_writer _resolve_default_release_binary)
+REPO='$REPO' DEPLOY_BUILD_PROFILE=release
+$selection
+echo \"\$SOURCE_BINARY\"" 2>/dev/null)" || actual=refused
+    if [ "$actual" = "$4" ]; then pass "$1 → $4"; else fail "$1 → expected $4, got $actual"; fi
+}
+expect_binary "switch on, external artifact" "$SWITCH_ON" /tmp/artifact refused
+expect_binary "unreadable switch, external artifact" \
+    'pub(crate) const O_TUI_WRITER: bool = cfg!(feature = "o");' /tmp/artifact refused
+expect_binary "switch on, own build" "$SWITCH_ON" "" own-build
+expect_binary "switch off, external artifact" "$SWITCH_OFF" /tmp/artifact /tmp/artifact
+expect_binary "source without the switch, external artifact" "" /tmp/artifact /tmp/artifact
+expect_binary "switch off, own build" "$SWITCH_OFF" "" own-build
 
 echo "== the manifest records the switch for the next deploy's guard =="
 for value in true false; do
