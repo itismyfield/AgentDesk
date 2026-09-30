@@ -7,7 +7,7 @@ use poise::serenity_prelude::ChannelId;
 use tower::ServiceExt;
 
 use crate::services::discord::host_teardown_gate::test_support::{
-    Stored, busy_turn, channel_key, runtime, seed, turn_kept,
+    Stored, busy_turn, channel_key, runtime, seed, shared_on, turn_kept,
 };
 
 async fn post_repair(
@@ -110,11 +110,20 @@ async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg() {
     use crate::services::discord::relay_recovery::{
         UNREAD_TAIL_SITE_STALE_MAILBOX, stale_mailbox_idle_tail_admits,
     };
+    let mut postgres = None;
+    let slot = &mut postgres;
+    let runtime = move || async move {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = shared_on(&pool).await;
+        *slot = Some((db, pool));
+        shared
+    };
     let shape = UnreadTailShape::RowOutputMissing;
-    let Some(mut seed) = UnreadTailSeed::start_on_postgres(5_996_120_001, shape).await else {
+    let Some(seed) = UnreadTailSeed::start_with_runtime(5_996_120_001, shape, runtime).await else {
         return;
     };
-    let (db, pool) = seed.postgres.take().expect("a postgres runtime");
+    let (db, pool) = postgres.take().expect("a postgres runtime");
     let (name, channel) = (&seed.tmux_session, seed.channel.get());
     let key = channel_key(&seed.shared, name);
     self::seed(&pool, &key, name, channel, Stored::Legacy).await;

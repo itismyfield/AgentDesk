@@ -40,11 +40,17 @@ impl Stored {
     ];
 }
 
-/// A claude runtime on `pool`, registered for the registry-keyed callers.
-pub(crate) async fn runtime(pool: &PgPool) -> (Arc<SharedData>, Arc<HealthRegistry>) {
+/// A claude runtime on `pool`.
+pub(crate) async fn shared_on(pool: &PgPool) -> Arc<SharedData> {
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     shared.settings.write().await.provider = ProviderKind::Claude;
+    shared
+}
+
+/// [`shared_on`], registered for the registry-keyed callers.
+pub(crate) async fn runtime(pool: &PgPool) -> (Arc<SharedData>, Arc<HealthRegistry>) {
+    let shared = shared_on(pool).await;
     let registry = Arc::new(HealthRegistry::new());
     registry
         .register("claude".to_string(), shared.clone())
