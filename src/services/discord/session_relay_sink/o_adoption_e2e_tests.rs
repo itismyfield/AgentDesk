@@ -540,6 +540,57 @@ async fn a_closed_turn_legacy_has_not_delivered_keeps_the_channel_on_legacy() {
     }
 }
 
+async fn adopted_by_the_host() {
+    let pair = Pair::new().await;
+    let cursor = pair.delivered_history().await;
+    let _candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let written = Arc::new(std::sync::Mutex::new(None));
+    let slot = Arc::clone(&written);
+    let path = pair.legs[0].binding.expected_rollout_path.clone();
+    let body = pair.legs[0].body.clone();
+    // The second turn lands after the recheck passed, before the init is written.
+    test_hook::set(A, test_hook::Step::BeforeWrite, move || {
+        *slot.lock().unwrap() = Some(write_second(&path, &body));
+        Ok(())
+    });
+    let hosts = pair.host(&pair.io);
+    settle().await;
+    assert_eq!(adoption(A), Adoption::Committed);
+    assert_eq!(
+        (pair.o_start(), legacy_cursor(&pair.legs[0])),
+        (cursor, cursor),
+        "the host starts O at the cursor Legacy reads from"
+    );
+    let (start, rows) = written
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the unit was written");
+    deliver_second(&pair.legs[0], start, &rows).await;
+    settle().await;
+    let seconds = pair.io.posts.to(A);
+    assert_eq!(
+        seconds.len(),
+        1,
+        "O posts the second turn's unit only: {seconds:?}"
+    );
+    assert!(seconds[0].ends_with("second"), "{seconds:?}");
+    assert_eq!(
+        pair.legs[0].legacy_posts(),
+        1,
+        "Legacy consumed the second turn"
+    );
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_host_adopts_a_channel_with_delivered_history_at_legacys_cursor() {
+    if isolated("adoption::the_host_adopts_a_channel_with_delivered_history_at_legacys_cursor") {
+        adopted_by_the_host().await;
+    }
+}
+
 async fn unit_after_the_recheck() {
     let pair = Pair::new().await;
     let cursor = pair.delivered_history().await;
