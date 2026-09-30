@@ -254,7 +254,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
                     channel_id
                 );
-                reset_session_for_auto_retry(
+                let reset = reset_session_for_auto_retry(
                     &shared_owned,
                     channel_id,
                     &cancel_token,
@@ -266,7 +266,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                 )
                 .await;
                 // #2452 H6: explicit completion path — see helper docs.
-                if let Some(user_msg_id) = user_msg_id {
+                if let Some(user_msg_id) = user_msg_id.filter(|_| reset.cleared()) {
                     spawn_retry_with_history_with_release(
                         gateway.clone(),
                         channel_id,
@@ -292,7 +292,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                         "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
                         channel_id
                     );
-                    reset_session_for_auto_retry(
+                    let reset = reset_session_for_auto_retry(
                         &shared_owned,
                         channel_id,
                         &cancel_token,
@@ -304,7 +304,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     )
                     .await;
                     // #2452 H6: explicit completion path — see helper.
-                    if let Some(user_msg_id) = user_msg_id {
+                    if let Some(user_msg_id) = user_msg_id.filter(|_| reset.cleared()) {
                         spawn_retry_with_history_with_release(
                             gateway.clone(),
                             channel_id,
@@ -340,7 +340,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                             turn_start.elapsed().as_secs(),
                             channel_id
                         );
-                        reset_session_for_auto_retry(
+                        let reset = reset_session_for_auto_retry(
                             &shared_owned,
                             channel_id,
                             &cancel_token,
@@ -352,7 +352,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                         )
                         .await;
                         // #2452 H6: explicit completion path.
-                        if let Some(user_msg_id) = user_msg_id {
+                        if let Some(user_msg_id) = user_msg_id.filter(|_| reset.cleared()) {
                             spawn_retry_with_history_with_release(
                                 gateway.clone(),
                                 channel_id,

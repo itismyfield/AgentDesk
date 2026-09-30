@@ -374,6 +374,23 @@ pub(super) fn handle_gemini_retry_boundary(
     had_local_session || should_reset
 }
 
+/// Whether an auto-retry reset ran; the host guard can keep the session untouched.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetryReset {
+    Cleared,
+    KeptByHostGuard,
+}
+
+impl RetryReset {
+    /// Only a cleared session may be retried; a kept one gets no retry either.
+    pub(super) fn cleared(self) -> bool {
+        self == Self::Cleared
+    }
+}
+
+/// The host guard decides before the resume state is cleared, so a kept session also
+/// keeps its provider session id.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reset_session_for_auto_retry(
     shared: &Arc<SharedData>,
@@ -384,7 +401,27 @@ pub(super) async fn reset_session_for_auto_retry(
     new_raw_provider_session_id: &mut Option<String>,
     inflight_state: &mut InflightTurnState,
     reason: &str,
-) {
+) -> RetryReset {
+    #[cfg(unix)]
+    let cleared = match cancel_token.tmux_session_name() {
+        Some(name) => {
+            let provider = shared.settings.read().await.provider.clone();
+            let session = crate::services::discord::inflight::clear_channel_session(
+                shared.pg_pool.as_ref(),
+                &provider,
+                channel_id.get(),
+                adk_session_key,
+                &name,
+                "auto_retry_fresh_session",
+            );
+            let Some(session) = session.await else {
+                return RetryReset::KeptByHostGuard;
+            };
+            Some(session)
+        }
+        None => None,
+    };
+
     clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
     let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
         inflight_state,
@@ -412,41 +449,23 @@ pub(super) async fn reset_session_for_auto_retry(
     }
 
     #[cfg(unix)]
-    if let Some(name) = cancel_token.tmux_session_name() {
-        let provider = shared.settings.read().await.provider.clone();
-        let pool = shared.pg_pool.as_ref();
-        kill_session_before_retry(pool, &provider, channel_id, adk_session_key, &name, reason)
-            .await;
+    if let Some(session) = cleared {
+        kill_session_before_retry(&session, reason);
     }
+    RetryReset::Cleared
 }
 
-/// Kills the turn's tmux session for a fresh retry once the host guard admits it
-/// through the turn's own session key.
+/// Kills the turn's tmux session the host guard admitted, for a fresh retry.
 #[cfg(unix)]
-async fn kill_session_before_retry(
-    pool: Option<&sqlx::PgPool>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    adk_session_key: Option<&str>,
-    name: &str,
+fn kill_session_before_retry(
+    session: &crate::services::session_host::ClearedHostSession,
     reason: &str,
 ) {
-    let session = crate::services::discord::inflight::clear_channel_session(
-        pool,
-        provider,
-        channel_id.get(),
-        adk_session_key,
-        name,
-        "auto_retry_fresh_session",
-    )
-    .await;
-    let Some(session) = session else {
-        return;
-    };
+    let name = session.name();
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
     crate::services::termination_audit::record_termination_for_cleared(
-        &session,
+        session,
         None,
         "turn_bridge",
         "auto_retry_fresh_session",
@@ -456,61 +475,13 @@ async fn kill_session_before_retry(
         None,
     );
     record_tmux_exit_reason(
-        session.name(),
+        name,
         &format!("forcing fresh session before auto-retry: {reason}"),
     );
     crate::services::platform::tmux::kill_session(
-        session.name(),
+        name,
         &format!("forcing fresh session before auto-retry: {reason}"),
     );
-}
-
-#[cfg(all(test, unix))]
-mod keyed_teardown_tests {
-    use super::*;
-    use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
-    use crate::services::discord::inflight::seed_session_row;
-
-    // Auto-retry tears the turn's session down only when its own key finds a legacy row.
-    #[tokio::test]
-    async fn auto_retry_kills_only_a_session_the_host_guard_admits_pg() {
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let bound = wire(&record(
-            &owner("1479671301387059502"),
-            "n1",
-            HostedState::Bound,
-        ));
-        let legacy = seed_session_row(&pool, "p4c3w1-retry-legacy", 1479671301387059501, None);
-        let legacy = legacy.await;
-        let bound = seed_session_row(
-            &pool,
-            "p4c3w1-retry-bound",
-            1479671301387059502,
-            Some(bound),
-        );
-        let bound = bound.await;
-        let cases = [
-            (Some(legacy.as_str()), "p4c3w1-retry-legacy", 501, true),
-            (Some(bound.as_str()), "p4c3w1-retry-bound", 502, false),
-            (None, "p4c3w1-retry-no-key", 503, false),
-        ];
-        for (key, name, channel, killed) in cases {
-            let channel_id = ChannelId::new(1479671301387059000 + channel);
-            let claude = ProviderKind::Claude;
-            kill_session_before_retry(Some(&pool), &claude, channel_id, key, name, "test").await;
-            let exit_reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
-            assert_eq!(
-                std::path::Path::new(&exit_reason).exists(),
-                killed,
-                "{name}"
-            );
-        }
-        pool.close().await;
-        db.drop().await;
-    }
 }
 
 #[cfg(test)]

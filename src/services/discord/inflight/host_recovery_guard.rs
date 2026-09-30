@@ -10,9 +10,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::{
-    AutomaticEffect, ClearedHostSession, HostKind, HostWitness, SessionTargetEvidence,
-    SessionTargetEvidenceSource, SessionTargetInput, StateChange, clear_legacy_session,
-    resolve_session_target, session_record_witness,
+    AutomaticEffect, ClearedHostSession, HostKind, HostLiveness, HostWitness,
+    SessionTargetEvidence, SessionTargetEvidenceSource, SessionTargetInput, StateChange,
+    clear_legacy_session, resolve_session_target, session_record_witness,
 };
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
@@ -77,6 +77,16 @@ impl SessionTargetEvidenceSource for KeyedEvidence {
     }
 }
 
+/// What an automatic teardown of one tmux session may do.
+pub(in crate::services::discord) enum KeyedTeardown {
+    /// A found legacy row with no host trace: the keyed teardown runs.
+    Cleared(ClearedHostSession),
+    /// No sessions row yet and no marker or inflight trace of another host; only a
+    /// caller whose own path starts before the row is written may go on by name.
+    RowMissing,
+    Kept,
+}
+
 /// Admits `tmux_name` for a kill or cleanup only when the sessions row behind the
 /// caller's key is a found legacy row and no marker or inflight row says otherwise.
 pub(in crate::services::discord) async fn clear_channel_session(
@@ -87,6 +97,32 @@ pub(in crate::services::discord) async fn clear_channel_session(
     tmux_name: &str,
     caller: &str,
 ) -> Option<ClearedHostSession> {
+    let teardown = keyed_teardown(
+        pool,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+        None,
+        caller,
+    );
+    match teardown.await {
+        KeyedTeardown::Cleared(session) => Some(session),
+        KeyedTeardown::RowMissing | KeyedTeardown::Kept => None,
+    }
+}
+
+/// The guard verdict on the rows as stored, before the caller changes anything;
+/// `observed` is the liveness probe the caller already ran, if any.
+pub(in crate::services::discord) async fn keyed_teardown(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    tmux_name: &str,
+    observed: Option<HostLiveness>,
+    caller: &str,
+) -> KeyedTeardown {
     let lookup = match (pool, session_key) {
         (Some(pool), Some(key)) => {
             load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await
@@ -116,24 +152,41 @@ pub(in crate::services::discord) async fn clear_channel_session(
         Ok(_) => {}
         Err(error) => evidence.inflight_locator = HostWitness::ReadFailed(error),
     }
+    let tmux_or_absent = |witness: &HostWitness| match witness {
+        HostWitness::Absent => true,
+        HostWitness::Known { kind, .. } => *kind == HostKind::Tmux,
+        _ => false,
+    };
+    let row_missing = matches!(lookup, HostedLookup::Missing)
+        && tmux_or_absent(&evidence.host_marker)
+        && tmux_or_absent(&evidence.inflight_locator)
+        && !evidence.runtime_kind_unrecognized
+        && observed != Some(HostLiveness::ProbeError);
     let input = SessionTargetInput::SessionKey(session_key.unwrap_or_default().to_string());
     let target = resolve_session_target(input, &KeyedEvidence(evidence));
     let change = StateChange::Automatic {
         effect: AutomaticEffect::Kill,
-        observed: None,
+        observed,
     };
-    clear_legacy_session(&target, change)
-        .inspect_err(|verdict| {
+    match clear_legacy_session(&target, change) {
+        Ok(session) => KeyedTeardown::Cleared(session),
+        Err(verdict) => {
             tracing::warn!(
                 caller,
                 tmux_name,
                 session_key,
                 ?verdict,
+                row_missing,
                 host = ?target.host,
-                "host guard kept the session: no automatic teardown"
+                "host guard refused the keyed teardown"
             );
-        })
-        .ok()
+            if row_missing {
+                KeyedTeardown::RowMissing
+            } else {
+                KeyedTeardown::Kept
+            }
+        }
+    }
 }
 
 #[cfg(test)]

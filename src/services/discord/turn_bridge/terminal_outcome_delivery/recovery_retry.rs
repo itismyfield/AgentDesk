@@ -59,7 +59,7 @@ pub(super) async fn handle_recovery_retry(
             "  [{ts}] ↻ Session recovery — triggering auto-retry with history (channel {})",
             channel_id
         );
-        reset_session_for_auto_retry(
+        let reset = reset_session_for_auto_retry(
             &shared_owned,
             channel_id,
             &cancel_token,
@@ -74,8 +74,8 @@ pub(super) async fn handle_recovery_retry(
         // completion path so the dedup lockout is released as soon
         // as scheduling resolves (≤ 120s safety net inside helper).
         // A recovery turn with no anchored user message (user_msg_id == 0)
-        // has no message to retry-with-history against, so skip scheduling.
-        if let Some(user_msg_id) = user_msg_id {
+        // has no message to retry-with-history against; a kept session skips it too.
+        if let Some(user_msg_id) = user_msg_id.filter(|_| reset.cleared()) {
             spawn_retry_with_history_with_release(
                 gateway.clone(),
                 channel_id,

@@ -21,9 +21,20 @@ pub(in crate::services::discord) async fn seed_session_row(
     raw: Option<Value>,
 ) -> String {
     let key = format!("claude/{TOKEN}/mac-mini:{name}");
+    seed_session_row_keyed(pool, &key, channel_id, raw).await;
+    key
+}
+
+/// [`seed_session_row`] under a key the caller built.
+pub(in crate::services::discord) async fn seed_session_row_keyed(
+    pool: &PgPool,
+    key: &str,
+    channel_id: u64,
+    raw: Option<Value>,
+) {
     let channel = channel_id.to_string();
     let params = HookSessionUpsert {
-        session_key: &key,
+        session_key: key,
         instance_id: Some("test-node"),
         agent_id: None,
         provider: "claude",
@@ -49,12 +60,11 @@ pub(in crate::services::discord) async fn seed_session_row(
         .await
         .unwrap();
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
-        .bind(&key)
+        .bind(key)
         .bind(raw)
         .execute(pool)
         .await
         .unwrap();
-    key
 }
 
 fn inflight_row(channel_id: u64, tmux: &str, host_kind: HostKind) -> InflightTurnState {

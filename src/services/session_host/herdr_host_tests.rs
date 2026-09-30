@@ -898,15 +898,15 @@ impl ScannedFile {
     }
 }
 
-/// Absolute path `path` names when written in `file`: a leading name a `use` binds
-/// there is followed, and so is a module another file re-exports under a new name.
+/// Absolute path `path` names in `file`, following a leading `use`-bound name and any module
+/// another file re-exports under a new name, whether the path starts at a `use` or `crate`.
 fn resolve_path(
     files: &BTreeMap<String, ScannedFile>,
     file: &ScannedFile,
     path: &[String],
 ) -> Vec<String> {
     let local = |scope: &ScannedFile, path: &[String]| {
-        let (mut path, mut followed) = (path.to_vec(), false);
+        let mut path = path.to_vec();
         for _ in 0..8 {
             let head = path.first().map(String::as_str);
             let Some(bound) = head
@@ -916,13 +916,11 @@ fn resolve_path(
                 break;
             };
             path = bound.iter().chain(&path[1..]).cloned().collect();
-            followed = true;
         }
-        (absolute_path(&scope.module, &path), followed)
+        absolute_path(&scope.module, &path)
     };
-    let (mut resolved, followed) = local(file, path);
-    // Only a path that went through a `use` can reach a re-exported module name.
-    for _ in 0..8 * usize::from(followed) {
+    let mut resolved = local(file, path);
+    for _ in 0..8 {
         let reexport = (1..resolved.len()).find_map(|k| {
             let owner = files.values().find(|other| other.module == resolved[..k])?;
             Some((k, owner, owner.bound(&resolved[k])?))
@@ -930,7 +928,7 @@ fn resolve_path(
         let Some((k, owner, bound)) = reexport else {
             break;
         };
-        let (mut next, _) = local(owner, bound);
+        let mut next = local(owner, bound);
         next.extend(resolved[k + 1..].iter().cloned());
         resolved = next;
     }
@@ -984,6 +982,14 @@ fn qualifier(code: &str, start: usize) -> Vec<String> {
 
 /// Qualifier path of each whole-word `name` outside `use` declarations and definitions.
 fn word_uses(code: &str, name: &str) -> Vec<Vec<String>> {
+    word_sites(code, name)
+        .into_iter()
+        .map(|(prefix, _)| prefix)
+        .collect()
+}
+
+/// [`word_uses`], with whether a call follows each use; any other use takes it as a value.
+fn word_sites(code: &str, name: &str) -> Vec<(Vec<String>, bool)> {
     if !code.contains(name) {
         return Vec::new();
     }
@@ -1006,14 +1012,19 @@ fn word_uses(code: &str, name: &str) -> Vec<Vec<String>> {
         .filter(|found| {
             !defines(found.start()) && !imports.iter().any(|span| span.contains(&found.start()))
         })
-        .map(|found| (found.start(), qualifier(code, found.start())))
-        .filter(|(at, prefix)| !prefix.is_empty() || !shadowed.iter().any(|s| s.contains(at)))
-        .map(|(_, prefix)| prefix)
+        .map(|found| (found.range(), qualifier(code, found.start())))
+        .filter(|(at, prefix)| {
+            !prefix.is_empty() || !shadowed.iter().any(|s| s.contains(&at.start))
+        })
+        .map(|(at, prefix)| {
+            let after = code[at.end..].trim_start();
+            (prefix, after.starts_with('(') || after.starts_with("::<"))
+        })
         .collect()
 }
 
-/// Where a `let` rebinds `name`: its own name, then from the end of its statement to
-/// the end of its block, cut short by a `use` that names `name` again.
+/// Where a `let` rebinds `name`: its own name, then its block after the statement, cut short
+/// by a `use` naming `name` again. An initializer naming `name` binds the item, so no shadow.
 fn shadowed_spans(
     code: &str,
     name: &str,
@@ -1047,6 +1058,9 @@ fn shadowed_spans(
         let Some(start) = statement_end else {
             continue;
         };
+        if word.is_match(&code[bound.end()..start]) {
+            continue;
+        }
         let reimport = imports
             .iter()
             .filter(|span| span.start > start && span.start < end)
@@ -1140,42 +1154,64 @@ fn guarded_item_violations(
                 ));
             }
         }
-        for (relative, used) in item_uses_by_file(&files, needle, &aliases) {
+        for (relative, (used, values)) in item_uses_by_file(&files, needle, &aliases) {
             if !owners.contains(&relative.as_str()) {
                 violations.push(format!("{relative}: {needle}"));
             } else if *budget != usize::MAX && used > *budget {
                 violations.push(format!("{relative}: {needle} used x{used} > {budget}"));
+            } else if *budget != usize::MAX && values > 0 {
+                // A budget counts calls; a function value could be called any number of times.
+                violations.push(format!("{relative}: {needle} taken as a value x{values}"));
             }
         }
     }
     violations
 }
 
-/// Uses of `needle` and its `aliases` in each file that names either.
+/// Uses of `needle` and its `aliases` per naming file, and how many take it as a value. An
+/// alias path that cannot be ruled out counts.
 fn item_uses_by_file(
     files: &BTreeMap<String, ScannedFile>,
     needle: &str,
     aliases: &[(String, String)],
-) -> BTreeMap<String, usize> {
+) -> BTreeMap<String, (usize, usize)> {
     let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(needle))).unwrap();
+    // Whether a path reaches `module`: it names it, names no scanned module, or names one
+    // that glob-imports it.
+    let reaches = |path: &[String], module: &[String]| {
+        path == module
+            || files
+                .values()
+                .find(|other| other.module == path)
+                .is_none_or(|other| other.sees_bare(files, false, module))
+    };
     let mut uses = BTreeMap::new();
     for (relative, file) in files {
-        let mut used = word_uses(&file.code, needle).len();
-        let mut named = file.code.contains(needle) && word.is_match(&file.code);
+        let mut sites = word_sites(&file.code, needle);
+        // A file names the item by a `use` or a use; a local binding of that name does not.
+        let imported = || {
+            use_spans(&file.code)
+                .iter()
+                .any(|at| word.is_match(&file.code[at.clone()]))
+        };
+        let mut named = !sites.is_empty() || (file.code.contains(needle) && imported());
         for (name, at) in aliases {
             let module = &files[at].module;
             let bare = file.sees_bare(files, at == relative, module);
-            let count = word_uses(&file.code, name)
-                .iter()
-                .filter(|prefix| {
-                    bare || (!prefix.is_empty() && resolve_path(files, file, prefix) == *module)
-                })
-                .count();
-            used += count;
-            named |= at == relative || count > 0;
+            let before = sites.len();
+            sites.extend(
+                word_sites(&file.code, name)
+                    .into_iter()
+                    .filter(|(prefix, _)| {
+                        let path = || resolve_path(files, file, prefix);
+                        bare || (!prefix.is_empty() && reaches(&path(), module))
+                    }),
+            );
+            named |= at == relative || sites.len() > before;
         }
         if named {
-            uses.insert(relative.clone(), used);
+            let values = sites.iter().filter(|(_, called)| !called).count();
+            uses.insert(relative.clone(), (sites.len(), values));
         }
     }
     uses
@@ -1437,6 +1473,7 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     const ITEMS: &[(&str, &[&str], usize)] = &[
         ("resolve_session_target", &[RESOLVE, ROOT], 0),
         ("resolve_target_host", &[RESOLVE], 1),
+        ("legacy_target_host", &[RESOLVE], 1),
         ("HostWitness", &[RESOLVE, ROOT], usize::MAX),
     ];
     const ALIAS: &str = "pub(crate) use self::resolve_session_target as target;\n";
@@ -1604,6 +1641,14 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
             "session_host.rs: resolve_session_target used x1 > 0",
         ),
         (
+            "a budgeted function taken as a value",
+            &[(
+                RESOLVE,
+                "fn f() { let g = legacy_target_host; g(); g(); }\n",
+            )],
+            "resolve.rs: legacy_target_host taken as a value x1",
+        ),
+        (
             "a let that reads the alias",
             &[
                 (ROOT, "fn a() { let target = target(); }\n"),
@@ -1658,8 +1703,6 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
-    // (file, calls there, why the call keeps the name)
-    type Listed = &'static [(&'static str, usize, &'static str)];
     const CALLS: &[(&str, Listed)] = &[
         (
             "record_termination_for_tmux",
@@ -1678,6 +1721,11 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                 ),
                 (
                     "src/services/discord/tmux_watcher/terminal_abort_exits.rs",
+                    1,
+                    MISSING,
+                ),
+                (
+                    "src/services/discord/watchers/lifecycle/restore.rs",
                     1,
                     MISSING,
                 ),
@@ -1723,12 +1771,30 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             ],
         ),
     ];
-    let sources = production_sources();
+    let violations = listed_call_violations(&production_sources(), CALLS);
+    assert!(
+        violations.is_empty(),
+        "name-only teardown calls: {violations:?}"
+    );
+}
+
+/// (file, calls there, why the call keeps the name)
+type Listed = &'static [(&'static str, usize, &'static str)];
+
+/// Each needle's calls per file against its list: an unlisted file, another count, a
+/// listed file with none, or the function taken as a value to call later all fail.
+fn listed_call_violations(
+    sources: &BTreeMap<String, String>,
+    calls: &[(&str, Listed)],
+) -> Vec<String> {
     let mut violations = Vec::new();
-    let files = scan_files(&sources, &mut violations);
-    for (needle, listed) in CALLS {
+    let files = scan_files(sources, &mut violations);
+    for (needle, listed) in calls {
         let uses = item_uses_by_file(&files, needle, &bindings(&files, needle));
-        for (relative, used) in &uses {
+        for (relative, (used, values)) in &uses {
+            if *values > 0 {
+                violations.push(format!("{relative}: {needle} taken as a value x{values}"));
+            }
             match listed.iter().find(|(file, ..)| file == relative) {
                 None => violations.push(format!("{relative}: unlisted {needle} x{used}")),
                 Some((_, count, why)) if count != used => violations.push(format!(
@@ -1744,9 +1810,127 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                 .map(|(file, count, _)| format!("{file}: {needle} listed x{count}, not found")),
         );
     }
-    assert!(
-        violations.is_empty(),
-        "name-only teardown calls: {violations:?}"
+    violations
+}
+
+// The list scan above runs on today's tree; these shapes reach a listed cleanup by a
+// fully qualified re-export or as a function value, and an unrelated closure does not.
+#[test]
+fn name_only_scan_follows_reexports_and_function_values() {
+    const COMMON: &str = "src/services/tmux_common.rs";
+    const FACADE: &str = "src/services/facade.rs";
+    const CALLER: &str = "src/services/caller.rs";
+    const CALLS: &[(&str, Listed)] = &[(
+        "cleanup_session_temp_files",
+        &[(COMMON, 1, "the one reviewed call")],
+    )];
+    let scan = |extra: &[(&str, &str)]| {
+        let mut sources: BTreeMap<String, String> = BTreeMap::from([(
+            COMMON.to_string(),
+            "pub(crate) fn cleanup_session_temp_files(n: &str) {}\n\
+             fn reviewed(n: &str) { cleanup_session_temp_files(n); }\n"
+                .to_string(),
+        )]);
+        for (file, text) in extra {
+            sources.entry(file.to_string()).or_default().push_str(text);
+        }
+        listed_call_violations(&sources, CALLS)
+    };
+    assert_eq!(scan(&[]), Vec::<String>::new());
+
+    type Extra = &'static [(&'static str, &'static str)];
+    let caught: &[(&str, Extra, &str)] = &[
+        (
+            "a fully qualified path through a re-exported module",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (
+                    FACADE,
+                    "pub(crate) use crate::services::tmux_common as cleanup_mod;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade::cleanup_mod::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "a fully qualified path through a glob re-export",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (FACADE, "pub(crate) use crate::services::tmux_common::*;\n"),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "an alias path that names no scanned module",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::gone::wipe(n); }\n",
+                ),
+            ],
+            "caller.rs: unlisted cleanup_session_temp_files x1",
+        ),
+        (
+            "the item rebound under its own name",
+            &[(
+                COMMON,
+                "fn again(n: &str) {\n\
+                 let cleanup_session_temp_files = crate::services::tmux_common::cleanup_session_temp_files;\n\
+                 cleanup_session_temp_files(n);\ncleanup_session_temp_files(n);\n}\n",
+            )],
+            "tmux_common.rs: cleanup_session_temp_files taken as a value x1",
+        ),
+        (
+            "a function pointer under another name",
+            &[(
+                CALLER,
+                "fn go(n: &str) { let f = crate::services::tmux_common::cleanup_session_temp_files; f(n); }\n",
+            )],
+            "caller.rs: cleanup_session_temp_files taken as a value x1",
+        ),
+        (
+            "a closure of the same name that calls the item",
+            &[(
+                COMMON,
+                "fn again(n: &str) {\n\
+                 let cleanup_session_temp_files = |n: &str| crate::services::tmux_common::cleanup_session_temp_files(n);\n\
+                 cleanup_session_temp_files(n);\n}\n",
+            )],
+            "tmux_common.rs: cleanup_session_temp_files x3, listed x1",
+        ),
+    ];
+    for (label, extra, expected) in caught {
+        let found = scan(extra);
+        assert!(
+            found.iter().any(|v| v.contains(expected)),
+            "{label}: expected {expected:?} in {found:?}"
+        );
+    }
+
+    let unrelated = "fn go(n: &str) {\n\
+         let cleanup_session_temp_files = |_: &str| ();\n\
+         cleanup_session_temp_files(n);\n}\n";
+    assert_eq!(
+        scan(&[(CALLER, unrelated)]),
+        Vec::<String>::new(),
+        "an unrelated local closure"
     );
 }
 

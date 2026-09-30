@@ -1438,6 +1438,7 @@ src/
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   └── rowless_receipt_tests.rs
 │   │   │   │   ├── empty_response_recovery/

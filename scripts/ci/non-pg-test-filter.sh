@@ -134,7 +134,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
   --skip services::discord::turn_bridge::resume_pin_tests
-  --skip services::discord::turn_bridge::retry_state::keyed_teardown_tests
+  --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
   --skip services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests

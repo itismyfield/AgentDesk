@@ -76,8 +76,8 @@ pub(crate) enum SessionTargetInput {
         token_hash: String,
         channel_id: u64,
     },
-    /// Raw name from a legacy compatibility API; it reaches a tmux or process host only
-    /// through a found sessions row with no hosted record, [`HostWitness::LegacyRow`].
+    /// Raw name from a legacy compatibility API. Like every input, it reaches a tmux or process
+    /// host only through a found sessions row with no hosted record, [`HostWitness::LegacyRow`].
     RawName(String),
 }
 
@@ -240,12 +240,13 @@ pub(crate) fn resolve_session_target(
     source: &dyn SessionTargetEvidenceSource,
 ) -> ResolvedSessionTarget {
     let evidence = source.read_evidence(&input);
-    let raw_name = matches!(input, SessionTargetInput::RawName(_));
+    // Every tmux or process answer needs a found row with no hosted record, whatever the
+    // input and whichever witness named the host.
     let host = match resolve_target_host(&evidence) {
         TargetHost::Known {
             kind: HostKind::Tmux | HostKind::Process,
             ..
-        } if raw_name && evidence.session_record != HostWitness::LegacyRow => {
+        } if evidence.session_record != HostWitness::LegacyRow => {
             TargetHost::Unknown(UnknownHost::NoHostEvidence)
         }
         host => host,
@@ -397,16 +398,14 @@ fn legacy_target_host(evidence: &SessionTargetEvidence, session_name: Option<&st
         runtime_kind_marker: evidence.runtime_kind_marker,
         process_registry_hit: evidence.process_registry_hit,
     };
-    // Only a found row with no hosted record proves the legacy reading, whatever the input.
-    let proven = evidence.session_record == HostWitness::LegacyRow;
     match (resolve_host_kind(legacy), session_name) {
-        (HostKindResolution::Known { kind, source }, Some(name)) if proven => TargetHost::Known {
+        (HostKindResolution::Known { kind, source }, Some(name)) => TargetHost::Known {
             kind,
             source: TargetSource::Legacy(source),
             name: name.to_string(),
         },
-        // A found row without any hosted trace keeps its pre-Herdr tmux reading.
-        (HostKindResolution::Unknown, Some(name)) if proven => TargetHost::Known {
+        // No host vote keeps the pre-Herdr tmux reading, still subject to the legacy-row check.
+        (HostKindResolution::Unknown, Some(name)) => TargetHost::Known {
             kind: HostKind::Tmux,
             source: TargetSource::SessionRecord,
             name: name.to_string(),
@@ -715,6 +714,7 @@ mod tests {
         let cases = [
             (
                 SessionTargetEvidence {
+                    session_record: HostWitness::LegacyRow,
                     inflight_locator: witness(HostKind::Tmux, Some("AgentDesk-codex-x")),
                     durable_runtime_kind: Some(R::CodexTui),
                     ..absent()
@@ -727,15 +727,17 @@ mod tests {
             ),
             (
                 SessionTargetEvidence {
-                    session_record: witness(HostKind::Process, Some("proc-1")),
+                    session_record: HostWitness::LegacyRow,
+                    inflight_locator: witness(HostKind::Process, Some("proc-1")),
                     durable_runtime_kind: Some(R::ProcessBackend),
                     process_registry_hit: true,
                     ..absent()
                 },
-                target(HostKind::Process, TargetSource::SessionRecord, "proc-1"),
+                target(HostKind::Process, TargetSource::InflightLocator, "proc-1"),
             ),
             (
                 named(SessionTargetEvidence {
+                    session_record: HostWitness::LegacyRow,
                     host_marker: witness(HostKind::Tmux, None),
                     durable_runtime_kind: Some(R::ClaudeTui),
                     ..absent()
@@ -972,6 +974,69 @@ mod tests {
             )
         );
         assert_eq!(resolved.legacy_ref(), Some(HostSessionRef::tmux(TUI_NAME)));
+    }
+
+    // Whatever the input, a marker, an inflight locator or a runtime vote names a tmux
+    // host only next to a found legacy row.
+    #[test]
+    fn every_input_needs_a_found_legacy_row_for_a_tmux_answer() {
+        let tmux = || HostWitness::Known {
+            kind: HostKind::Tmux,
+            target: Some(TUI_NAME.to_string()),
+        };
+        let canonical = SessionTargetInput::Canonical {
+            provider: "claude".to_string(),
+            token_hash: "h".to_string(),
+            channel_id: 1,
+        };
+        let raw = SessionTargetInput::RawName(TUI_NAME.to_string());
+        let records = [
+            HostWitness::LegacyRow,
+            HostWitness::Absent,
+            HostWitness::NoRow,
+            HostWitness::ReadFailed("closed pool".to_string()),
+        ];
+        for input in [key("claude/h/mac-mini:x"), canonical, raw] {
+            for record in &records {
+                let named = SessionTargetEvidence {
+                    session_name: Some(TUI_NAME.to_string()),
+                    session_record: record.clone(),
+                    ..absent()
+                };
+                let witnesses = [
+                    (
+                        "marker",
+                        SessionTargetEvidence {
+                            host_marker: tmux(),
+                            ..named.clone()
+                        },
+                    ),
+                    (
+                        "inflight locator",
+                        SessionTargetEvidence {
+                            inflight_locator: tmux(),
+                            ..named.clone()
+                        },
+                    ),
+                    (
+                        "runtime vote",
+                        SessionTargetEvidence {
+                            runtime_kind_marker: Some(R::LegacyTmuxWrapper),
+                            ..named
+                        },
+                    ),
+                ];
+                let proven = *record == HostWitness::LegacyRow;
+                for (witness, evidence) in witnesses {
+                    let resolved = resolve(input.clone(), evidence);
+                    let label = format!("{input:?} {record:?} {witness}");
+                    let tmux_ref = Some(HostSessionRef::tmux(TUI_NAME));
+                    assert_eq!(resolved.legacy_ref() == tmux_ref, proven, "{label}");
+                    let unknown = matches!(resolved.host, TargetHost::Unknown(_));
+                    assert_eq!(unknown, !proven, "{label}");
+                }
+            }
+        }
     }
 
     // Each sessions-row reading against the chain a consumer runs: resolve, then guard.

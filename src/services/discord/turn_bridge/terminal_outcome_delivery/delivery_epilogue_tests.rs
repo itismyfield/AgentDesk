@@ -17,6 +17,8 @@ use std::{
 use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::GatewayFuture};
 use tracing_subscriber::fmt::MakeWriter;
 
+#[cfg(all(test, unix))]
+mod recovery_retry_guard_tests;
 #[cfg(unix)]
 mod rowless_receipt_tests;
 

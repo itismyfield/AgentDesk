@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::services::discord::inflight::KeyedTeardown;
+use crate::services::discord::tmux_lifecycle::DispatchTmuxProtection;
+use crate::services::session_host::HostLiveness;
 use crate::services::tmux_common::{current_tmux_owner_marker, tmux_owner_path};
 
 pub(in crate::services::discord) fn session_belongs_to_current_runtime(
@@ -162,13 +165,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         restored_turn: Option<RestoredWatcherTurn>,
         thread_parent: Option<ThreadFollowUpParent>,
         codex_direct_resume_fallback: Option<codex_restore::DirectResumeFallback>,
-    }
-
-    // Dead sessions that need DB cleanup (idle status report + tmux kill)
-    struct DeadSessionCleanup {
-        channel_id: u64,
-        channel_name: String,
-        session_name: String,
     }
 
     let mut pending: Vec<PendingWatcher> = Vec::new();
@@ -446,25 +442,23 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
         }
 
-        if !probe_tmux_session_liveness(session_name).await {
+        let dead = DeadSessionCleanup::probe(channel_id.get(), &channel_name, session_name);
+        if let Some(dc) = dead.await {
             let ts = chrono::Local::now().format("%H:%M:%S");
+            let observed = dc.observed;
             if let Some(diag) = build_tmux_death_diagnostic(session_name, Some(&output_path)) {
                 tracing::info!(
-                    "  [{ts}] ⏭ watcher skip for {} — tmux pane dead ({diag})",
+                    "  [{ts}] ⏭ watcher skip for {} — tmux pane {observed:?} ({diag})",
                     session_name
                 );
             } else {
                 tracing::info!(
-                    "  [{ts}] ⏭ watcher skip for {} — tmux pane dead",
+                    "  [{ts}] ⏭ watcher skip for {} — tmux pane {observed:?}",
                     session_name
                 );
             }
             // Schedule DB cleanup + tmux kill for this dead session
-            dead_cleanups.push(DeadSessionCleanup {
-                channel_id: channel_id.get(),
-                channel_name: channel_name.clone(),
-                session_name: session_name.to_string(),
-            });
+            dead_cleanups.push(dc);
             continue;
         }
 
@@ -740,94 +734,16 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
     // Clean up dead sessions: report idle to DB and kill tmux sessions
     if !dead_cleanups.is_empty() {
-        let api_port = shared.api_port;
         let provider = shared.settings.read().await.provider.clone();
+        let effects = StartupDeadSessionEffects {
+            shared,
+            provider: &provider,
+        };
 
         let mut cleaned_dead_sessions = 0usize;
         for dc in &dead_cleanups {
-            let dispatch_protection =
-                super::super::super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-                    shared.pg_pool.as_ref(),
-                    &shared.token_hash,
-                    &provider,
-                    &dc.session_name,
-                    Some(&dc.channel_name),
-                );
-            let dispatch_failed_for_dead_session =
-                if let Some(protection) = dispatch_protection.as_ref() {
-                    super::super::super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
-                        api_port,
-                        protection,
-                        &dc.session_name,
-                        "tmux_startup",
-                    )
-                    .await
-                } else {
-                    false
-                };
-            let cleanup_plan = dead_session_cleanup_plan(
-                dispatch_protection.is_some() && !dispatch_failed_for_dead_session,
-            );
-
-            if let Some(protection) = dispatch_protection {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                if dispatch_failed_for_dead_session {
-                    tracing::warn!(
-                        "  [{ts}] tmux startup: failed active dispatch for dead session {} — {}",
-                        dc.session_name,
-                        protection.log_reason()
-                    );
-                } else {
-                    tracing::info!(
-                        "  [{ts}] ♻ tmux startup: preserving dispatch session {} — {}",
-                        dc.session_name,
-                        protection.log_reason()
-                    );
-                }
-            }
-
-            let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
-            let thread_channel_id =
-                super::super::super::adk_session::parse_thread_channel_id_from_name(
-                    &dc.channel_name,
-                );
-            let session_key = super::super::super::adk_session::build_namespaced_session_key(
-                &shared.token_hash,
-                &provider,
-                &tmux_name,
-            );
-            let agent_id =
-                resolve_role_binding(ChannelId::new(dc.channel_id), Some(&dc.channel_name))
-                    .map(|binding| binding.role_id);
-
-            if cleanup_plan.report_idle_status {
-                super::super::super::adk_session::post_adk_session_status(
-                    Some(&session_key),
-                    Some(&dc.channel_name),
-                    None,
-                    "idle",
-                    &provider,
-                    None,
-                    None,
-                    None,
-                    None,
-                    thread_channel_id,
-                    Some(ChannelId::new(dc.channel_id)),
-                    agent_id.as_deref(),
-                    api_port,
-                )
-                .await;
-            }
-
-            if cleanup_plan.preserve_tmux_session {
-                continue;
-            }
-
-            let pool = shared.pg_pool.as_ref();
-            let (channel_id, session_name) = (dc.channel_id, dc.session_name.as_str());
-            if kill_dead_startup_session(pool, &provider, channel_id, &session_key, session_name)
-                .await
-            {
+            let (pool, token_hash) = (shared.pg_pool.as_ref(), shared.token_hash.as_str());
+            if clean_dead_startup_session(pool, token_hash, &provider, dc, &effects).await {
                 cleaned_dead_sessions += 1;
             }
         }
@@ -849,41 +765,181 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
     }
 }
 
-/// Kills a dead session found at startup once the host guard admits it through the
-/// sessions row the idle report just upserted.
-async fn kill_dead_startup_session(
-    pool: Option<&sqlx::PgPool>,
-    provider: &ProviderKind,
+/// A tmux session found not live at startup, with the pane liveness that found it.
+struct DeadSessionCleanup {
     channel_id: u64,
-    session_key: &str,
-    session_name: &str,
+    channel_name: String,
+    session_name: String,
+    observed: HostLiveness,
+}
+
+impl DeadSessionCleanup {
+    /// A cleanup candidate unless the pane is live. A failed probe stays a candidate
+    /// with its answer, so the host guard keeps the session instead of reading it as dead.
+    async fn probe(channel_id: u64, channel_name: &str, session_name: &str) -> Option<Self> {
+        let probe = crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness;
+        let observed = HostLiveness::from(probe(session_name).await);
+        let marker = crate::services::tmux_common::session_dead_marker_path(session_name);
+        if observed != HostLiveness::Live {
+            let (channel_name, session_name) = (channel_name.into(), session_name.into());
+            return Some(Self {
+                channel_id,
+                channel_name,
+                session_name,
+                observed,
+            });
+        }
+        if std::path::Path::new(&marker).exists() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🧹 clearing stale .pane_dead marker for {session_name} — tmux session is alive"
+            );
+            let _ = std::fs::remove_file(&marker);
+        }
+        None
+    }
+}
+
+/// The dispatch failure and idle report a startup cleanup makes; tests record them.
+trait DeadSessionEffects {
+    fn dispatch_protection(&self, dc: &DeadSessionCleanup) -> Option<DispatchTmuxProtection>;
+    async fn fail_dispatch(&self, protection: &DispatchTmuxProtection, name: &str) -> bool;
+    async fn report_idle(&self, dc: &DeadSessionCleanup, session_key: &str);
+}
+
+struct StartupDeadSessionEffects<'a> {
+    shared: &'a SharedData,
+    provider: &'a ProviderKind,
+}
+
+impl DeadSessionEffects for StartupDeadSessionEffects<'_> {
+    fn dispatch_protection(&self, dc: &DeadSessionCleanup) -> Option<DispatchTmuxProtection> {
+        super::super::super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+            self.shared.pg_pool.as_ref(),
+            &self.shared.token_hash,
+            self.provider,
+            &dc.session_name,
+            Some(&dc.channel_name),
+        )
+    }
+
+    async fn fail_dispatch(&self, protection: &DispatchTmuxProtection, name: &str) -> bool {
+        let api_port = self.shared.api_port;
+        super::super::super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
+            api_port,
+            protection,
+            name,
+            "tmux_startup",
+        )
+        .await
+    }
+
+    async fn report_idle(&self, dc: &DeadSessionCleanup, session_key: &str) {
+        let thread_channel_id =
+            super::super::super::adk_session::parse_thread_channel_id_from_name(&dc.channel_name);
+        let agent_id = resolve_role_binding(ChannelId::new(dc.channel_id), Some(&dc.channel_name))
+            .map(|binding| binding.role_id);
+        super::super::super::adk_session::post_adk_session_status(
+            Some(session_key),
+            Some(&dc.channel_name),
+            None,
+            "idle",
+            self.provider,
+            None,
+            None,
+            None,
+            None,
+            thread_channel_id,
+            Some(ChannelId::new(dc.channel_id)),
+            agent_id.as_deref(),
+            self.shared.api_port,
+        )
+        .await;
+    }
+}
+
+/// Cleans one session found dead at startup. The host guard reads the rows as stored
+/// before the dispatch failure, the idle report or the kill; a refusal skips all three.
+async fn clean_dead_startup_session(
+    pool: Option<&sqlx::PgPool>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    dc: &DeadSessionCleanup,
+    effects: &impl DeadSessionEffects,
 ) -> bool {
-    let session = crate::services::discord::inflight::clear_channel_session(
+    let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
+    let session_key = super::super::super::adk_session::build_namespaced_session_key(
+        token_hash, provider, &tmux_name,
+    );
+    let (key, name) = (Some(session_key.as_str()), dc.session_name.as_str());
+    let caller = "startup_dead_session";
+    let teardown = crate::services::discord::inflight::keyed_teardown(
         pool,
         provider,
-        channel_id,
-        Some(session_key),
-        session_name,
-        "startup_dead_session",
-    )
-    .await;
-    let Some(session) = session else {
+        dc.channel_id,
+        key,
+        name,
+        Some(dc.observed),
+        caller,
+    );
+    let teardown = teardown.await;
+    if matches!(teardown, KeyedTeardown::Kept) {
         return false;
+    }
+    let dispatch_protection = effects.dispatch_protection(dc);
+    let dispatch_failed_for_dead_session = match dispatch_protection.as_ref() {
+        Some(protection) => effects.fail_dispatch(protection, name).await,
+        None => false,
     };
+    let cleanup_plan = dead_session_cleanup_plan(
+        dispatch_protection.is_some() && !dispatch_failed_for_dead_session,
+    );
+
+    if let Some(protection) = dispatch_protection {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        if dispatch_failed_for_dead_session {
+            tracing::warn!(
+                "  [{ts}] tmux startup: failed active dispatch for dead session {} — {}",
+                name,
+                protection.log_reason()
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] ♻ tmux startup: preserving dispatch session {} — {}",
+                name,
+                protection.log_reason()
+            );
+        }
+    }
+
+    if cleanup_plan.report_idle_status {
+        effects.report_idle(dc, &session_key).await;
+    }
+    if cleanup_plan.preserve_tmux_session {
+        return false;
+    }
+
+    // Kill the dead tmux session; one with no sessions row keeps main's name-only audit.
+    let name = name.to_string();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::services::termination_audit::record_termination_for_cleared(
-            &session,
-            None,
-            "tmux_startup",
-            "startup_dead_session",
-            Some("startup cleanup: dead session"),
-            None,
-        );
-        record_tmux_exit_reason(session.name(), "startup cleanup: dead session");
-        crate::services::platform::tmux::kill_session(
-            session.name(),
-            "startup cleanup: dead session",
-        );
+        let reason = "startup cleanup: dead session";
+        let (component, code) = ("tmux_startup", "startup_dead_session");
+        use crate::services::termination_audit as audit;
+        match &teardown {
+            KeyedTeardown::Cleared(session) => audit::record_termination_for_cleared(
+                session,
+                None,
+                component,
+                code,
+                Some(reason),
+                None,
+            ),
+            KeyedTeardown::RowMissing | KeyedTeardown::Kept => {
+                audit::record_termination_for_tmux(&name, None, component, code, Some(reason), None)
+            }
+        }
+        record_tmux_exit_reason(&name, reason);
+        crate::services::platform::tmux::kill_session(&name, reason);
     })
     .await;
     true
@@ -920,48 +976,98 @@ pub(super) fn add_configured_channel_bindings(
 
 #[cfg(test)]
 mod keyed_teardown_tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
-    use crate::services::discord::inflight::seed_session_row;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, owner, record, wire};
+    use crate::services::discord::adk_session::build_namespaced_session_key;
+    use crate::services::discord::inflight::seed_session_row_keyed;
+    use crate::services::platform::tmux::PaneLiveness::{DeadOrAbsent, ProbeError};
+    use crate::services::tmux_diagnostics::PaneLivenessOverrideGuard;
 
-    // A dead session found at startup is killed only when its key finds a legacy row.
+    /// Protects every session with an active dispatch and records what main would change.
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<&'static str>>);
+
+    impl DeadSessionEffects for Recorded {
+        fn dispatch_protection(&self, _dc: &DeadSessionCleanup) -> Option<DispatchTmuxProtection> {
+            Some(DispatchTmuxProtection::SessionRow {
+                dispatch_id: "p4c3w1-dispatch".to_string(),
+                session_status: "turn_active".to_string(),
+                dispatch_status: "dispatched".to_string(),
+            })
+        }
+
+        async fn fail_dispatch(&self, _protection: &DispatchTmuxProtection, _name: &str) -> bool {
+            self.0.lock().unwrap().push("fail_dispatch");
+            true
+        }
+
+        async fn report_idle(&self, _dc: &DeadSessionCleanup, _session_key: &str) {
+            self.0.lock().unwrap().push("idle");
+        }
+    }
+
+    // A session found not live at startup: the guard reads the rows as stored before the
+    // dispatch failure, the idle report or the kill, and a refusal skips all three.
     #[tokio::test]
-    async fn startup_cleanup_kills_only_a_session_the_host_guard_admits_pg() {
+    async fn startup_cleanup_runs_only_after_the_host_guard_admits_the_stored_rows_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
+        let claude = ProviderKind::Claude;
+        let channel = |n: u64| 1_479_671_301_387_059_600 + n;
+        let tmux = |channel_name: &str| claude.build_tmux_session_name(channel_name);
+        let key =
+            |channel_name: &str| build_namespaced_session_key(TOKEN, &claude, &tmux(channel_name));
         let bound = wire(&record(
-            &owner("1479671301387059602"),
+            &owner(&channel(2).to_string()),
             "n1",
             HostedState::Bound,
         ));
-        let legacy = seed_session_row(&pool, "p4c3w1-start-legacy", 1479671301387059601, None);
-        let legacy = legacy.await;
-        let bound = seed_session_row(
-            &pool,
-            "p4c3w1-start-bound",
-            1479671301387059602,
-            Some(bound),
+        for (channel_name, n, raw) in [
+            ("p4c3w1-start-legacy", 1, None),
+            ("p4c3w1-start-bound", 2, Some(bound)),
+            ("p4c3w1-start-probe", 3, None),
+        ] {
+            seed_session_row_keyed(&pool, &key(channel_name), channel(n), raw).await;
+        }
+        let marker = crate::services::tmux_common::session_temp_path(
+            &tmux("p4c3w1-start-missing-herdr"),
+            "host_kind",
         );
-        let bound = bound.await;
-        let missing = legacy.replace("legacy", "missing");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, "herdr").unwrap();
+
+        // (channel name, channel, pane liveness, cleaned in main's order)
         let cases = [
-            (legacy.as_str(), "p4c3w1-start-legacy", 601, true),
-            (bound.as_str(), "p4c3w1-start-bound", 602, false),
-            (missing.as_str(), "p4c3w1-start-missing", 603, false),
+            ("p4c3w1-start-legacy", 1, DeadOrAbsent, true),
+            ("p4c3w1-start-bound", 2, DeadOrAbsent, false),
+            ("p4c3w1-start-probe", 3, ProbeError, false),
+            // No row before the idle report: main's name-only cleanup, unless a trace says otherwise.
+            ("p4c3w1-start-missing", 4, DeadOrAbsent, true),
+            ("p4c3w1-start-missing-herdr", 5, DeadOrAbsent, false),
+            ("p4c3w1-start-missing-probe", 6, ProbeError, false),
         ];
-        for (key, name, channel, killed) in cases {
-            let channel_id = 1479671301387059000 + channel;
-            let claude = ProviderKind::Claude;
-            let cleaned = kill_dead_startup_session(Some(&pool), &claude, channel_id, key, name);
-            assert_eq!(cleaned.await, killed, "{name}");
-            let exit_reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
-            assert_eq!(
-                std::path::Path::new(&exit_reason).exists(),
-                killed,
-                "{name}"
-            );
+        for (channel_name, n, liveness, cleaned) in cases {
+            let session_name = tmux(channel_name);
+            let _pane = PaneLivenessOverrideGuard::set(&session_name, liveness);
+            let dc = DeadSessionCleanup::probe(channel(n), channel_name, &session_name);
+            let dc = dc.await.expect("a pane that is not live is a candidate");
+            let effects = Recorded::default();
+            let done = clean_dead_startup_session(Some(&pool), TOKEN, &claude, &dc, &effects);
+            assert_eq!(done.await, cleaned, "{channel_name}");
+            let changed: &[&str] = if cleaned {
+                &["fail_dispatch", "idle"]
+            } else {
+                &[]
+            };
+            assert_eq!(*effects.0.lock().unwrap(), changed, "{channel_name}");
+            let exit_reason =
+                crate::services::tmux_common::session_temp_path(&session_name, "exit_reason");
+            let killed = std::path::Path::new(&exit_reason).exists();
+            assert_eq!(killed, cleaned, "{channel_name}");
         }
         pool.close().await;
         db.drop().await;

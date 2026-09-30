@@ -11,9 +11,13 @@ mod destructive_commit;
 mod finalizer_identity;
 mod host_locator;
 mod host_recovery_guard;
-pub(in crate::services::discord) use host_recovery_guard::clear_channel_session;
 #[cfg(test)]
-pub(in crate::services::discord) use host_recovery_guard::keyed_tests::seed_session_row;
+pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
+    seed_session_row, seed_session_row_keyed,
+};
+pub(in crate::services::discord) use host_recovery_guard::{
+    KeyedTeardown, clear_channel_session, keyed_teardown,
+};
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
