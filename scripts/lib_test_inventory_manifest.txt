@@ -6841,6 +6841,7 @@ services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_pending_b_is_bound_by_the_pass_when_launch_a_never_existed
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_resolved_b_stays_bound_over_launch_a_on_every_later_pass
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_restored_b_whose_channel_mapping_expired_still_logs_and_adopts_a_file_less_c
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_restored_b_whose_runtime_binding_lapsed_refuses_a_file_less_c_until_the_pass_rebinds_it
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_restored_b_whose_transcript_is_unreadable_still_refuses_the_next_session
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_seeded_pane_keeps_its_channel_and_refuses_a_file_less_c_until_the_pass_restores_it
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_alias_conflict_keeps_original_pane_unready
