@@ -811,11 +811,12 @@ fn herdr_items_have_no_production_caller() {
         "HerdrSocketTransport::new(",
         "HerdrSocketTransport::<",
     ];
-    // Nothing writes a host locator or `.host_kind` marker; only their owners and the
-    // dormant guard adapter read one. The termination owner holds a locator only as a warrant's target.
+    // Nothing writes a host locator or `.host_kind` marker; only their owners, the guard
+    // adapter and the cleanup gate read one. Termination holds a locator only as a target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
     const MARKER: &str = "src/services/tmux_common/host_marker.rs";
     const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
+    const CLEANUP_GATE: &str = "src/db/dispatched_sessions/hosted_execution.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -831,9 +832,9 @@ fn herdr_items_have_no_production_caller() {
             ],
         ),
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
-        ("HostKindMarker", &[MARKER, GUARD_ADAPTER]),
-        ("read_host_kind_marker", &[MARKER]),
-        ("host_marker::", &[GUARD_ADAPTER]),
+        ("HostKindMarker", &[MARKER, GUARD_ADAPTER, CLEANUP_GATE]),
+        ("read_host_kind_marker", &[MARKER, CLEANUP_GATE]),
+        ("host_marker::", &[GUARD_ADAPTER, CLEANUP_GATE]),
         (".host_locator", &[GUARD_ADAPTER]),
         ("host_locator: Some", &[]),
         ("host_locator:", &[INFLIGHT_MODEL, GUARD_ADAPTER]),

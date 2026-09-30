@@ -665,6 +665,11 @@
       "path": "migrations/postgres/0130_machine_resource_samples.sql",
       "sha256": "65a8926e026238fbabe1de241119208ff5448705b26f8c0a2308a85fa513a387",
       "version": 130
+    },
+    {
+      "path": "migrations/postgres/0131_sessions_hosted_execution.sql",
+      "sha256": "48b3814552340658f95f27ec23ee689a8af8a0a8c803bb419b44594e1b30d76d",
+      "version": 131
     }
   ],
   "version": 1
