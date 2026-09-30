@@ -82,15 +82,15 @@ pub(super) async fn handle_recovery_retry(
                 user_msg_id,
                 user_text_owned.clone(),
             );
+            // Only a queued retry replaces the placeholder with the continue notice.
+            let _ = gateway
+                .edit_message(
+                    channel_id,
+                    current_msg_id,
+                    "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
+                )
+                .await;
         }
-        // Replace placeholder with recovery notice (don't delete — avoids visual gap)
-        let _ = gateway
-            .edit_message(
-                channel_id,
-                current_msg_id,
-                "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
-            )
-            .await;
         full_response = String::new();
         }
     }

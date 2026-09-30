@@ -138,6 +138,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
+  --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
   --skip services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
   --skip services::dispatches::wait_queue::tests
@@ -466,6 +467,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_returns_marker_recorded_voice_channel
   services::discord::turn_bridge::voice_completion::voice_completion_tests::handoff_prompt_classification_requires_typed_marker
   services::discord::turn_bridge::voice_completion::voice_completion_tests::recognizes_voice_background_handoff_via_typed_marker
+  services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
   services::discord::voice_barge_in::tests::background_handoff_refuses_publish_when_pg_reservation_fails
   services::dispatches::wait_queue::tests::wait_timeout_uses_wait_started_at
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, LegacyDispatchKind, ProviderKind};
+use crate::services::provider_teardown::TeardownClearance;
 use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
@@ -23,6 +24,8 @@ pub(super) struct StreamingTurn<'a> {
     pub cancel: Arc<CancelToken>,
     pub remote_profile: Option<&'a RemoteProfile>,
     pub tmux_session_name: Option<&'a str>,
+    /// Host-guard verdict for the turn's tmux teardowns, judged before spawn.
+    pub teardown: Option<&'a TeardownClearance>,
     pub channel_id: u64,
     pub model: Option<&'a str>,
     pub native_fast_mode: Option<bool>,
@@ -66,6 +69,7 @@ pub(super) fn execute(
             Some(turn.cancel),
             turn.remote_profile,
             turn.tmux_session_name,
+            turn.teardown,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
             turn.model,
@@ -85,6 +89,7 @@ pub(super) fn execute(
             Some(turn.cancel),
             turn.remote_profile,
             turn.tmux_session_name,
+            turn.teardown,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
             turn.model,
@@ -192,6 +197,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             remote_profile: None,
             tmux_session_name: None,
+            teardown: None,
             channel_id: 42,
             model: Some("configured-model"),
             native_fast_mode: None,
