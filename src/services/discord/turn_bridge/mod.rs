@@ -162,7 +162,7 @@ use current_message_anchor::{
 };
 use guards::{make_bridge_guards, resolve_guard_owner_channel};
 use headless_delivery::{
-    cleanup_headless_streaming_placeholder_after_delivery, enqueue_headless_delivery,
+    cleanup_headless_streaming_placeholder_after_delivery, enqueue_claimed_headless_delivery,
     is_synthetic_headless_message_id,
 };
 use memory_lifecycle::{

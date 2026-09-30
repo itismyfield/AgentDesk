@@ -52,3 +52,18 @@ pub(super) async fn claimed_send<T, F: std::future::Future<Output = Result<T, St
 ) -> Result<T, String> {
     cutover::BodySend::flatten(cutover::claim_then_send(claim, send).await)
 }
+
+/// The transport's own result, or `None` when O owns the channel or its identity is held and
+/// nothing was sent.
+pub(in crate::services::discord::turn_bridge) async fn sent_under<T, F>(
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    match cutover::claim_then_send(claim, send).await {
+        Ok(cutover::BodySend::Sent(sent)) => Some(sent),
+        Ok(cutover::BodySend::OwnedByO) | Err(_) => None,
+    }
+}

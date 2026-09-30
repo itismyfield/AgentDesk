@@ -316,17 +316,14 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     )
                     .await;
                 } else {
-                    // #3805 P1: capture the tail continuation chunk (id +
-                    // its own text) so the completion footer re-anchors onto
-                    // it instead of stranding on the edited chunk 0.
+                    // Capture the tail continuation chunk (id and text) so the completion
+                    // footer re-anchors onto it instead of the edited chunk 0.
                     let expected_transcript = crate::services::discord::outbound::delivery_record::capture_edit_failure_transcript_identity(
                         shared,
                         tmux_session_name,
                     );
                     let mut last_chunk_anchor = None;
-                    // #5071 T1 S3a: receipt for whichever message each arm records
-                    // as its anchor — tail continuation on edit, first chunk on
-                    // the edit-failure fallback.
+                    // Receipt of each arm's anchor: tail chunk on edit, first chunk on fallback.
                     let mut edit_anchor_receipt = None;
                     let (anchor, receipt) = (&mut last_chunk_anchor, &mut edit_anchor_receipt);
                     let text = relay_text.as_str();
@@ -340,8 +337,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     let Ok(BodySend::Sent(replace_outcome)) =
                         claim_then_send(body_claim, replace).await
                     else {
-                        // Nothing was sent: O owns the channel or its identity is held.
-                        return false;
+                        return false; // Nothing sent: O owns the channel or its identity is held.
                     };
                     enum WatcherDeferredReplaceOutcome {
                         Replace(ReplaceLongMessageOutcome),
@@ -686,10 +682,8 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     watcher_lease_turn.user_msg_id,
                     watcher_lease_start,
                 );
-                // The rollback sender makes chunk failure all-or-nothing
-                // before a rewind. A timeout after Discord accepts a POST
-                // is still inherently ambiguous, so classification and the
-                // attempt cap below remain the backstop.
+                // The rollback sender makes chunk failure all-or-nothing before a rewind; an
+                // accepted POST that times out stays ambiguous, left to the attempt cap below.
                 let send = || {
                     crate::services::discord::formatting::send_long_message_raw_with_reference_rollback_returning_receipts(
                         &http,
@@ -701,8 +695,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     )
                 };
                 let Ok(BodySend::Sent(sent)) = claim_then_send(body_claim, send).await else {
-                    // Nothing was sent: O owns the channel or its identity is held.
-                    return false;
+                    return false; // Nothing was sent: O owns the channel or its identity is held.
                 };
                 match sent.and_then(|receipts| {
                     crate::services::discord::formatting::message_ids_from_receipts(
@@ -716,14 +709,8 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         external_input_lease_consumed_by_relay =
                             external_input_lease_before_relay || prompt_anchor.is_some();
                         direct_send_delivered = true;
-                        // #4911 R10: the placeholderless fresh send is a
-                        // confirmed terminal delivery like the edit arms, so
-                        // it must carry a delivery proof. Without it the
-                        // outer commit takes the proof-less
-                        // `AdvancedWithoutProof` branch: the frontier moves
-                        // but no DeliveredCommit / receipt / ledger entry /
-                        // #4081 fingerprint is written, which is exactly the
-                        // missing-fingerprint precondition #4911 replays on.
+                        // A confirmed fresh send carries a delivery proof like the edit arms;
+                        // without one the commit advances with no receipt or fingerprint.
                         *watcher_terminal_delivery_proof =
                             Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
                                 anchor_msg_id: message_ids.last().copied(),

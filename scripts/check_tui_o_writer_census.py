@@ -313,7 +313,11 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/stream_tick.rs": ("W14", "CUT_D"),
     "turn_bridge/terminal_controller_cutover.rs": ("W10b-c", "COV:W10"),
     "turn_bridge/terminal_delivery.rs": ("W10d", "COV:W10"),
-    "turn_bridge/terminal_outcome_delivery.rs": ("W10", "CUT_D"),
+    "turn_bridge/terminal_outcome_delivery.rs": (
+        "W10",
+        "CUT_D",
+        "turn_bridge/terminal_controller_cutover/o_body.rs",
+    ),
     "turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": ("W11", "CUT_D"),
     "turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": ("W13", "CUT_D"),
     "turn_bridge/terminal_outcome_delivery/recovery_retry.rs": ("W18", "KEEP_NONBODY"),
@@ -395,6 +399,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/tmux_watcher/terminal_long_chunks.rs": (
         "apply_watcher_long_chunks_legacy:claim",
     ),
+    "src/services/discord/turn_bridge/headless_delivery.rs": (
+        "enqueue_claimed_headless_delivery:claim",
+    ),
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": (
         "handle_watcher_runtime_handoff:peek",
     ),
@@ -410,11 +417,10 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
         "bridge_o_body_peek_decision:peek",
         "claimed_send:claim",
+        "sent_under:claim",
     ),
     "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": (
         "run_terminal_outcome_delivery:peek",
-        "run_terminal_outcome_delivery:claim",
-        "run_terminal_outcome_delivery:claim",
     ),
     "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": (
         "handle_cancel_prompt_replace:peek",
