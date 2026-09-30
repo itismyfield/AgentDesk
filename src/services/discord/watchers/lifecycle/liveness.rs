@@ -95,25 +95,11 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
     shared: &Arc<SharedData>,
     tmux_session_name: &str,
     output_path: &str,
-    watcher_provider: &ProviderKind,
+    _watcher_provider: &ProviderKind,
     prompt_too_long_killed: bool,
     terminal_delivery_observed: bool,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
-    // The host guard runs before the cancel tombstone is consumed or a restart is handed off.
-    let (channel, dead) = (channel_id.get(), SessionLiveness::Missing);
-    let caller = "watcher_observed_death";
-    let admitted = host_liveness::admits_tmux_verdict(
-        shared,
-        watcher_provider,
-        channel,
-        tmux_session_name,
-        dead,
-        caller,
-    );
-    if !admitted.await {
-        return;
-    }
     let diagnostic = build_tmux_death_diagnostic(tmux_session_name, Some(output_path));
     if let Some(diag) = diagnostic.as_deref() {
         tracing::info!(

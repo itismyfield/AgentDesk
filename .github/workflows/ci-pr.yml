@@ -337,7 +337,6 @@ jobs:
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
-              - 'src/services/discord/watchers/lifecycle/liveness_tests.rs'
               - 'src/services/discord/watchers/lifecycle/restore.rs'
               - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
               - 'src/services/dispatches/discord_delivery/guard.rs'

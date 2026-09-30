@@ -134,7 +134,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_delivery_custody::pg_tests
   --skip services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
-  --skip services::discord::tmux::watcher_lifecycle::liveness::tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
   --skip services::discord::tmux_reaper::host_guard_tests
@@ -481,7 +480,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::task_notification_delivery::tests::transient_edit_never_falls_back_to_fresh_post
   services::discord::task_notification_delivery::tests::unavailable_pinned_bot_releases_lease_for_immediate_retry
   services::discord::task_notification_delivery::tests::xml_and_stream_json_share_semantic_key_and_nonce_is_bounded
-  services::discord::tmux::watcher_lifecycle::liveness::tests::watcher_probe_reads_dead_only_on_a_confirmed_tmux_death
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
