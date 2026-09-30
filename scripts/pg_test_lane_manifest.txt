@@ -34,6 +34,7 @@ src/engine/ops/config_ops.rs
 src/engine/ops/db_ops.rs
 src/engine/ops/kanban_ops.rs
 src/engine/ops/message_ops.rs
+src/engine/ops/timeouts_ops/host_repair_tests.rs
 src/github/sync.rs
 src/high_risk_recovery.rs
 src/reconcile.rs
@@ -176,6 +177,7 @@ engine::ops::config_ops::tests
 engine::ops::db_ops::tests
 engine::ops::kanban_ops::tests
 engine::ops::message_ops::tests
+engine::ops::timeouts_ops::host_repair::tests
 github::sync::terminal_open_alert_tests
 high_risk_recovery
 reconcile::dispatch_delivery_reconcile_tests
@@ -623,6 +625,12 @@ engine::ops::kanban_ops::tests::set_status_raw_pg_blocks_when_review_entered_at_
 engine::ops::kanban_ops::tests::set_status_raw_pg_matches_intent_reference_across_matrix
 engine::ops::kanban_ops::tests::set_status_raw_pg_windows_rework_over_stale_pass
 engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
+engine::ops::timeouts_ops::host_repair::tests::legacy_row_repairs_match_the_base_policy_writes_pg
+engine::ops::timeouts_ops::host_repair::tests::non_legacy_rows_defer_without_probe_write_or_tmux_command_pg
+engine::ops::timeouts_ops::host_repair::tests::repair_after_a_new_turn_on_the_same_row_writes_nothing_pg
+engine::ops::timeouts_ops::host_repair::tests::repair_after_the_row_changed_since_observation_writes_nothing_pg
+engine::ops::timeouts_ops::host_repair::tests::section_i_defers_herdr_rows_and_repairs_legacy_rows_pg
+engine::ops::timeouts_ops::host_repair::tests::session_command_api_reaches_tmux_only_for_legacy_rows_pg
 github::sync::terminal_open_alert_tests::enqueue_terminal_open_alert_pg_dedupes_within_ttl
 github::sync::terminal_open_alert_tests::pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window
 github::sync::terminal_open_alert_tests::pg_stale_candidate_selection_excludes_custom_terminal_status

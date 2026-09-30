@@ -61,6 +61,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/auto_queue/tests.rs",
         "src/engine/ops/exec_ops/exec_allowlist_tests.rs",
         "src/engine/ops/exec_ops/session_liveness_tests.rs",
+        "src/engine/ops/timeouts_ops/host_repair_tests.rs",
         "src/services/platform/tmux/liveness/tests.rs",
         "src/services/cluster/intake_router_hook/edge_case_tests.rs",
         "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
