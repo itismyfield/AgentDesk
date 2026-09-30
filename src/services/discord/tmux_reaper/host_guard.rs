@@ -14,7 +14,6 @@ use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tm
 use crate::services::session_host::{
     HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
 };
-use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
 /// Host verdict the stale-busy heal takes before its first probe; `true` lets it go on.
 pub(super) type HostGate = dyn for<'a> Fn(&'a Arc<SharedData>, &'a ProviderKind, ChannelId, &'a str) -> Admits<'a>
@@ -103,10 +102,10 @@ async fn routine_owned_session_key(
     })
 }
 
-/// Kills the listed session of one completed unified-thread run once the host guard
-/// admits it; the thread channel keys its sessions row and inflight row.
-pub(super) async fn kill_unified_thread_session(
-    shared: &Arc<SharedData>,
+/// The listed session of one completed unified-thread run, once the host guard admits
+/// it; the thread channel keys its sessions row and inflight row.
+pub(super) async fn unified_thread_target(
+    shared: &SharedData,
     thread_channel_id: &str,
     names: &[String],
 ) -> Option<String> {
@@ -119,20 +118,9 @@ pub(super) async fn kill_unified_thread_session(
     let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
     let name = names
         .iter()
-        .find(|name| name.starts_with(&prefix) && name.ends_with(&full_suffix))?
-        .clone();
-    let (provider, _) = parse_provider_and_channel_from_tmux_name(&name)?;
+        .find(|name| name.starts_with(&prefix) && name.ends_with(&full_suffix))?;
+    let (provider, _) = parse_provider_and_channel_from_tmux_name(name)?;
     let channel_id = thread_channel_id.parse::<u64>().ok()?;
-    let gate = shared_teardown(shared, &provider, channel_id, &name, None, "unified_kill");
-    if matches!(gate.await, KeyedTeardown::Kept) {
-        return None;
-    }
-    let target = name.clone();
-    tokio::task::spawn_blocking(move || {
-        record_tmux_exit_reason(&target, "unified-thread run completed");
-        crate::services::platform::tmux::kill_session(&target, "unified-thread run completed");
-    })
-    .await
-    .ok()?;
-    Some(name)
+    let gate = shared_teardown(shared, &provider, channel_id, name, None, "unified_kill");
+    (!matches!(gate.await, KeyedTeardown::Kept)).then(|| name.clone())
 }

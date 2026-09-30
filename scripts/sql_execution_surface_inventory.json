@@ -27860,6 +27860,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/tmux_reaper/host_guard.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4b0a92230a768514c9b6f8f3b1340a927102313f892c12360b85f97dd9cf4f3f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/tmux_restart_handoff.rs",
       "api": "sqlx::query",
       "symbol": "query",

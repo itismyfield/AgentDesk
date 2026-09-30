@@ -14,8 +14,7 @@ use crate::services::tmux_diagnostics::{
     probe_tmux_session_pane_liveness, record_tmux_exit_reason,
 };
 use host_guard::{
-    HostGate, keyed_host_gate, kill_unified_thread_session, routine_teardown,
-    tmux_session_not_missing,
+    HostGate, keyed_host_gate, routine_teardown, tmux_session_not_missing, unified_thread_target,
 };
 
 /// The final race gate for stale-busy recovery. The first mailbox identity is
@@ -1577,4 +1576,21 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
             );
         }
     }
+}
+
+/// Kills the listed session of one completed unified-thread run the host guard admits.
+async fn kill_unified_thread_session(
+    shared: &Arc<SharedData>,
+    thread_channel_id: &str,
+    names: &[String],
+) -> Option<String> {
+    let name = unified_thread_target(shared, thread_channel_id, names).await?;
+    let target = name.clone();
+    tokio::task::spawn_blocking(move || {
+        record_tmux_exit_reason(&target, "unified-thread run completed");
+        crate::services::platform::tmux::kill_session(&target, "unified-thread run completed");
+    })
+    .await
+    .ok()?;
+    Some(name)
 }

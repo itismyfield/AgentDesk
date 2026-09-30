@@ -1244,6 +1244,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
+│   │   ├── tmux_reaper/
+│   │   │   └── host_guard.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1604,6 +1606,7 @@ src/
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
+│   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_recap.rs
