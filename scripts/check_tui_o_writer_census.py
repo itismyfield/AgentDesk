@@ -21,9 +21,9 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
   (d) A claim is the `claim_then_send` helper, which claims just before the
       send it runs; its closure is the transport call alone. `claim_at_post`
       wraps a task-response transport so each chunk post claims that way. A
-      raw claim (a claiming gate fn, or under tui_o any `.claim(`/`::claim(`)
-      may appear only in the RAW_CLAIM_SITES functions, each listed with its
-      reason.
+      raw claim (a claiming gate fn, or under tui_o any `.claim(` call or
+      `::claim` path) may appear only in the RAW_CLAIM_SITES functions, each
+      listed with its reason.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -74,10 +74,10 @@ PRIMITIVES: dict[str, str] = {
 _OWNS = r"o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?"
 _RAW_CLAIM = rf"\b{_OWNS}\b|\bcandidate\s*\.\s*claim\s*\("
 RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
-# `Candidate::claim` is visible only under tui_o, so there every `.claim(` or `::claim(` counts,
-# whatever the receiver, chain or path it is reached through.
+# `Candidate::claim` is visible only under tui_o, so there every `.claim(` call and every
+# `::claim` path counts, whatever the receiver or chain, and whether called or taken as a value.
 TUI_O_ROOT = "src/services/tui_o/"
-TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|(?:\.|::)\s*claim\s*\(")
+TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*claim\s*\(|::\s*claim\b")
 GATE_RES = {
     "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send\b|\bclaim_at_post\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),

@@ -154,6 +154,8 @@ class CensusGateTests(unittest.TestCase):
             "adoption.claim(ch);",
             "snapshot.candidate(ch).unwrap().claim(ch);",
             "Candidate::claim(&adoption, ch);",
+            "let invoke = Candidate::claim; invoke(&adoption, ch);",
+            "channels.map(Candidate::claim);",
         ):
             with self.subTest(raw=raw):
                 self.write("src/services/tui_o/early.rs", f"fn early(ch: u64) {{ {raw} }}\n")
