@@ -336,6 +336,7 @@ src/
 │   │   │   ├── reviews.rs
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
+│   │   │   ├── host_guard_tests.rs
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
@@ -814,6 +815,8 @@ src/
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
+│   │   ├── host_teardown_gate/
+│   │   │   └── test_support.rs
 │   │   ├── idle_recap/
 │   │   │   ├── card.rs
 │   │   │   ├── context_display.rs
@@ -1245,7 +1248,8 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_reaper/
-│   │   │   └── host_guard.rs
+│   │   │   ├── host_guard.rs
+│   │   │   └── host_guard_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
