@@ -6,7 +6,8 @@ use crate::services::claude_tui::hook_server::adoption_retry::{
 use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
 use crate::services::tui_prompt_dedupe::pending::{
     CHANNEL_MAPPING_TTL, ExactPathWait, PendingRestore, age_channel_mapping_for_tests,
-    expire_channel_mapping_for_tests, last_restore_outcome, reset_restore_outcomes_for_tests,
+    expire_channel_mapping_for_tests, expire_runtime_binding_for_tests, last_restore_outcome,
+    reset_restore_outcomes_for_tests,
 };
 use crate::services::tui_prompt_dedupe::{
     claude_session_rotation_for_tmux, register_launched_tmux_runtime_binding,
@@ -440,6 +441,50 @@ fn a_restored_b_whose_channel_mapping_expired_still_logs_and_adopts_a_file_less_
     let c = uuid();
     let status = pane.clear_to(&ingress, &c, &uuid());
     assert_eq!(status, 202, "/clear to a file-less C is acknowledged");
+    assert_eq!(
+        pending_lines(pane.channel, &c),
+        1,
+        "C is Pending in the log"
+    );
+    assert_eq!(
+        deferred_adoption_count(),
+        1,
+        "C waits in the adoption queue"
+    );
+    pane.adopt_newer(&c, &pane.b);
+}
+
+#[test]
+fn a_restored_b_whose_runtime_binding_lapsed_refuses_a_file_less_c_until_the_pass_rebinds_it() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = Pane::new(&ingress, root.path(), 7_531, false);
+    pane.restart();
+    pane.touch(&pane.b);
+    let bound = PendingRestore::BoundFromLedger {
+        pending_seq: 2,
+        exact_wait: None,
+    };
+    assert_eq!(pane.rehydrate(), Some(bound.clone()), "B restored");
+
+    // An idle pane outlives only its runtime binding; launch A still names the pane.
+    expire_runtime_binding_for_tests(&pane.tmux);
+    assert_eq!(pane.bound(), None, "the binding lapsed");
+    let alias = resolve_tmux_session_name("claude", &pane.a);
+    assert_eq!(alias.as_deref(), Some(pane.tmux.as_str()));
+    let mapped = dedupe::owner_channel_for_tmux_session(&pane.tmux);
+    assert_eq!(mapped, Some(pane.channel), "the channel mapping stays");
+    let (c, request) = (uuid(), uuid());
+    let status = pane.clear_to(&ingress, &c, &request);
+    assert_eq!(status, 425, "C refused while its pane has no binding");
+    assert_eq!(pending_lines(pane.channel, &c), 0, "nothing logged for C");
+
+    assert_eq!(pane.rehydrate(), Some(bound), "the pass binds B again");
+    pane.expect_bound(&pane.b);
+    let status = pane.clear_to(&ingress, &c, &request);
+    assert_eq!(status, 202, "the retry after the pass is acknowledged");
     assert_eq!(
         pending_lines(pane.channel, &c),
         1,

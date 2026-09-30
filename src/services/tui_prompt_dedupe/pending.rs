@@ -556,6 +556,16 @@ pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
     }
 }
 
+/// Ages the pane's runtime binding past its TTL; its alias, channel mapping and outcome stay.
+#[cfg(test)]
+pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
+    let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let aged = std::time::Instant::now() - super::SESSION_MAPPING_TTL;
+    if let Some(binding) = state.runtime_by_tmux.get_mut(tmux_session) {
+        binding.recorded_at = aged - std::time::Duration::from_secs(1);
+    }
+}
+
 #[cfg(test)]
 pub(crate) const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPING_TTL;
 
