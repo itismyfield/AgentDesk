@@ -1820,6 +1820,7 @@ fn name_only_scan_follows_reexports_and_function_values() {
     const COMMON: &str = "src/services/tmux_common.rs";
     const FACADE: &str = "src/services/facade.rs";
     const CALLER: &str = "src/services/caller.rs";
+    const OTHER: &str = "src/services/other.rs";
     const CALLS: &[(&str, Listed)] = &[(
         "cleanup_session_temp_files",
         &[(COMMON, 1, "the one reviewed call")],
@@ -1924,14 +1925,38 @@ fn name_only_scan_follows_reexports_and_function_values() {
         );
     }
 
-    let unrelated = "fn go(n: &str) {\n\
-         let cleanup_session_temp_files = |_: &str| ();\n\
-         cleanup_session_temp_files(n);\n}\n";
-    assert_eq!(
-        scan(&[(CALLER, unrelated)]),
-        Vec::<String>::new(),
-        "an unrelated local closure"
-    );
+    let clean: &[(&str, Extra)] = &[
+        (
+            "an unrelated local closure",
+            &[(
+                CALLER,
+                "fn go(n: &str) {\n\
+                 let cleanup_session_temp_files = |_: &str| ();\n\
+                 cleanup_session_temp_files(n);\n}\n",
+            )],
+        ),
+        (
+            "another module's function of the alias name through a re-exported module",
+            &[
+                (
+                    COMMON,
+                    "pub(crate) use self::cleanup_session_temp_files as wipe;\n",
+                ),
+                (OTHER, "pub(crate) fn wipe(n: &str) {}\n"),
+                (
+                    FACADE,
+                    "pub(crate) use crate::services::other as other_mod;\n",
+                ),
+                (
+                    CALLER,
+                    "fn go(n: &str) { crate::services::facade::other_mod::wipe(n); }\n",
+                ),
+            ],
+        ),
+    ];
+    for (label, extra) in clean {
+        assert_eq!(scan(extra), Vec::<String>::new(), "{label}");
+    }
 }
 
 /// Byte range of the body of the first `signature` in token-only code.
