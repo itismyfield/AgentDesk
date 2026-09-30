@@ -153,6 +153,10 @@ struct ScopedIntakeTestEnv {
 
 impl ScopedIntakeTestEnv {
     fn enforce() -> Self {
+        Self::with_mode("enforce")
+    }
+
+    fn with_mode(mode: &str) -> Self {
         let lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -162,7 +166,7 @@ impl ScopedIntakeTestEnv {
         // SAFETY: the crate-wide env lock serializes tests that mutate process
         // environment, and Drop restores both variables before releasing it.
         unsafe {
-            std::env::set_var("ADK_INTAKE_ROUTING_MODE", "enforce");
+            std::env::set_var("ADK_INTAKE_ROUTING_MODE", mode);
             std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
         }
         Self {
@@ -489,6 +493,55 @@ async fn intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
             reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { .. }
         }
     ));
+}
+
+async fn admitted_locally(deps: &IntakeDeps<'_>, channel: ChannelId) -> Result<(), String> {
+    use crate::services::cluster::intake_router_hook::IntakeBlockedReason;
+    let submission = submission_for_admission(channel, 4_360_011);
+    match super::admit_text_intake(deps, &submission).await {
+        super::IntakeAdmission::Local(_) => Ok(()),
+        super::IntakeAdmission::Blocked {
+            reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+        } => Err(detail),
+        other => panic!("unexpected admission {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
+    let env = ScopedIntakeTestEnv::with_mode("disabled");
+    // A cluster-less config of its own, so the host's config cannot turn the fallback off.
+    let config = crate::runtime_layout::config_file_path(env._root.path());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "server: {}\n").unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
+    let deps = deps(&http, &shared);
+    let (o, legacy) = (ChannelId::new(4_360_001), ChannelId::new(4_360_002));
+    let local = |channel| admitted_locally(&deps, channel);
+
+    let _unread = test_probe::answers(&[]);
+    assert_eq!(local(o).await, Ok(()), "writer off");
+    let selected = test_override::force_channels(&[(o.get(), ClaudeTui)]);
+    let off = test_override::force_off();
+    assert_eq!(local(o).await, Ok(()), "flag off with a list");
+    drop((off, selected));
+    let _none = test_override::force_channels(&[]);
+    assert_eq!(local(o).await, Ok(()), "empty list");
+
+    let _selected = test_override::force_channels(&[(o.get(), ClaudeTui)]);
+    assert_eq!(
+        local(legacy).await,
+        Ok(()),
+        "an unselected channel keeps its path"
+    );
+    let _not_ready = test_probe::answers(&[false]);
+    let held = local(o).await.expect_err("no ready writer here");
+    assert!(held.contains("gateway"), "{held}");
+    let _ready = test_probe::answers(&[true]);
+    assert_eq!(local(o).await, Ok(()), "the ready gateway runs it");
 }
 
 #[tokio::test(flavor = "current_thread")]
