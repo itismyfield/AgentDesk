@@ -24678,6 +24678,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:093f07a7a95c58d22e303409b7fc888b69d5ae2ca90f71a3639eac998a59036a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/o_route_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:5ef342d9cad0cf44edfdbec4c7544243c22c2b74a1ebd5f4ff61d38c99ba256e"
     },
     {
@@ -24697,6 +24706,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:7dc53eec56230722f127c891403693f57817e2240b4a09c60d0f70f7bde212ad"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/o_route_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd3e6d7e9ea43b2532b4fda9b208f81b4496eef5192a937c061a0aae0416df4f"
     },
     {
       "root": "src",

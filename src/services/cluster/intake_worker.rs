@@ -953,4 +953,4 @@ mod o_route_tests;
 mod drain_tests;
 
 // No test drives a tick into `execute_intake_turn_core`, which needs a full Discord runtime;
-// `o_route_tests` runs ticks only as far as runtime resolution.
+// `o_route_tests` stops ticks at runtime resolution or refuses the accept in the database.

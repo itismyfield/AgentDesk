@@ -286,3 +286,173 @@ async fn publish(
     }
     readiness.set(channel, false);
 }
+
+/// A gateway stand-in for tests that drive the real host: every POST is recorded with its
+/// channel, and each channel binds the one source it was given.
+#[cfg(test)]
+pub(crate) mod test_io {
+    use super::*;
+    use crate::services::tui_o::shadow::SourceId;
+    use crate::services::tui_o::writer::binding::{
+        BindingCause, BindingEvent, BindingEvidence, BindingRecord, BindingTarget,
+    };
+    use crate::services::tui_o::writer::{PostOutcome, SeenMessage};
+
+    #[derive(Default)]
+    pub(crate) struct Posts(Mutex<Vec<(u64, SeenMessage)>>);
+
+    impl Posts {
+        pub(crate) fn to(&self, channel: u64) -> Vec<String> {
+            let posts = locked(&self.0);
+            let to = posts.iter().filter(|(c, _)| *c == channel);
+            to.map(|(_, message)| message.content.clone()).collect()
+        }
+    }
+
+    impl DiscordPort for Posts {
+        fn bot_id(&self) -> u64 {
+            42
+        }
+
+        fn post(
+            &self,
+            channel: u64,
+            content: String,
+        ) -> impl Future<Output = PostOutcome> + Send + 'static {
+            let mut posts = locked(&self.0);
+            let id = 101 + posts.len() as u64;
+            let author_id = 42;
+            let receipt = SeenMessage {
+                id,
+                author_id,
+                content,
+            };
+            posts.push((channel, receipt.clone()));
+            std::future::ready(PostOutcome::Created(receipt))
+        }
+
+        fn history_after(
+            &self,
+            channel: u64,
+            after: u64,
+        ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
+            let posts = locked(&self.0);
+            let page = posts.iter().filter(|(c, m)| *c == channel && m.id > after);
+            std::future::ready(Ok(page.map(|(_, m)| m.clone()).collect()))
+        }
+
+        fn history_readable(&self, _: u64) -> bool {
+            true
+        }
+    }
+
+    pub(crate) struct AnyLease;
+
+    impl DeliveryLease for AnyLease {
+        type Held = ();
+        fn try_acquire(&self, _: u64, _: u64) -> Option<()> {
+            Some(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub(crate) struct Alarms(pub(crate) Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
+
+    impl AlarmSink for Alarms {
+        fn raise(&self, channel: u64, alarm: WriterAlarm) {
+            locked(&self.0).push((channel, alarm));
+        }
+    }
+
+    pub(crate) struct Startup {
+        event: BindingEvent,
+        notice: watch::Sender<u64>,
+    }
+
+    impl BindingEvents for Startup {
+        fn binding_events_since(
+            &self,
+            channel: u64,
+            after: u64,
+        ) -> Result<Vec<BindingEvent>, String> {
+            let due = channel == self.event.channel_id && after < self.event.seq;
+            Ok(due.then(|| self.event.clone()).into_iter().collect())
+        }
+
+        fn subscribe(&self, _: u64) -> watch::Receiver<u64> {
+            self.notice.subscribe()
+        }
+    }
+
+    /// Reports every channel as new and empty; the store's own checks still apply.
+    pub(crate) struct TestHost {
+        pub(crate) posts: Arc<Posts>,
+        pub(crate) alarms: Alarms,
+        sources: BTreeMap<u64, SourceId>,
+    }
+
+    impl TestHost {
+        pub(crate) fn new(sources: impl IntoIterator<Item = (u64, SourceId)>) -> Arc<Self> {
+            Arc::new(Self {
+                posts: Arc::default(),
+                alarms: Alarms::default(),
+                sources: sources.into_iter().collect(),
+            })
+        }
+    }
+
+    impl HostIo for TestHost {
+        type Port = Posts;
+        type Lease = AnyLease;
+        type Alarms = Alarms;
+        type Bindings = Startup;
+
+        fn port(&self) -> impl Future<Output = Arc<Posts>> + Send {
+            std::future::ready(Arc::clone(&self.posts))
+        }
+
+        fn lease(&self) -> AnyLease {
+            AnyLease
+        }
+
+        fn alarms(&self) -> Alarms {
+            self.alarms.clone()
+        }
+
+        fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Startup> {
+            let source = self.sources.get(&channel).cloned();
+            let source = source.unwrap_or_else(|| panic!("no source for channel {channel}"));
+            let received_at = chrono::Utc::now();
+            let evidence = BindingEvidence {
+                hook_event: "SessionStart".into(),
+                received_at,
+            };
+            let record = BindingRecord::Bound {
+                old: None,
+                new: BindingTarget::Source(source),
+                cause: BindingCause::Startup,
+                parent_hint: None,
+                evidence,
+            };
+            let event = BindingEvent {
+                seq: 1,
+                channel_id: channel,
+                provider,
+                tmux_session: format!("host-{channel}"),
+                execution_nonce: "host".into(),
+                record,
+                committed_at: received_at,
+            };
+            let notice = watch::channel(1).0;
+            Arc::new(Startup { event, notice })
+        }
+
+        fn activation_facts(
+            &self,
+            _: u64,
+            _: ShadowProvider,
+        ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
+            std::future::ready(Ok(ActivationFacts::default()))
+        }
+    }
+}

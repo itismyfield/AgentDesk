@@ -174,3 +174,146 @@ async fn readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_l
     pool.close().await;
     fixture.drop().await;
 }
+
+/// This process's writer readiness is global, so the case runs in a child of its own.
+fn in_own_process(name: &str) -> bool {
+    const CHILD: &str = "ADK_TEST_O_TOPOLOGY_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    // Without PostgreSQL the child cannot run; fail here with the reason every PG test gives.
+    crate::db::postgres::postgres_test_database_url_base()
+        .expect("POSTGRES_TEST_DATABASE_URL_BASE required for db::auto_queue tests");
+    let root = tempfile::tempdir().unwrap();
+    let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &qualified, "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .env_remove(test_override::CHILD_ENV)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    false
+}
+
+/// The hook's answer for `channel` with routing disabled: run it here, or hold it.
+async fn routed_locally(pool: &PgPool, channel: u64) -> bool {
+    use crate::services::cluster::intake_router_hook::{
+        IntakeRouterContext, IntakeRouterDecision, try_route_intake,
+    };
+    use crate::services::cluster::intake_routing_config::IntakeRoutingMode;
+    let channel = channel.to_string();
+    let ctx = IntakeRouterContext {
+        mode: IntakeRoutingMode::Disabled,
+        leader_instance_id: "leader-1",
+        provider: "claude",
+        channel_id: &channel,
+        policy_channel_id: &channel,
+        user_msg_id: "9999",
+        request_owner_id: "100",
+        request_owner_name: Some("Tester"),
+        user_text: "hello",
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: Some(false),
+        turn_kind: "foreground",
+        merge_consecutive: false,
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        preserve_on_cancel: false,
+        node_override_instance_id: None,
+        has_nonportable_uploads: false,
+        attachment_refs: &[],
+    };
+    match try_route_intake(pool, &ctx).await {
+        IntakeRouterDecision::RanLocal { .. } => true,
+        IntakeRouterDecision::Blocked { .. } => false,
+        other => panic!("unexpected decision {other:?}"),
+    }
+}
+
+fn accept_attempted(outcome: Result<TickOutcome, sqlx::Error>) -> bool {
+    matches!(outcome, Err(error) if error.to_string().contains("accept attempted"))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_anywhere_pg() {
+    use crate::services::tui_o::ownership::OwnershipGate;
+    use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
+    use crate::services::tui_o::writer::host::{self, HostParts, test_io::TestHost};
+    if !in_own_process(
+        "a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_anywhere_pg",
+    ) {
+        return;
+    }
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('agent-o', 'Test', 'claude', 'unused')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    refuse_accepts(&pool).await;
+    let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
+    let (_registry, shared) = owner.await;
+    let not_cancelled = || false;
+    let tick = || run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
+    let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
+
+    // No writer is hosted here, as on a runner: the Legacy row runs, the canary row waits.
+    let canary = seed(&pool, O, 1).await;
+    seed(&pool, LEGACY, 2).await;
+    assert!(!routed_locally(&pool, O).await && routed_locally(&pool, LEGACY).await);
+    assert!(accept_attempted(tick().await), "the Legacy row is accepted");
+    assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
+    assert_eq!(state(&pool, canary).await, pending());
+
+    // The gateway hosts the canary's writer; it takes the row only once Owned and ready.
+    let runtime = tempfile::tempdir().unwrap();
+    let transcript = runtime.path().join("canary.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    let io = TestHost::new([(O, source_id_for("e2e", &transcript).unwrap())]);
+    let gate = Arc::new(OwnershipGate::default());
+    let parts = || HostParts {
+        io: Arc::clone(&io),
+        runtime_root: Some(runtime.path().to_path_buf()),
+        gate: Arc::clone(&gate),
+        readiness: host::process_readiness(),
+    };
+    let _hosts = host::start(ShadowProvider::Claude, true, parts);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!routed_locally(&pool, O).await, "not Owned yet");
+    assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
+    gate.acquired();
+    for _ in 0..100 {
+        if host::channel_accepts(O) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(routed_locally(&pool, O).await, "the ready gateway runs it");
+    assert!(accept_attempted(tick().await), "the canary row is accepted");
+
+    // One open route per channel: clear the accepted row before the next message.
+    sqlx::query("DELETE FROM intake_outbox WHERE id = $1")
+        .bind(canary)
+        .execute(&pool)
+        .await
+        .unwrap();
+    gate.lost();
+    let later = seed(&pool, O, 3).await;
+    assert!(!routed_locally(&pool, O).await, "a lost gateway holds it");
+    assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
+    assert_eq!(state(&pool, later).await, pending());
+    assert_eq!(*io.alarms.0.lock().unwrap(), []);
+
+    pool.close().await;
+    fixture.drop().await;
+}
