@@ -77,7 +77,8 @@ impl Ingress {
 
     pub(crate) fn transcript(&self, session: &str) -> PathBuf {
         let path = self.path(session);
-        fs::write(&path, b"{}\n").unwrap();
+        let row = json!({"type": "mode", "sessionId": session});
+        fs::write(&path, format!("{row}\n")).unwrap();
         path
     }
 

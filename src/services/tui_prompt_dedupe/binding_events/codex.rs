@@ -123,9 +123,13 @@ pub(crate) fn record(
             })
         })
         .transpose()?;
-    commit_with(channel, |writer| {
-        writer.plan_codex(context, session, hook, source)
-    })
+    let committed = commit_with(channel, |writer| {
+        match writer.plan_codex(context, session, hook, source) {
+            Some(event) => Planned::Append(event, false),
+            None => Planned::Keep(Committed::Unchanged),
+        }
+    })?;
+    Ok(committed == Committed::Appended)
 }
 
 impl Writer {

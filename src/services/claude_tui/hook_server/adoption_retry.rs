@@ -52,7 +52,7 @@ struct DeferredAdoption {
     hook: HookSignal,
     /// The entry's binding event is in the log; it only waits for its rotation or its transcript.
     recorded: bool,
-    /// Recorded as a Pending whose transcript does not exist yet.
+    /// Recorded as a Pending whose transcript is not verified yet.
     pending: bool,
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn adopt_from_hook(
     let tmux = resolve_tmux_session_name("claude", command_session_id.trim()).unwrap_or_default();
     // Adoption and artifact cutover share the pane authority so a retry cannot rewrite them late.
     with_tmux_source_authority(&tmux, |_| {
-        // A hook naming another session replaces a recorded Pending still waiting for its file,
+        // A hook naming another session replaces a recorded Pending still waiting for its transcript,
         // once the new session's own evidence is durable.
         if claude_session_rotation_for_tmux(&tmux).is_none()
             && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != payload_session_id)
@@ -191,14 +191,20 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
     {
         Ok((adopted, skip)) => {
             // An adopted source stays queued until its rotation settles and a recorded Pending until
-            // its transcript exists, so later hooks wait behind it; a later queued session replaces it.
+            // its transcript is verified, so later hooks wait behind it; a later queued session replaces it.
             let pending = adopted.is_none() && skip.is_none();
             // An entry whose pane lost its channel mapping keeps its place until the next pass restores it.
             let no_channel = skip == Some(AdoptSkip::ChannelNotRestored);
+            // An unreadable log or pinned file decided nothing, so the entry keeps its place and marks.
+            let transient = matches!(
+                skip,
+                Some(AdoptSkip::HistoryUnreadable | AdoptSkip::SourceUnreadable)
+            );
             let held = if pending {
                 !(queued && queued_count(tmux) > 1)
             } else {
                 no_channel
+                    || transient
                     || (adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some())
             };
             let queue = if held {
@@ -206,7 +212,7 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             } else {
                 QueueStep::Pop
             };
-            if queued && held && !no_channel {
+            if queued && held && !no_channel && !transient {
                 mark_front_recorded(tmux, pending);
             } else if queued && !held {
                 pop_front(tmux);
@@ -285,9 +291,9 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
 }
 
 /// Queues a Pending restored from the log as recorded, so the poll adopts it once its transcript
-/// exists and a hook naming another session replaces it.
+/// is verified and a hook naming another session replaces it. The restore holds the pane's authority.
 pub(crate) fn seed_restored(
-    tmux_session_name: &str,
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
@@ -299,9 +305,7 @@ pub(crate) fn seed_restored(
         recorded: true,
         pending: true,
     };
-    with_tmux_source_authority(tmux_session_name, |_| {
-        queue_behind(tmux_session_name, &request);
-    });
+    queue_behind(authority.session(), &request);
 }
 
 /// Re-runs each pane's deferred adoptions in hook order with their original evidence.

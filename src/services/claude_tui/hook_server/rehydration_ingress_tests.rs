@@ -73,7 +73,7 @@ fn outer_failure(alias: bool, header: bool) {
         crate::services::claude_tui::transcript_tail::claude_transcript_path(&cwd, &a, Some(&home))
             .unwrap();
     std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
-    std::fs::write(&a_path, "{}\n").unwrap();
+    std::fs::write(&a_path, format!("{{\"sessionId\":\"{a}\"}}\n")).unwrap();
     let context = BindingContext {
         schema: 1,
         provider: "claude".into(),
@@ -110,7 +110,7 @@ fn outer_failure(alias: bool, header: bool) {
     .unwrap();
     // Reproduce a real H→A adoption and artifact cutover before losing dcserver state.
     let h_path = a_path.parent().unwrap().join(format!("{h}.jsonl"));
-    std::fs::write(&h_path, "{}\n").unwrap();
+    std::fs::write(&h_path, format!("{{\"sessionId\":\"{h}\"}}\n")).unwrap();
     assert!(dedupe::register_rehydrated_tmux_runtime_binding(
         "claude",
         &tmux,
@@ -298,8 +298,8 @@ impl RegistrationRace {
         .unwrap();
         std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
         let b_path = a_path.parent().unwrap().join(format!("{b}.jsonl"));
-        std::fs::write(&a_path, "{}\n").unwrap();
-        std::fs::write(&b_path, "{}\n").unwrap();
+        std::fs::write(&a_path, format!("{{\"sessionId\":\"{a}\"}}\n")).unwrap();
+        std::fs::write(&b_path, format!("{{\"sessionId\":\"{b}\"}}\n")).unwrap();
         let context = BindingContext {
             schema: 1,
             provider: "claude".into(),

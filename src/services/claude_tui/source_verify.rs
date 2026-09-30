@@ -1,6 +1,5 @@
-//! Decides whether a Claude hook names a transcript the pane may bind to.
+//! Decides whether a Claude hook, restore or registration names a transcript the pane may bind to.
 //! Payload path, session id, opened-file identity and first record decide; mtime never does.
-#![allow(dead_code)] // Dormant until the Claude binding path calls these checks.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -10,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
+use crate::services::tui_prompt_dedupe::binding_events::{HookSignal, SourceId};
 
 /// Longest first line read to learn whose transcript a file is.
 const FIRST_RECORD_LIMIT: u64 = 1 << 20;
@@ -27,6 +28,7 @@ pub(crate) struct ClaudeHookSource {
 
 impl ClaudeHookSource {
     /// Reads parent fields only, so a subagent's `agent_transcript_path` never names the pane source.
+    #[cfg(test)]
     pub(crate) fn from_payload(payload: &Value) -> Option<Self> {
         let field = |key: &str| payload.get(key).and_then(Value::as_str);
         Some(Self {
@@ -37,8 +39,23 @@ impl ClaudeHookSource {
         })
     }
 
+    /// `transcript_path` is the payload's path, already spelled under the pane's projects root.
+    pub(crate) fn from_signal(
+        session_id: &str,
+        hook: &HookSignal,
+        transcript_path: PathBuf,
+    ) -> Self {
+        Self {
+            event: hook.event.clone(),
+            session_id: session_id.to_owned(),
+            transcript_path,
+            start_source: hook.source.clone(),
+        }
+    }
+
     fn is_explicit_resume(&self) -> bool {
-        self.event == "SessionStart" && self.start_source.as_deref() == Some("resume")
+        HookEventKind::from_path(&self.event) == HookEventKind::SessionStart
+            && self.start_source.as_deref() == Some("resume")
     }
 }
 
@@ -49,6 +66,23 @@ pub(crate) struct ClaudeSource {
     pub path: PathBuf,
     /// None until a hook verified the file; the launch binding exists before it.
     pub file: Option<SourceFileIdentity>,
+}
+
+impl ClaudeSource {
+    /// The log identity of a verified source; `None` without a Unix file identity.
+    pub(crate) fn source_id(&self) -> Option<SourceId> {
+        let (dev, ino) = match self.file? {
+            #[cfg(unix)]
+            SourceFileIdentity::Unix { dev, ino } => (dev, ino),
+            SourceFileIdentity::Unavailable => return None,
+        };
+        Some(SourceId {
+            session_id: self.session_id.clone(),
+            path: self.path.clone(),
+            dev,
+            ino,
+        })
+    }
 }
 
 /// First line of an opened transcript.
@@ -97,6 +131,93 @@ pub(crate) fn observe_transcript(path: &Path) -> io::Result<OpenedTranscript> {
     })
 }
 
+/// One look at a source's transcript: a check's descriptor, a stat, or an identity already checked.
+pub(crate) enum Observation<'a> {
+    /// `observe_transcript`: identity and first record read from one descriptor.
+    Opened(Result<&'a OpenedTranscript, &'a io::Error>),
+    /// Only the (dev, ino) a stat of the path found; the first record is not read.
+    Stat(io::Result<(u64, u64)>),
+    /// An identity a check verified from its own first record.
+    Checked(&'a SourceId),
+}
+
+/// What an observation proves once the pane's pin judges it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PinJudgment {
+    /// The pinned file itself, or an unpinned source's first verification: bind this identity.
+    Verified(SourceId),
+    /// A stat of a source no pin holds: logged as the stat finds it, not verified.
+    Unpinned,
+    /// No pin and no verified transcript yet: a durable Pending, never acknowledged as bound.
+    Pending,
+    /// The pinned file could not be read: binding and cursor stay, nothing succeeds, judged again.
+    Recheck,
+    /// The pinned file was replaced, rewritten or removed: the pin stays and nothing binds over it.
+    Anomaly,
+    /// A complete first record naming another session, or none.
+    Foreign,
+    /// Its own first record but no file identity to pin.
+    Unidentified,
+}
+
+/// The one rule every hook, restore and registration of a Claude source goes through: a pin on
+/// `session`'s `path` admits only its own file, and without one only a verified first record binds.
+pub(crate) fn judge_pin(
+    pin: Option<&SourceId>,
+    session: &str,
+    path: &Path,
+    seen: Observation,
+) -> PinJudgment {
+    use PinJudgment::{Anomaly, Foreign, Pending, Recheck, Unidentified, Unpinned, Verified};
+    let pin = pin.filter(|pin| pin.session_id == session && pin.path == path);
+    let pinned_file = pin.map(|pin| (pin.dev, pin.ino));
+    let (file, first) = match seen {
+        Observation::Checked(source) => {
+            return match pinned_file {
+                Some(file) if file != (source.dev, source.ino) => Anomaly,
+                _ => Verified(source.clone()),
+            };
+        }
+        Observation::Stat(Ok(file)) => {
+            return match pin {
+                Some(pin) if pinned_file == Some(file) => Verified(pin.clone()),
+                Some(_) => Anomaly,
+                None => Unpinned,
+            };
+        }
+        Observation::Stat(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return if pin.is_some() { Anomaly } else { Pending };
+        }
+        Observation::Opened(Ok(OpenedTranscript::Missing)) => {
+            return if pin.is_some() { Anomaly } else { Pending };
+        }
+        Observation::Stat(Err(_)) | Observation::Opened(Err(_)) => {
+            return if pin.is_some() { Recheck } else { Pending };
+        }
+        Observation::Opened(Ok(OpenedTranscript::Opened { file, first })) => (file, first),
+    };
+    let identity = match file {
+        #[cfg(unix)]
+        SourceFileIdentity::Unix { dev, ino } => Some((*dev, *ino)),
+        SourceFileIdentity::Unavailable => None,
+    };
+    let own = matches!(first, FirstRecord::Session(id) if id == session);
+    match (pin, identity) {
+        // A file rewritten or truncated in place keeps its inode, so its first record decides too.
+        (Some(pin), Some(file)) if own && pinned_file == Some(file) => Verified(pin.clone()),
+        (Some(_), _) => Anomaly,
+        (None, _) if *first == FirstRecord::NotWritten => Pending,
+        (None, _) if !own => Foreign,
+        (None, None) => Unidentified,
+        (None, Some((dev, ino))) => Verified(SourceId {
+            session_id: session.to_owned(),
+            path: path.to_path_buf(),
+            dev,
+            ino,
+        }),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceVerdict {
     /// The hook is about the bound source; same path, (dev, ino) and first record.
@@ -105,8 +226,10 @@ pub(crate) enum SourceVerdict {
     Confirm(ClaudeSource),
     /// A newly verified source takes over from the bound one.
     Rotate(ClaudeSource),
-    /// Path and id agree, but the file or its first record does not exist yet.
+    /// Path and id agree, but the file or its first record does not exist yet, or it is unreadable.
     Pending,
+    /// The bound source's pinned file could not be read; the pane keeps its binding meanwhile.
+    Recheck,
     /// A resume back to a session the pane left; arrival order cannot tell it from a late hook.
     PendingConflict,
     Rejected(SourceRejection),
@@ -130,15 +253,14 @@ pub(crate) enum SourceRejection {
 pub(crate) fn verify_claude_source(
     hook: &ClaudeHookSource,
     projects_root: &Path,
-    opened: &OpenedTranscript,
+    opened: Result<&OpenedTranscript, &io::Error>,
     history: &[ClaudeSource],
 ) -> SourceVerdict {
-    use SourceVerdict::{Anomaly, Confirm, Current, Pending, PendingConflict, Rejected, Rotate};
-    if uuid::Uuid::parse_str(&hook.session_id).is_err() {
-        return Rejected(SourceRejection::InvalidSessionId);
-    }
-    if !is_top_level_transcript(projects_root, &hook.transcript_path, &hook.session_id) {
-        return Rejected(SourceRejection::NotTopLevelTranscript);
+    use SourceVerdict::{
+        Anomaly, Confirm, Current, Pending, PendingConflict, Recheck, Rejected, Rotate,
+    };
+    if let Some(rejection) = precheck(hook, projects_root) {
+        return Rejected(rejection);
     }
     let named = |source: &&ClaudeSource| source.session_id == hook.session_id;
     let current = history.last().filter(named);
@@ -150,41 +272,73 @@ pub(crate) fn verify_claude_source(
             Rejected(SourceRejection::Regression)
         };
     }
-    let pinned = current.and_then(|source| Some((source, source.file?)));
-    let (file, first) = match opened {
-        OpenedTranscript::Missing if pinned.is_some() => return Anomaly,
-        OpenedTranscript::Missing => return Pending,
-        OpenedTranscript::Opened { file, first } => (*file, first),
-    };
-    if let Some((bound, bound_file)) = pinned {
-        // A verified file rewritten or truncated in place keeps its inode, so its first record is rechecked.
-        let own_first = matches!(first, FirstRecord::Session(id) if *id == hook.session_id);
-        let same = bound.path == hook.transcript_path && bound_file == file && own_first;
-        return if same { Current } else { Anomaly };
+    let pin = current.and_then(ClaudeSource::source_id);
+    // The bound session named at another path is not the file its pin holds.
+    if pin
+        .as_ref()
+        .is_some_and(|pin| pin.path != hook.transcript_path)
+    {
+        return Anomaly;
     }
-    match first {
-        FirstRecord::NotWritten => return Pending,
-        FirstRecord::Session(id) if *id == hook.session_id => {}
-        FirstRecord::Session(_) | FirstRecord::Unnamed => {
-            return Rejected(SourceRejection::FirstRecordMismatch);
+    let seen = Observation::Opened(opened);
+    match judge_pin(pin.as_ref(), &hook.session_id, &hook.transcript_path, seen) {
+        PinJudgment::Verified(id) if pin.as_ref() == Some(&id) => Current,
+        PinJudgment::Verified(id) => {
+            #[cfg(unix)]
+            let file = SourceFileIdentity::Unix {
+                dev: id.dev,
+                ino: id.ino,
+            };
+            #[cfg(not(unix))]
+            let file = SourceFileIdentity::Unavailable;
+            let source = ClaudeSource {
+                session_id: id.session_id,
+                path: id.path,
+                file: Some(file),
+            };
+            if current.is_some() {
+                Confirm(source)
+            } else {
+                Rotate(source)
+            }
         }
-    }
-    if matches!(file, SourceFileIdentity::Unavailable) {
-        return Rejected(SourceRejection::IdentityUnavailable);
-    }
-    let source = ClaudeSource {
-        session_id: hook.session_id.clone(),
-        path: hook.transcript_path.clone(),
-        file: Some(file),
-    };
-    if current.is_some() {
-        Confirm(source)
-    } else {
-        Rotate(source)
+        PinJudgment::Pending | PinJudgment::Unpinned => Pending,
+        PinJudgment::Recheck => Recheck,
+        PinJudgment::Anomaly => Anomaly,
+        PinJudgment::Foreign => Rejected(SourceRejection::FirstRecordMismatch),
+        PinJudgment::Unidentified => Rejected(SourceRejection::IdentityUnavailable),
     }
 }
 
-fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
+/// The checks that need no file: a valid session id and a top-level transcript path.
+pub(crate) fn precheck(hook: &ClaudeHookSource, projects_root: &Path) -> Option<SourceRejection> {
+    if uuid::Uuid::parse_str(&hook.session_id).is_err() {
+        return Some(SourceRejection::InvalidSessionId);
+    }
+    if !is_top_level_transcript(projects_root, &hook.transcript_path, &hook.session_id) {
+        return Some(SourceRejection::NotTopLevelTranscript);
+    }
+    None
+}
+
+/// Spells `payload` under `root` when only the spelling differs (a symlinked or `/private` root);
+/// any other path is returned as is and fails the top-level check.
+pub(crate) fn normalize_payload_path(root: &Path, payload: &Path) -> PathBuf {
+    if payload.starts_with(root) {
+        return payload.to_path_buf();
+    }
+    let parts = payload.parent().and_then(|project| {
+        let same_root =
+            std::fs::canonicalize(project.parent()?).ok()? == std::fs::canonicalize(root).ok()?;
+        same_root.then(|| (project.file_name(), payload.file_name()))
+    });
+    match parts {
+        Some((Some(project), Some(file))) => root.join(project).join(file),
+        _ => payload.to_path_buf(),
+    }
+}
+
+pub(crate) fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
     let file_name = format!("{session_id}.jsonl");
     let Ok(rest) = path.strip_prefix(root) else {
         return false;
@@ -196,6 +350,7 @@ fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
 }
 
 /// Byte offset where a fork's own rows start, and how many leading rows it inherited.
+#[allow(dead_code)] // Dormant until the fork boundary path calls it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ForkBoundary {
     pub offset: u64,
@@ -203,6 +358,7 @@ pub(crate) struct ForkBoundary {
 }
 
 /// Why a fork boundary cannot be named; the caller stops that source instead of guessing.
+#[allow(dead_code)] // Dormant until the fork boundary path calls it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ForkBoundaryError {
     ParentUuidsUnknown,
@@ -214,6 +370,7 @@ pub(crate) enum ForkBoundaryError {
 
 /// Finds the byte after the leading rows whose `uuid` the parent already had.
 /// Rows are matched by native uuid only; bodies are never compared.
+#[allow(dead_code)] // Dormant until the fork boundary path calls it.
 pub(crate) fn fork_start_boundary(
     parent_uuids: &HashSet<String>,
     fork_head: &[u8],
@@ -287,7 +444,7 @@ mod tests {
         hook: &ClaudeHookSource,
     ) -> SourceVerdict {
         let opened = observe_transcript(&hook.transcript_path).unwrap();
-        let verdict = verify_claude_source(hook, root, &opened, history);
+        let verdict = verify_claude_source(hook, root, Ok(&opened), history);
         match &verdict {
             SourceVerdict::Confirm(source) => *history.last_mut().unwrap() = source.clone(),
             SourceVerdict::Rotate(source) => history.push(source.clone()),
@@ -302,6 +459,7 @@ mod tests {
             SourceVerdict::Confirm(_) => "confirm",
             SourceVerdict::Rotate(_) => "rotate",
             SourceVerdict::Pending => "pending",
+            SourceVerdict::Recheck => "recheck",
             SourceVerdict::PendingConflict => "conflict",
             SourceVerdict::Rejected(_) => "rejected",
             SourceVerdict::Anomaly => "anomaly",
@@ -333,6 +491,20 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        // The first complete line of each captured run's own transcript, as the CLI wrote it.
+        let shapes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hook_payload/claude-2.1.283.transcript-first-records.jsonl");
+        let first_records: std::collections::HashMap<String, String> =
+            std::fs::read_to_string(shapes)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let record = serde_json::from_str::<Value>(line).unwrap()["record"].clone();
+                    let session = record["sessionId"].as_str().unwrap().to_owned();
+                    (session, format!("{record}\n"))
+                })
+                .collect();
+        let (mut replayed, mut synthetic) = (HashSet::new(), HashSet::new());
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("projects");
         // Captured paths are <claude home>/projects/<project>/<file>; replay them under a temp home.
@@ -372,7 +544,13 @@ mod tests {
                 let path = rebase(&payload["transcript_path"]);
                 let session = payload["session_id"].as_str().unwrap().to_string();
                 if event["transcript_exists_at_hook"] == true && !path.exists() {
-                    write(&path, &first_row(&session));
+                    // Only a session whose transcript was not captured gets a synthetic first line.
+                    let captured = first_records.get(&session);
+                    match captured {
+                        Some(_) => replayed.insert(session.clone()),
+                        None => synthetic.insert(session.clone()),
+                    };
+                    write(&path, captured.map_or(&first_row(&session), |line| line));
                 }
                 payload["transcript_path"] = json!(path);
                 let parsed = ClaudeHookSource::from_payload(&payload).unwrap();
@@ -407,6 +585,24 @@ mod tests {
             );
             assert_eq!(history.last().unwrap().path, parsed.transcript_path);
         }
+        // Every run's transcript is replayed from its capture; only the TUI's /clear target, whose
+        // file was never captured, is synthetic, so a lost capture fails here instead of passing.
+        let runs = fixture["runs"].as_array().unwrap();
+        let tui_events = runs.iter().find(|run| run["name"] == tui).unwrap()["events"].clone();
+        let clear_target = tui_events.as_array().unwrap().iter().find(|event| {
+            event["event"] == "SessionStart" && event["payload"]["source"] == "clear"
+        });
+        let clear_target = clear_target.unwrap()["payload"]["session_id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(synthetic, HashSet::from([clear_target.to_owned()]));
+        let captured: HashSet<String> = first_records.keys().cloned().collect();
+        assert_eq!(replayed, captured, "every captured first line replayed");
+        assert_eq!(
+            replayed.len(),
+            3,
+            "the three captured runs' own transcripts"
+        );
     }
 
     #[test]
@@ -434,6 +630,21 @@ mod tests {
         assert_eq!(history.len(), 3);
         let stop = hook("Stop", C, &transcript(root, C), None);
         assert_eq!(feed(root, &mut history, &stop), SourceVerdict::Current);
+    }
+
+    #[test]
+    fn snake_case_session_start_is_an_explicit_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let history = bound_chain(root, &[A, B, C]);
+        // The receiver hands hooks over under their snake_case event name.
+        let signal = HookSignal::from_payload("session_start", &json!({"source": "resume"}));
+        let resume = ClaudeHookSource::from_signal(B, &signal, transcript(root, B));
+        let opened = observe_transcript(&resume.transcript_path).unwrap();
+        assert_eq!(
+            verify_claude_source(&resume, root, Ok(&opened), &history),
+            SourceVerdict::PendingConflict
+        );
     }
 
     #[test]

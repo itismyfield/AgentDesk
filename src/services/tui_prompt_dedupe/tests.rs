@@ -1,8 +1,21 @@
 use super::*;
 
+/// Claude reports the continuation's transcript, here next to the one the pane is bound to.
 fn adopt(command: &str, payload: &str) -> Option<(String, String)> {
-    let hook = binding_events::HookSignal::from_payload("stop", &serde_json::Value::Null);
+    let tmux = resolve_tmux_session_name("claude", command).unwrap();
+    let bound = runtime_binding_for_tmux_session(&tmux).unwrap().output_path;
+    let path = std::path::Path::new(&bound).with_file_name(format!("{payload}.jsonl"));
+    let payload_json = serde_json::json!({ "transcript_path": path });
+    let hook = binding_events::HookSignal::from_payload("stop", &payload_json);
     adopt_claude_continuation_session(command, payload, &hook).expect("no binding event failure")
+}
+
+/// A Claude transcript's first line, which names its session.
+fn first_row(session: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "mode", "sessionId": session})
+    )
 }
 
 fn reset_state() {
@@ -69,8 +82,8 @@ fn claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset() {
     let new_session = uuid::Uuid::new_v4().to_string();
     let old_path = tmp.path().join(format!("{old_session}.jsonl"));
     let new_path = tmp.path().join(format!("{new_session}.jsonl"));
-    std::fs::write(&old_path, b"old\n").unwrap();
-    std::fs::write(&new_path, b"new\n").unwrap();
+    std::fs::write(&old_path, first_row(&old_session)).unwrap();
+    std::fs::write(&new_path, first_row(&new_session)).unwrap();
     let tmux = format!("tmux-4423-continuation-{}", std::process::id());
     register_provider_session("claude", &old_session, &tmux);
     register_tmux_runtime_binding(
@@ -126,8 +139,13 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
     let first_path = tmp.path().join(format!("{first_continuation}.jsonl"));
     let second_path = tmp.path().join(format!("{second_continuation}.jsonl"));
     let stale_path = tmp.path().join(format!("{stale_continuation}.jsonl"));
-    for path in [&command_path, &first_path, &second_path, &stale_path] {
-        std::fs::write(path, b"{}\n").unwrap();
+    for (path, session) in [
+        (&command_path, &command_session),
+        (&first_path, &first_continuation),
+        (&second_path, &second_continuation),
+        (&stale_path, &stale_continuation),
+    ] {
+        std::fs::write(path, first_row(session)).unwrap();
     }
     filetime::set_file_mtime(&first_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
     filetime::set_file_mtime(&second_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
@@ -189,7 +207,7 @@ fn hook_re_report_restates_the_adopted_session_authority() {
     let command_session = uuid::Uuid::new_v4().to_string();
     let payload_session = uuid::Uuid::new_v4().to_string();
     let adopted_path = tmp.path().join(format!("{payload_session}.jsonl"));
-    std::fs::write(&adopted_path, b"{}\n").unwrap();
+    std::fs::write(&adopted_path, first_row(&payload_session)).unwrap();
     let tmux = format!("tmux-5212-readopt-{}", std::process::id());
     // The pane already adopted `payload_session`; the live Claude process still
     // addresses hooks with its cached launch-time UUID.
@@ -2854,6 +2872,8 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
 // test fails if the acquisition is moved after the read.
 #[test]
 fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
+    // The authority key follows the runtime root env, so no other test may move it mid-probe.
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());

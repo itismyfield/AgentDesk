@@ -18,20 +18,54 @@ thread_local! { pub(crate) static BLOCK_ALIAS: std::cell::Cell<bool> = const { s
 thread_local! { pub(crate) static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
+    register_claude_pane_with(tmux, channel, binding, Record::Stat);
+}
+
+/// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
+/// an unpublished `Persisted` when the pane's pin refused it.
+pub(crate) fn register_claude_pane_with(
+    tmux: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+    record: Record,
+) -> Option<Persisted> {
     let key = pane_key(tmux);
+    begin_pane_registration(&key, &binding);
+    let registered = crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+        register_rehydrated_under_source_authority(authority, "claude", channel, binding, record)
+    });
+    #[cfg(test)]
+    if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
+        complete();
+    }
+    finish_registration(&key, registered.is_some_and(Persisted::published));
+    registered
+}
+
+/// `register_claude_pane_with` for a caller that holds the pane's source authority across its
+/// own judgment, so the registration and its completion land in that same hold.
+pub(crate) fn register_claude_pane_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+    record: Record,
+) -> Option<Persisted> {
+    let key = pane_key(authority.session());
+    begin_pane_registration(&key, &binding);
+    let registered =
+        register_rehydrated_under_source_authority(authority, "claude", channel, binding, record);
+    finish_under_authority(&key, registered.is_some_and(Persisted::published));
+    registered
+}
+
+fn begin_pane_registration(key: &Pane, binding: &TuiRuntimeBinding) {
     if let Some(launch) = binding
         .session_id
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
-        begin_registration(&key, launch);
+        begin_registration(key, launch);
     }
-    let registered = register_rehydrated_tmux_runtime_binding("claude", tmux, channel, binding);
-    #[cfg(test)]
-    if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
-        complete();
-    }
-    finish_registration(&key, registered);
 }
 
 pub(crate) fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok: bool) {
@@ -43,6 +77,16 @@ pub(crate) fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok
         finish_registration(&key, true);
     } else {
         begin_registration(&key, launch);
+    }
+}
+
+/// `note_claude_pane_registration(.., true)` for a caller holding the pane's source authority.
+pub(crate) fn note_claude_pane_registered_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    launch: Option<&str>,
+) {
+    if launch.is_some_and(|s| !s.trim().is_empty()) {
+        finish_under_authority(&pane_key(authority.session()), true);
     }
 }
 

@@ -8,12 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::TuiRuntimeBinding;
 use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::claude_tui::source_verify::{Observation, PinJudgment, judge_pin};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
@@ -73,6 +75,24 @@ pub(crate) struct BindingEvent {
     pub parent_hint: Option<SourceId>,
     pub evidence: BindingEvidence,
     pub committed_at: DateTime<Utc>,
+}
+
+/// A log line: the event plus whether its source passed the Claude source check. The flag sits
+/// beside the event so readers of `BindingEvent` see the same record either way.
+#[derive(Deserialize)]
+struct Logged {
+    #[serde(flatten)]
+    event: BindingEvent,
+    #[serde(default)]
+    verified: bool,
+}
+
+#[derive(Serialize)]
+struct LoggedRef<'a> {
+    #[serde(flatten)]
+    event: &'a BindingEvent,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    verified: bool,
 }
 
 /// A binding change whose event could not be persisted; the binding was not published.
@@ -175,12 +195,24 @@ impl<'a> Proposal<'a> {
     }
 }
 
+/// `verified` pins `current`'s (dev, ino): a hook naming it on another file is an anomaly.
 #[derive(Default)]
 struct PaneState {
     current: Option<SourceId>,
+    verified: bool,
     pending: Option<BindingEvent>,
-    rejected: Option<String>,
+    /// `(session, reason)` of the latest refusal, so only a repeat of the same judgment is dropped.
+    rejected: Option<(String, String)>,
     nonce: Option<String>,
+}
+
+/// How a proposal is written. Only `Stat` reads the file; the others record the caller's judgment.
+#[derive(Clone, Copy)]
+enum Plan<'a> {
+    Stat,
+    ForcePending,
+    Verified(&'a SourceId),
+    Rejected(&'a str),
 }
 
 struct Writer {
@@ -218,15 +250,15 @@ fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 
-struct LogRead {
-    records: Vec<BindingEvent>,
+struct LogRead<T = BindingEvent> {
+    records: Vec<T>,
     lines: u64,
     complete_len: u64,
     total_len: u64,
 }
 
 /// Complete lines only: a torn tail is left out, and a corrupt line is skipped with a warning.
-fn read_log(path: &Path) -> io::Result<LogRead> {
+fn read_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -269,7 +301,7 @@ pub(crate) fn binding_events_since(
     };
     // Holding the lock keeps a record that is being rolled back out of every read.
     let _logs = lock_logs();
-    let read = read_log(&path)?;
+    let read = read_log::<BindingEvent>(&path)?;
     if read.lines != read.records.len() as u64 {
         let unreadable = read.lines - read.records.len() as u64;
         return Err(io::Error::other(format!(
@@ -341,7 +373,11 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     if let Some(log) = logs.get(&path) {
         return Ok(log.notify.subscribe());
     }
-    let last = read_log(&path)?.records.iter().map(|r| r.seq).max();
+    let last = read_log::<BindingEvent>(&path)?
+        .records
+        .iter()
+        .map(|r| r.seq)
+        .max();
     let notify = watch::channel(last.unwrap_or(0)).0;
     let log = logs.entry(path).or_insert(ChannelLog {
         notify,
@@ -350,29 +386,119 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     Ok(log.notify.subscribe())
 }
 
-/// Appends what `proposal` changes for its pane, if anything; `Ok` means the binding may be published.
-pub(crate) fn record_source(proposal: &Proposal) -> io::Result<()> {
-    commit(proposal, None)
+/// What a commit left in the log for its proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Committed {
+    Appended,
+    /// The log already says what the proposal says.
+    Unchanged,
+    /// The path no longer names the file its check read, and no pin holds it: nothing was logged.
+    Stale,
+    /// The pinned file was replaced or is gone: nothing was logged and nothing may be bound.
+    Anomaly,
+    /// The pinned file could not be looked at: nothing was logged, and it is judged again.
+    Recheck,
 }
 
-/// Audits a candidate the binding judgment refused; the binding itself stays as it is.
-pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<()> {
-    commit(proposal, Some(reason))
+/// What a plan does to the log: append a record and whether its source was verified, or keep it.
+enum Planned {
+    Append(BindingEvent, bool),
+    Keep(Committed),
 }
 
-fn commit(proposal: &Proposal, rejected: Option<&str>) -> io::Result<()> {
-    commit_with(proposal.channel_id, |writer| {
-        writer.plan(proposal, rejected)
+/// Appends what `proposal`'s stat changes for its pane, if anything, as the pane's pin admits it.
+pub(crate) fn record_source(proposal: &Proposal) -> io::Result<Committed> {
+    commit(proposal, Plan::Stat)
+}
+
+/// How a Pending judgment stands in the log once `record_pending` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingRecord {
+    Recorded,
+    /// A Pending for the same candidate was already logged.
+    AlreadyPending,
+}
+
+/// A candidate that has no verified transcript yet waits as a Pending, whether or not a file exists.
+/// Only a matching Pending stands in for the record; a current source naming the candidate does not.
+pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
+    match commit(proposal, Plan::ForcePending)? {
+        Committed::Appended => Ok(PendingRecord::Recorded),
+        _ => Ok(PendingRecord::AlreadyPending),
+    }
+}
+
+/// Records exactly `source`, the identity the check read, unless the pane's pin holds another file;
+/// the path is not looked at again.
+pub(crate) fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<Committed> {
+    commit(proposal, Plan::Verified(source))
+}
+
+/// Judges a path that no longer names the file its check read: under the pane's pin that is an
+/// anomaly, or a recheck while unreadable; otherwise the check is stale and waits.
+pub(crate) fn judge_moved(proposal: &Proposal) -> io::Result<Committed> {
+    let committed = commit_with(proposal.channel_id, |writer| {
+        let stat = fs::metadata(proposal.path).map(|meta| file_identity(&meta));
+        Planned::Keep(
+            match writer.pin_judgment(proposal, Observation::Stat(stat)) {
+                PinJudgment::Anomaly => Committed::Anomaly,
+                PinJudgment::Recheck => Committed::Recheck,
+                _ => Committed::Stale,
+            },
+        )
+    })?;
+    Ok(match committed {
+        Committed::Unchanged => Committed::Stale,
+        committed => committed,
     })
-    .map(|_| ())
 }
 
+/// Audits a candidate the binding judgment refused; `true` when this judgment was newly logged.
+pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<bool> {
+    commit(proposal, Plan::Rejected(reason)).map(|c| c == Committed::Appended)
+}
+
+/// The pane's current source, when a verified record pinned it.
+pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
+    let mut pinned = None;
+    commit_with(channel_id, |writer| {
+        let pane = writer.panes.get(tmux_session).filter(|pane| pane.verified);
+        pinned = pane.and_then(|pane| pane.current.clone());
+        Planned::Keep(Committed::Unchanged)
+    })?;
+    Ok(pinned)
+}
+
+/// The (dev, ino) a verified record pinned for the pane, if its current source is `path` of `session`.
+pub(crate) fn pinned_file(
+    channel_id: u64,
+    tmux_session: &str,
+    session: &str,
+    path: &str,
+) -> io::Result<Option<crate::services::cluster::stream_relay::SourceFileIdentity>> {
+    let current = pinned_source(channel_id, tmux_session)?;
+    let current = current.filter(|c| c.session_id == session && c.path == Path::new(path));
+    #[cfg(unix)]
+    let pin = |c: SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+        dev: c.dev,
+        ino: c.ino,
+    };
+    #[cfg(not(unix))]
+    let pin = |_: SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable;
+    Ok(current.map(pin))
+}
+
+fn commit(proposal: &Proposal, mode: Plan) -> io::Result<Committed> {
+    commit_with(proposal.channel_id, |writer| writer.plan(proposal, mode))
+}
+
+/// Runs `plan` on the channel's writer and appends the record it returns.
 fn commit_with(
     channel_id: u64,
-    plan: impl FnOnce(&mut Writer) -> Option<BindingEvent>,
-) -> io::Result<bool> {
+    plan: impl FnOnce(&mut Writer) -> Planned,
+) -> io::Result<Committed> {
     let Some(path) = log_path(channel_id)? else {
-        return Ok(false);
+        return Ok(Committed::Unchanged);
     };
     let mut logs = lock_logs();
     let log = logs.entry(path.clone()).or_insert_with(|| ChannelLog {
@@ -390,25 +516,25 @@ fn commit_with(
         log.writer = Some(writer);
     }
     let Some(writer) = log.writer.as_mut() else {
-        return Ok(false);
+        return Ok(Committed::Unchanged);
     };
-    let Some(record) = plan(writer) else {
-        return Ok(false);
+    let (record, verified) = match plan(writer) {
+        Planned::Append(record, verified) => (record, verified),
+        Planned::Keep(committed) => return Ok(committed),
     };
-    if let Err(error) = writer.append(&path, &record) {
+    if let Err(error) = writer.append(&path, &record, verified) {
         // A line that could not be cut back off is re-read from disk before the next append.
         if writer.poisoned {
             log.writer = None;
         }
         return Err(error);
     }
-    writer.apply(&record);
+    writer.apply(&record, verified);
     log.notify.send_replace(record.seq);
-    Ok(true)
+    Ok(Committed::Appended)
 }
 
-fn source_id(session: Option<&str>, path: &str, meta: &fs::Metadata) -> SourceId {
-    let (dev, ino) = file_identity(meta);
+fn source_id(session: Option<&str>, path: &str, (dev, ino): (u64, u64)) -> SourceId {
     SourceId {
         session_id: session.unwrap_or_default().to_owned(),
         path: PathBuf::from(path),
@@ -422,11 +548,11 @@ fn same_source(
     current: &SourceId,
     session: Option<&str>,
     path: &str,
-    meta: Option<&fs::Metadata>,
+    file: Option<(u64, u64)>,
 ) -> bool {
     current.path == Path::new(path)
         && session.is_none_or(|id| current.session_id.is_empty() || current.session_id == id)
-        && meta.is_none_or(|meta| file_identity(meta) == (current.dev, current.ino))
+        && file.is_none_or(|file| file == (current.dev, current.ino))
 }
 
 fn pending_matches(pending: &BindingEvent, session: Option<&str>, path: &str) -> bool {
@@ -452,7 +578,7 @@ impl Writer {
             }
             _ => {}
         }
-        let read = read_log(path)?;
+        let read = read_log::<Logged>(path)?;
         if read.total_len > 0 {
             let file = OpenOptions::new().write(true).open(path)?;
             if read.complete_len < read.total_len {
@@ -471,24 +597,31 @@ impl Writer {
             parents_synced: read.total_len > 0,
             poisoned: false,
         };
-        read.records.iter().for_each(|record| writer.apply(record));
+        (read.records.iter()).for_each(|logged| writer.apply(&logged.event, logged.verified));
         Ok(writer)
     }
 
-    fn apply(&mut self, record: &BindingEvent) {
+    fn apply(&mut self, record: &BindingEvent, verified: bool) {
         self.last_seq = self.last_seq.max(record.seq);
         let pane = self.panes.entry(record.tmux_session.clone()).or_default();
         if record.execution_nonce.is_some() {
             pane.nonce = record.execution_nonce.clone();
         }
         match &record.new {
-            BindingTarget::Source(source) => pane.current = Some(source.clone()),
+            BindingTarget::Source(source) => {
+                pane.current = Some(source.clone());
+                pane.verified = verified;
+            }
             BindingTarget::Pending {
                 payload_session_id, ..
             } => {
                 pane.pending = Some(record.clone());
                 // The refused session is a candidate again, so its next refusal must reach the log.
-                if pane.rejected.as_ref() == Some(payload_session_id) {
+                if pane
+                    .rejected
+                    .as_ref()
+                    .is_some_and(|(session, _)| session == payload_session_id)
+                {
                     pane.rejected = None;
                 }
             }
@@ -497,17 +630,47 @@ impl Writer {
                 source,
             } => {
                 pane.current = Some(source.clone());
+                pane.verified = verified;
                 if pane.pending.as_ref().is_some_and(|p| p.seq == *pending_seq) {
                     pane.pending = None;
                 }
             }
             BindingTarget::Rejected {
-                payload_session_id, ..
-            } => pane.rejected = Some(payload_session_id.clone()),
+                payload_session_id,
+                reason,
+                ..
+            } => pane.rejected = Some((payload_session_id.clone(), reason.clone())),
         }
     }
 
-    fn plan(&mut self, p: &Proposal, rejected: Option<&str>) -> Option<BindingEvent> {
+    /// What the pane's pin makes of `seen`, an observation of the proposal's path.
+    fn pin_judgment(&self, p: &Proposal, seen: Observation) -> PinJudgment {
+        let pane = self.panes.get(p.tmux_session).filter(|pane| pane.verified);
+        let pin = pane.and_then(|pane| pane.current.as_ref());
+        let session = p.session().or(pin.map(|pin| pin.session_id.as_str()));
+        judge_pin(pin, session.unwrap_or_default(), Path::new(p.path), seen)
+    }
+
+    fn plan(&mut self, p: &Proposal, mode: Plan) -> Planned {
+        let stat =
+            matches!(mode, Plan::Stat).then(|| fs::metadata(p.path).map(|m| file_identity(&m)));
+        // Only a stat reads the file; a Pending judgment has none and a verified one brings its own.
+        let file = match mode {
+            Plan::Stat => stat.as_ref().and_then(|stat| stat.as_ref().ok().copied()),
+            Plan::Verified(source) => Some((source.dev, source.ino)),
+            Plan::ForcePending | Plan::Rejected(_) => None,
+        };
+        let seen = match (mode, stat) {
+            (Plan::Verified(source), _) => Some(Observation::Checked(source)),
+            (_, Some(stat)) => Some(Observation::Stat(stat)),
+            _ => None,
+        };
+        // Every source a registration or a check logs is held to the pane's pin first.
+        match seen.map(|seen| self.pin_judgment(p, seen)) {
+            Some(PinJudgment::Anomaly) => return Planned::Keep(Committed::Anomaly),
+            Some(PinJudgment::Recheck) => return Planned::Keep(Committed::Recheck),
+            _ => {}
+        }
         let pane = self.panes.entry(p.tmux_session.to_owned()).or_default();
         let session = p.session();
         let replaced = p.replaced.filter(|(path, id)| {
@@ -516,14 +679,28 @@ impl Writer {
         });
         let replaced = replaced.and_then(|(path, id)| {
             let meta = fs::metadata(path).ok()?;
-            Some(source_id(id, path, &meta))
+            Some(source_id(id, path, file_identity(&meta)))
         });
         let old = pane.current.clone().or(replaced);
         let payload_session_id = session.unwrap_or_default().to_owned();
-        let meta = fs::metadata(p.path);
-        let (new, inherited) = if let Some(reason) = rejected {
-            if pane.rejected.as_deref() == Some(payload_session_id.as_str()) {
-                return None;
+        let pending = pane.pending.as_ref();
+        let pending = pending.filter(|e| pending_matches(e, session, p.path));
+        // A verified source is no change only once its record is pinned and no Pending waits on it.
+        let unsettled = matches!(mode, Plan::Verified(_)) && (!pane.verified || pending.is_some());
+        let (new, inherited) = if let Plan::ForcePending = mode {
+            if pending.is_some() {
+                return Planned::Keep(Committed::Unchanged);
+            }
+            let payload_transcript_path = p.payload_path();
+            let new = BindingTarget::Pending {
+                payload_session_id,
+                payload_transcript_path,
+            };
+            (new, None)
+        } else if let Plan::Rejected(reason) = mode {
+            let judged = (payload_session_id.clone(), reason.to_owned());
+            if pane.rejected.as_ref() == Some(&judged) {
+                return Planned::Keep(Committed::Unchanged);
             }
             let payload_transcript_path = p.payload_path();
             let reason = reason.to_owned();
@@ -536,15 +713,14 @@ impl Writer {
         } else if pane
             .current
             .as_ref()
-            .is_some_and(|current| same_source(current, session, p.path, meta.as_ref().ok()))
+            .is_some_and(|current| same_source(current, session, p.path, file))
+            && !unsettled
         {
-            return None;
+            return Planned::Keep(Committed::Unchanged);
         } else {
-            let pending = pane.pending.as_ref();
-            let pending = pending.filter(|e| pending_matches(e, session, p.path));
-            match (meta, pending) {
-                (Err(_), Some(_)) => return None,
-                (Err(_), None) => {
+            match (file, pending) {
+                (None, Some(_)) => return Planned::Keep(Committed::Unchanged),
+                (None, None) => {
                     let payload_transcript_path = p.payload_path();
                     let new = BindingTarget::Pending {
                         payload_session_id,
@@ -552,8 +728,8 @@ impl Writer {
                     };
                     (new, None)
                 }
-                (Ok(meta), Some(pending)) => {
-                    let source = source_id(session, p.path, &meta);
+                (Some(file), Some(pending)) => {
+                    let source = source_id(session, p.path, file);
                     let pending_seq = pending.seq;
                     let new = BindingTarget::Resolved {
                         pending_seq,
@@ -561,12 +737,16 @@ impl Writer {
                     };
                     (new, Some(pending.clone()))
                 }
-                (Ok(meta), None) => (
-                    BindingTarget::Source(source_id(session, p.path, &meta)),
+                (Some(file), None) => (
+                    BindingTarget::Source(source_id(session, p.path, file)),
                     None,
                 ),
             }
         };
+        let verified = matches!(mode, Plan::Verified(_));
+        // Pinning the source it already names is not a new source, so it has no parent.
+        let repinned = matches!(&new, BindingTarget::Source(s) if pane.current.as_ref() == Some(s));
+        let rejected = matches!(mode, Plan::Rejected(_)).then_some(());
         let nonce = match observe_spawn_nonce_marker(p.tmux_session) {
             SpawnNonceMarker::Known(nonce) => Some(nonce),
             _ => None,
@@ -593,7 +773,7 @@ impl Writer {
                     cause,
                     BindingCause::Fork | BindingCause::Compact | BindingCause::Continuation
                 );
-                let parent = (derived && rejected.is_none())
+                let parent = (derived && rejected.is_none() && !repinned)
                     .then(|| old.clone())
                     .flatten();
                 (cause, parent)
@@ -601,7 +781,7 @@ impl Writer {
         };
         let hook_event = p.hook.map(|hook| hook.event.clone());
         let received_at = p.hook.map_or_else(Utc::now, |hook| hook.received_at);
-        Some(BindingEvent {
+        let event = BindingEvent {
             seq: self.last_seq + 1,
             channel_id: p.channel_id,
             provider: p.provider.to_owned(),
@@ -616,12 +796,17 @@ impl Writer {
                 received_at,
             },
             committed_at: Utc::now(),
-        })
+        };
+        Planned::Append(event, verified)
     }
 
     /// Append and fsync one line; on failure the line is cut back off so no reader sees it.
-    fn append(&mut self, path: &Path, record: &BindingEvent) -> io::Result<()> {
-        let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+    fn append(&mut self, path: &Path, record: &BindingEvent, verified: bool) -> io::Result<()> {
+        let logged = LoggedRef {
+            event: record,
+            verified,
+        };
+        let mut line = serde_json::to_vec(&logged).map_err(io::Error::other)?;
         line.push(b'\n');
         let mut file = OpenOptions::new().write(true).create(true).open(path)?;
         let start = file.seek(SeekFrom::End(0))?;
