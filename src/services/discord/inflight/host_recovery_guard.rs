@@ -1,11 +1,20 @@
 //! Host witnesses an inflight row and the `.host_kind` marker give the session
 //! target resolver. Unknown on-disk values stay unreadable, never absent.
-#![cfg_attr(not(test), allow(dead_code))]
+
+use sqlx::PgPool;
 
 use super::InflightTurnState;
 use super::host_locator::PersistedHostLocator;
-use crate::services::session_host::{HostKind, HostWitness, SessionTargetEvidence};
-use crate::services::tmux_common::host_marker::HostKindMarker;
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+};
+use crate::services::provider::ProviderKind;
+use crate::services::session_host::{
+    AutomaticEffect, ClearedHostSession, HostKind, HostWitness, SessionTargetEvidence,
+    SessionTargetEvidenceSource, SessionTargetInput, StateChange, clear_legacy_session,
+    resolve_session_target, session_record_witness,
+};
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 pub(in crate::services::discord) fn locator_witness(
     locator: Option<&PersistedHostLocator>,
@@ -60,6 +69,77 @@ pub(in crate::services::discord) fn with_inflight_row(
     evidence
 }
 
+struct KeyedEvidence(SessionTargetEvidence);
+
+impl SessionTargetEvidenceSource for KeyedEvidence {
+    fn read_evidence(&self, _input: &SessionTargetInput) -> SessionTargetEvidence {
+        self.0.clone()
+    }
+}
+
+/// Admits `tmux_name` for a kill or cleanup only when the sessions row behind the
+/// caller's key is a found legacy row and no marker or inflight row says otherwise.
+pub(in crate::services::discord) async fn clear_channel_session(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    tmux_name: &str,
+    caller: &str,
+) -> Option<ClearedHostSession> {
+    let lookup = match (pool, session_key) {
+        (Some(pool), Some(key)) => {
+            load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await
+        }
+        (None, _) => HostedLookup::Unknown("no postgres pool".to_string()),
+        (_, None) => HostedLookup::Unknown("no session key".to_string()),
+    };
+    let mut evidence = SessionTargetEvidence {
+        session_key: session_key.map(str::to_string),
+        session_name: Some(tmux_name.to_string()),
+        session_record: session_record_witness(&lookup),
+        inflight_locator: HostWitness::Absent,
+        host_marker: marker_witness(read_host_kind_marker(tmux_name)),
+        ..SessionTargetEvidence::unread()
+    };
+    // An inflight row that names another tmux session is not evidence about this one.
+    match super::load_inflight_state_read_only_result(provider, channel_id) {
+        Ok(Some(row))
+            if row
+                .tmux_session_name
+                .as_deref()
+                .is_none_or(|n| n == tmux_name) =>
+        {
+            evidence.inflight_locator = HostWitness::ReadFailed("filled from the row".into());
+            evidence = with_inflight_row(evidence, &row);
+        }
+        Ok(_) => {}
+        Err(error) => evidence.inflight_locator = HostWitness::ReadFailed(error),
+    }
+    let input = SessionTargetInput::SessionKey(session_key.unwrap_or_default().to_string());
+    let target = resolve_session_target(input, &KeyedEvidence(evidence));
+    let change = StateChange::Automatic {
+        effect: AutomaticEffect::Kill,
+        observed: None,
+    };
+    clear_legacy_session(&target, change)
+        .inspect_err(|verdict| {
+            tracing::warn!(
+                caller,
+                tmux_name,
+                session_key,
+                ?verdict,
+                host = ?target.host,
+                "host guard kept the session: no automatic teardown"
+            );
+        })
+        .ok()
+}
+
+#[cfg(test)]
+#[path = "host_recovery_guard_keyed_tests.rs"]
+pub(super) mod keyed_tests;
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -110,7 +190,7 @@ mod tests {
         SessionTargetEvidence {
             session_key: Some(format!("claude/hash/mac-mini:{TMUX_NAME}")),
             session_name: session_name.map(str::to_string),
-            session_record: HostWitness::Absent,
+            session_record: HostWitness::LegacyRow,
             inflight_locator: HostWitness::ReadFailed("filled from the row".to_string()),
             host_marker: HostWitness::Absent,
             ..SessionTargetEvidence::unread()
@@ -246,7 +326,8 @@ mod tests {
             assert_eq!(verdict, GuardVerdict::Refused(GuardRefusal::UnknownHost));
         }
 
-        let (host, verdict) = kill_verdict(caller(Some(ClaudeTui), absent(), absent()), row(None));
+        let legacy = caller(Some(ClaudeTui), HostWitness::LegacyRow, absent());
+        let (host, verdict) = kill_verdict(legacy, row(None));
         assert!(
             matches!(&host, TargetHost::Known { kind: HostKind::Tmux, name, .. } if name == TMUX_NAME),
             "agreeing kinds keep the legacy reading: {host:?}"

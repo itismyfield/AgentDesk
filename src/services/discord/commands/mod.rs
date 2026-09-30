@@ -35,6 +35,7 @@ mod session;
 mod sidecar;
 mod skill;
 mod text_commands;
+mod tmux_recreate;
 mod tui_passthrough;
 mod voice;
 

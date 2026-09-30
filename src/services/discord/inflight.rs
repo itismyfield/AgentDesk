@@ -11,6 +11,9 @@ mod destructive_commit;
 mod finalizer_identity;
 mod host_locator;
 mod host_recovery_guard;
+pub(in crate::services::discord) use host_recovery_guard::clear_channel_session;
+#[cfg(test)]
+pub(in crate::services::discord) use host_recovery_guard::keyed_tests::seed_session_row;
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;

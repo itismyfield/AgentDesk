@@ -823,25 +823,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 continue;
             }
 
-            // Kill the dead tmux session
-            let sess = dc.session_name.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::services::termination_audit::record_termination_for_tmux(
-                    &sess,
-                    None,
-                    "tmux_startup",
-                    "startup_dead_session",
-                    Some("startup cleanup: dead session"),
-                    None,
-                );
-                record_tmux_exit_reason(&sess, "startup cleanup: dead session");
-                crate::services::platform::tmux::kill_session(
-                    &sess,
-                    "startup cleanup: dead session",
-                );
-            })
-            .await;
-            cleaned_dead_sessions += 1;
+            let pool = shared.pg_pool.as_ref();
+            let (channel_id, session_name) = (dc.channel_id, dc.session_name.as_str());
+            if kill_dead_startup_session(pool, &provider, channel_id, &session_key, session_name)
+                .await
+            {
+                cleaned_dead_sessions += 1;
+            }
         }
 
         if cleaned_dead_sessions > 0 {
@@ -859,6 +847,46 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // directory. See issue #892.
         sweep_orphan_session_files().await;
     }
+}
+
+/// Kills a dead session found at startup once the host guard admits it through the
+/// sessions row the idle report just upserted.
+async fn kill_dead_startup_session(
+    pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: &str,
+    session_name: &str,
+) -> bool {
+    let session = crate::services::discord::inflight::clear_channel_session(
+        pool,
+        provider,
+        channel_id,
+        Some(session_key),
+        session_name,
+        "startup_dead_session",
+    )
+    .await;
+    let Some(session) = session else {
+        return false;
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::services::termination_audit::record_termination_for_cleared(
+            &session,
+            None,
+            "tmux_startup",
+            "startup_dead_session",
+            Some("startup cleanup: dead session"),
+            None,
+        );
+        record_tmux_exit_reason(session.name(), "startup cleanup: dead session");
+        crate::services::platform::tmux::kill_session(
+            session.name(),
+            "startup cleanup: dead session",
+        );
+    })
+    .await;
+    true
 }
 
 pub(super) fn add_configured_channel_bindings(
@@ -887,5 +915,55 @@ pub(super) fn add_configured_channel_bindings(
                 .entry(tmux_name)
                 .or_insert_with(|| (ChannelId::new(binding.channel_id), channel_name.to_string()));
         }
+    }
+}
+
+#[cfg(test)]
+mod keyed_teardown_tests {
+    use super::*;
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+    use crate::services::discord::inflight::seed_session_row;
+
+    // A dead session found at startup is killed only when its key finds a legacy row.
+    #[tokio::test]
+    async fn startup_cleanup_kills_only_a_session_the_host_guard_admits_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let bound = wire(&record(
+            &owner("1479671301387059602"),
+            "n1",
+            HostedState::Bound,
+        ));
+        let legacy = seed_session_row(&pool, "p4c3w1-start-legacy", 1479671301387059601, None);
+        let legacy = legacy.await;
+        let bound = seed_session_row(
+            &pool,
+            "p4c3w1-start-bound",
+            1479671301387059602,
+            Some(bound),
+        );
+        let bound = bound.await;
+        let missing = legacy.replace("legacy", "missing");
+        let cases = [
+            (legacy.as_str(), "p4c3w1-start-legacy", 601, true),
+            (bound.as_str(), "p4c3w1-start-bound", 602, false),
+            (missing.as_str(), "p4c3w1-start-missing", 603, false),
+        ];
+        for (key, name, channel, killed) in cases {
+            let channel_id = 1479671301387059000 + channel;
+            let claude = ProviderKind::Claude;
+            let cleaned = kill_dead_startup_session(Some(&pool), &claude, channel_id, key, name);
+            assert_eq!(cleaned.await, killed, "{name}");
+            let exit_reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
+            assert_eq!(
+                std::path::Path::new(&exit_reason).exists(),
+                killed,
+                "{name}"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
     }
 }

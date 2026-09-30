@@ -1,4 +1,4 @@
-// The session target resolver has no production caller until its consumers land.
+// Only the keyed teardown gate calls the resolver so far; the rest waits for its consumers.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::herdr_host::UnconfiguredHerdrHost;
@@ -397,22 +397,20 @@ fn legacy_target_host(evidence: &SessionTargetEvidence, session_name: Option<&st
         runtime_kind_marker: evidence.runtime_kind_marker,
         process_registry_hit: evidence.process_registry_hit,
     };
+    // Only a found row with no hosted record proves the legacy reading, whatever the input.
+    let proven = evidence.session_record == HostWitness::LegacyRow;
     match (resolve_host_kind(legacy), session_name) {
-        (HostKindResolution::Known { kind, source }, Some(name)) => TargetHost::Known {
+        (HostKindResolution::Known { kind, source }, Some(name)) if proven => TargetHost::Known {
             kind,
             source: TargetSource::Legacy(source),
             name: name.to_string(),
         },
         // A found row without any hosted trace keeps its pre-Herdr tmux reading.
-        (HostKindResolution::Unknown, Some(name))
-            if evidence.session_record == HostWitness::LegacyRow =>
-        {
-            TargetHost::Known {
-                kind: HostKind::Tmux,
-                source: TargetSource::SessionRecord,
-                name: name.to_string(),
-            }
-        }
+        (HostKindResolution::Unknown, Some(name)) if proven => TargetHost::Known {
+            kind: HostKind::Tmux,
+            source: TargetSource::SessionRecord,
+            name: name.to_string(),
+        },
         (HostKindResolution::Conflict { first, second }, _) => TargetHost::Conflict {
             first: (first.0, TargetSource::Legacy(first.1)),
             second: (second.0, TargetSource::Legacy(second.1)),
@@ -685,6 +683,7 @@ mod tests {
 
             let named = SessionTargetEvidence {
                 session_name: Some(TUI_NAME.to_string()),
+                session_record: HostWitness::LegacyRow,
                 ..unnamed
             };
             let resolved = resolve(key(full), named);
@@ -790,7 +789,7 @@ mod tests {
         assert_eq!(resolved.legacy_ref(), None);
 
         let legacy_row = SessionTargetEvidence {
-            session_record: HostWitness::Absent,
+            session_record: HostWitness::LegacyRow,
             ..lost_marker
         };
         assert_eq!(
@@ -1031,6 +1030,26 @@ mod tests {
                 refused,
             ),
             (
+                "row not proven, runtime vote",
+                SessionTargetEvidence {
+                    session_record: HostWitness::Absent,
+                    runtime_kind_marker: Some(R::LegacyTmuxWrapper),
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::NoHostEvidence),
+                refused,
+            ),
+            (
+                "row not proven, process registry",
+                SessionTargetEvidence {
+                    session_record: HostWitness::Absent,
+                    process_registry_hit: true,
+                    ..found()
+                },
+                TargetHost::Unknown(UnknownHost::NoHostEvidence),
+                refused,
+            ),
+            (
                 "no row",
                 SessionTargetEvidence {
                     session_record: HostWitness::NoRow,
@@ -1113,6 +1132,11 @@ mod tests {
             for input in [
                 SessionTargetInput::RawName(TUI_NAME.to_string()),
                 key("claude/h/mac-mini:x"),
+                SessionTargetInput::Canonical {
+                    provider: "claude".to_string(),
+                    token_hash: "h".to_string(),
+                    channel_id: 5340,
+                },
             ] {
                 let resolved = resolve(input.clone(), evidence.clone());
                 assert_eq!(resolved.host, expected, "{label} via {input:?}");
@@ -1138,6 +1162,7 @@ mod tests {
         };
         let tui_row = SessionTargetEvidence {
             session_name: Some(name.to_string()),
+            session_record: HostWitness::LegacyRow,
             inflight_runtime_kind: Some(R::ClaudeTui),
             runtime_kind_marker: Some(R::ClaudeTui),
             ..absent()

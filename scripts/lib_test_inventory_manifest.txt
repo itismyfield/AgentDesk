@@ -3555,6 +3555,7 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
 services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
 services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
+services::discord::inflight::host_recovery_guard::keyed_tests::keyed_teardown_admits_only_a_found_legacy_row_pg
 services::discord::inflight::host_recovery_guard::tests::a_tmux_name_disagreement_stays_a_conflict_across_merges
 services::discord::inflight::host_recovery_guard::tests::caller_runtime_evidence_survives_the_inflight_row_merge
 services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
@@ -6635,6 +6636,7 @@ services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_with_pending_synthetic_start_is_not_suppressed
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_without_inflight_is_suppressed
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::streaming_placeholder_without_inflight_is_skipped
+services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::startup_cleanup_kills_only_a_session_the_host_guard_admits_pg
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::interactive_restore_without_dispatch_is_untouched
@@ -7412,6 +7414,7 @@ services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_ca
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
+services::discord::turn_bridge::retry_state::keyed_teardown_tests::auto_retry_kills_only_a_session_the_host_guard_admits_pg
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::replay_gate_does_not_reset_offset_for_short_sentinel
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_clamps_offset_within_replaced_body
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_normalizes_prior_offset_inside_leading_multibyte_char
@@ -9247,7 +9250,8 @@ services::session_host::herdr_host::tests::herdr_requests_serialize_with_schema_
 services::session_host::herdr_host::tests::herdr_send_text_keeps_ambiguous_outcomes_indeterminate
 services::session_host::herdr_host::tests::herdr_unconfigured_host_fails_every_call_explicitly
 services::session_host::herdr_host::tests::herdr_working_dir_prefers_foreground_cwd
-services::session_host::herdr_host::tests::session_target_guard_has_no_production_caller
+services::session_host::herdr_host::tests::name_only_teardown_calls_stay_on_the_reviewed_list
+services::session_host::herdr_host::tests::session_target_guard_stays_behind_the_keyed_gate
 services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe

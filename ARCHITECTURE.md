@@ -731,6 +731,7 @@ src/
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── text_commands.rs
+│   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── delivery_lease_cell/
@@ -860,6 +861,7 @@ src/
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
+│   │   │   ├── host_recovery_guard_keyed_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs

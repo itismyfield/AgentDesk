@@ -413,28 +413,103 @@ pub(super) async fn reset_session_for_auto_retry(
 
     #[cfg(unix)]
     if let Some(name) = cancel_token.tmux_session_name() {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"
+        let provider = shared.settings.read().await.provider.clone();
+        let pool = shared.pg_pool.as_ref();
+        kill_session_before_retry(pool, &provider, channel_id, adk_session_key, &name, reason)
+            .await;
+    }
+}
+
+/// Kills the turn's tmux session for a fresh retry once the host guard admits it
+/// through the turn's own session key.
+#[cfg(unix)]
+async fn kill_session_before_retry(
+    pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    adk_session_key: Option<&str>,
+    name: &str,
+    reason: &str,
+) {
+    let session = crate::services::discord::inflight::clear_channel_session(
+        pool,
+        provider,
+        channel_id.get(),
+        adk_session_key,
+        name,
+        "auto_retry_fresh_session",
+    )
+    .await;
+    let Some(session) = session else {
+        return;
+    };
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
+    crate::services::termination_audit::record_termination_for_cleared(
+        &session,
+        None,
+        "turn_bridge",
+        "auto_retry_fresh_session",
+        Some(&format!(
+            "forcing fresh session before auto-retry: {reason}"
+        )),
+        None,
+    );
+    record_tmux_exit_reason(
+        session.name(),
+        &format!("forcing fresh session before auto-retry: {reason}"),
+    );
+    crate::services::platform::tmux::kill_session(
+        session.name(),
+        &format!("forcing fresh session before auto-retry: {reason}"),
+    );
+}
+
+#[cfg(all(test, unix))]
+mod keyed_teardown_tests {
+    use super::*;
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+    use crate::services::discord::inflight::seed_session_row;
+
+    // Auto-retry tears the turn's session down only when its own key finds a legacy row.
+    #[tokio::test]
+    async fn auto_retry_kills_only_a_session_the_host_guard_admits_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let bound = wire(&record(
+            &owner("1479671301387059502"),
+            "n1",
+            HostedState::Bound,
+        ));
+        let legacy = seed_session_row(&pool, "p4c3w1-retry-legacy", 1479671301387059501, None);
+        let legacy = legacy.await;
+        let bound = seed_session_row(
+            &pool,
+            "p4c3w1-retry-bound",
+            1479671301387059502,
+            Some(bound),
         );
-        crate::services::termination_audit::record_termination_for_tmux(
-            &name,
-            None,
-            "turn_bridge",
-            "auto_retry_fresh_session",
-            Some(&format!(
-                "forcing fresh session before auto-retry: {reason}"
-            )),
-            None,
-        );
-        record_tmux_exit_reason(
-            &name,
-            &format!("forcing fresh session before auto-retry: {reason}"),
-        );
-        crate::services::platform::tmux::kill_session(
-            &name,
-            &format!("forcing fresh session before auto-retry: {reason}"),
-        );
+        let bound = bound.await;
+        let cases = [
+            (Some(legacy.as_str()), "p4c3w1-retry-legacy", 501, true),
+            (Some(bound.as_str()), "p4c3w1-retry-bound", 502, false),
+            (None, "p4c3w1-retry-no-key", 503, false),
+        ];
+        for (key, name, channel, killed) in cases {
+            let channel_id = ChannelId::new(1479671301387059000 + channel);
+            let claude = ProviderKind::Claude;
+            kill_session_before_retry(Some(&pool), &claude, channel_id, key, name, "test").await;
+            let exit_reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
+            assert_eq!(
+                std::path::Path::new(&exit_reason).exists(),
+                killed,
+                "{name}"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
     }
 }
 

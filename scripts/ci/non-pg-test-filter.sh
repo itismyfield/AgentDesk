@@ -109,6 +109,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
+  --skip services::discord::inflight::host_recovery_guard::keyed_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
@@ -124,6 +125,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_delivery_custody::pg_tests
   --skip services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
+  --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   --skip services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
@@ -131,6 +133,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
   --skip services::discord::turn_bridge::resume_pin_tests
+  --skip services::discord::turn_bridge::retry_state::keyed_teardown_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
   --skip services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
