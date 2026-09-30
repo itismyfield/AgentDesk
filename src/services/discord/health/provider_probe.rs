@@ -369,6 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_idle_standby_is_degraded_but_http_ready() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = HealthRegistry::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         registry.register_standby("codex".to_string(), shared).await;
@@ -411,6 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_profile_health_does_not_require_gateway_or_hide_recovery_failure() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = HealthRegistry::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         registry

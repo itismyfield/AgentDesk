@@ -2113,7 +2113,8 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
-services::cluster::intake_worker::o_route_tests::a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_anywhere_pg
+services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
+services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::intake_worker::tests::fence_between_open_check_and_active_registration_rejects_late_tick
@@ -9511,6 +9512,7 @@ services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
+services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition

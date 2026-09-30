@@ -18,6 +18,7 @@ fn worker_rest_transport_delivers_without_gateway_queue_chaining() {
 
 #[tokio::test]
 async fn rest_worker_terminal_edits_once_without_a_headless_duplicate() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     driver.gateway = Arc::new(DriverGateway {
         chain_locally: false,

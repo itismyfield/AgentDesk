@@ -210,6 +210,7 @@ async fn exact_receipt_rowless_terminal_preserves_foreign_anchor_and_successor_5
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_foreign_anchor_fallback_and_dual_failure_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for post_fails in [false, true] {
         let driver = TerminalDeliveryDriver::new(
             if post_fails {
@@ -301,6 +302,7 @@ async fn drain_custody(driver: &TerminalDeliveryDriver) -> Result<usize, String>
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for case in [
         "uncovered",
         "stale",
@@ -536,6 +538,7 @@ async fn exact_receipt_rowless_terminal_postlude_preserves_same_user_and_zero_id
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_custody_respects_owner_and_live_lease_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for owner in [
         Some(BridgeOutputOwner::WatcherRelay),
         Some(BridgeOutputOwner::StandbyRelay),
@@ -588,6 +591,7 @@ async fn exact_receipt_rowless_terminal_custody_respects_owner_and_live_lease_55
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_custody_long_partial_ack_survives_retry_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::FailSecondPostOnce, 1)
         .with_body("long answer ".repeat(700));
     let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
@@ -677,6 +681,7 @@ fn assert_no_completed_signal(
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_custody_empty_cancel_and_ptl_match_normal_body_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for cancel in [true, false] {
         let mut normal_body = None;
         for foreign in [false, true] {
@@ -739,6 +744,7 @@ async fn exact_receipt_rowless_terminal_custody_empty_cancel_and_ptl_match_norma
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_source_range_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for (provider, recovered, completed, native_claude) in [
         (ProviderKind::Claude, "", true, false),
         (ProviderKind::Claude, "A answer", true, false),
@@ -985,6 +991,7 @@ async fn exact_receipt_rowless_terminal_consumes_captured_claude_source_without_
 
 #[tokio::test]
 async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_successor_5521() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     use crate::services::discord::turn_finalizer::{CompletionAdmissionPlan, TurnKey};
     for replace_actor in [false, true] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::FallbackAfterEditFailure, 2);

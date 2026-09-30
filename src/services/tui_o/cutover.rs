@@ -182,12 +182,31 @@ pub(crate) mod test_override {
                 let entries = serde_json::from_str::<Vec<(u64, RuntimeHandoffKind)>>(&raw).unwrap();
                 return evaluate(Some(&snapshot(&entries)));
             }
-            // Tests never run bootstrap; read as the empty list it installs when YAML lists none.
-            match channel_policy::boot() {
-                Some(boot) => evaluate(Some(boot)),
-                None => evaluate(Some(&BootChannels::default())),
-            }
+            // Uninstalled stays None as in production; fixtures that need the empty list set it.
+            evaluate(channel_policy::boot())
         })
+    }
+
+    /// Re-runs `name` in a child whose whole process reads the empty writer list, for bodies that
+    /// reach the gate from runtime worker threads; returns whether this is that child.
+    pub(crate) fn in_empty_list_process(name: &str) -> bool {
+        if std::env::var_os(CHANNELS_ENV).is_some() {
+            return true;
+        }
+        let qualified = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", qualified, "--nocapture"])
+            .env(CHANNELS_ENV, "[]")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed; 0 failed; 0 ignored;"),
+            "{stdout}"
+        );
+        false
     }
 
     pub(crate) fn force_off() -> ForceGuard {

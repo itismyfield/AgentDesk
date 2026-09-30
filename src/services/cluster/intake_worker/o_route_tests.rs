@@ -240,40 +240,72 @@ async fn routed_locally(pool: &PgPool, channel: u64) -> bool {
     }
 }
 
-fn accept_attempted(outcome: Result<TickOutcome, sqlx::Error>) -> bool {
+/// The tick refused by `refuse_accepts` got as far as its accept attempt.
+fn reached_accept_attempt(outcome: Result<TickOutcome, sqlx::Error>) -> bool {
     matches!(outcome, Err(error) if error.to_string().contains("accept attempted"))
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_anywhere_pg() {
+/// Status and whether accept and spawn were recorded.
+async fn transitions(pool: &PgPool, id: i64) -> (String, bool, bool) {
+    sqlx::query_as(
+        "SELECT status::TEXT, accepted_at IS NOT NULL, spawned_at IS NOT NULL
+         FROM intake_outbox WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// One canary and one Legacy row on a runner, then on the canary's gateway. `commit` lets
+/// accept and spawn land with the TUI turn stood in; otherwise the database refuses the accept.
+async fn canary_topology(commit: bool) {
     use crate::services::tui_o::ownership::OwnershipGate;
     use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
     use crate::services::tui_o::writer::host::{self, HostParts, test_io::TestHost};
-    if !in_own_process(
-        "a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_anywhere_pg",
-    ) {
-        return;
-    }
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
     sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('agent-o', 'Test', 'claude', 'unused')")
         .execute(&pool)
         .await
         .unwrap();
-    refuse_accepts(&pool).await;
+    if !commit {
+        refuse_accepts(&pool).await;
+    }
+    let turns = super::test_executor::record();
     let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
     let (_registry, shared) = owner.await;
     let not_cancelled = || false;
     let tick = || run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
+    let ran = |outcome: Result<TickOutcome, sqlx::Error>| match commit {
+        true => matches!(outcome, Ok(TickOutcome::Processed)),
+        false => reached_accept_attempt(outcome),
+    };
+    // A refused accept leaves the claim in place with nothing recorded after it.
+    let settled = match commit {
+        true => ("done".to_string(), true, true),
+        false => ("claimed".to_string(), false, false),
+    };
     let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
 
     // No writer is hosted here, as on a runner: the Legacy row runs, the canary row waits.
     let canary = seed(&pool, O, 1).await;
-    seed(&pool, LEGACY, 2).await;
+    let legacy = seed(&pool, LEGACY, 2).await;
     assert!(!routed_locally(&pool, O).await && routed_locally(&pool, LEGACY).await);
-    assert!(accept_attempted(tick().await), "the Legacy row is accepted");
+    assert!(ran(tick().await), "the Legacy row reaches its accept");
     assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
+    assert_eq!(
+        transitions(&pool, legacy).await,
+        settled,
+        "the Legacy row's transitions"
+    );
     assert_eq!(state(&pool, canary).await, pending());
+    let untouched = ("pending".to_string(), false, false);
+    assert_eq!(
+        transitions(&pool, canary).await,
+        untouched,
+        "held rows record nothing"
+    );
 
     // The gateway hosts the canary's writer; it takes the row only once Owned and ready.
     let runtime = tempfile::tempdir().unwrap();
@@ -299,9 +331,20 @@ async fn a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_any
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(routed_locally(&pool, O).await, "the ready gateway runs it");
-    assert!(accept_attempted(tick().await), "the canary row is accepted");
+    assert!(ran(tick().await), "the canary row reaches its accept");
+    assert_eq!(
+        transitions(&pool, canary).await,
+        settled,
+        "the canary row's transitions"
+    );
+    let expected_turns = if commit { vec![LEGACY, O] } else { Vec::new() };
+    assert_eq!(
+        turns.channels(),
+        expected_turns,
+        "one turn per committed row"
+    );
 
-    // One open route per channel: clear the accepted row before the next message.
+    // One open route per channel: clear the canary row before the next message.
     sqlx::query("DELETE FROM intake_outbox WHERE id = $1")
         .bind(canary)
         .execute(&pool)
@@ -312,8 +355,30 @@ async fn a_canary_row_runs_only_on_its_ready_gateway_while_a_legacy_row_runs_any
     assert!(!routed_locally(&pool, O).await, "a lost gateway holds it");
     assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
     assert_eq!(state(&pool, later).await, pending());
+    assert_eq!(
+        turns.channels(),
+        expected_turns,
+        "a held row starts no turn"
+    );
     assert_eq!(*io.alarms.0.lock().unwrap(), []);
 
     pool.close().await;
     fixture.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg()
+ {
+    if in_own_process(
+        "a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg",
+    ) {
+        canary_topology(false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg() {
+    if in_own_process("a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg") {
+        canary_topology(true).await;
+    }
 }

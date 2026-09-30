@@ -390,7 +390,7 @@ impl Leg {
     }
 
     /// Writes the turn's one assistant unit and hands the terminal frame to the Legacy sink.
-    async fn finish_turn(&self) -> RelaySinkOutcome {
+    async fn finish_turn(&self) -> Result<RelaySinkOutcome, RelaySinkError> {
         let text = &self.body;
         let rows = [
             serde_json::json!({"type":"assistant", "uuid":"row-answer", "apiBlockIndex":0,
@@ -404,7 +404,7 @@ impl Leg {
         let mut frame = terminal_frame_offset(binding, &payload, 1, end, 710, STARTED, Some(0));
         let session = &binding.expected_session_name;
         frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
-        self.sink.deliver(&frame).await.unwrap()
+        self.sink.deliver(&frame).await
     }
 
     /// Body-carrying Legacy transport calls: a new message or an edited placeholder.
@@ -433,7 +433,8 @@ async fn run_canary_pair(selected: &[u64]) {
         .iter()
         .map(|&c| (c, RuntimeHandoffKind::ClaudeTui))
         .collect();
-    let _selected = cutover::test_override::force_channels(&owned);
+    // A canary list is injected; the empty case relies on what the boot install left.
+    let _selected = (!selected.is_empty()).then(|| cutover::test_override::force_channels(&owned));
     let io = TestHost::new(legs.iter().map(|leg| (leg.channel, leg.source())));
     let gate = Arc::new(OwnershipGate::default());
     gate.acquired();
@@ -446,7 +447,12 @@ async fn run_canary_pair(selected: &[u64]) {
     let hosts = host::start(ShadowProvider::Claude, true, parts);
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     for leg in &legs {
-        assert_eq!(leg.finish_turn().await, RelaySinkOutcome::TerminalDelivered);
+        let outcome = leg.finish_turn().await;
+        assert!(
+            matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+            "{} body must be delivered, not held: {outcome:?}",
+            leg.channel
+        );
     }
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     for leg in &legs {
@@ -479,9 +485,17 @@ async fn a_canary_channel_posts_only_through_o_and_its_legacy_neighbour_only_thr
     }
 }
 
+// The empty list reaches the sinks through the same boot install the server entries run.
 #[tokio::test(start_paused = true)]
 async fn an_empty_writer_list_leaves_both_channels_to_legacy() {
     if isolated("an_empty_writer_list_leaves_both_channels_to_legacy") {
+        let channel = |id: u64| {
+            serde_json::json!({"id": format!("legacy-{id}"), "name": "Legacy",
+            "channels": {"claude": {"id": id.to_string(), "runtime": "tui"}}})
+        };
+        let config = serde_json::from_value(serde_json::json!({"server": {},
+            "agents": [channel(640020), channel(640021)], "tui_o": {"writer": {"channels": []}}}));
+        crate::bootstrap::install_boot_snapshots(&config.unwrap()).unwrap();
         run_canary_pair(&[]).await;
     }
 }

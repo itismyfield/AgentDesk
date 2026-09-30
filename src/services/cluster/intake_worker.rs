@@ -26,7 +26,9 @@ use crate::db::intake_outbox::{
 };
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
-use crate::services::discord::{IntakeRequest, SharedData, TurnKind, execute_intake_turn_core};
+#[cfg(not(test))]
+use crate::services::discord::execute_intake_turn_core;
+use crate::services::discord::{IntakeRequest, SharedData, TurnKind};
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -35,6 +37,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+#[cfg(test)]
+use test_executor::execute_intake_turn_core;
 
 #[derive(Default)]
 struct MarkDoneMissCounters {
@@ -952,5 +956,6 @@ mod o_route_tests;
 #[path = "intake_worker/drain_tests.rs"]
 mod drain_tests;
 
-// No test drives a tick into `execute_intake_turn_core`, which needs a full Discord runtime;
-// `o_route_tests` stops ticks at runtime resolution or refuses the accept in the database.
+#[cfg(test)]
+#[path = "intake_worker/test_executor.rs"]
+pub(crate) mod test_executor;
