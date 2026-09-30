@@ -9576,8 +9576,6 @@ services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
-services::tui_o::topology::tests::switch_off_keeps_every_intake_worker
-services::tui_o::topology::tests::switch_on_refuses_tui_intake_off_the_gateway_only
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health

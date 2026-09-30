@@ -2,7 +2,7 @@
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
 /// The one O writer build switch, shared with the intake topology so both flip together.
-/// While false every ownership guard is a no-op.
+/// On, only the channels the boot list selects move to O; an empty list leaves all to Legacy.
 pub(crate) use super::topology::O_TUI_WRITER;
 
 use super::channel_policy;
@@ -14,13 +14,15 @@ pub(crate) use channel_gate::{
     IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
 
-// Enabling the writer is a later activation step; this build must stay off.
-const _: () = assert!(!O_TUI_WRITER);
+/// Whether the writer switch is on; test builds may turn it on or off per thread.
+pub(crate) fn writer_enabled() -> bool {
+    test_override::enabled()
+}
 
 /// Each boot-snapshot channel with its boot kind and whether O owns its output; the writer host
 /// derives its store and actor switches from this, never from a reloaded config.
 pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, bool)> {
-    let enabled = O_TUI_WRITER || test_override::forced();
+    let enabled = writer_enabled();
     let evaluate = |snapshot: Option<&channel_policy::BootChannels>| {
         let Some(snapshot) = snapshot else {
             return Vec::new();
@@ -38,7 +40,7 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, bool)> {
 
 /// The channels O owns with their boot kind; the snapshot is not read while the writer is off.
 fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
-    if !(O_TUI_WRITER || test_override::forced()) {
+    if !writer_enabled() {
         return Vec::new();
     }
     let owned = boot_ownership().into_iter().filter(|&(_, _, owned)| owned);
@@ -51,8 +53,8 @@ fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
 mod test_override {
     use super::channel_policy::{self, BootChannels};
 
-    pub(super) fn forced() -> bool {
-        false
+    pub(super) fn enabled() -> bool {
+        super::O_TUI_WRITER
     }
 
     pub(super) fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
@@ -71,18 +73,22 @@ pub(crate) mod test_override {
     pub(crate) const CHILD_ENV: &str = "ADK_TEST_O_TUI_WRITER";
 
     thread_local! {
-        static FORCED: Cell<bool> = const { Cell::new(false) };
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
-    pub(crate) fn forced() -> bool {
-        FORCED.with(Cell::get) || std::env::var_os(CHILD_ENV).is_some()
+    /// The switch this thread forced, otherwise the build constant.
+    pub(crate) fn enabled() -> bool {
+        let child = std::env::var_os(CHILD_ENV).is_some();
+        FORCED
+            .with(Cell::get)
+            .unwrap_or(super::O_TUI_WRITER || child)
     }
 
-    pub(crate) struct ForceGuard(bool);
+    pub(crate) struct ForceGuard(Option<bool>);
 
-    // Private: the flag alone leaves no channel list, so every gate would hold; use `force_channels`.
+    // Private: the list is set with the switch; use `force_channels`.
     fn force_on() -> ForceGuard {
-        ForceGuard(FORCED.with(|cell| cell.replace(true)))
+        ForceGuard(FORCED.with(|cell| cell.replace(Some(true))))
     }
 
     impl Drop for ForceGuard {
@@ -176,34 +182,17 @@ pub(crate) mod test_override {
                 let entries = serde_json::from_str::<Vec<(u64, RuntimeHandoffKind)>>(&raw).unwrap();
                 return evaluate(Some(&snapshot(&entries)));
             }
-            evaluate(channel_policy::boot())
+            // Tests never run bootstrap; read as the empty list it installs when YAML lists none.
+            match channel_policy::boot() {
+                Some(boot) => evaluate(Some(boot)),
+                None => evaluate(Some(&BootChannels::default())),
+            }
         })
     }
 
     pub(crate) fn force_off() -> ForceGuard {
-        ForceGuard(FORCED.with(|cell| cell.replace(false)))
+        ForceGuard(FORCED.with(|cell| cell.replace(Some(false))))
     }
-    thread_local! {
-        static INTAKE_ADMITTED: Cell<bool> = const { Cell::new(false) };
-    }
-
-    pub(crate) fn intake_admitted() -> bool {
-        INTAKE_ADMITTED.with(Cell::get)
-    }
-
-    pub(crate) struct IntakeGuard(bool);
-
-    /// Acts as if the intake gate admitted TUI providers off the gateway, until dropped.
-    pub(crate) fn admit_intake() -> IntakeGuard {
-        IntakeGuard(INTAKE_ADMITTED.with(|cell| cell.replace(true)))
-    }
-
-    impl Drop for IntakeGuard {
-        fn drop(&mut self) {
-            INTAKE_ADMITTED.with(|cell| cell.set(self.0));
-        }
-    }
-
     // Registry-reset tests run concurrently, so binding-dependent fixtures use their own process.
     pub(crate) fn isolated_binding_case(name: &str) -> bool {
         const CHILD: &str = "ADK_TEST_O_BINDING_CASE";

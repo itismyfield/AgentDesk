@@ -48,7 +48,7 @@ fn decide(
     channel_id: u64,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    let enabled = super::O_TUI_WRITER || super::test_override::forced();
+    let enabled = super::writer_enabled();
     if !enabled {
         return Ok(false);
     }

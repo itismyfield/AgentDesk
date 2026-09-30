@@ -1,8 +1,8 @@
 # TUI O writer canary runbook
 
 This runbook covers the first O writer canary: one new, empty channel moved to the O writer by
-[`tui_o.writer.channels`](tui-o-writer-channels.md). It applies only to a build whose
-`O_TUI_WRITER` switch is `true`. While the switch is `false`, listing a channel changes nothing.
+[`tui_o.writer.channels`](tui-o-writer-channels.md). It applies to a build whose `O_TUI_WRITER`
+switch is `true`, as this build is. With an empty list every channel stays on Legacy.
 
 Managed drain and handback to Legacy are not implemented. The canary is one way: a canary channel
 is never removed from the list and never added again. The next canary uses a different new channel.
@@ -46,6 +46,10 @@ activation would hold.
   `/api/health` has no `tui_o:halted:<channel>` reason. `tui_o:paused_no_gateway:<channel>` is
   expected only until the gateway lease is owned.
 - The next restart logs no new init line: the stored init is recovered, never written again.
+
+Activation waits, without a hold, until the gateway lease is owned; facts read while the lease was
+lost are read again once it is owned. It waits up to 10 seconds for the cluster bootstrap to publish
+this node's instance id, and holds with `this node's instance id is not published yet` otherwise.
 
 When activation holds, the log line and `tui_o:halted:<channel>` name the reason, for example
 `first activation: 1 open intake rows` or `first activation: source ... already holds N bytes`.
