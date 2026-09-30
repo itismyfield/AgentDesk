@@ -358,6 +358,7 @@ fn spawn_tui_prompt_relay_observer(
 }
 
 async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiPrompt) {
+    let _unannounced_prompt_id = synthetic_start_wiring::UnannouncedPromptIdGuard(&prompt);
     // Local-only controls were classified before publication, so this relay path
     // never needs to repair pre-publish lease/SSH state. A missing or lagged
     // receiver therefore cannot strand a local `/compact` relay lease.

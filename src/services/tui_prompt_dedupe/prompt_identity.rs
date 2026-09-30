@@ -1,5 +1,5 @@
-//! Claude `prompt_id` as the relayed-entry ledger's second key: the hook has it
-//! before the row's uuid exists. Only announced hooks record it (forks rewrite row ids).
+//! Claude `prompt_id` as the relayed-entry ledger's second key, known before the row's
+//! uuid. Only hooks record it (forks rewrite row ids); it suppresses once announced.
 
 use super::*;
 
@@ -22,6 +22,8 @@ impl<'a> ClaudePromptId<'a> {
 pub(super) enum PromptIdMatch {
     Absent,
     Same,
+    /// Same text, but the hook's announcement has no POST result yet; suppresses nothing.
+    Unannounced,
     /// Seen with other text; the id no longer suppresses anything.
     Ambiguous,
 }
@@ -70,36 +72,26 @@ pub(super) fn check_relayed_prompt_id(
     if entry.value.ambiguous {
         return PromptIdMatch::Ambiguous;
     }
-    if same_text(&entry.value.prompt, prompt) {
-        return PromptIdMatch::Same;
+    if !same_text(&entry.value.prompt, prompt) {
+        entry.value.ambiguous = true;
+        return PromptIdMatch::Ambiguous;
     }
-    entry.value.ambiguous = true;
-    PromptIdMatch::Ambiguous
+    if entry.value.announced {
+        PromptIdMatch::Same
+    } else {
+        PromptIdMatch::Unannounced
+    }
 }
 
-/// Records the hook `prompt_id` of a published SSH-direct observation once its
-/// announcement was sent or may have been; an unannounced prompt records nothing.
-pub fn record_announced_prompt_id(prompt: &ObservedTuiPrompt) {
-    let Some(prompt_id) = prompt.hook_prompt_id.as_deref() else {
-        return;
-    };
-    if prompt.ssh_direct_observation_generation == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
-        return;
-    }
-    record_relayed_prompt_id(
-        &prompt.provider,
-        prompt.tmux_session_name.trim(),
-        prompt_id,
-        &prompt.prompt,
-    );
-}
-
-/// A present id keeps its first record time; other text only marks it ambiguous.
-fn record_relayed_prompt_id(
+/// Holds a published hook's `prompt_id` unannounced so a conflicting row read
+/// before the POST result still marks it ambiguous. A present id keeps its first
+/// record, record time and observer; other text only marks it ambiguous.
+pub(super) fn record_observed_hook_prompt_id(
     provider: &str,
     tmux_session_name: &str,
     prompt_id: &str,
     prompt: &str,
+    observed_by: u64,
 ) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -121,11 +113,53 @@ fn record_relayed_prompt_id(
             prompt_id: prompt_id.to_string(),
             prompt: prompt.to_string(),
             ambiguous: false,
+            announced: false,
+            observed_by,
         },
         recorded_at: Instant::now(),
     });
     while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
         queue.pop_front();
+    }
+}
+
+/// Lets the observation's hook `prompt_id` suppress once its announcement was sent
+/// or may have been; an id already marked ambiguous stays ambiguous.
+pub fn record_announced_prompt_id(prompt: &ObservedTuiPrompt) {
+    settle_hook_prompt_id(prompt, true);
+}
+
+/// Drops the hook `prompt_id` the observation left unannounced, for a relay that
+/// never POSTed or whose POST certainly created nothing; an announced id stays.
+pub fn withdraw_unannounced_prompt_id(prompt: &ObservedTuiPrompt) {
+    settle_hook_prompt_id(prompt, false);
+}
+
+fn settle_hook_prompt_id(prompt: &ObservedTuiPrompt, announced: bool) {
+    let Some(prompt_id) = prompt.hook_prompt_id.as_deref() else {
+        return;
+    };
+    let observed_by = prompt.ssh_direct_observation_generation;
+    if observed_by == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&prompt.provider, prompt.tmux_session_name.trim());
+    let Some(queue) = state.relayed_prompt_ids_by_tmux.get_mut(&key) else {
+        return;
+    };
+    let Some(index) = queue.iter().position(|seen| {
+        seen.value.prompt_id == prompt_id
+            && seen.value.observed_by == observed_by
+            && !seen.value.announced
+    }) else {
+        return;
+    };
+    if announced {
+        queue[index].value.announced = true;
+    } else {
+        queue.remove(index);
     }
 }
 

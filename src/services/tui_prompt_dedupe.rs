@@ -111,8 +111,8 @@ pub struct ObservedTuiPrompt {
     /// publish no lease/SSH state at all.
     pub(crate) external_input_lease_generation: u64,
     pub(crate) ssh_direct_observation_generation: u64,
-    /// Hook-submitted Claude `prompt_id`; the relay records it only once the
-    /// announcement was sent or may have been.
+    /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
+    /// announcement POST result settles it.
     pub(crate) hook_prompt_id: Option<String>,
 }
 
@@ -255,8 +255,8 @@ struct TuiPromptDedupeState {
     // (30min) — long enough to span the rotation+self-loop window, bounded so
     // the set cannot grow without limit; additionally ring-capped per key.
     relayed_entry_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<String>>>,
-    // Announced hook `prompt_id` -> its text, so the idle scanner's later row
-    // (`promptId`, fresh uuid) is suppressed as the same input.
+    // Hook `prompt_id` -> its text, so the idle scanner's later row (`promptId`,
+    // fresh uuid) is suppressed as the same input once the hook was announced.
     relayed_prompt_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<RelayedPromptId>>>,
 }
 
@@ -265,6 +265,11 @@ struct RelayedPromptId {
     prompt_id: String,
     prompt: String,
     ambiguous: bool,
+    /// False until the relay's announcement POST was sent or may have been; an
+    /// unannounced id still tracks text conflicts but suppresses nothing.
+    announced: bool,
+    /// Observation generation of the hook that recorded the id; only its POST result settles it.
+    observed_by: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -306,9 +311,9 @@ pub use observation::*;
 pub(crate) use prompt_identity::age_observed_prompt_records_for_tests;
 pub use prompt_identity::{
     ClaudePromptId, extract_claude_transcript_prompt_id, extract_prompt_id_from_hook_payload,
-    record_announced_prompt_id,
+    record_announced_prompt_id, withdraw_unannounced_prompt_id,
 };
-use prompt_identity::{PromptIdMatch, check_relayed_prompt_id};
+use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
 pub use runtime_binding::*;
 
 #[cfg(test)]

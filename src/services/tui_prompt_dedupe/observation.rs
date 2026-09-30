@@ -285,7 +285,7 @@ fn observe_prompt_candidates_by_tmux_inner(
                 prompt_id,
                 "prompt_id matched a relayed prompt with different text; not suppressed"
             ),
-            PromptIdMatch::Absent => {}
+            PromptIdMatch::Absent | PromptIdMatch::Unannounced => {}
         }
     }
     let local_only_control = candidates
@@ -339,10 +339,19 @@ fn observe_prompt_candidates_by_tmux_inner(
                 mark_ssh_direct_observation_pending(&provider, tmux_session_name),
             )
         };
-    // A hook's prompt_id rides the event; the relay records it after its POST.
+    // A hook's prompt_id is held unannounced and rides the event; the relay's
+    // POST result lets it suppress or withdraws it.
     let hook_prompt_id = match prompt_id {
         Some(ClaudePromptId::HookSubmit(prompt_id)) if local_only_control.is_none() => {
-            Some(prompt_id.trim().to_string())
+            let prompt_id = prompt_id.trim();
+            record_observed_hook_prompt_id(
+                &provider,
+                tmux_session_name,
+                prompt_id,
+                &candidates[0],
+                ssh_direct_observation_generation,
+            );
+            Some(prompt_id.to_string())
         }
         _ => None,
     };

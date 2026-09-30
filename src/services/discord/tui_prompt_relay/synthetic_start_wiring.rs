@@ -92,16 +92,26 @@ pub(super) fn discord_post_certainly_unsent(error: &serenity::Error) -> bool {
     }
 }
 
-/// Records the hook prompt_id once its announcement POST was sent or may have been;
-/// a POST that certainly created nothing leaves the idle scanner free to announce it.
+/// Lets the hook prompt_id suppress once its announcement POST was sent or may have
+/// been; a POST that certainly created nothing withdraws it for the idle scanner.
 pub(super) fn record_prompt_id_after_post(
     prompt: &ObservedTuiPrompt,
     error: Option<&serenity::Error>,
 ) {
     if error.is_some_and(discord_post_certainly_unsent) {
+        crate::services::tui_prompt_dedupe::withdraw_unannounced_prompt_id(prompt);
         return;
     }
     crate::services::tui_prompt_dedupe::record_announced_prompt_id(prompt);
+}
+
+/// Withdraws the hook prompt_id on every relay return that no POST result settled.
+pub(super) struct UnannouncedPromptIdGuard<'a>(pub(super) &'a ObservedTuiPrompt);
+
+impl Drop for UnannouncedPromptIdGuard<'_> {
+    fn drop(&mut self) {
+        crate::services::tui_prompt_dedupe::withdraw_unannounced_prompt_id(self.0);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
