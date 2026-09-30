@@ -47,8 +47,9 @@ jobs:
       high_risk_recovery: ${{ steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
       pg_db: ${{ steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
-      # rust_or_policy for the library sweep; check_fast and lint keep the raw filter.
-      rust_tests: ${{ steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
+      # rust_or_policy for the library sweep, which still runs when an include! call
+      # reads a changed file; check_fast and lint keep the raw filter.
+      rust_tests: ${{ steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half

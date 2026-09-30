@@ -1,7 +1,9 @@
 """Comment-only CI skip: scripts/ci/comment_only_gate.py and its ci-pr.yml wiring.
 
 A false ``comment_only=true`` skips the PostgreSQL, high-risk, Windows and
-library-sweep lanes for real code, so the gate cases below pin the refusals.
+library-sweep lanes for real code, so the gate cases below pin the refusals. A
+false ``rust_tests_skip=true`` skips the library sweep whose tests read a changed
+file through ``include_str!``, so the include cases pin what that scan resolves.
 The workflow cases evaluate ci-pr.yml's own expressions and run the real
 required-check-mirror.sh, so a mirror that reads a different output than the
 job it mirrors turns a skipped lane into a red required context here.
@@ -26,8 +28,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MIRROR = REPO_ROOT / "scripts/required-check-mirror.sh"
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import comment_only_gate as gate  # noqa: E402
+import rust_include_reads as includes  # noqa: E402
 
 SKIPPED_WHEN_COMMENT_ONLY = (
     "test_fast",
@@ -125,19 +129,76 @@ class DecideTests(unittest.TestCase):
                 self.assertVerdict(False, 0, [("M", RS, RS)], filters)
 
 
+class IncludeScanTests(unittest.TestCase):
+    """What rust_include_reads.scan says each include call reads."""
+
+    def scan(self, body: str, path: str = "src/a/reader.rs", cargo=("",), symlinks=()) -> list:
+        return includes.scan(path, textwrap.dedent(body), set(cargo), set(symlinks))
+
+    def test_literal_and_manifest_paths_resolve_like_rustc(self) -> None:
+        sites = self.scan('''
+            // include_str!("comment.rs") and "include_str!(\\"string.rs\\")" are not calls.
+            const A: &str = include_str!("same.rs");
+            const B: &str = include_str!("../b/up.rs");
+            const C: &[u8] = include_bytes!(r#"./raw.rs"#);
+            const D: &str = std::include_str!(concat!("../", "joined.rs"));
+            const E: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rooted.rs"));
+            const F: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()));
+            include!(
+                "multi\\
+                 line.rs",
+            );
+            const G: &str = include_str!("../../../outside.rs");
+        ''')
+        self.assertEqual(
+            [site.target for site in sites],
+            ["src/a/same.rs", "src/b/up.rs", "src/a/raw.rs", "src/joined.rs",
+             "src/rooted.rs", "src/a/reader.rs", "src/a/multiline.rs"],
+        )
+        self.assertEqual([site.line for site in sites][:2], [3, 4])
+        nested = self.scan('include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/x.rs"));', "tools/t/src/lib.rs", ("", "tools/t"))
+        self.assertEqual([site.target for site in nested], ["tools/t/x.rs"])
+
+    def test_unresolvable_arguments_may_read_any_rust_file(self) -> None:
+        for body in (
+            'macro_rules! grab { ($p:expr) => { include_str!($p) }; }',
+            'include_str!(concat!(env!("OUT_DIR"), "/gen.rs"));',
+            'include_str!(PATH);',
+            'include_str!("\\u{2e}\\u{2e}/x.rs");',
+            'use std::include_str as grab;',
+            'include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()));',  # file!() outside the root crate
+            'include_str!("linked/data.json");',  # a symlinked directory may lead to any file
+        ):
+            with self.subTest(body=body):
+                sites = self.scan(body, "tools/t/src/lib.rs", ("", "tools/t"), {"tools/t/src/linked"})
+                self.assertEqual(len(sites), 1, sites)
+                self.assertIsNone(sites[0].target)
+                self.assertTrue(sites[0].reads("src/server/mod.rs"), sites[0])
+        (json_site,) = self.scan('include_str!(concat!(env!("OUT_DIR"), "/data.json"));')
+        self.assertFalse(json_site.reads("src/server/mod.rs"))
+        self.assertFalse(json_site.reads("docs/guide.md"))
+
+
 class GateProcessTests(unittest.TestCase):
     """Runs the gate the way the workflow step does, against a real git history."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        for rel in ("scripts/check_comment_only_change.py", "scripts/rust_lex.py", "scripts/ci/comment_only_gate.py"):
+        for rel in (
+            "scripts/check_comment_only_change.py",
+            "scripts/rust_lex.py",
+            "scripts/ci/comment_only_gate.py",
+            "scripts/ci/rust_include_reads.py",
+        ):
             (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / rel, self.root / rel)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "gate@example.invalid")
         self.git("config", "user.name", "gate")
         self.write("src/lib.rs", "// chatty\npub fn one() -> u32 {\n    1\n}\n")
+        self.write("src/body.rs", "// body\npub fn two() -> u32 {\n    2\n}\n")
+        self.write("src/reader.rs", 'const BODY: &str = include_str!("body.rs");\n')
         self.base = self.commit("seed")
 
     def tearDown(self) -> None:
@@ -180,15 +241,57 @@ class GateProcessTests(unittest.TestCase):
         self.write("docs/guide.md", "# guide\n")
         result, output = self.run_gate(self.commit("comment only"))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, "comment_only=true\n")
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n")
         summary = (self.root / "gh-summary").read_text(encoding="utf-8")
         self.assertIn("comment_only=true", summary)
+        self.assertIn("scanned 1 include calls", summary)
         self.assertIn("OK: every changed Rust file is byte-identical", summary)
+
+    def test_comment_edit_a_test_may_read_keeps_the_library_sweep(self) -> None:
+        filters = json.dumps(outputs(rust_or_policy=["src/body.rs"]))
+        self.write("src/body.rs", "// reworded\npub fn two() -> u32 {\n    2\n}\n")
+        result, output = self.run_gate(self.commit("comment on an included file"), filters=filters)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertIn("src/body.rs is read by src/reader.rs:1 include_str! -> src/body.rs", result.stdout)
+
+        # The call may exist only on the base side, when main added it after the PR branched.
+        self.git("rm", "-q", "src/reader.rs")
+        fork = self.commit("drop the reader")
+        self.write("src/reader.rs", 'const BODY: &str = include_str!("body.rs");\n')
+        base = self.commit("main adds the reader again")
+        self.git("checkout", "-q", "-b", "pr", fork)
+        self.write("src/body.rs", "// reworded twice\npub fn two() -> u32 {\n    2\n}\n")
+        result, output = self.run_gate(self.commit("comment on body"), base=base, filters=filters)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n", result.stdout)
+        self.assertIn("src/body.rs is read by src/reader.rs:1", result.stdout)
+
+    def test_call_inside_a_file_include_splices_is_seen(self) -> None:
+        self.write("src/reader.rs", 'include!("calls.inc");\n')
+        self.write("src/calls.inc", 'const BODY: &str = include_str!("body.rs");\n')
+        self.base = self.commit("reader splices its calls")
+        self.write("src/body.rs", "// reworded\npub fn two() -> u32 {\n    2\n}\n")
+        result, output = self.run_gate(self.commit("comment on body"), filters=json.dumps(outputs(rust_or_policy=["src/body.rs"])))
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertIn("src/body.rs is read by src/calls.inc:1 include_str!", result.stdout)
+
+    def test_unresolved_include_or_scan_failure_keeps_the_library_sweep(self) -> None:
+        self.write("src/reader.rs", 'const BODY: &str = include_str!(concat!(env!("OUT_DIR"), "/gen.rs"));\n')
+        self.base = self.commit("unresolvable include")
+        self.write("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n")
+        head = self.commit("comment only")
+        result, output = self.run_gate(head)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertIn("unresolved, tail '/gen.rs'", result.stdout)
+
+        (self.root / "scripts/ci/rust_include_reads.py").write_text("raise RuntimeError('scan exploded')\n", encoding="utf-8")
+        result, output = self.run_gate(head)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertIn("scan exploded", result.stdout)
 
     def test_code_change_writes_false_with_the_judge_finding(self) -> None:
         self.write("src/lib.rs", "// chatty\npub fn one() -> u32 {\n    2\n}\n")
         result, output = self.run_gate(self.commit("code"))
-        self.assertEqual(output, "comment_only=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
         self.assertIn("code differs after comment removal", result.stdout)
 
     def test_unknown_base_writes_false(self) -> None:
@@ -197,19 +300,19 @@ class GateProcessTests(unittest.TestCase):
         for base in ("0" * 40, "not-a-sha"):
             with self.subTest(base=base):
                 _result, output = self.run_gate(head, base=base)
-                self.assertEqual(output, "comment_only=false\n")
+                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
 
     def test_broken_judge_or_filter_input_writes_false(self) -> None:
         self.write("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n")
         head = self.commit("comment only")
         _result, output = self.run_gate(head, filters="{not json")
-        self.assertEqual(output, "comment_only=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
         (self.root / "scripts/check_comment_only_change.py").write_text(
             "raise RuntimeError('judge exploded')\n", encoding="utf-8"
         )
         result, output = self.run_gate(head)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, "comment_only=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
         self.assertIn("judge exploded", result.stdout)
 
 
@@ -303,9 +406,16 @@ def render(value: object, lookup) -> str:
 class WorkflowSimulation:
     """Evaluates one ci-pr.yml run from the filter and gate step outputs."""
 
-    def __init__(self, filters: dict[str, str], comment_only: str | None, forced: dict[str, str] | None = None):
+    def __init__(
+        self,
+        filters: dict[str, str],
+        comment_only: str | None,
+        forced: dict[str, str] | None = None,
+        rust_tests_skip: str | None = None,
+    ):
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        steps = {"filter": filters, "comment_only": {} if comment_only is None else {"comment_only": comment_only}}
+        gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip}
+        steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
 
         def step_lookup(name: str) -> object:
             _steps, step, _outputs, key = name.split(".")
@@ -366,7 +476,7 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_comment_only_skips_heavy_lanes_and_every_required_context_is_green(self) -> None:
         for relay_contract in ([], ["src/services/discord/inflight/store.rs"]):
             raw = {**HEAVY_RAW, **outputs(relay_contract=relay_contract)}
-            run = WorkflowSimulation(raw, "true")
+            run = WorkflowSimulation(raw, "true", rust_tests_skip="true")
             with self.subTest(relay_contract=bool(relay_contract)):
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "skipped", job_id)
@@ -375,9 +485,19 @@ class WorkflowWiringTests(unittest.TestCase):
                 self.assertEqual(run.changes["comment_only"], "true")
                 self.assertPublishedGreen(run)
 
+    def test_include_reader_runs_only_the_library_sweep(self) -> None:
+        for skip in ("false", None, ""):
+            run = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip=skip)
+            with self.subTest(rust_tests_skip=skip):
+                self.assertEqual(run.changes["rust_tests"], HEAVY_RAW["rust_or_policy"])
+                self.assertEqual(run.results["library_sweep"], "success")
+                for job_id in SKIPPED_WHEN_COMMENT_ONLY[:-1]:
+                    self.assertEqual(run.results[job_id], "skipped", job_id)
+                self.assertPublishedGreen(run)
+
     def test_gate_false_or_unset_keeps_the_raw_filters(self) -> None:
         for gate_output in ("false", None, ""):
-            run = WorkflowSimulation(HEAVY_RAW, gate_output)
+            run = WorkflowSimulation(HEAVY_RAW, gate_output, rust_tests_skip="true")
             with self.subTest(gate_output=gate_output):
                 self.assertEqual(run.changes["comment_only"], "false")
                 for output, raw_filter in OVERRIDDEN.items():
@@ -399,6 +519,9 @@ class WorkflowWiringTests(unittest.TestCase):
                 run = WorkflowSimulation(HEAVY_RAW, "false", forced={job_id: "skipped"})
                 codes = [result.returncode for result in run.mirror_runs()[context]]
                 self.assertIn(1, codes, f"{context} passed with {job_id} skipped while its filter is true")
+        kept = WorkflowSimulation(HEAVY_RAW, "true", forced={"library_sweep": "skipped"}, rust_tests_skip="false")
+        codes = [result.returncode for result in kept.mirror_runs()["Library test sweep (ubuntu-latest)"]]
+        self.assertIn(1, codes, "library sweep kept for an include reader passed while skipped")
 
 
 if __name__ == "__main__":

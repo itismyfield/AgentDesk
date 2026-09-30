@@ -12,6 +12,11 @@ and every file any path filter selected is one of those verified ``.rs`` files
 (so a ``.md`` that selects a filter, or a file the filter saw but git did not,
 keeps the full run). Anything else -- including a missing input or an
 exception -- writes ``comment_only=false``; the workflow reads only ``'true'``.
+
+``rust_tests_skip=true`` also lets the library sweep skip. It needs
+``comment_only=true`` and no ``include!``/``include_str!``/``include_bytes!``
+call in the base or head tree that reads, or may read, a changed file
+(scripts/ci/rust_include_reads.py); tests see those files' comments.
 """
 
 from __future__ import annotations
@@ -78,6 +83,16 @@ def decide(
     return not reasons, reasons
 
 
+def include_readers(changed: set[str], sites) -> list[str]:
+    """Why the library sweep must run: each include call that may read a changed file."""
+    return sorted(
+        f"{path} is read by {site.describe()}"
+        for site in sites
+        for path in changed
+        if site.reads(path)
+    )
+
+
 def git(*args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args], check=False, capture_output=True, text=True
@@ -87,9 +102,10 @@ def git(*args: str) -> str:
     return result.stdout
 
 
-def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str]:
+def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str, bool, list[str]]:
+    """(comment_only, its refusals, judge log, library sweep may skip, sweep notes)."""
     if not SHA.match(base) or not SHA.match(head):
-        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], ""
+        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], "", False, []
     judge = subprocess.run(
         [sys.executable, str(JUDGE), base, head, "--allow-non-rust"],
         check=False, capture_output=True, text=True,
@@ -106,25 +122,38 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
     except json.JSONDecodeError:
         filter_outputs = None
     verdict, reasons = decide(judge.returncode, entries, filter_outputs)
-    return verdict, reasons, judge_log
+    if not verdict:
+        return False, reasons, judge_log, False, []
+    try:
+        from rust_include_reads import tree_sites
+
+        changed = {path for _status, old_path, new_path in entries for path in (old_path, new_path)}
+        sites = tree_sites(str(REPO_ROOT), base) | tree_sites(str(REPO_ROOT), head)
+        readers = include_readers(changed, sites)
+        notes = [*readers, f"scanned {len(sites)} include calls in the base and head trees"]
+    except Exception as error:  # the sweep keeps running when the scan cannot finish
+        readers, notes = None, [f"include scan error: {error!r}"]
+    return True, [], judge_log, readers == [], notes
 
 
 def main() -> int:
     try:
-        verdict, reasons, judge_log = evaluate(
+        verdict, reasons, judge_log, skip_sweep, sweep_notes = evaluate(
             os.environ.get("BASE_SHA", ""),
             os.environ.get("HEAD_SHA", ""),
             os.environ.get("FILTER_OUTPUTS"),
         )
     except Exception as error:  # every failure falls back to the full run
-        verdict, reasons, judge_log = False, [f"gate error: {error!r}"], ""
+        verdict, reasons, judge_log, skip_sweep, sweep_notes = False, [f"gate error: {error!r}"], "", False, []
 
     value = "true" if verdict else "false"
+    skip = "true" if verdict and skip_sweep else "false"
     judge_lines = judge_log.splitlines()
     if len(judge_lines) > SUMMARY_LINE_LIMIT:
         judge_lines = judge_lines[:SUMMARY_LINE_LIMIT] + ["... (truncated)"]
-    report = [f"comment_only={value}"]
-    report += [f"- {reason}" for reason in reasons]
+    report = [f"comment_only={value}", *(f"- {reason}" for reason in reasons)]
+    if verdict:
+        report += [f"rust_tests_skip={skip}", *(f"- {note}" for note in sweep_notes)]
     report += ["", "check_comment_only_change.py:", *(judge_lines or ["<not run>"])]
     print("\n".join(report))
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -134,7 +163,7 @@ def main() -> int:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         with open(output_path, "a", encoding="utf-8") as output:
-            output.write(f"comment_only={value}\n")
+            output.write(f"comment_only={value}\nrust_tests_skip={skip}\n")
     return 0
 
 

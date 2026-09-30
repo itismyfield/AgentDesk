@@ -18,7 +18,10 @@
 PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인지 판정한다. 참이면
 `pg_db`·`high_risk_recovery`·`cross_os_rust`·`rust_tests` 출력을 `false`로 내보내
 `test_fast`·`high-risk-recovery`·Windows 두 job·`library_sweep`이 skip되고, 같은 출력을
-읽는 required mirror가 green을 게시한다. `check_fast`·`lint`·Script checks·relay authority·
+읽는 required mirror가 green을 게시한다. 단 base·head 트리의 `include!`·`include_str!`·
+`include_bytes!` 호출이 바뀐 파일을 읽거나 인자를 해석할 수 없어 읽을 수도 있으면
+(`scripts/ci/rust_include_reads.py`) 시험이 그 주석을 보므로 `rust_tests`는 원래 값을 유지해
+`library_sweep`만 돈다. `check_fast`·`lint`·Script checks·relay authority·
 dashboard는 원래 조건 그대로 돈다. 판정 오류·입력 누락은 전부 원래 필터값(전체 실행)으로 간다.
 
 Selection observer required gate가 red로 만드는 observer 사망은 **프로세스 수준
