@@ -88,9 +88,8 @@ async fn posting(claim: &ResponseDeliveryClaim) -> PreparedResponseChunk {
         .unwrap()
 }
 
-/// Every decision before a chunk post that sends nothing (the bot identity lookup, a journal
-/// conflict, an already confirmed chunk, a quarantined chunk, a history check that cannot prove
-/// absence) leaves a pending adoption; only a post releases it, and it posts nothing for O.
+/// Every no-post decision (identity lookup, journal conflict, confirmed or quarantined chunk,
+/// history that cannot prove absence) leaves a pending adoption; only a real post releases it.
 #[tokio::test]
 async fn a_task_response_claims_its_channel_only_at_a_chunk_post() {
     let cases = [

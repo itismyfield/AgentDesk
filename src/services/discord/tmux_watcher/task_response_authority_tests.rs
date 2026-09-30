@@ -6,9 +6,8 @@ use crate::services::tui_o::cutover::test_override;
 
 const BODY: &str = "ADK-C1A-watcher-task-response-body";
 
-/// A watcher task response that sends no body (a preparation failure, a live claim held by the
-/// sink, an already delivered or sent-but-uncommitted response, or an owned response whose bot
-/// identity lookup fails before any chunk post) leaves a pending adoption.
+/// A watcher task response that sends no body (failed preparation, a sink-held claim, a delivered
+/// or sent response, an owned one whose bot identity lookup fails) leaves a pending adoption.
 #[tokio::test]
 async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() {
     if !test_override::isolated_binding_case(concat!(
