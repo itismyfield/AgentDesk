@@ -711,13 +711,6 @@ pub(crate) mod policy_observability_tests {
     }
 }
 
-/// Scan inflight directory for the provider and delete the file matching the
-/// given tmux session.
-///
-/// Thin wrapper that delegates to the single-owner implementation in
-/// `services::discord::inflight` (see `docs/recovery-paths.md` — inflight
-/// cleanup SSoT, issue #1074). Kept as a function rather than inlined so that
-/// existing call sites in this module continue to read naturally.
 /// The host guard for a force-kill whose session the registry can key; `None` when the
 /// policy keeps tmux or no provider, channel or name is known, which keeps main's path.
 async fn force_kill_host_gate(
@@ -754,6 +747,13 @@ fn kept_by_host_guard(tmux_session_observed: Option<String>) -> TurnLifecycleSto
     }
 }
 
+/// Scan inflight directory for the provider and delete the file matching the
+/// given tmux session.
+///
+/// Thin wrapper that delegates to the single-owner implementation in
+/// `services::discord::inflight` (see `docs/recovery-paths.md` — inflight
+/// cleanup SSoT, issue #1074). Kept as a function rather than inlined so that
+/// existing call sites in this module continue to read naturally.
 pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
     crate::services::discord::clear_inflight_by_tmux_name(provider, tmux_name)
 }
