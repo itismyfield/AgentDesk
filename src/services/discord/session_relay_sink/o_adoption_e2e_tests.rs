@@ -509,13 +509,16 @@ impl Pair {
             .delivery_start
     }
 
-    fn held_for(&self, reason: &str) {
+    fn released_for(&self, reason: &str) {
         let alarms = self.io.alarms.0.lock().unwrap();
-        let held = |(channel, alarm): &(u64, _)| {
+        let released = |(channel, alarm): &(u64, _)| {
             *channel == A
-                && matches!(alarm, crate::services::tui_o::writer::WriterAlarm::Halted { detail } if detail.contains(reason))
+                && matches!(alarm, crate::services::tui_o::writer::WriterAlarm::Released { detail } if detail.contains(reason))
         };
-        assert!(alarms.iter().any(held), "held for {reason}: {alarms:?}");
+        assert!(
+            alarms.iter().any(released),
+            "released for {reason}: {alarms:?}"
+        );
     }
 }
 
@@ -536,7 +539,7 @@ async fn unit_after_the_pin() {
     settle().await;
     assert_eq!(adoption(A), Adoption::Released);
     assert!(!pair.init_exists(), "a moved transcript writes no init");
-    pair.held_for("length moved");
+    pair.released_for("length moved");
     let (start, rows) = written
         .lock()
         .unwrap()
@@ -574,7 +577,7 @@ async fn undelivered_closed_turn() {
     let hosts = pair.host(&pair.io);
     settle().await;
     assert_eq!(adoption(A), Adoption::Released);
-    pair.held_for("past frontier 0 may post");
+    pair.released_for("past frontier 0 may post");
     // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
     finish(&pair.legs[0]).await;
     settle().await;

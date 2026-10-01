@@ -9652,6 +9652,7 @@ services::tui_input::durability_tests::supported::reopen_refuses_handle_when_ado
 services::tui_input::durability_tests::supported::replay_stops_at_first_bad_record_and_discards_valid_suffix
 services::tui_input::durability_tests::supported::snapshot_replacement_survives_every_cut_and_resumes_append
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
+services::tui_o::alarm::tests::a_released_channel_has_its_own_reason_apart_from_halted
 services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour

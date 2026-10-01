@@ -88,6 +88,10 @@ pub enum WriterAlarm {
     Halted {
         detail: String,
     },
+    /// The writer host stopped before any store write, so Legacy keeps the channel's output.
+    Released {
+        detail: String,
+    },
     ContentTransform {
         serial: u64,
     },
