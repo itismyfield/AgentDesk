@@ -317,9 +317,10 @@ mod n2b_seams {
         static STALE_HISTORY: std::cell::RefCell<Option<(Option<SourceId>, SourceHistory)>> = const { std::cell::RefCell::new(None) };
     }
 
-    /// Before a hook takes its pane's authority: the mutation that reads the history here keeps
-    /// that copy for the check, and then the seam runs.
+    /// Before a hook takes its pane's authority: the mutation reads the history here and keeps
+    /// that copy for this hook's check, past any hook the seam lands meanwhile.
     pub(crate) fn before_authority(command_session_id: &str) {
+        let mut stale = None;
         if source_verify::n2b_mutant("auth") {
             let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
             let key = PromptKey::new("claude", command_session_id);
@@ -335,13 +336,13 @@ mod n2b_seams {
                     SpawnNonceMarker::Known(nonce) => Some(nonce),
                     _ => None,
                 };
-                let read = binding_events::claude_history(channel, &tmux, nonce.as_deref());
-                STALE_HISTORY.set(read.ok());
+                stale = binding_events::claude_history(channel, &tmux, nonce.as_deref()).ok();
             }
         }
         if let Some(seam) = BEFORE_AUTHORITY.with_borrow_mut(Option::take) {
             seam();
         }
+        STALE_HISTORY.set(stale);
     }
 
     /// The history a mutation read before the authority, or what the check read under it.
