@@ -162,6 +162,14 @@ fn herdr_restart_reconcile_follows_the_restore_table() {
 
     mark(&key, herdr);
     let unchanged = || HerdrPaneReading::Present(running(&stored));
+    let mut launched = stored.clone();
+    launched.state = HostedState::Pending;
+    let got = reconcile_record(&HostedRecord::Known(launched), &Reader::new(unchanged()));
+    assert_eq!(got, HostReconcile::Pending(Match), "launched, never bound");
+    assert!(
+        !got.admits_reconnect(),
+        "a pending launch is never reconnected"
+    );
     let mut elsewhere = Reader::new(HerdrPaneReading::Missing);
     elsewhere.endpoint.as_mut().unwrap().socket_addr = "/adk/other.sock".into();
     let mut pending = stored.clone();
@@ -187,7 +195,7 @@ fn herdr_restart_reconcile_follows_the_restore_table() {
             "pending pane without launch evidence",
             HostedRecord::Known(pending),
             Reader::new(unchanged()),
-            HostReconcile::Herdr(Unknown(HerdrUnknown::NoStoredEvidence)),
+            HostReconcile::Pending(Unknown(HerdrUnknown::NoStoredEvidence)),
         ),
         (
             "retired",
@@ -271,7 +279,7 @@ async fn herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg() {
         (
             Some(pending_with_pane(&owner("100"))),
             |_| HerdrPaneReading::Present(running(&bound())),
-            HostReconcile::Herdr(Unknown(HerdrUnknown::NoStoredEvidence)),
+            HostReconcile::Pending(Unknown(HerdrUnknown::NoStoredEvidence)),
         ),
         (None, |_| HerdrPaneReading::Missing, HostReconcile::Legacy),
     ];

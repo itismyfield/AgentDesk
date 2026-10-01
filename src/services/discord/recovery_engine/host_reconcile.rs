@@ -81,8 +81,10 @@ impl HerdrExecutionReader for NoHerdrEndpoint {
 pub(crate) enum HostReconcile {
     /// A found row with no hosted record keeps main's tmux path.
     Legacy,
-    /// The stored execution against what its pane runs now.
+    /// The stored Bound execution against what its pane runs now.
     Herdr(HerdrExecutionMatch),
+    /// The same comparison for a launch that never reached Bound; nothing reconnects to it.
+    Pending(HerdrExecutionMatch),
     /// A complete snapshot of the stored endpoint has no such pane; no other pane stands in.
     Missing,
     /// No row, a failed or conflicting read, an unreadable or retired record.
@@ -119,24 +121,26 @@ fn reconcile_record(record: &HostedRecord, reader: &dyn HerdrExecutionReader) ->
             return HostReconcile::Unresolved("unreadable hosted record".to_string());
         }
     };
-    if record.state == HostedState::Retired {
-        return HostReconcile::Unresolved("retired hosted record".to_string());
-    }
+    let verdict = match record.state {
+        HostedState::Bound => HostReconcile::Herdr,
+        HostedState::Pending => HostReconcile::Pending,
+        HostedState::Retired => {
+            return HostReconcile::Unresolved("retired hosted record".to_string());
+        }
+    };
     let (Some(stored), Some(_)) = (&record.location, &record.expected) else {
-        return HostReconcile::Herdr(Unknown(HerdrUnknown::NoStoredEvidence));
+        return verdict(Unknown(HerdrUnknown::NoStoredEvidence));
     };
     match reader.endpoint() {
-        None => return HostReconcile::Herdr(Unknown(HerdrUnknown::ProbeFailed)),
+        None => return verdict(Unknown(HerdrUnknown::ProbeFailed)),
         Some(endpoint) if *endpoint != HerdrEndpointId::of(stored) => {
-            return HostReconcile::Herdr(Unknown(HerdrUnknown::EndpointChanged));
+            return verdict(Unknown(HerdrUnknown::EndpointChanged));
         }
         Some(_) => {}
     }
     let evidence = match reader.read_pane(&stored.pane_id) {
         HerdrPaneReading::Missing => return HostReconcile::Missing,
-        HerdrPaneReading::Unreadable(_) => {
-            return HostReconcile::Herdr(Unknown(HerdrUnknown::ProbeFailed));
-        }
+        HerdrPaneReading::Unreadable(_) => return verdict(Unknown(HerdrUnknown::ProbeFailed)),
         HerdrPaneReading::Present(evidence) => evidence,
     };
     let current = HerdrCurrentExecution {
@@ -146,7 +150,7 @@ fn reconcile_record(record: &HostedRecord, reader: &dyn HerdrExecutionReader) ->
         provider_process: evidence.provider_process,
         marker: marker_evidence(&record.owner.logical_key),
     };
-    HostReconcile::Herdr(compare_herdr_execution(record, &current))
+    verdict(compare_herdr_execution(record, &current))
 }
 
 /// Reads the session's row and reconciles it; the row is never written.
