@@ -81,6 +81,47 @@ fn herdr_stored_execution_matches_only_when_every_stored_field_is_confirmed() {
             Unknown(HerdrUnknown::MarkerLost),
         ),
         (
+            "lost marker, root replaced on the same endpoint and pane",
+            |c| {
+                c.marker = HerdrMarkerEvidence::Lost;
+                c.root.as_mut().unwrap().pid += 50;
+            },
+            Mismatch(HerdrMismatch::RootReplaced),
+        ),
+        (
+            "lost marker, provider restarted under the same pid",
+            |c| {
+                c.marker = HerdrMarkerEvidence::Lost;
+                c.provider_process.as_mut().unwrap().start = "1700009999".into();
+            },
+            Mismatch(HerdrMismatch::ProviderReplaced),
+        ),
+        (
+            "lost marker, another nonce only",
+            |c| {
+                c.marker = HerdrMarkerEvidence::Lost;
+                c.binding_nonce = Some("n2".into());
+            },
+            Unknown(HerdrUnknown::MarkerLost),
+        ),
+        (
+            "lost marker, root pid differs behind another socket",
+            |c| {
+                c.marker = HerdrMarkerEvidence::Lost;
+                c.root.as_mut().unwrap().pid += 50;
+                c.location.socket_addr = "/adk/other.sock".into();
+            },
+            Unknown(HerdrUnknown::EndpointChanged),
+        ),
+        (
+            "root pid differs behind another socket",
+            |c| {
+                c.root.as_mut().unwrap().pid += 50;
+                c.location.socket_addr = "/adk/other.sock".into();
+            },
+            Unknown(HerdrUnknown::EndpointChanged),
+        ),
+        (
             "marker names tmux",
             |c| c.marker = HerdrMarkerEvidence::OtherHost,
             Mismatch(HerdrMismatch::OtherHostMarker),

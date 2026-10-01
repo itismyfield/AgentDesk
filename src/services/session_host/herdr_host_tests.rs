@@ -1412,6 +1412,8 @@ fn herdr_items_have_no_production_caller() {
         (POLICY_REPAIR, 2),
         // Dormant Herdr launch: names the host for the pane location and its marker.
         ("src/services/herdr_launch.rs", 2),
+        // Dormant restart reconcile: reads the marker beside the stored pane, never a host.
+        (RECONCILE, 1),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -1444,6 +1446,7 @@ fn herdr_items_have_no_production_caller() {
     const LIVENESS: &str = "src/services/discord/host_liveness.rs";
     // A Claude turn's own marker check before it probes, kills or launches by name.
     const CLAUDE_TURN_GATE: &str = "src/services/claude/host_gate.rs";
+    const RECONCILE: &str = "src/services/discord/recovery_engine/host_reconcile.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1468,6 +1471,7 @@ fn herdr_items_have_no_production_caller() {
                 RESOLVE,
                 LIVENESS,
                 CLAUDE_TURN_GATE,
+                RECONCILE,
             ],
         ),
         (
@@ -1479,6 +1483,7 @@ fn herdr_items_have_no_production_caller() {
                 GUARD_ADAPTER,
                 LIVENESS,
                 CLAUDE_TURN_GATE,
+                RECONCILE,
             ],
         ),
         (
@@ -1490,6 +1495,7 @@ fn herdr_items_have_no_production_caller() {
                 CLAUDE_LAUNCH,
                 LIVENESS,
                 CLAUDE_TURN_GATE,
+                RECONCILE,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),

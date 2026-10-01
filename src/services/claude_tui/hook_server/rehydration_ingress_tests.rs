@@ -811,3 +811,39 @@ mod pending;
 
 #[path = "../../discord/tui_prompt_relay/headless_tests.rs"]
 mod headless;
+
+// The restart pass does not adopt a live pane by name when its `.host_kind` marker names
+// another host; an absent, tmux or unrecognized marker keeps main's adoption.
+#[test]
+fn a_live_pane_marked_for_another_host_is_not_adopted_by_name() {
+    let (root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let _ingress = Ingress::new();
+    let _reset = Reset;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let markers = [
+        (None, true),
+        (Some("tmux"), true),
+        (Some("zellij"), true),
+        (Some("herdr"), false),
+        (Some("process"), false),
+    ];
+    for (n, (marker, adopted)) in markers.into_iter().enumerate() {
+        let (tmux, channel) = (format!("p7r-adopt-{}", uuid()), 7_500 + n as u64);
+        let path = crate::services::tmux_common::session_temp_path(&tmux, "host_kind");
+        if let Some(marker) = marker {
+            std::fs::create_dir_all(Path::new(&path).parent().unwrap()).unwrap();
+            std::fs::write(&path, marker).unwrap();
+        }
+        VIEW.with_borrow_mut(|v| {
+            *v = Some(View {
+                tmux: tmux.clone(),
+                channel,
+                home: root.path().join("claude-home"),
+                peers: Vec::new(),
+            })
+        });
+        rehydrate_existing_claude_tui_bindings(&shared);
+        let owner = shared.tmux_watchers.owner_channel_for_tmux_session(&tmux);
+        assert_eq!(owner.is_some(), adopted, "{marker:?}");
+    }
+}

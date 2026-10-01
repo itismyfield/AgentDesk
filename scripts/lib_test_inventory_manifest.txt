@@ -4777,6 +4777,8 @@ services::discord::recovery_engine::crash_resume_guard::tests::resume_required_n
 services::discord::recovery_engine::crash_resume_guard::tests::session_bound_relay_turn_is_not_a_black_hole_risk
 services::discord::recovery_engine::crash_resume_guard::tests::synthetic_owner_turn_is_not_a_real_user_black_hole
 services::discord::recovery_engine::crash_resume_guard::tests::watcher_owned_turn_is_not_a_black_hole_risk
+services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
+services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
 services::discord::recovery_engine::idle_captured_response::tests::idle_partial_source_stamp_refuses_append_and_replacement
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_accepts_native_stop_hook_with_nullable_session_5071
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_keeps_normalized_result_and_tool_precedence_5071
@@ -6148,6 +6150,7 @@ services::discord::tmux::active_bridge_turn_guard_tests::session_bound_relay_own
 services::discord::tmux::buffer_offset_tests::advance_buffer_start_offset_tracks_drained_leftover_tail
 services::discord::tmux::execution_identity::herdr_observation::tests::herdr_pending_without_launch_evidence_is_never_a_match
 services::discord::tmux::execution_identity::herdr_observation::tests::herdr_stored_execution_matches_only_when_every_stored_field_is_confirmed
+services::discord::tmux::execution_identity::herdr_report_order::tests::herdr_report_order_accepts_only_a_newer_verified_seq_of_the_followed_source
 services::discord::tmux::execution_identity::tests::absent_spawn_nonce_is_never_observed_as_a_match
 services::discord::tmux::execution_identity::tests::execution_identity_modes_keep_a0_non_destructive
 services::discord::tmux::execution_identity::tests::legacy_makes_no_marker_read_at_the_decision_point
@@ -6991,6 +6994,7 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_life
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_queue_eligible_before_mailbox_release
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::local_model_observation_wakes_idle_durable_queue_through_production_workers
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_completion_lifecycle_validates_order_and_cardinality
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_live_pane_marked_for_another_host_is_not_adopted_by_name
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
