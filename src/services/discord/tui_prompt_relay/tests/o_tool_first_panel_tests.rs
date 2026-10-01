@@ -14,9 +14,8 @@ fn tool(name: &str) -> StreamMessage {
     }
 }
 
-/// Runs one Claude idle turn whose first frame is a Bash call. `then_done` sends Done right
-/// behind it; otherwise Read and then Done follow once the panel shows Bash. None when the
-/// idle prefix stays shut.
+/// One Claude idle turn opened by a Bash call, then Done (`then_done`) or, once Bash shows, Read
+/// and Done. None when the idle prefix stays shut.
 fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<String>> {
     let _telemetry = crate::services::observability::lock_env_then_runtime();
     let temp = tempfile::tempdir().unwrap();
