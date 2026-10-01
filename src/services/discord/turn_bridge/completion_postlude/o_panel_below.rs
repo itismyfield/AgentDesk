@@ -105,10 +105,13 @@ async fn follow_posts(
             .await
             .is_err()
         {
-            let v2 = shared.ui.status_panel_v2_enabled;
-            orphans::enqueue_separate_status_panel_orphan(v2, provider, token, channel, panel);
+            orphans::enqueue(provider, token, channel, panel);
         }
         panel = next.get();
         moves += 1;
     }
 }
+
+#[cfg(test)]
+#[path = "o_panel_below_tests.rs"]
+mod tests;
