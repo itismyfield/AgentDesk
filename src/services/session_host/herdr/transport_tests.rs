@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::services::session_host::herdr::model::ExecutionState;
+use crate::services::session_host::herdr::observe::RestoreResume;
 use crate::services::session_host::herdr_host::HerdrHost;
 use crate::services::session_host::model::{
     HostLiveness, HostMutation, HostPresence, HostSessionRef,
@@ -218,15 +219,22 @@ fn transport(server: &Server, config: HerdrSocketConfig) -> HerdrSocketTransport
     HerdrSocketTransport::new(&endpoint(server), config, LineJsonFraming)
 }
 
+/// Stands in for a server that reads resume-on-restore off on whatever connection is open.
+fn restore_off_now(transport: &HerdrSocketTransport) -> RestoreResume {
+    RestoreResume::Off {
+        generation: transport.generation(),
+    }
+}
+
 fn host(server: &Server, config: HerdrSocketConfig) -> HerdrHost<HerdrSocketTransport> {
-    HerdrHost::new(endpoint(server), transport(server, config))
+    HerdrHost::new(endpoint(server), transport(server, config)).with_restore_reader(restore_off_now)
 }
 
 /// A host whose connection is already open, as mutations never open one.
 fn connected(server: &Server, config: HerdrSocketConfig) -> HerdrHost<HerdrSocketTransport> {
     let transport = transport(server, config);
     transport.connect().expect("handshake");
-    HerdrHost::new(endpoint(server), transport)
+    HerdrHost::new(endpoint(server), transport).with_restore_reader(restore_off_now)
 }
 
 fn pane() -> HostSessionRef<'static> {
@@ -512,6 +520,10 @@ impl HerdrTransport for PauseAfterSnapshot<'_> {
         }
         exchange
     }
+
+    fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64) {
+        self.inner.call_on(call, generation)
+    }
 }
 
 #[test]
@@ -550,5 +562,35 @@ fn herdr_socket_observation_keeps_the_snapshot_generation_across_a_concurrent_re
         (observation.execution, observation.shell_pid),
         (ExecutionState::Unknown, None),
         "a snapshot from the first connection must not join a pid from the second"
+    );
+}
+
+#[test]
+fn herdr_socket_sends_a_mutation_only_on_the_connection_its_check_read() {
+    let server = serve(vec![conn(vec![ok()])]);
+    let transport = transport(&server, config());
+    let send = |id: &str| HerdrCall {
+        id: id.into(),
+        request: HerdrRequest::PaneSendText {
+            pane_id: PANE.into(),
+            text: "x".into(),
+        },
+    };
+    transport.connect().expect("handshake");
+    let (outcome, generation) = transport.call_on(&send("adk-1"), 1);
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(generation, 1);
+
+    transport.connect().expect("reconnect");
+    let (outcome, generation) = transport.call_on(&send("adk-2"), 1);
+    assert!(
+        matches!(outcome, Err(HerdrTransportError::NotSent(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(generation, 2);
+    assert_eq!(
+        server.methods(),
+        ["ping", "pane.send_text", "ping"],
+        "a check read on connection 1 must not let input out on connection 2"
     );
 }

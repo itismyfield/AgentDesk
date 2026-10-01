@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,7 +17,6 @@ fn endpoint() -> HerdrLaunchEndpoint {
         config_key: "herdr.default".into(),
         socket_addr: "/adk/herdr.sock".into(),
         herdr_session: "agentdesk".into(),
-        restore_resume: Some(false),
     }
 }
 
@@ -52,6 +52,9 @@ struct FakeHost {
     probes: AtomicUsize,
     on_create: Hook,
     on_evidence: Hook,
+    /// E7 readings in order; once empty, Off on connection 1.
+    restore: Mutex<VecDeque<RestoreResume>>,
+    requests: Mutex<Vec<HerdrCreateRequest>>,
 }
 
 impl FakeHost {
@@ -63,7 +66,14 @@ impl FakeHost {
             probes: AtomicUsize::new(0),
             on_create: Box::new(|| {}),
             on_evidence: Box::new(|| {}),
+            restore: Mutex::default(),
+            requests: Mutex::default(),
         }
+    }
+
+    fn reading(self, readings: &[RestoreResume]) -> Self {
+        *self.restore.lock().unwrap() = readings.iter().copied().collect();
+        self
     }
 
     fn created(pane: &str) -> Self {
@@ -74,8 +84,14 @@ impl FakeHost {
 }
 
 impl HerdrLaunchHost for FakeHost {
-    fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+    fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
+        let next = self.restore.lock().unwrap().pop_front();
+        next.unwrap_or(RestoreResume::Off { generation: 1 })
+    }
+
+    fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.creates.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(request.clone());
         (self.on_create)();
         self.reply.clone()
     }
@@ -112,14 +128,12 @@ async fn herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_an
             with(|e| e.socket_addr = "herdr.sock".into()),
             ENDPOINT_MISSING,
         ),
-        (with(|e| e.restore_resume = None), RESTORE_RESUME_NOT_OFF),
-        (
-            with(|e| e.restore_resume = Some(true)),
-            RESTORE_RESUME_NOT_OFF,
-        ),
     ];
-    for (endpoint, reason) in cases {
-        let host = Arc::new(FakeHost::created("pane-1"));
+    let unverified = [RestoreResume::Unverified, RestoreResume::On]
+        .map(|reading| (Some(endpoint()), RESTORE_RESUME_NOT_OFF, Some(reading)));
+    let cases = cases.map(|(endpoint, reason)| (endpoint, reason, None));
+    for (endpoint, reason, reading) in cases.into_iter().chain(unverified) {
+        let host = Arc::new(FakeHost::created("pane-1").reading(reading.as_slice()));
         let prepared = AtomicUsize::new(0);
         let result = launch_herdr_session(
             &pool,
@@ -134,7 +148,7 @@ async fn herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_an
         assert_eq!(
             result,
             Err(HerdrLaunchError::Unsupported(reason)),
-            "{endpoint:?}"
+            "{endpoint:?} {reading:?}"
         );
         assert_eq!(host.creates.load(Ordering::SeqCst), 0);
         assert_eq!(prepared.load(Ordering::SeqCst), 0);
@@ -487,4 +501,43 @@ async fn herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evide
     assert_eq!(kept.expected, Some(expected(&execution_nonce, 100)));
     pool.close().await;
     db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let off = |generation| RestoreResume::Off { generation };
+    for second in [RestoreResume::Unverified, RestoreResume::On, off(2)] {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        seed_row(&pool, None).await;
+        let host = Arc::new(FakeHost::created("pane-1").reading(&[off(1), second]));
+        let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone());
+        let result = result.await;
+        let generations: Vec<u64> = (host.requests.lock().unwrap().iter())
+            .map(|request| request.restore_off_generation)
+            .collect();
+        if second == off(2) {
+            assert!(matches!(result, Ok(HerdrLaunchOutcome::Launched { .. })));
+            assert_eq!(
+                generations,
+                [2],
+                "the create rides the connection of the latest reading"
+            );
+        } else {
+            assert_eq!(
+                result,
+                Err(HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into())),
+                "{second:?}: the admission-time Off is not reused for the create"
+            );
+            assert!(generations.is_empty(), "{second:?}: no create");
+            let kept = decoded(stored(&pool).await);
+            assert!(
+                matches!(&kept, HostedRecord::Known(record) if record.state == HostedState::Pending),
+                "the refusal deletes nothing: {kept:?}"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    }
 }
