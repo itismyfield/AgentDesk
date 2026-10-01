@@ -19,7 +19,9 @@ use super::idle_captured_response::{
 use super::terminal_watcher::restart_report_watcher_start;
 use super::{restart_report::clear_loaded_restart_report, *};
 
-use super::tmux_probe::{tmux_has_session_with_retry, tmux_session_alive_with_retry};
+use super::tmux_probe::{
+    RestoredRead, RestoredReader, read_restored_output, restart_pane, restart_session,
+};
 
 #[cfg(not(unix))]
 fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Option<String> {
@@ -562,9 +564,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             // re-attaches a watcher to pick up the remaining output).
             // If the session is dead, delegate to the flush loop for fallback.
             let tmux_name = restart_tmux_name;
-            let session_alive = tmux_name
-                .as_deref()
-                .map_or(false, tmux_session_alive_with_retry);
+            let probe = restart_pane(shared, provider, &state, tmux_name.as_deref()).await;
+            let Some(session_alive) = probe.alive() else {
+                continue;
+            };
             // Derive channel_name from tmux session name if not in inflight state.
             // Validate before mutating restart-report state so other same-provider
             // bots do not log/clear reports for channels they do not own.
@@ -1454,9 +1457,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             }
         }
 
-        let can_recover = tmux_session_name
-            .as_deref()
-            .map_or(false, |name| tmux_has_session_with_retry(name));
+        let probe = restart_session(shared, provider, &state, tmux_session_name.as_deref()).await;
+        let Some(can_recover) = probe.alive() else {
+            continue;
+        };
 
         if matches!(
             recovery_phase_after_tmux_probe(can_recover, None),
@@ -1679,7 +1683,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         // If the tmux pane is alive, skip the recovery reader entirely. The idle
         // session gets a watcher immediately rather than deferring to
         // restore_tmux_watchers() — that ~50s gap raced and lost the response.
-        let pane_alive = tmux_session_alive_with_retry(&tmux_session_name);
+        let probe = restart_pane(shared, provider, &state, Some(&tmux_session_name)).await;
+        let Some(pane_alive) = probe.alive() else {
+            continue;
+        };
         if matches!(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
             RecoveryPhase::WatcherReattach
@@ -2131,75 +2138,54 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
         let (tx, rx) = mpsc::channel();
         let cancel_for_reader = cancel_token.clone();
-        let output_for_reader = output_path.clone();
         let input_for_reader = input_fifo_path.clone();
-        let tmux_for_reader = tmux_session_name.clone();
         let start_offset = state.last_offset;
         let recovery_session_id = state.session_id.clone();
-        let runtime_kind_for_reader = runtime_kind;
         let retry_channel_id = channel_id.get();
-        let provider_for_reader = provider.clone();
+        let reader = RestoredReader {
+            provider: provider.clone(),
+            row: state.clone(),
+            name: tmux_session_name.clone(),
+            runtime_kind,
+            output_path: output_path.clone(),
+        };
         std::thread::spawn(move || {
-            match crate::services::session_backend::read_output_file_until_result(
-                &output_for_reader,
-                start_offset,
-                tx.clone(),
-                Some(cancel_for_reader),
-                crate::services::provider::SessionProbe::tmux_with_structured_output(
-                    tmux_for_reader.clone(),
-                    provider_for_reader,
-                    Some(runtime_kind_for_reader),
-                    output_for_reader.clone(),
-                ),
-            ) {
-                Ok(ReadOutputResult::Completed { offset })
-                | Ok(ReadOutputResult::Cancelled { offset }) => {
+            let read = read_restored_output(&reader, start_offset, &tx, cancel_for_reader);
+            #[cfg(test)]
+            let traced = (
+                reader.name.clone(),
+                super::tmux_probe::reader_trace::end_of(&read),
+            );
+            match read {
+                Ok(RestoredRead::HandOff(offset)) => {
+                    #[cfg(test)]
+                    super::tmux_probe::reader_trace::runtime_ready(&reader.name);
                     let _ = tx.send(StreamMessage::RuntimeReady {
                         handoff: runtime_handoff_for_recovery(
-                            runtime_kind_for_reader,
-                            output_for_reader,
+                            reader.runtime_kind,
+                            reader.output_path,
                             input_for_reader,
-                            tmux_for_reader,
+                            reader.name,
                             recovery_session_id,
                             offset,
                         ),
                     });
                 }
-                Ok(ReadOutputResult::SessionDied { offset }) => {
-                    // Check if tmux pane is actually alive — dcserver restart
-                    // may cause SessionDied because no new output arrived, but
-                    // the Claude CLI process could still be idle (waiting for input).
-                    let pane_alive = tmux_session_alive_with_retry(&tmux_for_reader);
+                // A result read past a pane the host never confirmed live: no watcher handoff.
+                Ok(RestoredRead::Ended) => {}
+                Ok(RestoredRead::Died) => {
+                    // Session truly died during restart recovery. Fall back
+                    // to the generic auto-retry path so restart handling
+                    // does not get a special handoff-only branch.
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    if pane_alive {
-                        // Session is alive but idle — hand off to watcher instead of retrying
-                        tracing::info!(
-                            "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
-                            retry_channel_id
-                        );
-                        let _ = tx.send(StreamMessage::RuntimeReady {
-                            handoff: runtime_handoff_for_recovery(
-                                runtime_kind_for_reader,
-                                output_for_reader,
-                                input_for_reader,
-                                tmux_for_reader,
-                                recovery_session_id,
-                                offset,
-                            ),
-                        });
-                    } else {
-                        // Session truly died during restart recovery. Fall back
-                        // to the generic auto-retry path so restart handling
-                        // does not get a special handoff-only branch.
-                        tracing::warn!(
-                            "  [{ts}] ↻ Recovery: session died, signaling generic auto-retry (channel {})",
-                            retry_channel_id
-                        );
-                        let _ = tx.send(StreamMessage::Done {
-                            result: "__session_died_retry__".to_string(),
-                            session_id: recovery_session_id,
-                        });
-                    }
+                    tracing::warn!(
+                        "  [{ts}] ↻ Recovery: session died, signaling generic auto-retry (channel {})",
+                        retry_channel_id
+                    );
+                    let _ = tx.send(StreamMessage::Done {
+                        result: "__session_died_retry__".to_string(),
+                        session_id: recovery_session_id,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(StreamMessage::Error {
@@ -2210,8 +2196,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     });
                 }
             }
+            #[cfg(test)]
+            super::tmux_probe::reader_trace::ended(&traced.0, traced.1);
         });
-
         let recovery_dispatch_id = parse_dispatch_id(&state.user_text)
             .or(lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await);
         let recovery_dispatch_kind =
@@ -2680,6 +2667,9 @@ mod tests {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "restore_inflight/host_probe_tests.rs"]
+mod host_probe_tests;
 #[cfg(test)]
 #[path = "restore_inflight/kickoff_identity_tests.rs"]
 mod kickoff_identity_tests;
