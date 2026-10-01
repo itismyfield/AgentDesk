@@ -148,6 +148,33 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
     Ok(binding)
 }
 
+/// Moves a completed singleton from `from` to `to`, keeping its generation. Refused while any
+/// turn row is open on the channel, so a turn that already read `from` as its prior panel wins.
+pub(in crate::services::discord) fn move_completed_if_current(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    from: u64,
+    to: u64,
+) -> Result<StatusPanelSingletonBinding, String> {
+    let inflight_root = runtime_store::discord_inflight_root()
+        .ok_or_else(|| "AgentDesk inflight runtime root unavailable".to_string())?;
+    let path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
+    let _guard = inflight::lock_inflight_state_path(&path)?;
+    if path.exists() {
+        return Err("a turn row is open on the channel".to_string());
+    }
+    let root = runtime_store::discord_status_panel_singletons_root()
+        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
+    let current = current_durable_singleton(&root, provider, token_hash, channel_id, from)?;
+    let moved = StatusPanelSingletonBinding {
+        panel_message_id: to,
+        generation: current.generation,
+    };
+    bind_in_root(&root, provider, token_hash, channel_id, moved)?;
+    Ok(moved)
+}
+
 /// #4891: the shared "is this completed panel still the channel's durable
 /// singleton?" check, used by every `commit_if_owned_or_current` arm that cannot
 /// read the panel's generation off a matching inflight row.

@@ -152,6 +152,8 @@ fn writer_all_tui_selects_only_tui_bindings_and_applies_on_restart() {
     use crate::config_live_reload::restart_required_changes;
     use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
     use crate::services::tui_o::channel_policy::BootChannels;
+    // Loading resolves paths against AGENTDESK_ROOT_DIR, which parallel tests set under this lock.
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let path = root.path().join("agentdesk.yaml");
     let data_dir = serde_json::to_string(&root.path().join("data")).unwrap();

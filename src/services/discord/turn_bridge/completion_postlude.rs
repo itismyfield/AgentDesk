@@ -10,6 +10,7 @@ use super::*;
 mod channel_episode_scope;
 mod channel_writeback;
 mod contracts;
+pub(super) mod o_panel_below;
 
 pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
@@ -166,6 +167,11 @@ pub(super) async fn run_completion_postlude(
             )
             .await;
         status_panel_completion_committed = committed;
+        let follow = committed && !single_message_panel_footer_mode;
+        if follow && completion_r0.permits_channel_effects() {
+            let owner = (&shared_owned, &gateway, &provider, channel_id);
+            o_panel_below::follow(owner, &inflight_state, &last_status_panel_text);
+        }
         terminal_projection_settled.release_completion_admission(
             &completion_guard,
             busy_requeue_outcome.take(),
@@ -350,28 +356,19 @@ pub(super) async fn run_completion_postlude(
         }
     };
 
-    // Persist or clear provider session_id in DB so fresh-session transitions
-    // survive dcserver restarts and idle cleanup.
-    if let Some(session_key) = channel_writeback::provider_session_clear_key(
+    channel_writeback::persist_provider_session(
         channel_effects_suppressed,
         clear_provider_session,
         adk_session_key.as_deref(),
-    ) {
-        super::super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
-            .await;
-    } else if let (Some(session_key), Some(persisted_sid)) =
-        (adk_session_key.as_deref(), session_id_to_persist.as_deref())
-    {
-        super::super::adk_session::save_provider_session_id(
-            session_key,
-            persisted_sid,
+        (
+            session_id_to_persist.as_deref(),
             new_raw_provider_session_id.as_deref(),
-            &provider,
-            channel_id,
-            shared_owned.api_port,
-        )
-        .await;
-    }
+        ),
+        &provider,
+        channel_id,
+        shared_owned.api_port,
+    )
+    .await;
 
     let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
     let mut recall_feedback_analysis =

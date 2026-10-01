@@ -200,6 +200,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "tui_prompt_relay.rs": {".say": 2},
     "tui_prompt_relay/bridge_gateway.rs": {"edit_outbound_message": 1, "replace_long_message*": 1, "send_long_message*": 1, "send_outbound_message": 1},
     "tui_prompt_relay/synthetic_start_wiring.rs": {".say": 1},
+    "turn_bridge/completion_postlude/o_panel_below.rs": {"TurnGateway::send_message": 1},
     "turn_bridge/current_message_anchor.rs": {"TurnGateway::edit_message": 1, "TurnGateway::send_message": 1},
     "turn_bridge/headless_delivery.rs": {"edit_channel_message*": 1, "send_long_message*": 1},
     "turn_bridge/mod.rs": {"TurnGateway::edit_message": 1},
@@ -307,6 +308,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "tui_prompt_relay.rs": ("W24", "KEEP_NONBODY"),
     "tui_prompt_relay/bridge_gateway.rs": ("W23", "COV:W10"),
     "tui_prompt_relay/synthetic_start_wiring.rs": ("W24", "KEEP_NONBODY"),
+    "turn_bridge/completion_postlude/o_panel_below.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/current_message_anchor.rs": ("W15", "KEEP_NONBODY"),
     "turn_bridge/headless_delivery.rs": ("W17", "KEEP_36"),
     "turn_bridge/mod.rs": ("W18", "KEEP_NONBODY"),
@@ -409,6 +411,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "apply_watcher_long_chunks_legacy:claim",
     ),
     "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs": ("idle_tail_tool_opens:peek",),
+    "src/services/discord/turn_bridge/completion_postlude/o_panel_below.rs": (
+        "follow:peek",
+    ),
     "src/services/discord/turn_bridge/headless_delivery.rs": (
         "enqueue_claimed_headless_delivery:claim",
     ),
