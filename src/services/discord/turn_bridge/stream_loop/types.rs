@@ -480,6 +480,8 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopState<'a> {
     pub(in crate::services::discord::turn_bridge) bridge_spans: &'a mut BridgeLatencySpans,
     pub(in crate::services::discord::turn_bridge) status_panel_generation: &'a mut u64,
     pub(in crate::services::discord::turn_bridge) entry_watcher_epoch_current: &'a mut bool,
+    /// Kept out of the durable-owner reconcile, which recomputes the relay flags each save.
+    pub(in crate::services::discord::turn_bridge) watcher_adopted_after_done: &'a mut bool,
 }
 
 pub(in crate::services::discord::turn_bridge) struct StreamLoopOutput {

@@ -421,7 +421,6 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": (
         "handle_watcher_runtime_handoff:peek",
-        "handle_watcher_runtime_handoff:peek",
     ),
     "src/services/discord/turn_bridge/stream_loop/types.rs": (
         "deliver:claim",
@@ -451,6 +450,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "resume_with_gateway:peek",
         "resume_with_gateway:claim",
     ),
+    "src/services/discord/turn_bridge/watcher_handoff.rs": ("o_body_needs_bridge_terminal:peek",),
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
         "watcher_backstop_turn_is_terminal:peek",
     ),

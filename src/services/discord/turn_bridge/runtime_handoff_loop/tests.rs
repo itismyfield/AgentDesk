@@ -45,7 +45,6 @@ struct HandoffObservation {
     terminal_control_drain_until: Option<std::time::Instant>,
     claim_outcome: WatcherHandoffClaimOutcome,
     tmux_handed_off: bool,
-    watcher_owns: bool,
     watcher_relay_available: bool,
     watcher_delivery_pin: Option<WatcherClaimIncarnation>,
     watcher_slots: usize,
@@ -59,7 +58,6 @@ async fn dispatch_process_handoff_with_pin(
     state_dirty: &mut bool,
     done: bool,
     initial_watcher_delivery_pin: Option<WatcherClaimIncarnation>,
-    relay_owned: bool,
 ) -> HandoffObservation {
     let channel_id = ChannelId::new(state.channel_id);
     let mut terminal_control_ready_observed = false;
@@ -68,11 +66,11 @@ async fn dispatch_process_handoff_with_pin(
         .map(|_| state.last_offset);
     let mut watcher_owner_channel_id = channel_id;
     let mut standby_relay_owns_output = false;
-    let mut watcher_relay_available_for_turn = relay_owned;
+    let mut watcher_relay_available_for_turn = false;
     let mut watcher_delivery_pin = initial_watcher_delivery_pin;
     let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
     let mut tmux_handed_off = false;
-    let mut watcher_owns_assistant_relay = relay_owned;
+    let mut watcher_owns_assistant_relay = false;
     let mut terminal_control_drain_until = done.then(|| {
         std::time::Instant::now()
             .checked_add(std::time::Duration::from_secs(60))
@@ -100,6 +98,7 @@ async fn dispatch_process_handoff_with_pin(
             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
             tmux_handed_off: &mut tmux_handed_off,
             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+            watcher_adopted_after_done: &mut false,
             state_dirty,
             terminal_control_drain_until: &mut terminal_control_drain_until,
             last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
@@ -115,7 +114,6 @@ async fn dispatch_process_handoff_with_pin(
         terminal_control_drain_until,
         claim_outcome: watcher_handoff_claim_outcome,
         tmux_handed_off,
-        watcher_owns: watcher_owns_assistant_relay,
         watcher_relay_available: watcher_relay_available_for_turn,
         watcher_delivery_pin,
         watcher_slots: shared.tmux_watchers.len(),
@@ -130,17 +128,8 @@ async fn dispatch_process_handoff(
     state_dirty: &mut bool,
     done: bool,
 ) -> HandoffObservation {
-    dispatch_process_handoff_with_pin(
-        shared,
-        provider,
-        state,
-        message,
-        state_dirty,
-        done,
-        None,
-        false,
-    )
-    .await
+    dispatch_process_handoff_with_pin(shared, provider, state, message, state_dirty, done, None)
+        .await
 }
 
 #[tokio::test]
@@ -305,7 +294,6 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         &mut state_dirty,
         false,
         Some(pre_frame_pin),
-        false,
     )
     .await;
 
@@ -359,7 +347,6 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         &mut state_dirty,
         false,
         failed.watcher_delivery_pin,
-        false,
     )
     .await;
     assert_eq!(retried.outcome, Some(GuardedSaveOutcome::Saved));
@@ -726,94 +713,4 @@ fn provisional_cleanup_preserves_replacement_incarnation() {
     assert!(Arc::ptr_eq(&registered.cancel, &replacement_cancel));
     assert!(!registered.cancel.load(Ordering::Relaxed));
     assert!(provisional_cancel.load(Ordering::Relaxed));
-}
-
-/// Whether the bridge hands the turn's terminal to the watcher after a Claude TUI handoff that
-/// reuses the channel's live watcher, with the turn's text already marked sent as O's cut leaves it.
-#[cfg(unix)]
-async fn delegates_after_claude_tui_handoff(
-    o_owns: bool,
-    done: bool,
-    text: &str,
-    relay_owned: bool,
-) -> bool {
-    use crate::services::tui_o::cutover::test_override;
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
-    let channel_id = 42_632_501;
-    let kind = RuntimeHandoffKind::ClaudeTui;
-    let selected = [(channel_id, kind)];
-    let _o = test_override::force_channels(if o_owns { &selected[..] } else { &[] });
-    let provider = ProviderKind::Claude;
-    let mut state = runtime_seed(provider.clone(), channel_id);
-    state.full_response = text.to_string();
-    state.response_sent_offset = text.len();
-    save_inflight_state(&state).unwrap();
-    state = load_inflight_state(&provider, channel_id).unwrap();
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let (tmux, transcript) = (
-        "AgentDesk-claude-o-after-done",
-        "/runtime/o-after-done.jsonl",
-    );
-    shared.tmux_watchers.insert(
-        ChannelId::new(channel_id),
-        live_watcher_handle(tmux, transcript),
-    );
-    let handoff = RuntimeHandoff::ClaudeTui {
-        transcript_path: transcript.into(),
-        tmux_session_name: tmux.into(),
-        last_offset: 8_192,
-    };
-    let message = RuntimeHandoffLoopMessage::RuntimeReady { handoff };
-    let mut dirty = false;
-    let observed = dispatch_process_handoff_with_pin(
-        &shared,
-        &provider,
-        &mut state,
-        message,
-        &mut dirty,
-        done,
-        None,
-        relay_owned,
-    )
-    .await;
-    assert_eq!(
-        observed.claim_outcome,
-        WatcherHandoffClaimOutcome::ReusedExisting
-    );
-    assert!(
-        observed.watcher_owns,
-        "the live watcher still takes the session"
-    );
-    let pending = !response_portion_after_offset(text, state.response_sent_offset)
-        .trim()
-        .is_empty();
-    super::super::watcher_handoff::should_delegate_bridge_relay_to_watcher(
-        observed.watcher_owns,
-        observed.watcher_relay_available,
-        pending,
-        false,
-        false,
-        false,
-        false,
-    )
-}
-
-/// On O's channel a watcher adopted after Done leaves the terminal of O-consumed text to the bridge;
-/// Legacy, pre-text handoffs, empty turns and turns the watcher already relays still delegate.
-#[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn o_channel_keeps_the_bridge_terminal_when_the_watcher_is_adopted_after_done() {
-    let body = "[E2E:E1:OK]";
-    assert!(!delegates_after_claude_tui_handoff(true, true, body, false).await);
-    assert!(delegates_after_claude_tui_handoff(false, true, body, false).await);
-    assert!(delegates_after_claude_tui_handoff(true, false, body, false).await);
-    assert!(delegates_after_claude_tui_handoff(true, true, "", false).await);
-    assert!(delegates_after_claude_tui_handoff(true, true, body, true).await);
 }

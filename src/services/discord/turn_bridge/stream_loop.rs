@@ -621,6 +621,8 @@ pub(super) async fn run_stream_loop(
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
                                     watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                                    watcher_adopted_after_done: &mut *state
+                                        .watcher_adopted_after_done,
                                     state_dirty: &mut state_dirty,
                                     terminal_control_drain_until: &mut terminal_control_drain_until,
                                     last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
@@ -660,6 +662,8 @@ pub(super) async fn run_stream_loop(
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
                                     watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                                    watcher_adopted_after_done: &mut *state
+                                        .watcher_adopted_after_done,
                                     state_dirty: &mut state_dirty,
                                     terminal_control_drain_until: &mut terminal_control_drain_until,
                                     last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
@@ -707,6 +711,8 @@ pub(super) async fn run_stream_loop(
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
                                     watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                                    watcher_adopted_after_done: &mut *state
+                                        .watcher_adopted_after_done,
                                     state_dirty: &mut state_dirty,
                                     terminal_control_drain_until: &mut terminal_control_drain_until,
                                     last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
@@ -745,6 +751,8 @@ pub(super) async fn run_stream_loop(
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
                                     watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                                    watcher_adopted_after_done: &mut *state
+                                        .watcher_adopted_after_done,
                                     state_dirty: &mut state_dirty,
                                     terminal_control_drain_until: &mut terminal_control_drain_until,
                                     last_activity_heartbeat_at: &mut last_activity_heartbeat_at,

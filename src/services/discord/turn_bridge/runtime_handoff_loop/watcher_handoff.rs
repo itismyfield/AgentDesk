@@ -25,6 +25,7 @@ pub(super) struct WatcherRuntimeHandoffState<'a> {
     pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
     pub(super) tmux_handed_off: &'a mut bool,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
+    pub(super) watcher_adopted_after_done: &'a mut bool,
     pub(super) state_dirty: &'a mut bool,
     pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
 }
@@ -67,6 +68,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     let watcher_handoff_claim_outcome = state.watcher_handoff_claim_outcome;
     let tmux_handed_off = state.tmux_handed_off;
     let watcher_owns_assistant_relay = state.watcher_owns_assistant_relay;
+    let watcher_adopted_after_done = state.watcher_adopted_after_done;
     let state_dirty = state.state_dirty;
     let terminal_control_drain_until = state.terminal_control_drain_until;
     let state_dirty_before_handoff = *state_dirty;
@@ -99,7 +101,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     #[cfg(unix)]
     let relay_http_available = shared_owned.serenity_http_or_token_fallback().is_some();
     #[cfg(unix)]
-    let on_standby = shared_owned.http.cached_serenity_ctx.get().is_none();
+    let on_standby = !super::gateway_session_ready(shared_owned);
     #[cfg(unix)]
     let intended_relay_owner = if relay_http_available {
         if on_standby {
@@ -247,7 +249,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     if watcher_claimed {
         #[cfg(unix)]
         {
-            let on_standby = shared_owned.http.cached_serenity_ctx.get().is_none();
+            let on_standby = !super::gateway_session_ready(shared_owned);
             if on_standby {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -476,18 +478,9 @@ pub(super) fn handle_watcher_runtime_handoff(
             inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
         }
     }
-    // A watcher adopted after Done resumes past this turn's text, which O's cut marks sent;
-    // the bridge keeps the terminal, as it does in Legacy where that text stays pending.
-    if done
-        && !relay_owned_before
-        && *watcher_relay_available_for_turn
-        && !inflight_state.full_response.trim().is_empty()
-        && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-            channel_id.get(),
-            Some(runtime_kind),
-        ) == Ok(true)
-    {
-        *watcher_relay_available_for_turn = false;
+    // A watcher adopted only after Done resumes past this turn's text; the post-loop weighs it.
+    if done && !relay_owned_before && *watcher_relay_available_for_turn {
+        *watcher_adopted_after_done = true;
     }
     *state_dirty = tmux_ready_state_dirty_after_guarded_save(*state_dirty, Some(outcome));
     if done {

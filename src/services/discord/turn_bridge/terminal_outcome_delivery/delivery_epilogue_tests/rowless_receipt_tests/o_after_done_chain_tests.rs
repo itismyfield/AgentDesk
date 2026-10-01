@@ -1,4 +1,5 @@
-//! An O channel's Claude TUI turn from the after-Done watcher handoff to its completed panel.
+//! An O channel's Claude TUI turn from the after-Done watcher handoff to its completed panel,
+//! and the real bridge's terminal owner for each order the producer's frames can arrive in.
 
 use super::*;
 use crate::services::discord::status_panel_singleton_store as singleton;
@@ -8,7 +9,7 @@ use crate::services::discord::turn_bridge::runtime_handoff_loop::{
 };
 use crate::services::discord::turn_bridge::{
     output_lifecycle::classify_bridge_output_owner,
-    watcher_handoff::should_delegate_bridge_relay_to_watcher,
+    watcher_handoff::{o_body_needs_bridge_terminal, should_delegate_bridge_relay_to_watcher},
 };
 use crate::services::tui_o::{cutover::test_override, writer::deliver};
 use RuntimeHandoffKind::ClaudeTui;
@@ -48,6 +49,7 @@ async fn hand_off_after_done(
     let (mut ready, mut tmux_last_offset, mut owner) = (false, None, channel_id);
     let (mut standby, mut available, mut pin) = (false, false, None);
     let (mut claim, mut handed_off, mut owns) = (WatcherHandoffClaimOutcome::None, false, false);
+    let mut adopted_after_done = false;
     let (mut dirty, mut drain, mut heartbeat) = (false, None, None);
     let _ = handle_runtime_handoff_loop_message(
         message,
@@ -69,6 +71,7 @@ async fn hand_off_after_done(
             watcher_handoff_claim_outcome: &mut claim,
             tmux_handed_off: &mut handed_off,
             watcher_owns_assistant_relay: &mut owns,
+            watcher_adopted_after_done: &mut adopted_after_done,
             state_dirty: &mut dirty,
             terminal_control_drain_until: &mut drain,
             last_activity_heartbeat_at: &mut heartbeat,
@@ -77,7 +80,14 @@ async fn hand_off_after_done(
     .await;
     assert!(owns, "the live watcher takes the session for later input");
     let pending = false;
-    let delegated = should_delegate_bridge_relay_to_watcher(
+    let direct = state.gateway.can_deliver_directly();
+    let delegated = !o_body_needs_bridge_terminal(
+        adopted_after_done,
+        &state.full_response,
+        channel_id,
+        &state.inflight_state,
+        direct,
+    ) && should_delegate_bridge_relay_to_watcher(
         owns, available, pending, false, false, false, false,
     );
     (delegated, claim)
@@ -182,4 +192,167 @@ async fn o_turn_after_done_handoff_completes_below_o_body_on_a_headless_gateway(
     assert_eq!(posts, vec![moved], "{log:?}");
     assert!(log.contains(&("PATCH".into(), PANEL)), "{log:?}");
     assert!(log.contains(&("DELETE".into(), PANEL)), "{log:?}");
+}
+
+const ORDER_BODY: &str = "[E2E:E1:OK]";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Frame {
+    Text,
+    Done,
+    Ready,
+}
+
+/// Runs the real bridge over `drains`, each sent once the previous one is saved (its text, else its
+/// handoff), and returns the bridge's completion signal and the bodies it posted.
+async fn bridge_turn(o_owns: bool, drains: &[&[Frame]]) -> (BridgeCompletionSignal, Vec<String>) {
+    use crate::services::discord::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
+    driver.inflight.runtime_kind = Some(ClaudeTui);
+    inflight::save_inflight_state(&driver.inflight).expect("seed the Claude TUI row");
+    let selected = [(DRIVER_CHANNEL_ID, ClaudeTui)];
+    let _o = test_override::force_channels(if o_owns { &selected[..] } else { &[] });
+    // A connected bot, so the adopted watcher's ownership is what the handoff persists.
+    let _gateway =
+        crate::services::discord::turn_bridge::runtime_handoff_loop::test_gateway::connect();
+    let _rest = crate::services::discord::shared_state::test_rest::recording_mock(
+        REST_BASE,
+        DRIVER_CHANNEL_ID,
+    )
+    .await;
+    let transcript = driver
+        ._temp
+        .path()
+        .join("driver.jsonl")
+        .display()
+        .to_string();
+    let frame = |frame: Frame| match frame {
+        Frame::Text => StreamMessage::Text {
+            content: ORDER_BODY.to_string(),
+        },
+        Frame::Done => StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        },
+        Frame::Ready => StreamMessage::RuntimeReady {
+            handoff: crate::services::agent_protocol::RuntimeHandoff::ClaudeTui {
+                transcript_path: transcript.clone(),
+                tmux_session_name: DRIVER_TMUX_SESSION.to_string(),
+                last_offset: 64,
+            },
+        },
+    };
+    let cancel = Arc::new(CancelToken::new());
+    let user_msg = MessageId::new(DRIVER_USER_MSG_ID);
+    assert!(
+        crate::services::discord::mailbox_try_start_turn(
+            &driver.shared,
+            channel_id,
+            cancel.clone(),
+            UserId::new(1),
+            user_msg,
+        )
+        .await
+    );
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let bridge = TurnBridgeContext {
+        provider: ProviderKind::Claude,
+        gateway: driver.gateway.clone(),
+        channel_id,
+        user_msg_id: Some(user_msg),
+        user_text_owned: "driver prompt".to_string(),
+        request_owner_name: String::new(),
+        role_binding: None,
+        adk_session_key: None,
+        adk_session_name: None,
+        adk_session_info: None,
+        adk_cwd: None,
+        dispatch_id: None,
+        dispatch_kind: None,
+        memory_recall_usage: TokenUsage::default(),
+        context_window_tokens: 0,
+        context_compact_percent: 0,
+        current_msg_id: Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+        response_sent_offset: 0,
+        full_response: String::new(),
+        tmux_last_offset: None,
+        new_session_id: None,
+        defer_watcher_resume: false,
+        reuse_status_panel_message: false,
+        completion_tx: Some(completion_tx),
+        is_external_input_tui_direct: false,
+        inflight_state: driver.inflight.clone(),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    for message in drains[0] {
+        tx.send(frame(*message)).unwrap();
+    }
+    spawn_turn_bridge(driver.shared.clone(), cancel, rx, bridge);
+    for (previous, drain) in drains.iter().zip(&drains[1..]) {
+        let saved = |row: InflightTurnState| {
+            if previous.contains(&Frame::Text) {
+                row.full_response == ORDER_BODY
+            } else {
+                row.effective_relay_owner_kind() == inflight::RelayOwnerKind::Watcher
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !inflight::load_inflight_state(&ProviderKind::Claude, DRIVER_CHANNEL_ID)
+            .is_some_and(saved)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{previous:?} never saved"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        for message in *drain {
+            tx.send(frame(*message)).unwrap();
+        }
+    }
+    drop(tx);
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(10), completion_rx)
+        .await
+        .expect("the bridge ends")
+        .expect("completion signal");
+    let posted = driver.published_bodies.lock().unwrap().clone();
+    (signal, posted)
+}
+
+/// On O's channel a watcher adopted after Done leaves the bridge the terminal and O the body,
+/// whether the text drains alone or with Done; Legacy posts its own body as before.
+#[tokio::test]
+async fn o_turn_keeps_the_bridge_terminal_in_either_frame_order() {
+    use Frame::{Done, Ready, Text};
+    let posts_body = |posted: &[String]| posted.iter().any(|text| text.contains(ORDER_BODY));
+    for (order, drains) in [
+        ("live", &[&[Text][..], &[Done, Ready][..]][..]),
+        ("batch", &[&[Text, Done, Ready][..]][..]),
+    ] {
+        let (signal, posted) = bridge_turn(true, drains).await;
+        assert_eq!(signal, BridgeCompletionSignal::Finalized, "{order}");
+        assert!(!posts_body(&posted), "{order}: {posted:?}");
+    }
+    let (signal, posted) = bridge_turn(false, &[&[Text], &[Done, Ready]]).await;
+    assert_eq!(signal, BridgeCompletionSignal::Finalized, "legacy");
+    assert!(posts_body(&posted), "legacy: {posted:?}");
+}
+
+/// On O's channel a watcher that already relayed the turn before Done still ends it, and so does
+/// the watcher of a turn with no text, which has no O body behind it.
+#[tokio::test]
+async fn o_turn_without_an_after_done_body_stays_delegated() {
+    use Frame::{Done, Ready, Text};
+    for (case, drains) in [
+        ("relayed", &[&[Ready][..], &[Text, Done, Ready][..]][..]),
+        ("empty", &[&[Done, Ready][..]][..]),
+    ] {
+        let (signal, posted) = bridge_turn(true, drains).await;
+        assert_eq!(signal, BridgeCompletionSignal::Unresolved, "{case}");
+        assert!(
+            posted.iter().all(|text| !text.contains(ORDER_BODY)),
+            "{case}: {posted:?}"
+        );
+    }
 }
