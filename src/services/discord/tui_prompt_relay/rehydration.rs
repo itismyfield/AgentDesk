@@ -1200,8 +1200,14 @@ mod tests {
     mod host_defer {
         use super::*;
         use crate::db::dispatched_sessions::hosted_execution;
-        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
-        use crate::services::discord::host_teardown_gate::test_support::shared_on;
+        use crate::db::dispatched_sessions::hosted_execution::HostedState;
+        use crate::db::dispatched_sessions::hosted_execution::tests::{
+            future_schema, owner, record, wire,
+        };
+        use crate::services::discord::host_defer_gate::tests::{
+            Case, ScriptedTmux, postgres, with_second_bot,
+        };
+        use crate::services::discord::host_teardown_gate::test_support::Stored;
 
         fn binding(
             kind: RuntimeHandoffKind,
@@ -1228,7 +1234,8 @@ mod tests {
             crate::services::tui_prompt_dedupe::reset_state_for_tests();
             let tmux = ScriptedTmux::install();
             let (db, pool) = postgres().await;
-            let shared = shared_on(&pool).await;
+            let bot_b = "p4c1-bot-b";
+            let (shared, _registry) = with_second_bot(&pool, bot_b).await;
             let providers = [
                 (ProviderKind::Claude, RuntimeHandoffKind::ClaudeTui),
                 (ProviderKind::Codex, RuntimeHandoffKind::CodexTui),
@@ -1260,9 +1267,35 @@ mod tests {
                     }
                 }
             }
+            // A second bot's rows sit under its own hash, which only the registry names.
+            let mut second = Vec::new();
+            for (n, stored) in [Stored::Legacy, Stored::Hosted, Stored::Future]
+                .into_iter()
+                .enumerate()
+            {
+                let channel = 1_479_671_301_387_065_800 + n as u64;
+                let name = format!("AgentDesk-claude-p4c1-bot-b-{n}");
+                let claude = ProviderKind::Claude;
+                let key = crate::services::discord::adk_session::build_namespaced_session_key(
+                    bot_b, &claude, &name,
+                );
+                let mut row_owner = owner(&channel.to_string());
+                row_owner.discord_token_hash = bot_b.to_string();
+                let raw = match stored {
+                    Stored::Hosted => Some(wire(&record(&row_owner, "n1", HostedState::Bound))),
+                    Stored::Future => Some(future_schema(&row_owner)),
+                    _ => None,
+                };
+                let seed = crate::services::discord::host_key_derivation::tests::seed_row;
+                seed(&pool, "claude", Some(bot_b), &key, channel, raw).await;
+                let tui = binding(RuntimeHandoffKind::ClaudeTui);
+                crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&name, tui);
+                crate::services::tui_prompt_dedupe::register_tmux_channel(&name, channel);
+                second.push((name, stored == Stored::Legacy));
+            }
             let unread = "AgentDesk-claude-p4c1-evict-unread";
             let key = crate::services::discord::host_teardown_gate::test_support::channel_key;
-            let legacy = crate::services::discord::host_teardown_gate::test_support::Stored::Legacy;
+            let legacy = Stored::Legacy;
             let unread_channel = 1_479_671_301_387_065_900;
             Case::Stored(legacy)
                 .seed(&pool, &key(&shared, unread), unread, unread_channel)
@@ -1306,6 +1339,13 @@ mod tests {
                 let label = format!("{name} listed={listed} {case:?}");
                 assert_eq!(mirrored, !case.admitted(), "{label}: mirror");
                 assert_eq!(owned, !case.admitted(), "{label}: restored owner");
+            }
+
+            for (name, admitted) in &second {
+                let mirrored =
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name)
+                        .is_some();
+                assert_eq!(mirrored, !admitted, "{name}: second bot's mirror");
             }
 
             let claude_tui = binding(RuntimeHandoffKind::ClaudeTui);

@@ -3445,6 +3445,7 @@ services::discord::health::watcher_respawn::tests::unwatched_candidates_exclude_
 services::discord::health::watcher_respawn::tests::unwatched_candidates_include_a_mailbox_channel_whose_watcher_was_cancelled
 services::discord::health::watcher_respawn::tests::watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
+services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::http::tests::discord_content_or_zwsp_replaces_empty_content

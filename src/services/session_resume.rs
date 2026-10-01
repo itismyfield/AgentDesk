@@ -1510,7 +1510,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn resume_refuses_what_the_host_guard_keeps_before_any_change_pg() {
-        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
+        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux};
         use crate::services::discord::host_teardown_gate::test_support::{channel_key, runtime};
         let _root = crate::config::TestRuntimeRootGuard::new();
         let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -1518,7 +1518,7 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmux = ScriptedTmux::install();
-        let (db, pool) = postgres().await;
+        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
         let (shared, registry) = runtime(&pool).await;
         let target_cwd = tempfile::tempdir().expect("target cwd");
         let opts = ResumePreviousOptions {

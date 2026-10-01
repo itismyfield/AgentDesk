@@ -2,11 +2,13 @@
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
+use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
 use crate::db::dispatched_sessions::hosted_execution::tests::{owner, pending, wire};
+use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::test_support::{
     Stored, channel_key, seed, shared_on,
 };
@@ -60,6 +62,26 @@ pub(crate) async fn postgres() -> (crate::db::auto_queue::test_support::TestPost
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     (db, pool)
+}
+
+/// A claude runtime on `pool` whose registry also holds a second claude bot hashed `other`.
+pub(crate) async fn with_second_bot(
+    pool: &PgPool,
+    other: &str,
+) -> (Arc<SharedData>, Arc<HealthRegistry>) {
+    let mut shared = shared_on(pool).await;
+    let registry = Arc::new(HealthRegistry::new());
+    let own = Arc::get_mut(&mut shared).expect("an unshared runtime");
+    own.health_registry = Arc::downgrade(&registry);
+    let mut second = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut second)
+        .expect("an unshared runtime")
+        .token_hash = other.to_string();
+    registry
+        .register("claude".to_string(), shared.clone())
+        .await;
+    registry.register("claude".to_string(), second).await;
+    (shared, registry)
 }
 
 /// Maps `channel` to `channel_name` in the runtime's session table.
@@ -164,5 +186,47 @@ async fn the_promote_gate_holds_only_what_the_host_guard_keeps_pg() {
     pool.close().await;
     let unread = gate(&shared, &provider, channel_of(0)).await;
     assert!(unread, "a failed row read is not a legacy answer");
+    db.drop().await;
+}
+
+// A row written under another tmux name, with no alias for the name the channel now builds,
+// still holds the promotion through its channel row; a legacy or absent row promotes.
+#[tokio::test]
+async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, record};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+    let cases = [
+        Stored::Legacy,
+        Stored::Hosted,
+        Stored::Future,
+        Stored::Missing,
+    ];
+    for (n, stored) in cases.into_iter().enumerate() {
+        let channel = ChannelId::new(1_479_671_301_387_062_000 + n as u64);
+        map_channel(&shared, channel, &format!("p4c1-renamed-{n}")).await;
+        let old = provider.build_tmux_session_name(&format!("p4c1-old-{n}"));
+        let key = channel_key(&shared, &old);
+        let mut row_owner = owner(&channel.get().to_string());
+        row_owner.discord_token_hash = shared.token_hash.clone();
+        let raw = match stored {
+            Stored::Hosted => Some(wire(&record(&row_owner, "n1", HostedState::Bound))),
+            Stored::Future => Some(future_schema(&row_owner)),
+            _ => None,
+        };
+        if stored != Stored::Missing {
+            let hash = Some(shared.token_hash.as_str());
+            let seed = crate::services::discord::host_key_derivation::tests::seed_row;
+            seed(&pool, "claude", hash, &key, channel.get(), raw).await;
+        }
+        let held = gate(&shared, &provider, channel).await;
+        let expected = matches!(stored, Stored::Hosted | Stored::Future);
+        assert_eq!(held, expected, "{stored:?}");
+    }
     db.drop().await;
 }

@@ -452,7 +452,7 @@ pub(super) async fn reconcile_managed_tmux_runtime_kind_for_config(
     }
     let caller = "runtime_kind_mismatch_recreate";
     let deferred = super::super::super::host_defer_gate::turn_session_deferred(
-        shared.pg_pool.as_ref(),
+        shared,
         provider,
         channel_id.get(),
         session_key,

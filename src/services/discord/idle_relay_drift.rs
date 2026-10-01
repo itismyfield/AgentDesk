@@ -488,7 +488,7 @@ async fn attempt_drift_repair(
     let mirror_channel =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
     // A session the host guard keeps is neither repaired nor counted as lost.
-    let host = super::host_defer_gate::channel_session_deferred;
+    let host = super::host_defer_gate::sweep_session_deferred;
     let channel = mirror_channel.unwrap_or(0);
     if host(shared, &provider, channel, tmux_session_name).await {
         return;
@@ -973,12 +973,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg() {
-        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
+        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux};
         use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
         let _root = crate::config::TestRuntimeRootGuard::new();
         let _drift = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmux = ScriptedTmux::install();
-        let (db, pool) = postgres().await;
+        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
         let shared = shared_on(&pool).await;
         let repair = |name: String, channel: u64| {
             let shared = shared.clone();

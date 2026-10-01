@@ -114,6 +114,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
+  --skip services::discord::idle_relay_drift::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
   --skip services::discord::inflight::rebind_reap::tests
   --skip services::discord::inflight::removal::custody_notice_tests
@@ -135,6 +136,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_delivery_custody::pg_tests
+  --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
@@ -344,7 +346,20 @@ NON_PG_FILTER_REPLAY=(
   services::discord::idle_recap_interaction::tests::recap_prompt_route_rejects_unrelated_custom_ids
   services::discord::idle_recap_interaction::tests::recap_prompt_route_sends_suggest_to_internal_followup_handler
   services::discord::idle_recap_interaction::tests::recap_prompt_sent_ephemeral_includes_actual_prompt_text
-  services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg
+  services::discord::idle_relay_drift::tests::all_sources_miss_is_no_source
+  services::discord::idle_relay_drift::tests::confirmed_dead_orphan_drains_pending_emissions_once
+  services::discord::idle_relay_drift::tests::db_channel_disagrees_with_mirror_blocks_misdelivery
+  services::discord::idle_relay_drift::tests::db_channel_foreign_instance_is_blocked
+  services::discord::idle_relay_drift::tests::db_channel_without_mirror_witness_is_blocked
+  services::discord::idle_relay_drift::tests::dead_pane_blocks_any_candidate
+  services::discord::idle_relay_drift::tests::dead_pane_without_source_is_still_permanent
+  services::discord::idle_relay_drift::tests::drift_warn_first_emits_then_suppresses_then_reemits
+  services::discord::idle_relay_drift::tests::drift_warn_sessions_are_independent
+  services::discord::idle_relay_drift::tests::probe_error_preserves_pending_emissions
+  services::discord::idle_relay_drift::tests::repair_cooldown_and_single_flight_gate
+  services::discord::idle_relay_drift::tests::settings_hit_live_pane_promotes_settings
+  services::discord::idle_relay_drift::tests::settings_miss_db_hit_mirror_agrees_instance_match_promotes_db
+  services::discord::idle_relay_drift::tests::ttl_expiry_accounts_pending_emissions_before_removal
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_delegates_signals
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_preserves_probe_error
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
@@ -482,7 +497,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::task_notification_delivery::tests::transient_edit_never_falls_back_to_fresh_post
   services::discord::task_notification_delivery::tests::unavailable_pinned_bot_releases_lease_for_immediate_retry
   services::discord::task_notification_delivery::tests::xml_and_stream_json_share_semantic_key_and_nonce_is_bounded
-  services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
+  services::discord::terminal_ui_obligation::tests::obligation_store_round_trips_lists_and_clears
+  services::discord::terminal_ui_obligation::tests::terminal_ui_claude_tui_without_runtime_output_path_stays_not_ready
+  services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
+  services::discord::terminal_ui_obligation::tests::terminal_ui_reconcile_action_prefers_complete_then_deadline_then_wait
+  services::discord::terminal_ui_obligation::tests::terminal_ui_snapshot_from_inflight_preserves_missing_claude_tui_output_flag
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
@@ -570,7 +589,6 @@ NON_PG_FILTER_REPLAY=(
   services::session_resume::tests::discover_skips_current_and_picks_newest_prior_in_lineage
   services::session_resume::tests::lineage_stem_strips_only_datetime_suffix
   services::session_resume::tests::off_runtime_discovery_preserves_selection_and_runtime_progress
-  services::session_resume::tests::resume_refuses_what_the_host_guard_keeps_before_any_change_pg
   services::session_resume::tests::resume_runtime_binding_clear_absence_is_success
   services::session_resume::tests::transition_busy_response_exposes_retryable_korean_contract
   services::settings::tests::delivery_journal_mode_stays_yaml_only

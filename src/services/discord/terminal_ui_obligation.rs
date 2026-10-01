@@ -58,6 +58,8 @@ enum TerminalUiSessionLookup {
     Current(TerminalUiSessionSnapshot),
     Stale(&'static str),
     Missing(&'static str),
+    /// The host guard keeps the session: no stale, missing or card decision is made.
+    Deferred,
 }
 
 #[derive(Debug)]
@@ -174,6 +176,7 @@ async fn reconcile_terminal_ui_obligation(
     let lookup = resolve_terminal_ui_session(shared, provider, channel_id, &obligation).await;
     let snapshot = match lookup {
         TerminalUiSessionLookup::Current(snapshot) => snapshot,
+        TerminalUiSessionLookup::Deferred => return,
         TerminalUiSessionLookup::Stale(reason) => {
             if clear_obligation_by_key(&obligation.provider, obligation.channel_id) {
                 tracing::warn!(
@@ -254,7 +257,11 @@ async fn resolve_terminal_ui_session(
     channel_id: ChannelId,
     obligation: &TerminalUiObligation,
 ) -> TerminalUiSessionLookup {
-    if let Some(state) = inflight::load_inflight_state(provider, channel_id.get()) {
+    let inflight = inflight::load_inflight_state(provider, channel_id.get());
+    if terminal_ui_host_deferred(shared, provider, channel_id, inflight.as_ref()).await {
+        return TerminalUiSessionLookup::Deferred;
+    }
+    if let Some(state) = inflight {
         if state.status_message_id != Some(obligation.status_message_id) {
             return TerminalUiSessionLookup::Stale("status_message_id_mismatch");
         }
@@ -301,6 +308,34 @@ async fn resolve_terminal_ui_session(
     })
 }
 
+/// Whether the host guard keeps the session the lookup would name, from the inflight row,
+/// the watcher or the channel name, before any of them reads the card stale or missing.
+async fn terminal_ui_host_deferred(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    state: Option<&InflightTurnState>,
+) -> bool {
+    let recorded = state.and_then(|state| clean_nonempty(state.tmux_session_name.as_deref()));
+    let name = match recorded {
+        Some(name) => Some(name.to_string()),
+        None => match shared.tmux_watchers.channel_binding(&channel_id) {
+            Some(binding) => Some(binding.tmux_session_name),
+            None if provider.uses_managed_tmux_backend() => {
+                let data = shared.core.lock().await;
+                let session = data.sessions.get(&channel_id);
+                let channel_name = session.and_then(|session| session.channel_name.as_deref());
+                channel_name.map(|name| provider.build_tmux_session_name(name))
+            }
+            None => None,
+        },
+    };
+    let Some(name) = name else {
+        return false;
+    };
+    super::host_defer_gate::sweep_session_deferred(shared, provider, channel_id.get(), &name).await
+}
+
 fn terminal_ui_snapshot_from_inflight(
     state: &inflight::InflightTurnState,
     tmux_session_name: &str,
@@ -336,11 +371,6 @@ async fn resolve_terminal_ui_tmux_session(
             .and_then(|session| session.channel_name.clone())
     }?;
     let tmux_session_name = provider.build_tmux_session_name(&channel_name);
-    // A session the host guard keeps has no tmux-derived context; the card waits.
-    let host = super::host_defer_gate::channel_session_deferred;
-    if host(shared, provider, channel_id.get(), &tmux_session_name).await {
-        return None;
-    }
     if crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name)
         || terminal_ui_generation_mtime_for_tmux(&tmux_session_name) != 0
     {
@@ -643,52 +673,100 @@ mod tests {
         );
     }
 
-    // A status card whose tmux generation went stale is dropped only for a session the
-    // host guard admits; a kept session's card waits for its deadline instead.
+    // A status card is dropped, as stale or expired, only for a session the host guard
+    // admits, whether the inflight row, the watcher or the channel name names it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg() {
-        use crate::services::discord::host_defer_gate::tests::{
-            Case, ScriptedTmux, map_channel, postgres,
-        };
+        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, map_channel};
         use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+        use crate::services::discord::tmux_watcher_registry::TmuxWatcherHandle;
+        use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
         let _root = crate::config::TestRuntimeRootGuard::new();
         let _tmux = ScriptedTmux::install();
-        let (db, pool) = postgres().await;
+        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
         let shared = shared_on(&pool).await;
         let http = Arc::new(serenity::Http::new("Bot p4c1-test"));
         let root = runtime_store::discord_terminal_ui_obligations_root().expect("root");
         let claude = ProviderKind::Claude;
         let channel_of = |n: usize| 1_479_671_301_387_064_000 + n as u64;
-        let pending = |n: usize| {
+        let now = terminal_ui_obligation_now_unix();
+        let pending = |n: usize, deadline_unix: i64| {
             let obligation = TerminalUiObligation {
                 generation_mtime_ns: 1,
-                deadline_unix: terminal_ui_obligation_now_unix() + 3600,
+                deadline_unix,
                 ..sample_obligation(channel_of(n))
             };
             write_obligation_in_root(&root, &obligation).expect("write obligation");
         };
-        for (n, case) in Case::ALL.into_iter().enumerate() {
-            let channel_name = format!("p4c1-card-{n}");
-            let name = claude.build_tmux_session_name(&channel_name);
-            map_channel(&shared, ChannelId::new(channel_of(n)), &channel_name).await;
-            case.seed(&pool, &channel_key(&shared, &name), &name, channel_of(n))
-                .await;
-            let marker = crate::services::tmux_common::session_temp_path(&name, "generation");
-            std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
-            std::fs::write(&marker, "2").expect("a later spawn's generation marker");
-            pending(n);
+        let entries = ["stale name", "expired", "inflight", "watcher"];
+        let mut cases = Vec::new();
+        for (e, entry) in entries.into_iter().enumerate() {
+            for (c, case) in Case::ALL.into_iter().enumerate() {
+                let n = e * 10 + c;
+                let channel = ChannelId::new(channel_of(n));
+                let channel_name = format!("p4c1-card-{n}");
+                let name = claude.build_tmux_session_name(&channel_name);
+                map_channel(&shared, channel, &channel_name).await;
+                case.seed(&pool, &channel_key(&shared, &name), &name, channel.get())
+                    .await;
+                if entry != "expired" {
+                    let marker =
+                        crate::services::tmux_common::session_temp_path(&name, "generation");
+                    std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+                    std::fs::write(&marker, "2").expect("a later spawn's generation marker");
+                }
+                if entry == "inflight" {
+                    let row = InflightTurnState::new(
+                        claude.clone(),
+                        channel.get(),
+                        None,
+                        1,
+                        channel.get() + 1,
+                        channel.get() + 2,
+                        "p4c1 card".to_string(),
+                        None,
+                        Some(name.clone()),
+                        None,
+                        None,
+                        0,
+                    );
+                    inflight::save_inflight_state_create_new(&row).expect("inflight row");
+                }
+                if entry == "watcher" {
+                    let handle = TmuxWatcherHandle {
+                        tmux_session_name: name.clone(),
+                        output_path: format!("/tmp/{name}.jsonl"),
+                        paused: Arc::new(AtomicBool::new(false)),
+                        resume_offset: Arc::new(Mutex::new(None)),
+                        cancel: Arc::new(AtomicBool::new(false)),
+                        pause_epoch: Arc::new(AtomicU64::new(0)),
+                        turn_delivered: Arc::new(AtomicBool::new(false)),
+                        last_heartbeat_ts_ms: Arc::new(AtomicI64::new(0)),
+                    };
+                    shared.tmux_watchers.insert(channel, handle);
+                }
+                pending(
+                    n,
+                    if entry == "expired" {
+                        now - 31
+                    } else {
+                        now + 3600
+                    },
+                );
+                cases.push((n, entry, case));
+            }
         }
         sweep_terminal_ui_obligations(&http, &shared, &claude).await;
-        for (n, case) in Case::ALL.into_iter().enumerate() {
+        for (n, entry, case) in cases {
             let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(n)).is_some();
-            assert_eq!(kept, !case.admitted(), "{case:?}");
+            assert_eq!(kept, !case.admitted(), "{entry} {case:?}");
             clear_obligation_in_root(&root, claude.as_str(), channel_of(n));
         }
         pool.close().await;
-        pending(0);
+        pending(10, now - 31);
         sweep_terminal_ui_obligations(&http, &shared, &claude).await;
-        let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(0)).is_some();
+        let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(10)).is_some();
         assert!(kept, "a failed row read is not a legacy answer");
         db.drop().await;
     }

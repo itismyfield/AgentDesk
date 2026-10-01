@@ -1,8 +1,11 @@
 //! The runtime-kind recreate against the rows stored under the turn's own key.
 
 use super::*;
+use crate::db::dispatched_sessions::hosted_execution::HostedState;
+use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
 use crate::services::discord::host_defer_gate::tests::{Case, postgres};
-use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+use crate::services::discord::host_key_derivation::tests::seed_row;
+use crate::services::discord::host_teardown_gate::test_support::{Stored, channel_key, shared_on};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 
 fn wrapper_binding() -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -63,6 +66,23 @@ async fn a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg() {
         case.seed(&pool, &key, &name, channel_of(n as u64)).await;
         let got = reconcile(&shared, &tmux, channel_of(n as u64), Some(&key), &name).await;
         assert_eq!(got, (case.admitted(), !case.admitted()), "{case:?}");
+    }
+
+    // A row written under the channel's old name still decides through its channel row.
+    for (n, stored) in [(80, Stored::Legacy), (81, Stored::Hosted)] {
+        let old = format!("AgentDesk-claude-p4c1-kind-old-{n}");
+        let mut row_owner = owner(&channel_of(n).to_string());
+        row_owner.discord_token_hash = shared.token_hash.clone();
+        let raw =
+            (stored == Stored::Hosted).then(|| wire(&record(&row_owner, "n1", HostedState::Bound)));
+        let hash = Some(shared.token_hash.as_str());
+        let old_key = channel_key(&shared, &old);
+        seed_row(&pool, "claude", hash, &old_key, channel_of(n), raw).await;
+        let name = format!("AgentDesk-claude-p4c1-kind-new-{n}");
+        let key = channel_key(&shared, &name);
+        let got = reconcile(&shared, &tmux, channel_of(n), Some(&key), &name).await;
+        let admitted = stored == Stored::Legacy;
+        assert_eq!(got, (admitted, !admitted), "renamed {stored:?}");
     }
 
     let unkeyed = reconcile(

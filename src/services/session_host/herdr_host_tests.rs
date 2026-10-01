@@ -1482,6 +1482,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (GUARD_ADAPTER, 1),
                 ("src/services/discord/inflight.rs", 0),
                 ("src/services/discord/host_key_derivation.rs", 1),
+                ("src/services/discord/host_defer_gate.rs", 1),
             ],
         ),
         ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
