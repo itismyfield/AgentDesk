@@ -601,6 +601,21 @@ fn stale_foreign_demote_excludes_session_bound_relay_for_orphan_reclaim() {
         !stale_foreign_inflight_is_reclaimable_at(&state, &rec, chrono::Utc::now().timestamp(),),
         "SessionBoundRelay rows must be left to the #3982 orphan downgrade path"
     );
+    // An unreadable transcript keeps the shield; only a recorded SDK entrypoint lifts it.
+    state.output_path = Some(root.path().join("missing.jsonl").display().to_string());
+    assert!(!stale_foreign_inflight_is_reclaimable_at(
+        &state,
+        &rec,
+        chrono::Utc::now().timestamp(),
+    ));
+    let sdk = root.path().join("sdk.jsonl");
+    std::fs::write(&sdk, "{\"type\":\"user\",\"entrypoint\":\"sdk-cli\"}\n").expect("write sdk");
+    state.output_path = Some(sdk.display().to_string());
+    assert!(stale_foreign_inflight_is_reclaimable_at(
+        &state,
+        &rec,
+        chrono::Utc::now().timestamp(),
+    ));
 }
 
 /// #3154 interleave integration test (design point: tokio interleave with
@@ -3590,4 +3605,5 @@ fn anchor_slot_rig_teardown_preserves_absent_root() {
     );
 }
 
+mod headless_row_tests;
 mod retire_tests;

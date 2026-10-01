@@ -72,8 +72,8 @@ use state::{
     active_worker_guard_for_spawn, committed_foreign_complete_finalize_context,
     committed_foreign_inflight_is_finalize_clearable, output_capture_offset,
     restart_orphan_evidence_at, restart_orphan_pane_ready_for_input,
-    stale_foreign_cancel_finalize_context, stale_foreign_inflight_is_reclaimable_at, take_retired,
-    update_claim_attempt_count,
+    stale_foreign_cancel_finalize_context, stale_foreign_inflight_is_reclaimable_at,
+    stale_foreign_probe, take_retired, update_claim_attempt_count,
 };
 
 /// #5071 T3-A1 observation label for the stale-FOREIGN automatic watcher cancel.
@@ -506,12 +506,7 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
         .await
         .active_user_message_id
         .map(|id| id.get());
-    let probe = super::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
-        shared.as_ref(),
-        &state,
-        mailbox_active_user_msg_id,
-        channel,
-    );
+    let probe = stale_foreign_probe(shared.as_ref(), &state, mailbox_active_user_msg_id, channel);
     let relay_frontier = probe.relay_frontier;
     let gate =
         super::destructive_cancel_gate::evaluate(shared, &provider, channel, channel, &probe).await;

@@ -1365,6 +1365,7 @@ src/
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
+│   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs
@@ -1400,6 +1401,8 @@ src/
 │   │   │   ├── claude_idle_tail.rs
 │   │   │   ├── claude_idle_tail_host_tests.rs
 │   │   │   ├── codex_idle_rollout.rs
+│   │   │   ├── headless.rs
+│   │   │   ├── headless_tests.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
@@ -1473,6 +1476,7 @@ src/
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── rowless_receipt_tests/
+│   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
