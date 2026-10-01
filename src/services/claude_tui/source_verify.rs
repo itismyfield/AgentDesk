@@ -377,6 +377,11 @@ pub(crate) fn verify_claude_source(
         SourceVerdict::Rotate(_)
             if !awaited && background && published.is_some() && !since.is_empty() =>
         {
+            // Refused, not Pending: a Pending would be resolved by its own retry once awaited.
+            #[cfg(test)]
+            if n2b_mutant("u10-pending") {
+                return SourceVerdict::Pending;
+            }
             Rejected(SourceRejection::UnprovenStart)
         }
         verdict => verdict,

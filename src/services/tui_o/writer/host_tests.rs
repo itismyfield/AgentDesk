@@ -827,14 +827,17 @@ async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
             }
         )
     };
-    let resolved = |e: &&BindingEvent| matches!(&e.record, BindingRecord::Resolved { .. });
+    // The only Resolved names D, so B's Pending was passed, not resolved.
+    let resolved = |e: &&BindingEvent| matches!(&e.record, BindingRecord::Resolved { source, .. } if source.session_id == d);
+    let any = |e: &&BindingEvent| matches!(&e.record, BindingRecord::Resolved { .. });
     let counts = (
         events.iter().filter(pending).count(),
+        events.iter().filter(any).count(),
         events.iter().filter(resolved).count(),
     );
     assert_eq!(
         counts,
-        (2, 1),
+        (2, 1, 1),
         "[O:pendings] only D's is resolved {events:#?}"
     );
     polls(6).await;

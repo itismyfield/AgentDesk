@@ -857,25 +857,61 @@ fn a_return_is_not_proven_while_the_binding_is_not_the_logged_current() {
 #[test]
 fn a_background_start_published_late_does_not_take_the_pane_back() {
     let lane = Lane::new();
-    // An old /clear X whose start was queued after the pane moved on to Y.
-    let (x, y) = (uuid(), uuid());
+    // /clear X, then /resume B; X's start is queued after B's and still names a written file.
+    let (x, b, z) = (uuid(), uuid(), uuid());
     let pane = Pane::new(&lane, 7_728, "n2b-u10a");
-    pane.chain(&[(&y, 20)]);
-    let unproven = AdoptionHttp::Skipped(AdoptSkip::SourceRejected(SourceRejection::UnprovenStart));
-    let late = pane.send(&x, start("clear", &pane.file(&x), 30));
-    assert_eq!(late, unproven, "[U10:clear]");
-    retry_deferred_claude_adoptions();
-    assert_eq!(
-        pane.bound(),
-        Some(y),
-        "[U10:clear] nothing is left to retry"
-    );
-    // X's own prompt is evidence the pane is on X.
-    assert_eq!(
-        pane.send(&x, prompt(&pane.path(&x), 40)),
-        ADOPTED,
+    let resume = start("resume", &pane.file(&b), 20);
+    assert_eq!(pane.send(&b, resume), ADOPTED);
+    assert!(clear_claude_session_rotation(pane.tmux));
+    let took_x = |pane: &Pane| {
+        let (source, resolved) = (format!("source:{x}"), format!("resolved:{x}"));
+        pane.kinds().iter().any(|k| *k == source || *k == resolved)
+    };
+    let late = start("clear", &pane.file(&x), 30);
+    let first = pane.send(&x, late.clone());
+    assert!(
+        pane.bound() == Some(b.clone()) && !took_x(&pane),
         "[U10:clear]"
     );
+    retry_deferred_claude_adoptions();
+    assert!(
+        pane.bound() == Some(b.clone()) && !took_x(&pane),
+        "[U10:retry]"
+    );
+    let unproven = AdoptionHttp::Skipped(AdoptSkip::SourceRejected(SourceRejection::UnprovenStart));
+    assert_eq!(first, unproven, "[U10:refused]");
+    // A restart reloads the log and seeds the pane; the same request reprocessed stays refused.
+    restart(pane.channel);
+    register_tmux_channel(pane.tmux, pane.channel);
+    register_provider_session("claude", &pane.a, pane.tmux);
+    restore(pane.channel, pane.tmux, &pane.a, &pane.path(&pane.a));
+    retry_deferred_claude_adoptions();
+    assert!(
+        pane.bound() == Some(b.clone()) && !took_x(&pane),
+        "[U10:restart]"
+    );
+    assert_eq!(pane.send(&x, late), unproven, "[U10:restart]");
+    retry_deferred_claude_adoptions();
+    assert!(
+        pane.bound() == Some(b.clone()) && !took_x(&pane),
+        "[U10:restart]"
+    );
+    // A /clear whose transcript is not written yet waits for it as before and resolves.
+    let waiting = pane.send(&z, start("clear", &pane.path(&z), 40));
+    assert_eq!(waiting, PENDING, "[U10:file_wait]");
+    pane.file(&z);
+    retry_deferred_claude_adoptions();
+    assert_eq!(pane.bound(), Some(z.clone()), "[U10:file_wait]");
+    assert_eq!(
+        pane.kinds().last(),
+        Some(&format!("resolved:{z}")),
+        "[U10:file_wait]"
+    );
+    // X's own prompt is evidence the pane is on X.
+    assert!(clear_claude_session_rotation(pane.tmux));
+    retry_deferred_claude_adoptions();
+    let own = pane.send(&x, prompt(&pane.path(&x), 50));
+    assert_eq!(own, ADOPTED, "[U10:clear]");
     // A relaunch resuming B, whose own start is queued after the pane already took D.
     let (b, d) = (uuid(), uuid());
     let pane = Pane::new(&lane, 7_729, "n2b-u10b");
