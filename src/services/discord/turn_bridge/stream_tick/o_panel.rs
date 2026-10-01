@@ -27,9 +27,8 @@ pub(super) fn status_frame(
     build_turn_bridge_streaming_edit_text(shared.ui.status_panel_v2_enabled, "", &block, provider)
 }
 
-/// Edits the panel when due; a panel above O's newest post is sent again below it, and the old
-/// one goes to the orphan-spinner cleanup (recorded, retried) once the new one is bound to the
-/// turn. Returns whether anything was written.
+/// Edits the panel when due, or sends it again below O's newest post and, once bound, hands
+/// the old one to the orphan-spinner cleanup (recorded, retried). True when anything was written.
 pub(super) async fn refresh_o_status_panel(
     shared: &Arc<SharedData>,
     owner: &Arc<dyn TurnGateway>,
