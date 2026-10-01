@@ -232,11 +232,15 @@ mod tests {
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &codex);
         let _server = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &dir.join("server"));
-        for hooks in [false, true] {
-            let _flag = Guard::set_value_after_shared_test_env_lock(
-                "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
-                if hooks { "1" } else { "0" }.as_ref(),
-            );
+        for (flag, hooks) in [(Some("0"), false), (Some("1"), true), (None, true)] {
+            let _flag =
+                Guard::capture_after_shared_test_env_lock("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+            match flag {
+                Some(value) => unsafe {
+                    std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value)
+                },
+                None => unsafe { std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS") },
+            }
             let _published = hooks.then(|| {
                 crate::services::claude_tui::hook_server::publish_hook_endpoint(
                     "http://127.0.0.1:9".to_string(),
@@ -248,7 +252,7 @@ mod tests {
                     let home = dir.join("profile").display().to_string();
                     overlay.env.insert("CODEX_HOME".into(), home);
                 }
-                let tmux = format!("codex-home-{hooks}-{profile}");
+                let tmux = format!("codex-home-{}-{profile}", flag.unwrap_or("unset"));
                 let options = CodexLaunchOptions::new("");
                 let script = prepare_codex_tui_launch_script(
                     &tmux, None, "", &options, None, None, false, &overlay,
@@ -265,7 +269,7 @@ mod tests {
                     (false, false) => dir.join("tmux"),
                     (false, true) => dir.join("server"),
                 };
-                let case = format!("hooks={hooks} profile={profile}");
+                let case = format!("flag={flag:?} profile={profile}");
                 assert!(
                     stdout.contains(&format!("home={}\n", expected.display())),
                     "child must run under the auth profile home, else the hook-verified one: {case}\n{stdout}"
