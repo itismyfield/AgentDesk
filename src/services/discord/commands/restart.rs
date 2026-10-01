@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use poise::serenity_prelude as serenity;
+
 use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::provider::ProviderKind;
 
@@ -173,6 +177,60 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
     RestartSeedStatus::Busy
 }
 
+/// Cancels the in-flight turn and resets the managed session, after the host check: `Err`
+/// carries why a session the guard keeps was left as it was, turn and process included.
+async fn restart_managed_session<Warn, WarnFut>(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    command_name: &'static str,
+    warn_in_flight: Warn,
+) -> Result<Result<Option<String>, String>, Error>
+where
+    Warn: FnOnce() -> WarnFut,
+    WarnFut: std::future::Future<Output = Result<(), Error>>,
+{
+    // Refused before the in-flight turn is cancelled: the session is not a legacy tmux one.
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    if let Some(reason) = refusal(shared, provider, channel_id, true, true, None).await {
+        return Ok(Err(reason));
+    }
+
+    // Warn if a turn is in flight, then cancel it via the same path /stop uses.
+    if mailbox_has_active_turn(shared, channel_id).await {
+        warn_in_flight().await?;
+        let cancel = mailbox_cancel_active_turn(shared, channel_id).await;
+        if let Some(token) = cancel.token {
+            super::super::turn_bridge::stop_active_turn(
+                provider,
+                &token,
+                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+                command_name,
+            )
+            .await;
+        }
+    }
+
+    // Kill the managed tmux/process session without clearing session_id when the
+    // provider can resume. The seed turn below immediately respawns the provider.
+    let reset = super::control::reset_channel_provider_state(
+        http,
+        shared,
+        provider,
+        channel_id,
+        command_name,
+        !provider_supports_resume(provider),
+        false, // do NOT clear history
+        true,  // recreate (kill) the tmux session so the seed turn fully respawns provider
+    )
+    .await;
+    Ok(match reset {
+        ManagedReset::Applied(tmux_name) => Ok(tmux_name),
+        ManagedReset::Refused(reason) => Err(reason),
+    })
+}
+
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -188,51 +246,19 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
 
     let channel_id = ctx.channel_id();
     let action = resolve_restart_action(&ctx.data().shared, channel_id).await;
-    let preserve_provider_session = provider_supports_resume(&ctx.data().provider);
-    // Refused before the in-flight turn is cancelled: the session is not a legacy tmux one.
-    let refusal = super::super::admin_host_guard::managed_reset_refusal;
-    let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-    if let Some(reason) = refusal(shared, provider, channel_id, true, true, None).await {
-        ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
-            .await?;
-        return Ok(());
-    }
-
-    // Warn if a turn is in flight, then cancel it via the same path /stop uses.
-    let in_flight = mailbox_has_active_turn(&ctx.data().shared, channel_id).await;
-    if in_flight {
-        ctx.say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.")
-            .await?;
-
-        let cancel = mailbox_cancel_active_turn(&ctx.data().shared, channel_id).await;
-        if let Some(token) = cancel.token {
-            super::super::turn_bridge::stop_active_turn(
-                &ctx.data().provider,
-                &token,
-                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                command_name,
-            )
-            .await;
-        }
-    }
-
-    // Kill the managed tmux/process session without clearing session_id when the
-    // provider can resume. The seed turn below immediately respawns the provider.
     let http = ctx.serenity_context().http.clone();
-    let reset = super::control::reset_channel_provider_state(
-        &http,
-        &ctx.data().shared,
-        &ctx.data().provider,
-        channel_id,
-        command_name,
-        !preserve_provider_session,
-        false, // do NOT clear history
-        true,  // recreate (kill) the tmux session so the seed turn fully respawns provider
-    )
-    .await;
-    let tmux_name = match reset {
-        ManagedReset::Applied(tmux_name) => tmux_name,
-        ManagedReset::Refused(reason) => {
+    let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
+    let warn = || async {
+        ctx.say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.")
+            .await
+            .map(|_| ())
+            .map_err(Error::from)
+    };
+    let restarted =
+        restart_managed_session(&http, shared, provider, channel_id, command_name, warn);
+    let tmux_name = match restarted.await? {
+        Ok(tmux_name) => tmux_name,
+        Err(reason) => {
             ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
                 .await?;
             return Ok(());
@@ -262,4 +288,73 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
 #[poise::command(slash_command, rename = "restart")]
 pub(in crate::services::discord) async fn cmd_restart(ctx: Context<'_>) -> Result<(), Error> {
     run_restart(ctx, "/restart").await
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod host_guard_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::services::discord::admin_host_guard::tests::process;
+    use crate::services::discord::host_defer_gate::tests::{
+        Case, ScriptedTmux, map_channel, postgres,
+    };
+    use crate::services::discord::host_teardown_gate::test_support::{
+        busy_turn, channel_key, shared_on, turn_kept,
+    };
+
+    // `/restart` on a session the host guard keeps leaves its in-flight turn, process and tmux
+    // as they are and says why; a legacy row, or no row yet, cancels and kills as in main.
+    #[tokio::test]
+    async fn restart_keeps_the_turn_and_process_of_a_refused_session_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let (provider, http) = (ProviderKind::Claude, Arc::new(serenity::Http::new("")));
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let channel = serenity::ChannelId::new(1_479_671_302_387_071_000 + n as u64);
+            let channel_name = format!("p4c2-restart-{n}");
+            let name = provider.build_tmux_session_name(&channel_name);
+            map_channel(&shared, channel, &channel_name).await;
+            case.seed(&pool, &channel_key(&shared, &name), &name, channel.get())
+                .await;
+            let token = busy_turn(&shared, channel, &name).await;
+            let alive = process(&name, n as u32 + 68_000);
+            tmux.take_calls();
+
+            let warned = AtomicBool::new(false);
+            let warn = || {
+                warned.store(true, Ordering::SeqCst);
+                async { Ok(()) }
+            };
+            let restart =
+                restart_managed_session(&http, &shared, &provider, channel, "/restart", warn);
+            let restarted = restart.await.expect("restart");
+            let warned = warned.load(Ordering::SeqCst);
+            if case.admitted() {
+                assert!(restarted.is_ok(), "{case:?}: {restarted:?}");
+                assert!(warned, "{case:?}: main warns of the in-flight turn");
+                let kept = turn_kept(&shared, channel, &token).await;
+                assert!(!kept, "{case:?}: main cancels the turn");
+                let calls = tmux.take_calls();
+                let recreated = calls.iter().any(|call| call.contains(&name));
+                assert!(recreated, "{case:?}: main recreates tmux: {calls:?}");
+                crate::services::session_backend::remove_process_session(&name);
+                continue;
+            }
+            let reason = restarted.expect_err("a kept session refuses the restart");
+            assert!(reason.contains(&name), "{case:?}: {reason}");
+            assert!(!warned, "{case:?}: no in-flight warning");
+            assert!(
+                turn_kept(&shared, channel, &token).await,
+                "{case:?}: turn kept"
+            );
+            assert!(alive.load(Ordering::SeqCst), "{case:?}: process kept");
+            assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{case:?}: no tmux");
+            crate::services::session_backend::remove_process_session(&name);
+        }
+        db.drop().await;
+    }
 }

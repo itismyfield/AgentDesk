@@ -2596,6 +2596,7 @@ services::discord::adk_session::context_usage_tests::context_usage_percent_is_bo
 services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strips_profile_label
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
+services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
@@ -2829,6 +2830,7 @@ services::discord::commands::recovery_ops::tests::validate_rejects_too_long
 services::discord::commands::response_wording_tests::bare_shell_command_error_uses_shared_folded_korean_rendering
 services::discord::commands::response_wording_tests::owner_error_detail_is_folded_and_markdown_safe
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
+services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
 services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg

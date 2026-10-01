@@ -940,6 +940,14 @@ pub async fn stop_agent_turn(
         }
     };
 
+    // A session the host check refuses, working or idle, is neither stopped nor marked.
+    if let Some(session) = session.as_ref()
+        && let Some(reason) = session.host_unsupported.as_deref()
+    {
+        let (unsupported, key) = ("session_host_not_tmux", &session.session_key);
+        let body = json!({"error": reason, "unsupported": unsupported, "session_key": key});
+        return (StatusCode::CONFLICT, Json(body));
+    }
     let Some(session) = session.filter(|candidate| candidate.is_working) else {
         return (
             StatusCode::CONFLICT,
@@ -959,12 +967,6 @@ pub async fn stop_agent_turn(
     }
 
     let session_key = session.session_key.clone();
-    // A session the host check refuses is neither stopped by its tmux name nor marked.
-    if let Some(reason) = session.host_unsupported {
-        let unsupported = "session_host_not_tmux";
-        let body = json!({"error": reason, "unsupported": unsupported, "session_key": session_key});
-        return (StatusCode::CONFLICT, Json(body));
-    }
     let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
     let lifecycle = stop_turn_preserving_queue(
         state.health_registry.as_deref(),

@@ -152,6 +152,14 @@ async fn diagnostics_routes_never_probe_a_non_legacy_session_pg() {
                     turn["host_unsupported"].is_string(),
                 );
                 assert_eq!(idle, (Some("idle"), true), "{what:?}: {turn}");
+                // An idle stop names the host refusal too, not a missing active turn.
+                let (status, Json(stop)) =
+                    super::stop_agent_turn(State(state.clone()), Path(agent.clone())).await;
+                let refused = (status, stop["unsupported"].as_str());
+                let expected = (StatusCode::CONFLICT, Some("session_host_not_tmux"));
+                assert_eq!(refused, expected, "{what:?}: {stop}");
+                let row = row_status(&pool, id).await;
+                assert_eq!(row, "turn_active", "{what:?}: the idle row is not marked");
                 let calls = tmux.take_calls();
                 assert!(naming(&calls, &name).is_empty(), "{what:?}: {calls:?}");
             }

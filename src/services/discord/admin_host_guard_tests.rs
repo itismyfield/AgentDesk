@@ -28,19 +28,29 @@ pub(crate) struct Recorder {
     server: tokio::task::AbortHandle,
 }
 
+/// A recorder answer for one request, ahead of its default message body.
+type Answer = Arc<dyn Fn(&Method, &str) -> Option<serde_json::Value> + Send + Sync>;
+
 impl Recorder {
     pub(crate) async fn start() -> Self {
+        Self::start_with(Arc::new(|_: &Method, _: &str| None)).await
+    }
+
+    pub(crate) async fn start_with(answer: Answer) -> Self {
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
         let recorded = calls.clone();
         let app = axum::Router::new().fallback(axum::routing::any(
             move |method: Method, uri: Uri, body: Bytes| {
-                let recorded = recorded.clone();
+                let (recorded, answer) = (recorded.clone(), answer.clone());
                 async move {
                     let body = String::from_utf8_lossy(&body);
                     let call = format!("{method} {} {body}", uri.path());
                     recorded.lock().unwrap().push(call);
                     if method == Method::DELETE {
                         return StatusCode::NO_CONTENT.into_response();
+                    }
+                    if let Some(answer) = answer(&method, uri.path()) {
+                        return axum::Json(answer).into_response();
                     }
                     axum::Json(serde_json::json!({
                         "id": "900001", "channel_id": "1", "content": "",
@@ -265,5 +275,137 @@ async fn reports_name_a_kept_host_without_probing_tmux_pg() {
         let named = probes.iter().filter(|call| call.contains(&name)).count();
         assert_eq!(named == 0, !case.admitted(), "{case:?}: {probes:?}");
     }
+    db.drop().await;
+}
+
+/// The runtime API and Discord as a reset dispatch in `thread` under `parent` sees them.
+fn dispatch_api(thread: ChannelId, parent: ChannelId) -> Answer {
+    Arc::new(move |method: &Method, path: &str| {
+        let channel = |id: ChannelId, kind: u8, parent: Option<String>| {
+            serde_json::json!({
+                "id": id.to_string(), "type": kind, "name": "p4c2-dispatch", "guild_id": "42000",
+                "position": 0, "permission_overwrites": [], "nsfw": false, "parent_id": parent,
+                "thread_metadata": {"archived": false, "auto_archive_duration": 60,
+                    "archive_timestamp": "2026-10-02T00:00:00Z", "locked": false}
+            })
+        };
+        match (method.as_str(), path) {
+            ("GET", "/api/internal/card-thread") => Some(serde_json::json!({
+                "dispatch_type": "implementation",
+                "dispatch_context": r#"{"reset_provider_state":true}"#,
+            })),
+            ("GET", path) if path == format!("/api/v10/channels/{thread}") => {
+                Some(channel(thread, 11, Some(parent.to_string())))
+            }
+            ("GET", path) if path == format!("/api/v10/channels/{parent}") => {
+                Some(channel(parent, 0, None))
+            }
+            _ => None,
+        }
+    })
+}
+
+// A dispatch whose reset the host guard refuses reports it and stops before its turn: no
+// mailbox claim, the session's delivery pointer stays and the input it took goes back.
+#[tokio::test]
+async fn a_refused_dispatch_reset_stops_before_the_turn_pg() {
+    use crate::services::discord::host_teardown_gate::test_support::Stored;
+    let test = "services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = ScriptedTmux::install();
+    // A regression that reaches the turn launch must not start a real provider CLI.
+    let stubs = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .next()
+        .unwrap();
+    for cli in ["claude", "codex"] {
+        std::fs::write(stubs.join(cli), "#!/bin/sh\nexit 1\n").unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(stubs.join(cli), mode).unwrap();
+    }
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let (thread, parent) = (
+        ChannelId::new(1_479_671_302_387_070_001),
+        ChannelId::new(1_479_671_302_387_070_000),
+    );
+    let api = Recorder::start_with(dispatch_api(thread, parent)).await;
+    crate::services::discord::internal_api::init(api.port, None);
+    let provider = ProviderKind::Claude;
+    let name = provider.build_tmux_session_name("p4c2-dispatch");
+    map_channel(&shared, thread, "p4c2-dispatch").await;
+    let workdir = tempfile::tempdir().unwrap();
+    let mut core = shared.core.lock().await;
+    let session = core.sessions.get_mut(&thread).unwrap();
+    session.current_path = Some(workdir.path().display().to_string());
+    (session.pending_uploads, session.cleared) = (vec!["taken-upload".into()], true);
+    drop(core);
+    let key = channel_key(&shared, &name);
+    Case::Stored(Stored::Hosted)
+        .seed(&pool, &key, &name, thread.get())
+        .await;
+    let pointer =
+        "UPDATE sessions SET active_turn_delivery_outbox_id = 4242 WHERE session_key = $1";
+    sqlx::query(pointer)
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("pointer");
+    let alive = process(&name, 67_000);
+    api.take();
+
+    let request = crate::services::discord::IntakeRequest {
+        intake_outbox_id: None,
+        channel_id: thread,
+        user_msg_id: poise::serenity_prelude::MessageId::new(thread.get() + 7),
+        source_message_ids: Vec::new(),
+        busy_followup_retry_user_msg_id: poise::serenity_prelude::MessageId::new(thread.get() + 7),
+        request_owner: poise::serenity_prelude::UserId::new(4350),
+        request_owner_name: "p4c2-dispatch".to_string(),
+        user_text: "DISPATCH:p4c2-dispatch-1 implement it".to_string(),
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        merge_consecutive: false,
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: Some(false),
+        turn_kind: crate::services::discord::TurnKind::Foreground,
+        preserve_on_cancel: false,
+    };
+    let intake = crate::services::discord::execute_intake_turn_core;
+    let preloaded = vec!["preloaded-upload".into()];
+    intake(&api.http, &shared, "test-token", request, preloaded)
+        .await
+        .expect("intake");
+
+    let calls = api.take();
+    let reported = calls
+        .iter()
+        .any(|c| c.contains("dispatch reset을(를) 적용하지 않았어요"));
+    assert!(reported, "the refusal is reported: {calls:?}");
+    let active = shared.mailbox(thread).has_active_turn().await.unwrap();
+    assert!(!active, "no turn is claimed");
+    let pointer: Option<i64> = sqlx::query_scalar(
+        "SELECT active_turn_delivery_outbox_id FROM sessions WHERE session_key = $1",
+    )
+    .bind(&key)
+    .fetch_one(&pool)
+    .await
+    .expect("pointer");
+    assert_eq!(pointer, Some(4242), "the delivery pointer stays");
+    let core = shared.core.lock().await;
+    let session = &core.sessions[&thread];
+    assert_eq!(
+        session.pending_uploads,
+        ["taken-upload", "preloaded-upload"],
+        "input returned"
+    );
+    assert!(session.cleared, "the clear flag returns");
+    drop(core);
+    assert!(alive.load(Ordering::SeqCst), "the process is kept");
+    crate::services::session_backend::remove_process_session(&name);
     db.drop().await;
 }

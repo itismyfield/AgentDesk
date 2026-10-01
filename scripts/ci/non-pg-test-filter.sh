@@ -109,6 +109,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::admin_host_guard::tests
   --skip services::discord::catch_up::too_old_notice::tests
   --skip services::discord::commands::control::clear_persist_failure_tests
+  --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests

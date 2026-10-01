@@ -132,7 +132,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "commands/node.rs": {".say": 3},
     "commands/receipt.rs": {".say": 2, "send_long_message*": 1},
     "commands/recovery_ops.rs": {".say": 3, "send_long_message*": 1},
-    "commands/restart.rs": {".say": 5},
+    "commands/restart.rs": {".say": 4},
     "commands/session.rs": {".say": 8, "send_long_message*": 2},
     "commands/skill.rs": {".say": 10, "send_long_message*": 3},
     "commands/text_commands.rs": {".send_message": 2, "send_long_message*": 10},

@@ -274,13 +274,15 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     ManagedReset::Applied(tmux_name)
 }
 
+/// The reset a pending flag asked for, if any. A refused one keeps its flags and is reported;
+/// the caller's turn runs on the session as it is, as with any turn the host guard admits.
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     fast_mode_channel_id: serenity::ChannelId,
-) {
+) -> Option<ManagedReset> {
     let fast_mode_reset_pending =
         fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider);
     let codex_goals_reset_pending = matches!(provider, ProviderKind::Codex)
@@ -303,7 +305,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         if fast_mode_channel_id != channel_id {
             sync_session_reset_pending(shared, fast_mode_channel_id);
         }
-        return;
+        return None;
     };
     let reset = reset_channel_provider_state(
         http,
@@ -316,9 +318,9 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         plan.recreate_tmux,
     )
     .await;
-    // A refused reset keeps its pending flags for a later turn on a legacy session.
-    if matches!(reset, ManagedReset::Refused(_)) {
-        return;
+    // A refused reset keeps its pending flags; the channel is told why it did not apply.
+    if reset.report(http, channel_id, plan.reset_source).await {
+        return Some(reset);
     }
 
     if fast_mode_reset_pending {
@@ -339,6 +341,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     if fast_mode_channel_id != channel_id {
         sync_session_reset_pending(shared, fast_mode_channel_id);
     }
+    Some(reset)
 }
 
 fn choose_clear_session_key(

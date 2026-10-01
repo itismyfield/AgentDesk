@@ -301,6 +301,7 @@ jobs:
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
               - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/restart.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'

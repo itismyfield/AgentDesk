@@ -58,6 +58,32 @@ impl ManagedReset {
     }
 }
 
+/// Puts back the input an intake took from `channel_id` when a refused reset stops it before
+/// its turn: the uploads lead the channel's pending list again and its clear flag returns.
+pub(crate) async fn return_intake_input(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    (uploads, was_cleared): (
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+        Option<bool>,
+    ),
+) {
+    let mut data = shared.core.lock().await;
+    let Some(session) = data.sessions.get_mut(&channel_id) else {
+        let (channel_id, lost) = (channel_id.get(), uploads.len());
+        tracing::warn!(
+            channel_id,
+            lost,
+            "no session to return a refused intake's input to"
+        );
+        return;
+    };
+    session.pending_uploads.splice(0..0, uploads);
+    if let Some(cleared) = was_cleared {
+        session.cleared = cleared;
+    }
+}
+
 /// Why a reset that kills or recreates the channel's managed session may not touch it. A
 /// clear naming its target's own key is judged on that key before the channel's session.
 pub(super) async fn managed_reset_refusal(

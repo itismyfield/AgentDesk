@@ -1136,7 +1136,13 @@ pub(super) async fn handle_text_message(
             dispatch_recreate_tmux,
         )
         .await;
-        reset.report(http, channel_id, "dispatch reset").await;
+        // A refused reset stops the dispatch before its turn and hands its input back.
+        if reset.report(http, channel_id, "dispatch reset").await {
+            let restore = super::super::super::admin_host_guard::return_intake_input;
+            let input = (pending_uploads, session_was_cleared);
+            restore(shared, original_channel_id, input).await;
+            return Ok(());
+        }
         session_id = None;
         memento_context_loaded = false;
         session_strategy_reason =

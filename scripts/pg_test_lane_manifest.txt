@@ -88,6 +88,7 @@ src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
+src/services/discord/commands/restart.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
@@ -259,6 +260,7 @@ services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::restart::host_guard_tests
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
@@ -931,6 +933,7 @@ services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_onl
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
+services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
@@ -938,6 +941,7 @@ services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_ou
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
+services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
