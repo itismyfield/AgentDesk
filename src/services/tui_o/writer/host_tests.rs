@@ -31,6 +31,15 @@ impl Raised {
         halted.collect()
     }
 
+    fn released(&self) -> Vec<(u64, String)> {
+        let raised = self.0.lock().unwrap();
+        let released = raised.iter().filter_map(|(channel, alarm)| match alarm {
+            WriterAlarm::Released { detail } => Some((*channel, detail.clone())),
+            _ => None,
+        });
+        released.collect()
+    }
+
     fn has(&self, channel: u64, wanted: &WriterAlarm) -> bool {
         let raised = self.0.lock().unwrap();
         raised
@@ -591,11 +600,18 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
         let ready = Arc::new(Readiness::default());
         host(&harness, &io, pg, &ready);
         polls(3).await;
-        let halted = io.alarms.halted();
+        // A released channel's output stays with Legacy, so only an undecided one is held.
+        let (halted, released) = (io.alarms.halted(), io.alarms.released());
+        let (named, other) = if pg {
+            (released, halted)
+        } else {
+            (halted, released)
+        };
         assert!(
-            matches!(halted.as_slice(), [(CHANNEL, detail)] if detail.contains(why)),
-            "{why}: {halted:?}"
+            matches!(named.as_slice(), [(CHANNEL, detail)] if detail.contains(why)),
+            "{why}: {named:?}"
         );
+        assert_eq!(other, [], "{why}");
         assert_eq!(harness.store.read_era().unwrap(), None, "{why}");
         assert!(!harness.store.has_channel_dir(CHANNEL), "{why}");
         assert!(!io.calls().iter().any(|(call, _)| *call == "port"), "{why}");
@@ -637,6 +653,7 @@ async fn missing_or_damaged_store_state_holds_instead_of_a_first_init() {
     assert!(held(CHANNEL, "era channel has no init"), "{halted:?}");
     assert!(held(OTHER, "store files but no init"), "{halted:?}");
     assert_eq!(adoption(OTHER), Adoption::Held, "store files keep O's hold");
+    assert_eq!(io.alarms.released(), [], "a held channel is not released");
     assert!(!init_path(&harness, CHANNEL).exists() && !orphan.exists());
     assert!(
         !io.calls().contains(&("facts", CHANNEL)),

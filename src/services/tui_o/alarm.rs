@@ -280,6 +280,22 @@ mod tests {
     }
 
     #[test]
+    fn a_released_channel_has_its_own_reason_apart_from_halted() {
+        let (router, recorder, health) = router(Some(ALERT));
+        let released = WriterAlarm::Released {
+            detail: "adoption held: no source is bound".into(),
+        };
+        router.raise_at(FAILING, &released, Instant::now());
+        router.raise_at(FAILING, &released, Instant::now());
+        assert_eq!(health.current_at(Instant::now()), ["tui_o:released:42"]);
+        let sent = sent(&recorder);
+        assert!(
+            matches!(sent.as_slice(), [(ALERT, text)] if text.contains("released on channel 42")),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
     fn not_found_alarms_only_at_three_within_an_hour() {
         let (router, recorder, health) = router(Some(ALERT));
         let start = Instant::now();

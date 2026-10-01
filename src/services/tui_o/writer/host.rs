@@ -186,7 +186,8 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
 /// A channel not adopted before its first `init` stays Legacy's for this process.
 fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
-    stop(candidate, alarms, channel, &format!("adoption held: {detail}"));
+    let detail = format!("adoption held: {detail}");
+    stop(candidate, alarms, channel, &detail);
 }
 
 /// Names a stop by the adoption it left: a released channel's output is Legacy's, so only an
@@ -195,7 +196,11 @@ fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &s
     if candidate.peek() != Adoption::Released {
         return hold(alarms, channel, detail);
     }
-    tracing::warn!(channel, detail, "[tui_o] writer host left the channel to Legacy");
+    tracing::warn!(
+        channel,
+        detail,
+        "[tui_o] writer host left the channel to Legacy"
+    );
     let detail = format!("writer host: {detail}");
     alarms.raise(channel, WriterAlarm::Released { detail });
 }
