@@ -134,23 +134,22 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
     let command_session = uuid::Uuid::new_v4().to_string();
     let first_continuation = uuid::Uuid::new_v4().to_string();
     let second_continuation = uuid::Uuid::new_v4().to_string();
-    let stale_continuation = uuid::Uuid::new_v4().to_string();
+    // The stale payload is a hop the pane already left; its log history is what refuses it.
+    let stale_continuation = first_continuation.clone();
     let command_path = tmp.path().join(format!("{command_session}.jsonl"));
     let first_path = tmp.path().join(format!("{first_continuation}.jsonl"));
     let second_path = tmp.path().join(format!("{second_continuation}.jsonl"));
-    let stale_path = tmp.path().join(format!("{stale_continuation}.jsonl"));
     for (path, session) in [
         (&command_path, &command_session),
         (&first_path, &first_continuation),
         (&second_path, &second_continuation),
-        (&stale_path, &stale_continuation),
     ] {
         std::fs::write(path, first_row(session)).unwrap();
     }
-    filetime::set_file_mtime(&first_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
-    filetime::set_file_mtime(&second_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
-    filetime::set_file_mtime(&stale_path, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+    let log_root = tempfile::tempdir().unwrap();
+    binding_events::set_test_root(Some(log_root.path()));
     let tmux = format!("tmux-4423-multihop-{}", std::process::id());
+    register_tmux_channel(&tmux, 7_090);
     register_provider_session("claude", &command_session, &tmux);
     register_tmux_runtime_binding(
         &tmux,
@@ -184,6 +183,8 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
             .as_deref(),
         Some(second_continuation.as_str())
     );
+    binding_events::forget_channel_for_tests(7_090);
+    binding_events::set_test_root(None);
 }
 
 /// #5212. Every hook after the first one takes the "already adopted" early

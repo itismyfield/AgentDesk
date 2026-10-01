@@ -553,10 +553,12 @@ src/
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
+│   │   │   │       ├── session_start_retry_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
-│   │   │   └── response_window.rs
+│   │   │   ├── response_window.rs
+│   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── codex_ingress_tests.rs
@@ -2060,6 +2062,7 @@ src/
 │   │   └── topology.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
+│   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   └── lane_tests.rs
 │   │   ├── runtime_binding/
@@ -2072,6 +2075,7 @@ src/
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── pending.rs
+│   │   ├── pending_history_tests.rs
 │   │   ├── pending_tests.rs
 │   │   ├── prompt_identity.rs
 │   │   ├── prompt_identity_tests.rs

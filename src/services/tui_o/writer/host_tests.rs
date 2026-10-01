@@ -7,6 +7,8 @@ use crate::services::tui_o::writer::host::{HostIo, HostParts, Readiness, start};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
+#[cfg(unix)]
+use chrono::{DateTime, TimeDelta};
 
 const OTHER: u64 = 8;
 
@@ -683,4 +685,178 @@ async fn a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned
     assert_eq!(era.initial_channels, [CHANNEL]);
     assert!(ready.accepts(CHANNEL));
     assert_eq!(io.alarms.halted(), []);
+}
+
+/// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
+#[cfg(unix)]
+struct ProducerPane {
+    tmux: &'static str,
+    a: String,
+    base: DateTime<Utc>,
+    _root: tempfile::TempDir,
+    _env: (tempfile::TempDir, [crate::config::TestEnvVarGuard; 2]),
+    _rotations: std::sync::MutexGuard<'static, ()>,
+    _state: std::sync::MutexGuard<'static, ()>,
+    _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+}
+
+#[cfg(unix)]
+impl ProducerPane {
+    fn launch(a: &str, a_path: &Path) -> Self {
+        use crate::services::tui_prompt_dedupe as dedupe;
+        let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        let rotations = dedupe::lock_claude_session_rotations_for_tests();
+        dedupe::reset_state_for_tests();
+        let root = tempfile::tempdir().unwrap();
+        p5::set_test_root(Some(root.path()));
+        let tmux = "o-superseded-pane";
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let marker = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+        std::fs::write(marker, nonce).unwrap();
+        dedupe::register_tmux_channel(tmux, CHANNEL);
+        dedupe::register_provider_session("claude", a, tmux);
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: ClaudeTui,
+            output_path: a_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(a.to_owned()),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        dedupe::register_launched_tmux_runtime_binding(tmux, binding);
+        Self {
+            tmux,
+            a: a.to_owned(),
+            base: Utc::now(),
+            _root: root,
+            _env: env,
+            _rotations: rotations,
+            _state: state,
+            _env_lock: env_lock,
+        }
+    }
+
+    /// Sends hook `event` naming `session`'s transcript, published `secs` after the launch.
+    fn send(&self, event: &str, source: Option<&str>, session: &str, path: &Path, secs: i64) {
+        use crate::services::claude_tui::hook_server::adoption_retry::adopt_from_hook;
+        let payload = serde_json::json!({ "source": source, "transcript_path": path });
+        let hook = p5::HookSignal {
+            published_at: Some(self.base + TimeDelta::seconds(secs)),
+            ..p5::HookSignal::from_payload(event, &payload)
+        };
+        adopt_from_hook(&self.a, session, &hook);
+    }
+
+    fn bound(&self) -> Option<String> {
+        let binding =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(self.tmux);
+        binding.and_then(|binding| binding.session_id)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProducerPane {
+    fn drop(&mut self) {
+        p5::set_test_root(None);
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    }
+}
+
+#[cfg(unix)]
+fn session_row(session: &str) -> Vec<u8> {
+    let row = serde_json::json!({"type": "mode", "sessionId": session});
+    let mut line = serde_json::to_vec(&row).unwrap();
+    line.push(b'\n');
+    line
+}
+
+/// The log the real judgment writes for A → Pending B (clear) → C → resume B → D, read as O reads
+/// it: the superseded Pending B is passed by evidence in the log, never resolved or skipped blindly.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
+    use super::super::binding::BindingLog;
+    let [a, b, c, d] = [(); 4].map(|_| uuid::Uuid::new_v4().to_string());
+    let mut bound_a = None;
+    let harness = Harness::build(|runtime| {
+        let path = runtime.join(format!("{a}.jsonl"));
+        let body = session_row(&a);
+        std::fs::write(&path, &body).unwrap();
+        let source_id = source_id_for(&a, &path).unwrap();
+        bound_a = Some(path);
+        let delivery_start = body.len() as u64;
+        let prefix_hash = hex::encode(Sha256::digest(&body));
+        vec![InitSource {
+            source_id,
+            delivery_start,
+            prefix_hash,
+        }]
+    });
+    harness.gate.acquired();
+    let a_path = bound_a.unwrap();
+    let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
+    let pane = ProducerPane::launch(&a, &a_path);
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    append(&a_path, &row("m1", "a tail"));
+    let prompt = "user_prompt_submit";
+    pane.send("session_start", Some("clear"), &b, &path(&b), 10);
+    std::fs::write(path(&c), session_row(&c)).unwrap();
+    pane.send(prompt, None, &c, &path(&c), 20);
+    std::fs::write(path(&b), session_row(&b)).unwrap();
+    pane.send("session_start", Some("resume"), &b, &path(&b), 30);
+    std::fs::write(path(&d), session_row(&d)).unwrap();
+    pane.send(prompt, None, &d, &path(&d), 40);
+    append(&path(&d), &row("n1", "d out"));
+    assert_eq!(pane.bound().as_deref(), Some(d.as_str()), "[O:binding_d]");
+    let events = bindings.binding_events_since(CHANNEL, 0).unwrap();
+    let last = events.last().unwrap().seq;
+    let pending = |e: &&BindingEvent| {
+        matches!(
+            &e.record,
+            BindingRecord::Bound {
+                new: BindingTarget::Pending { .. },
+                ..
+            }
+        )
+    };
+    assert_eq!(
+        events.iter().filter(pending).count(),
+        1,
+        "[O:one_pending] {events:#?}"
+    );
+    polls(6).await;
+    let store = harness.channel();
+    assert_eq!(
+        store.binding_checkpoint().unwrap(),
+        Some(last),
+        "[O:checkpoint]"
+    );
+    let d_source = source_id_for(&d, &path(&d)).unwrap();
+    assert!(store.cursor(&d_source).is_some(), "[O:d_reader]");
+    assert_eq!(harness.port.posts(), ["a tail", "d out"], "[O:posts]");
+    let stalled = |alarm: &WriterAlarm| matches!(alarm, WriterAlarm::BindingPending { .. });
+    assert!(!harness.alarms.taken().iter().any(stalled), "[O:no_wait]");
+    let (bound, _) = super::super::adoption::logged(&events).expect("[O:fresh] adoptable");
+    assert_eq!(bound.last().map(|s| &s.session_id), Some(&d), "[O:fresh]");
+
+    // A restart of O and of the log writer reads the same log to the same place.
+    halt(stop, task).await;
+    p5::forget_channel_for_tests(CHANNEL);
+    append(&path(&d), &row("n2", "d after restart"));
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(6).await;
+    let posts = harness.port.posts();
+    assert_eq!(posts, ["a tail", "d out", "d after restart"], "[O:restart]");
+    assert_eq!(
+        harness.channel().binding_checkpoint().unwrap(),
+        Some(last),
+        "[O:restart]"
+    );
+    assert!(!harness.alarms.taken().iter().any(stalled), "[O:restart]");
+    halt(stop, task).await;
 }

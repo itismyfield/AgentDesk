@@ -1,12 +1,14 @@
 //! Decides whether a Claude hook, restore or registration names a transcript the pane may bind to.
 //! Payload path, session id, opened-file identity and first record decide; mtime never does.
+//! A session the pane left comes back only on a hook published after every transition the log knows.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::services::claude_tui::hook_server::HookEventKind;
@@ -24,6 +26,8 @@ pub(crate) struct ClaudeHookSource {
     pub transcript_path: PathBuf,
     /// SessionStart `source`: startup, resume, clear, compact or fork.
     pub start_source: Option<String>,
+    /// When the sender queued the hook; `None` for a hook without relay headers.
+    pub published_at: Option<DateTime<Utc>>,
 }
 
 impl ClaudeHookSource {
@@ -36,6 +40,7 @@ impl ClaudeHookSource {
             session_id: field("session_id")?.to_string(),
             transcript_path: PathBuf::from(field("transcript_path")?),
             start_source: field("source").map(str::to_string),
+            published_at: None,
         })
     }
 
@@ -50,6 +55,7 @@ impl ClaudeHookSource {
             session_id: session_id.to_owned(),
             transcript_path,
             start_source: hook.source.clone(),
+            published_at: hook.published_at,
         }
     }
 
@@ -57,9 +63,61 @@ impl ClaudeHookSource {
         HookEventKind::from_path(&self.event) == HookEventKind::SessionStart
             && self.start_source.as_deref() == Some("resume")
     }
+
+    /// A resume or a prompt: the hooks that may bring the pane back to a session it left.
+    fn may_return(&self) -> bool {
+        let prompt = HookEventKind::from_path(&self.event) == HookEventKind::UserPromptSubmit;
+        #[cfg(test)]
+        let prompt = prompt && !n2b_mutant("ups-off");
+        self.is_explicit_resume() || prompt
+    }
 }
 
-/// A transcript the pane has bound. In a history the last entry is the current source.
+/// A pane's Claude sessions in its current execution, as the binding log's records moved it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SourceHistory {
+    pub current: Option<Visit>,
+    pub awaiting: Option<Visit>,
+    pub left: BTreeMap<String, Left>,
+    /// No unreadable line, seq gap, overflow or record without a nonce touched this execution.
+    pub complete: bool,
+}
+
+/// `since`: publish time of the hook that moved the pane here, if a hook did; `seen`: the record's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Visit {
+    pub session: String,
+    pub pin: Option<SourceId>,
+    pub since: Option<DateTime<Utc>>,
+    pub seen: DateTime<Utc>,
+}
+
+/// A session the pane moved on from: its pin then, and the time of the record that moved it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Left {
+    pub pin: Option<SourceId>,
+    pub left_at: DateTime<Utc>,
+}
+
+impl SourceHistory {
+    /// Times a hook must be published after to prove a return to `left`: leaving it, and the
+    /// moves to the current and waiting sessions.
+    fn bounds(&self, left: &Left) -> Vec<DateTime<Utc>> {
+        let visits = [&self.current, &self.awaiting].into_iter().flatten();
+        let visits = visits.map(|visit| visit.since.unwrap_or(visit.seen));
+        #[cfg(test)]
+        let visits = visits.filter(|_| !n2b_mutant("bound"));
+        std::iter::once(left.left_at).chain(visits).collect()
+    }
+}
+
+/// Test-only switch naming the one rule a mutation run disables.
+#[cfg(test)]
+pub(crate) fn n2b_mutant(name: &str) -> bool {
+    std::env::var("AGENTDESK_N2B_TEST_MUTATION").is_ok_and(|value| value == name)
+}
+
+/// A transcript a hook's check verified for the pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeSource {
     pub session_id: String,
@@ -230,7 +288,8 @@ pub(crate) enum SourceVerdict {
     Pending,
     /// The bound source's pinned file could not be read; the pane keeps its binding meanwhile.
     Recheck,
-    /// A resume back to a session the pane left; arrival order cannot tell it from a late hook.
+    /// A resume or prompt naming a session the pane left, with no publish time, complete history or
+    /// known binding to prove it came after the pane's last transition: nothing is bound.
     PendingConflict,
     Rejected(SourceRejection),
     /// The bound source's file was replaced or removed; stop instead of rebinding.
@@ -249,40 +308,88 @@ pub(crate) enum SourceRejection {
     Regression,
 }
 
-/// Judges one hook against the pane's source history, oldest first and current last.
+/// Judges one hook against the bound session, its pin and the pane's history: a left session needs
+/// a proven return, and a hook published before a transition the pane made is refused.
 pub(crate) fn verify_claude_source(
     hook: &ClaudeHookSource,
     projects_root: &Path,
     opened: Result<&OpenedTranscript, &io::Error>,
-    history: &[ClaudeSource],
+    bound: &str,
+    pin: Option<&SourceId>,
+    history: &SourceHistory,
 ) -> SourceVerdict {
-    use SourceVerdict::{
-        Anomaly, Confirm, Current, Pending, PendingConflict, Recheck, Rejected, Rotate,
-    };
+    use SourceVerdict::{Anomaly, PendingConflict, Rejected};
     if let Some(rejection) = precheck(hook, projects_root) {
         return Rejected(rejection);
     }
-    let named = |source: &&ClaudeSource| source.session_id == hook.session_id;
-    let current = history.last().filter(named);
-    let left_before = history.iter().rev().skip(1).any(|source| named(&source));
-    if current.is_none() && left_before {
-        return if hook.is_explicit_resume() {
-            PendingConflict
-        } else {
-            Rejected(SourceRejection::Regression)
-        };
-    }
-    let pin = current.and_then(ClaudeSource::source_id);
-    // The bound session named at another path is not the file its pin holds.
-    if pin
-        .as_ref()
-        .is_some_and(|pin| pin.path != hook.transcript_path)
-    {
-        return Anomaly;
-    }
     let seen = Observation::Opened(opened);
-    match judge_pin(pin.as_ref(), &hook.session_id, &hook.transcript_path, seen) {
-        PinJudgment::Verified(id) if pin.as_ref() == Some(&id) => Current,
+    let (session, published) = (hook.session_id.as_str(), hook.published_at);
+    if session == bound {
+        // The bound session named at another path is not the file its pin holds.
+        if pin.is_some_and(|pin| pin.path != hook.transcript_path) {
+            return Anomaly;
+        }
+        return judged(pin, hook, seen, true);
+    }
+    if let Some(left) = history.left.get(session) {
+        let older = published.is_some_and(|t| history.bounds(left).iter().any(|b| t <= *b));
+        if older || !hook.may_return() {
+            return Rejected(SourceRejection::Regression);
+        }
+        let known = (history.current.as_ref()).is_some_and(|current| current.session == bound);
+        let proven = published.is_some() && history.complete && known;
+        #[cfg(test)]
+        let lax = n2b_mutant("incomplete-proof") && known && published.is_some();
+        #[cfg(test)]
+        let proven = proven || n2b_mutant("held") || lax;
+        #[cfg(test)]
+        let proven = proven && !n2b_mutant("refuse");
+        if !proven {
+            return PendingConflict;
+        }
+        return judged(left.pin.as_ref(), hook, seen, false);
+    }
+    let awaited = (history.awaiting.as_ref()).is_some_and(|waiting| waiting.session == session);
+    let moved = [&history.current, &history.awaiting].into_iter().flatten();
+    let since: Vec<_> = moved
+        .filter(|v| v.session != session)
+        .filter_map(|v| v.since)
+        .collect();
+    let stale = published.is_some_and(|t| since.iter().any(|since| t < *since));
+    #[cfg(test)]
+    let stale = stale && !n2b_mutant("stale");
+    if !awaited && stale {
+        return Rejected(SourceRejection::Regression);
+    }
+    // A start Claude may run after it moved on cannot prove it is newer than a hooked move: wait.
+    let start = HookEventKind::from_path(&hook.event) == HookEventKind::SessionStart;
+    let background = start
+        && matches!(
+            hook.start_source.as_deref(),
+            Some("startup" | "clear" | "resume")
+        );
+    #[cfg(test)]
+    let background = background && !n2b_mutant("u10-off");
+    match judged(None, hook, seen, false) {
+        SourceVerdict::Rotate(_)
+            if !awaited && background && published.is_some() && !since.is_empty() =>
+        {
+            SourceVerdict::Pending
+        }
+        verdict => verdict,
+    }
+}
+
+/// What `pin`, the bound session's or the one a left session had, makes of the hook's file.
+fn judged(
+    pin: Option<&SourceId>,
+    hook: &ClaudeHookSource,
+    seen: Observation,
+    bound: bool,
+) -> SourceVerdict {
+    use SourceVerdict::{Anomaly, Confirm, Current, Pending, Recheck, Rejected, Rotate};
+    match judge_pin(pin, &hook.session_id, &hook.transcript_path, seen) {
+        PinJudgment::Verified(id) if bound && pin == Some(&id) => Current,
         PinJudgment::Verified(id) => {
             #[cfg(unix)]
             let file = SourceFileIdentity::Unix {
@@ -296,7 +403,7 @@ pub(crate) fn verify_claude_source(
                 path: id.path,
                 file: Some(file),
             };
-            if current.is_some() {
+            if bound {
                 Confirm(source)
             } else {
                 Rotate(source)
@@ -437,6 +544,30 @@ mod tests {
         ClaudeHookSource::from_payload(&payload).unwrap()
     }
 
+    /// Judges `hook` with the last source bound and the earlier ones left, at no known time.
+    fn verify(
+        hook: &ClaudeHookSource,
+        root: &Path,
+        opened: Result<&OpenedTranscript, &io::Error>,
+        history: &[ClaudeSource],
+    ) -> SourceVerdict {
+        let (bound, rest) = history
+            .split_last()
+            .map_or((None, &[][..]), |(b, r)| (Some(b), r));
+        let left_at = DateTime::<Utc>::UNIX_EPOCH;
+        let left = rest.iter().map(|source| {
+            let pin = source.source_id();
+            (source.session_id.clone(), Left { pin, left_at })
+        });
+        let history = SourceHistory {
+            left: left.collect(),
+            ..SourceHistory::default()
+        };
+        let pin = bound.and_then(ClaudeSource::source_id);
+        let bound = bound.map_or("", |bound| bound.session_id.as_str());
+        verify_claude_source(hook, root, opened, bound, pin.as_ref(), &history)
+    }
+
     /// Opens the payload's file and applies the verdict to the history as the binding would.
     fn feed(
         root: &Path,
@@ -444,7 +575,7 @@ mod tests {
         hook: &ClaudeHookSource,
     ) -> SourceVerdict {
         let opened = observe_transcript(&hook.transcript_path).unwrap();
-        let verdict = verify_claude_source(hook, root, Ok(&opened), history);
+        let verdict = verify(hook, root, Ok(&opened), history);
         match &verdict {
             SourceVerdict::Confirm(source) => *history.last_mut().unwrap() = source.clone(),
             SourceVerdict::Rotate(source) => history.push(source.clone()),
@@ -642,7 +773,7 @@ mod tests {
         let resume = ClaudeHookSource::from_signal(B, &signal, transcript(root, B));
         let opened = observe_transcript(&resume.transcript_path).unwrap();
         assert_eq!(
-            verify_claude_source(&resume, root, Ok(&opened), &history),
+            verify(&resume, root, Ok(&opened), &history),
             SourceVerdict::PendingConflict
         );
     }
