@@ -109,52 +109,17 @@ async fn a_fork_posts_only_what_follows_the_eight_rows_it_inherited() {
     append(&a_path, &rows(4..8));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["row 4", "row 5", "row 6", "row 7"]);
-    let (b_path, b) = transcript(&a_path, "b.jsonl", "s2", &rows(0..8));
+    let forked = [rows(0..8), row_at("n1", "forked new", Utc::now())].concat();
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &forked);
     bindings.commit(rotate(2, &a, &b, BindingCause::Fork));
-    polls(3).await;
-    append(&b_path, &row_at("n1", "forked new", Utc::now()));
     polls(3).await;
     let posts = harness.port.posts();
     assert_eq!(
         posts[4..],
         ["forked new"],
-        "only the new row is owed: {posts:?}"
+        "[T3] only the new row is owed: {posts:?}"
     );
     assert_eq!(harness.alarms.taken(), []);
-    halt(stop, task).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_resume_whose_first_new_record_predates_the_bind_posts_nothing_until_resolved() {
-    let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
-    let old = Utc::now() - TimeDelta::hours(1);
-    let body = [row("m0", "before the switch"), row_at("x1", "stale", old)].concat();
-    let (b_path, b) = transcript(&a_path, "b.jsonl", "s2", &body);
-    let mut store = harness.channel();
-    store.set_limits_for_test(1, u64::MAX);
-    let (stop, task) = spawn_with(
-        writer_over(&harness, store),
-        ShadowProvider::Claude,
-        bindings.clone(),
-    );
-    bindings.commit(rotate(2, &a, &b, BindingCause::Resume));
-    polls(3).await;
-    append(&b_path, &row_at("x2", "after", Utc::now()));
-    polls(3).await;
-    assert!(harness.port.posts().is_empty());
-    let pending = WriterAlarm::BoundaryPending { source: b.clone() };
-    assert_eq!(harness.alarms.taken(), [pending.clone()]);
-    let len = std::fs::metadata(&b_path).unwrap().len();
-    assert_eq!(harness.channel().cursor(&b).unwrap().captured_through, len);
-    assert!(harness.channel().ledger().gc_segments(&b).is_empty());
-    halt(stop, task).await;
-    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
-    polls(3).await;
-    assert!(
-        harness.port.posts().is_empty(),
-        "the boundary is never recomputed"
-    );
-    assert_eq!(harness.alarms.taken(), [pending]);
     halt(stop, task).await;
 }
 
@@ -501,6 +466,8 @@ async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_c
     halt(stop, task).await;
 }
 
+#[path = "fork_tests.rs"]
+mod fork_tests;
 #[path = "retire_tests.rs"]
 mod retire_tests;
 #[path = "switch_tests.rs"]

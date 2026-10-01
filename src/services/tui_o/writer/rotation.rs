@@ -2,12 +2,10 @@
 //! read until it provably stops; a resumed or forked source skips what its parent already holds.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{TimeDelta, Utc};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -16,8 +14,8 @@ use super::deliver::ChannelWriter;
 use super::pieces::{Derived, UnitDeriver};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
 use crate::services::claude_tui::hook_server::HookEventKind;
-use crate::services::tui_o::shadow::capture::{SourceCapture, file_identity};
-use crate::services::tui_o::shadow::identity::{RecordFact, classify, native_time};
+use crate::services::tui_o::shadow::capture::SourceCapture;
+use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{
     CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, MAX_READ_BYTES, ShadowProvider,
     SourceId, UnitKind,
@@ -33,11 +31,13 @@ pub const OLD_GROWTH_ALARM: Duration = Duration::from_secs(600);
 /// A retired source is watched this long; growth un-retires it.
 pub const RETIRED_WATCH: Duration = Duration::from_secs(24 * 60 * 60);
 pub const MAX_READERS: usize = 3;
-/// A parent longer than this is not scanned, so its lineage stays unproven.
+/// A parent consumed past this is not scanned, so a fork of it waits for the operator.
 pub const LINEAGE_SCAN_CAP_BYTES: u64 = 256 << 20;
 const PENDING_BIND_ALARM_SECS: i64 = 60;
-/// A first new record older than its bind by more than this may be an unrelated old session.
-const BIND_SLACK_SECS: i64 = 60;
+
+#[path = "fork_lineage.rs"]
+mod fork_lineage;
+use fork_lineage::{Class, Lineage, RowIds};
 
 /// How a record names a native key: as the unit itself or as an announcement of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -45,8 +45,6 @@ enum Seen {
     Sealed,
     Announced,
 }
-
-type Keys = HashSet<(String, UnitKind, Seen)>;
 
 struct Reader {
     source: SourceId,
@@ -99,8 +97,10 @@ pub struct Sources<B> {
     rotation: Rotation,
     /// Every attached source, in bind order.
     readers: Vec<Reader>,
-    /// Parent native keys by spool key; `None` when the scan could not finish.
-    lineage: HashMap<String, Option<Keys>>,
+    /// Parent identities by spool key, kept at the parent's durable cursor.
+    lineage: HashMap<String, Lineage>,
+    /// Undecided sources that have shown at least one inherited row.
+    prefix_seen: HashSet<String>,
     /// Boundary decisions and alarms made while deriving, flushed before delivery.
     dirty: bool,
     raised: Vec<WriterAlarm>,
@@ -138,24 +138,6 @@ fn record_keys(provider: ShadowProvider, line: &[u8]) -> Option<Vec<(String, Uni
             RecordFact::Blocked(_) => return None,
             _ => {}
         }
-    }
-    Some(keys)
-}
-
-fn record_time(line: &[u8]) -> Option<DateTime<Utc>> {
-    native_time(&serde_json::from_slice(line).ok()?)
-}
-
-/// Read-only scan of the parent file for the keys a fork or resume copies.
-fn scan_lineage(provider: ShadowProvider, parent: &SourceId) -> Option<Keys> {
-    let file = File::open(&parent.path).ok()?;
-    let meta = file.metadata().ok()?;
-    if file_identity(&meta) != (parent.dev, parent.ino) || meta.len() > LINEAGE_SCAN_CAP_BYTES {
-        return None;
-    }
-    let mut keys = Keys::new();
-    for line in BufReader::new(file.take(LINEAGE_SCAN_CAP_BYTES)).split(b'\n') {
-        keys.extend(record_keys(provider, &line.ok()?).unwrap_or_default());
     }
     Some(keys)
 }
@@ -270,6 +252,7 @@ impl<B: BindingEvents> Sources<B> {
             rotation: Rotation::default(),
             readers: Vec::new(),
             lineage: HashMap::new(),
+            prefix_seen: HashSet::new(),
             dirty: false,
             raised: Vec::new(),
             readers_alarmed: false,
@@ -298,8 +281,12 @@ impl<B: BindingEvents> Sources<B> {
             (predecessors(&self.rotation, &cursor.source), seq)
         });
         let now = Instant::now();
+        let consumed: HashMap<String, u64> = (cursors.iter())
+            .map(|cursor| (source_key(&cursor.source), cursor.captured_through))
+            .collect();
         for cursor in cursors {
             let (key, mut captured_any) = (source_key(&cursor.source), false);
+            self.sync_parent(&key, |parent| consumed.get(&source_key(parent)).copied());
             if let Some(SourceLink {
                 boundary: Boundary::Pending { .. },
                 ..
@@ -342,6 +329,12 @@ impl<B: BindingEvents> Sources<B> {
                 Some(next) => next.drain_to.filter(|end| cursor.captured_through < *end),
                 None => None,
             };
+            // A retired reader is never captured again, so its prefix-only end is judged here.
+            let ended = (reader.capture.as_ref())
+                .is_none_or(|capture| capture.file_len().ok() == Some(cursor.captured_through));
+            if reader.watch_until.is_some() && ended {
+                self.pend_at_end(&key, cursor.captured_through);
+            }
             self.readers.push(reader);
         }
         self.restore_legacy_hops();
@@ -697,6 +690,7 @@ impl<B: BindingEvents> Sources<B> {
             },
         };
         let read_through = capture.read_through();
+        let at_end = capture.file_len().ok() == Some(capture.captured_through());
         match writer.store().append_spool(&batch, &capture.prefix_hash()) {
             Ok(()) => reader.captured_any |= !batch.records.is_empty(),
             Err(StoreError::SpoolFull) => {
@@ -712,8 +706,15 @@ impl<B: BindingEvents> Sources<B> {
             reader.drain_to = None;
         }
         let key = source_key(&batch.source);
+        let store = writer.store();
+        self.sync_parent(&key, |parent| {
+            store.cursor(parent).map(|c| c.captured_through)
+        });
         for record in &batch.records {
             self.owe(deriver, owed, &key, record);
+        }
+        if at_end {
+            self.pend_at_end(&key, batch.captured_through);
         }
         Ok(())
     }
@@ -763,74 +764,101 @@ impl<B: BindingEvents> Sources<B> {
         match link.boundary {
             Boundary::Pending { .. } => {}
             Boundary::Owed { from } => {
-                if record.start >= from {
+                if record.start >= from && !self.masked(&link, record) {
                     owed.extend(deriver.derive(record));
                 }
             }
             Boundary::Undecided => {
-                let keys = record_keys(self.provider, &record.line);
-                if keys.is_some_and(|keys| keys.is_empty())
-                    || self.inherited(&link, record, deriver)
-                {
+                let row = RowIds::of(self.provider, &record.line);
+                if row.as_ref().is_some_and(RowIds::is_empty) {
                     return;
                 }
-                let earliest = link.committed_at - TimeDelta::seconds(BIND_SLACK_SECS);
-                let fresh = record_time(&record.line).is_some_and(|at| at >= earliest);
-                let proven = link
-                    .parent
-                    .as_ref()
-                    .is_some_and(|p| self.lineage_of(p).is_some());
-                let boundary = if fresh && proven {
-                    owed.extend(deriver.derive(record));
-                    Boundary::Owed { from: record.start }
-                } else {
-                    let source = link.source.clone();
-                    self.raised.push(WriterAlarm::BoundaryPending { source });
-                    Boundary::Pending {
-                        candidates: vec![0, record.start],
+                let parent = link.parent.as_ref();
+                let lineage = parent.and_then(|parent| self.lineage.get(&source_key(parent)));
+                let class = row.zip(lineage).map(|(row, lineage)| lineage.class(&row));
+                match class {
+                    Some(Class::Inherited) => {
+                        self.prefix_seen.insert(key.to_owned());
                     }
-                };
-                if let Some(link) = self.rotation.links.get_mut(key) {
-                    link.boundary = boundary;
+                    Some(Class::New) if self.prefix_seen.contains(key) => {
+                        owed.extend(deriver.derive(record));
+                        self.decide(key, Boundary::Owed { from: record.start });
+                    }
+                    _ => self.pend(key, record.start),
                 }
-                self.dirty = true;
             }
         }
     }
 
-    /// Every key of the record is already held by the parent or here. A unit counts only as a
-    /// sealed unit: an announcement alone does not carry the output its sealing record posts.
-    fn inherited(
-        &mut self,
-        link: &SourceLink,
-        record: &CapturedRecord,
-        deriver: &UnitDeriver,
-    ) -> bool {
+    /// A row after a fork's start whose every identity the parent consumed is the parent's copy,
+    /// unless the parent is pending or undecided and so may never post it.
+    fn masked(&self, link: &SourceLink, record: &CapturedRecord) -> bool {
         let Some(parent) = link.parent.as_ref() else {
             return false;
         };
-        let Some(keys) = record_keys(self.provider, &record.line) else {
+        let parent_link = self.rotation.link(parent).map(|l| &l.boundary);
+        if !matches!(parent_link, None | Some(Boundary::Owed { .. })) {
+            return false;
+        }
+        let Some(lineage) = self.lineage.get(&source_key(parent)) else {
             return false;
         };
-        let Some(lineage) = self.lineage_of(parent) else {
-            return false;
-        };
-        let held = |key: &String, kind: UnitKind, seen: Seen| {
-            let sealed = lineage.contains(&(key.clone(), kind, Seen::Sealed));
-            let announced = seen == Seen::Announced
-                && (lineage.contains(&(key.clone(), kind, Seen::Announced))
-                    || deriver.knows(key, kind));
-            sealed || deriver.sealed(key, kind) || announced
-        };
-        !keys.is_empty() && keys.iter().all(|(key, kind, seen)| held(key, *kind, *seen))
+        RowIds::of(self.provider, &record.line)
+            .is_some_and(|row| !row.is_empty() && lineage.class(&row) == Class::Inherited)
     }
 
-    fn lineage_of(&mut self, parent: &SourceId) -> Option<&Keys> {
-        let provider = self.provider;
-        let scanned = self.lineage.entry(source_key(parent));
-        scanned
-            .or_insert_with(|| scan_lineage(provider, parent))
-            .as_ref()
+    /// Brings the parent identities a source is judged against to the parent's durable cursor.
+    fn sync_parent(&mut self, key: &str, consumed: impl Fn(&SourceId) -> Option<u64>) {
+        let Some(link) = self.rotation.links.get(key) else {
+            return;
+        };
+        let Some(parent) = link.parent.clone() else {
+            return;
+        };
+        let wanted = match &link.boundary {
+            Boundary::Undecided => true,
+            Boundary::Owed { .. } => matches!(
+                self.rotation.link(&parent).map(|l| &l.boundary),
+                None | Some(Boundary::Owed { .. })
+            ),
+            Boundary::Pending { .. } => false,
+        };
+        if !wanted {
+            return;
+        }
+        let parent_key = source_key(&parent);
+        let cached = self.lineage.remove(&parent_key);
+        let through = consumed(&parent);
+        let synced = through.and_then(|t| fork_lineage::sync(cached, self.provider, &parent, t));
+        if let Some(lineage) = synced {
+            self.lineage.insert(parent_key, lineage);
+        }
+    }
+
+    /// A source still undecided once its file is read to the end has shown no new row.
+    fn pend_at_end(&mut self, key: &str, end: u64) {
+        let undecided = self.rotation.links.get(key);
+        if undecided.is_some_and(|link| link.boundary == Boundary::Undecided) {
+            self.pend(key, end);
+        }
+    }
+
+    fn pend(&mut self, key: &str, at: u64) {
+        if let Some(link) = self.rotation.links.get(key) {
+            let source = link.source.clone();
+            self.raised.push(WriterAlarm::BoundaryPending { source });
+        }
+        let mut candidates = vec![0, at];
+        candidates.dedup();
+        self.decide(key, Boundary::Pending { candidates });
+    }
+
+    fn decide(&mut self, key: &str, boundary: Boundary) {
+        if let Some(link) = self.rotation.links.get_mut(key) {
+            link.boundary = boundary;
+        }
+        self.prefix_seen.remove(key);
+        self.dirty = true;
     }
 
     fn flush<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
