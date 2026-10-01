@@ -3142,6 +3142,44 @@ fn parser_terminal_handoff_clears_previous_prose_before_next_turn() {
 }
 
 #[test]
+fn parser_new_turn_identity_discards_unterminated_previous_response() {
+    let binding = matched("4367");
+    let mut parser = SessionRelayParser::default();
+    let mut old_turn = frame(
+        &binding,
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old progress must not leak\"}]}}\n",
+        1,
+    );
+    old_turn.turn_user_msg_id = 101;
+    old_turn.turn_started_at = "2026-10-01T14:00:00Z".into();
+    old_turn.turn_start_offset = Some(100);
+    assert!(parser.ingest_frame(&old_turn).is_empty());
+
+    let mut new_turn = frame(
+        &binding,
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"current answer only\"}]}}\n",
+        2,
+    );
+    new_turn.turn_user_msg_id = 202;
+    new_turn.turn_started_at = "2026-10-01T14:01:00Z".into();
+    new_turn.turn_start_offset = Some(200);
+    assert!(parser.ingest_frame(&new_turn).is_empty());
+
+    let result = terminal_frame_offset(
+        &binding,
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"current answer only\"}\n",
+        3,
+        300,
+        202,
+        "2026-10-01T14:01:00Z",
+        Some(200),
+    );
+    let deliveries = parser.ingest_frame(&result);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].response_text, "current answer only");
+}
+
+#[test]
 fn parser_terminal_handoff_preserves_following_turn_tail() {
     let binding = matched("4366");
     let mut parser = SessionRelayParser::default();
