@@ -4,7 +4,7 @@
 //! decide when a terminal-success tmux pane has finished draining its JSONL
 //! output (so recovery may stop watching) and that compute the byte offset a
 //! restart-recovery watcher should resume reading from. They depend only on
-//! `std::fs`/`tokio::time` and the tmux `has_session` / `WRAPPER_TERMINAL_END_EVENT`
+//! `std::fs`/`tokio::time`, the host-aware tmux presence and the `WRAPPER_TERMINAL_END_EVENT`
 //! contracts, so they live in this leaf module. The async drain driver and the
 //! offset helper are re-imported by the root module so existing call sites stay
 //! byte-identical.
@@ -33,9 +33,11 @@ pub(super) async fn terminal_success_output_drained_for_recovery(
     let Ok(before_meta) = std::fs::metadata(output_path) else {
         return false;
     };
-    let tmux_alive = tmux_session_name
-        .map(crate::services::session_host::legacy_collapse::tmux_present_bool)
-        .unwrap_or(false);
+    // Only a confirmed missing tmux session skips the quiet period.
+    let tmux_alive = tmux_session_name.is_some_and(|name| {
+        crate::services::discord::host_liveness::observe_presence(name, None)
+            != Some(crate::services::session_host::HostPresence::Missing)
+    });
 
     if !tmux_alive {
         return terminal_success_watcher_stop_allowed(
@@ -302,5 +304,49 @@ mod tests {
         assert_ne!(offset, wrapper_last_offset);
         assert_eq!(current_len, transcript_eof as u64);
         assert!(!truncated);
+    }
+}
+
+#[cfg(test)]
+mod host_presence_tests {
+    use super::terminal_success_output_drained_for_recovery;
+    use crate::services::session_host::test_support::InjectedPresenceGuard;
+    use crate::services::session_host::{HostPresence, HostSessionRef};
+
+    // Only a confirmed missing tmux session skips the quiet period; a failed probe or another
+    // host waits it out, so bytes written meanwhile keep the recovery watcher attached.
+    #[tokio::test]
+    async fn drain_skips_the_quiet_period_only_for_a_confirmed_missing_session() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().expect("output dir");
+        let cases = [
+            (None, HostPresence::Missing, true),
+            (None, HostPresence::ProbeFailed, false),
+            (Some("herdr"), HostPresence::Missing, false),
+        ];
+        for (n, (host, presence, drained)) in cases.into_iter().enumerate() {
+            let name = format!("AgentDesk-claude-p4b1-drain-{n}");
+            let _presence = InjectedPresenceGuard::set(HostSessionRef::tmux(&name), presence);
+            if let Some(host) = host {
+                let marker = crate::services::tmux_common::session_temp_path(&name, "host_kind");
+                std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+                std::fs::write(marker, host).unwrap();
+            }
+            let path = dir.path().join(format!("{n}.jsonl"));
+            std::fs::write(&path, "{\"type\":\"result\"}\n").unwrap();
+            let end = std::fs::metadata(&path).unwrap().len();
+            let appender = {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                    std::io::Write::write_all(&mut file, b"{\"late\":1}\n").unwrap();
+                })
+            };
+            let path = path.to_string_lossy().into_owned();
+            let got = terminal_success_output_drained_for_recovery(&path, end, Some(&name)).await;
+            appender.join().unwrap();
+            assert_eq!(got, drained, "{host:?} {presence:?}");
+        }
     }
 }

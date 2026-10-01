@@ -1,11 +1,13 @@
 use poise::serenity_prelude::ChannelId;
 
+use crate::services::discord::host_liveness;
 use crate::services::discord::relay_health::{
     CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance,
 };
 use crate::services::discord::{self as discord, SharedData};
-use crate::services::platform::tmux::{PaneLiveness, SessionPresence};
+use crate::services::platform::tmux::SessionPresence;
 use crate::services::provider::ProviderKind;
+use crate::services::provider::session_probe::SessionLiveness;
 
 use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
@@ -151,6 +153,10 @@ pub(super) async fn witness_tmux_session_within(
     let Some(session_name) = session_name.map(str::to_string) else {
         return ExecutorWitness::Absent;
     };
+    // Another host's session is never witnessed absent, and no tmux probe is spent on it.
+    if !host_liveness::local_tmux(&session_name, None) {
+        return ExecutorWitness::Unwitnessed;
+    }
     if budget.remaining.is_zero() {
         return ExecutorWitness::Unwitnessed;
     }
@@ -513,7 +519,7 @@ impl SessionEnrichment {
             Some(name) => {
                 let probe_target = name.to_string();
                 let liveness = tokio::task::spawn_blocking(move || {
-                    crate::services::platform::tmux::pane_liveness(&probe_target)
+                    host_liveness::observe_liveness(&probe_target, None)
                 })
                 .await
                 .ok()?;
@@ -656,11 +662,11 @@ fn transcript_discovery_path<'a>(
     watcher_output_path.or(inflight_output_path)
 }
 
-fn liveness_as_alive(liveness: PaneLiveness) -> Option<bool> {
+fn liveness_as_alive(liveness: SessionLiveness) -> Option<bool> {
     match liveness {
-        PaneLiveness::Live => Some(true),
-        PaneLiveness::DeadOrAbsent => Some(false),
-        PaneLiveness::ProbeError => None,
+        SessionLiveness::Alive => Some(true),
+        SessionLiveness::Missing => Some(false),
+        SessionLiveness::ProbeFailed | SessionLiveness::Unknown => None,
     }
 }
 
@@ -670,8 +676,8 @@ mod tests {
 
     #[test]
     fn inflight_a_alive_watcher_b_dead_mismatch_probes_a() {
-        let inflight_a_liveness = liveness_as_alive(PaneLiveness::Live);
-        let watcher_b_liveness = liveness_as_alive(PaneLiveness::DeadOrAbsent);
+        let inflight_a_liveness = liveness_as_alive(SessionLiveness::Alive);
+        let watcher_b_liveness = liveness_as_alive(SessionLiveness::Missing);
         assert_eq!(
             liveness_probe_session(Some("inflight-a"), Some("watcher-b")),
             Some("inflight-a".to_string())
@@ -682,8 +688,9 @@ mod tests {
 
     #[test]
     fn only_exact_dead_or_absent_maps_to_dead() {
-        assert_eq!(liveness_as_alive(PaneLiveness::DeadOrAbsent), Some(false));
-        assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
+        assert_eq!(liveness_as_alive(SessionLiveness::Missing), Some(false));
+        assert_eq!(liveness_as_alive(SessionLiveness::ProbeFailed), None);
+        assert_eq!(liveness_as_alive(SessionLiveness::Unknown), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -791,6 +798,50 @@ mod tests {
             witness_tmux_session_within(Some("named"), &mut budget).await,
             ExecutorWitness::Unwitnessed
         );
+    }
+
+    // A session whose marker names another host is never witnessed absent nor read dead, and
+    // no probe or budget is spent on it; a tmux session keeps its three-state answers.
+    #[tokio::test]
+    async fn another_host_is_never_witnessed_absent_or_read_dead() {
+        use crate::services::session_host::test_support::InjectedLivenessGuard;
+        use crate::services::session_host::{HostLiveness, HostSessionRef};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let herdr = "AgentDesk-claude-p4b1-health-herdr";
+        let marker = crate::services::tmux_common::session_temp_path(herdr, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, "herdr").unwrap();
+        let dead = HostLiveness::DeadOrAbsent;
+        let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(herdr), dead);
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::Missing);
+        assert_eq!(
+            witness_tmux_session_within(Some(herdr), &mut budget).await,
+            ExecutorWitness::Unwitnessed
+        );
+        assert_eq!(
+            budget.remaining, TMUX_OBSERVATION_BUDGET,
+            "no probe was spent"
+        );
+        assert_eq!(
+            SessionEnrichment::probe_tmux_session_alive(Some(herdr)).await,
+            None
+        );
+
+        let tmux = "AgentDesk-claude-p4b1-health-tmux";
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::Missing);
+        assert_eq!(
+            witness_tmux_session_within(Some(tmux), &mut budget).await,
+            ExecutorWitness::Absent
+        );
+        for (pane, alive) in [
+            (HostLiveness::DeadOrAbsent, Some(false)),
+            (HostLiveness::Live, Some(true)),
+            (HostLiveness::ProbeError, None),
+        ] {
+            let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(tmux), pane);
+            let observed = SessionEnrichment::probe_tmux_session_alive(Some(tmux)).await;
+            assert_eq!(observed, alive, "{pane:?}");
+        }
     }
 
     #[tokio::test]

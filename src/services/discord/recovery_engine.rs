@@ -16,8 +16,6 @@ use crate::services::git::GitCommand;
 #[cfg(unix)]
 use crate::services::platform::binary_resolver;
 #[cfg(unix)]
-use crate::services::session_host::legacy_collapse::tmux_live_pane_bool;
-#[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::build_tmux_death_diagnostic;
@@ -219,7 +217,7 @@ pub(in crate::services::discord) use self::restore_inflight::{
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
 pub(super) use self::runtime::reregister_active_turn_from_inflight;
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
-use self::tmux_probe::tmux_session_alive_with_retry;
+use self::tmux_probe::observe_liveness_with_retry;
 // #3479: re-import the analytics + transcript helpers so root call sites stay
 // byte-identical. `recovered_transcript_turn_id` is gated on cfg(test) — the root
 // reaches it only from its unit test (prod calls it inside analytics_transcript).
@@ -229,11 +227,6 @@ use self::analytics_transcript::{
     extract_turn_analytics_from_output, lookup_turn_finished_dispatch_kind,
     persist_recovered_transcript, recovered_turn_duration_ms,
 };
-
-#[cfg(not(unix))]
-fn tmux_live_pane_bool(_name: &str) -> bool {
-    false
-}
 
 /// #2428 H5: exponential backoff (+ jitter) for the 3-attempt recovery retry
 /// loops in this module. Budget contract (Codex pass-1 review): the old fixed

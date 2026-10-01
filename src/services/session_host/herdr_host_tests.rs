@@ -1353,6 +1353,8 @@ fn herdr_items_have_no_production_caller() {
     const IDENTITY_GATE: &str = "src/services/discord/inflight/save_store/identity_gate.rs";
     const CLAUDE_LAUNCH: &str = "src/services/claude/tui_session_launch.rs";
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
+    // Liveness consumers' local host reading: marker and row locator, never a Herdr route.
+    const LIVENESS: &str = "src/services/discord/host_liveness.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1370,18 +1372,24 @@ fn herdr_items_have_no_production_caller() {
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
         (
             "HostKindMarker",
-            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE],
+            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, LIVENESS],
         ),
         (
             "read_host_kind_marker",
-            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER],
+            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER, LIVENESS],
         ),
         (
             "host_marker::",
-            &[GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, CLAUDE_LAUNCH],
+            &[
+                GUARD_ADAPTER,
+                CLEANUP_GATE,
+                RESOLVE,
+                CLAUDE_LAUNCH,
+                LIVENESS,
+            ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
-        (".host_locator", &[GUARD_ADAPTER, BINDING_CAS]),
+        (".host_locator", &[GUARD_ADAPTER, BINDING_CAS, LIVENESS]),
         ("host_locator: Some", &[]),
         (
             "host_locator:",

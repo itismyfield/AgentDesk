@@ -114,7 +114,11 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
+  --skip services::discord::inflight::rebind_reap::tests
   --skip services::discord::inflight::removal::custody_notice_tests
+  --skip services::discord::placeholder_sweeper::abandon_guard::tests
+  --skip services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
+  --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::tests
@@ -337,9 +341,42 @@ NON_PG_FILTER_REPLAY=(
   services::discord::idle_recap_interaction::tests::recap_prompt_route_rejects_unrelated_custom_ids
   services::discord::idle_recap_interaction::tests::recap_prompt_route_sends_suggest_to_internal_followup_handler
   services::discord::idle_recap_interaction::tests::recap_prompt_sent_ephemeral_includes_actual_prompt_text
+  services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_delegates_signals
+  services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_preserves_probe_error
+  services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
+  services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
+  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
+  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
+  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_pid_reuse_evidence_allows_cleanup
+  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_probe_error_preserves_retry
+  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_process_cleanup_is_fail_closed_without_unix_probe
+  services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup
+  services::discord::placeholder_sweeper::abandon_guard::tests::controller_detach_is_gated_by_identity_and_committed_state_delete
+  services::discord::placeholder_sweeper::abandon_guard::tests::dead_pane_without_runtime_files_converges_to_cleanup
+  services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_defers_queue_to_completion_authority
+  services::discord::placeholder_sweeper::abandon_guard::tests::discord_probe_maps_to_the_only_valid_cleanup_evidence
+  services::discord::placeholder_sweeper::abandon_guard::tests::live_pane_preserves_the_tmux_session_even_when_activity_is_not_recent
+  services::discord::placeholder_sweeper::abandon_guard::tests::missing_tmux_name_preserves_mailbox_state
+  services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_allows_tokenless_bounded_eviction_but_revival_preserves_row
+  services::discord::placeholder_sweeper::abandon_guard::tests::production_cleanup_plan_pins_evidence_probe_policy_and_delete_gate
+  services::discord::placeholder_sweeper::abandon_guard::tests::real_turn_without_a_tmux_name_preserves_mailbox_state
+  services::discord::placeholder_sweeper::abandon_guard::tests::revived_after_abandoned_edit_preserves_row_and_requires_visible_repair
+  services::discord::placeholder_sweeper::abandon_guard::tests::runtime_activity_exact_boundary_is_recent_and_next_second_is_inactive
+  services::discord::placeholder_sweeper::abandon_guard::tests::runtime_activity_zero_and_negative_are_unknown
+  services::discord::placeholder_sweeper::abandon_guard::tests::terminal_marker_owner_death_evicts_without_constructing_message_id_zero
+  services::discord::placeholder_sweeper::abandon_guard::tests::tmux_present_path_is_unchanged_by_claude_e_process_evidence
+  services::discord::placeholder_sweeper::abandon_guard::tests::tmuxless_wrong_runtime_kind_preserves_retry
+  services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
+  services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
+  services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
+  services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::owned_row_kickoff_identity_matches_persisted_ids
+  services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_apply_disposes_row_per_relay_outcome_without_anchor_or_queue_loss
+  services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_guard_precedes_recovery_marker_and_kickoff
+  services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_plan_maps_pane_liveness_to_disposition_inputs
+  services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_reacquired_row_has_no_kickoff_identity
   services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
   services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
   services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
