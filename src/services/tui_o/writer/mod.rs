@@ -92,6 +92,12 @@ pub enum WriterAlarm {
     Released {
         detail: String,
     },
+    /// Adopted at Legacy's cursor: Legacy's undelivered records in `from..to` are posted by neither.
+    Abandoned {
+        source: SourceId,
+        from: u64,
+        to: u64,
+    },
     ContentTransform {
         serial: u64,
     },

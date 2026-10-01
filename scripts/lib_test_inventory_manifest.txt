@@ -9807,14 +9807,13 @@ services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
-services::tui_o::writer::adoption::tests::a_closed_turn_legacy_has_not_delivered_is_not_adopted
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted
-services::tui_o::writer::adoption::tests::a_prompt_past_legacys_frontier_is_not_adopted
+services::tui_o::writer::adoption::tests::a_prompt_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::a_running_legacy_tail_releases_the_channel
-services::tui_o::writer::adoption::tests::a_turn_legacys_reader_has_not_ended_is_not_adopted
+services::tui_o::writer::adoption::tests::a_turn_legacys_reader_has_not_ended_is_reported_undelivered
 services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_not_adopted
-services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_not_adopted
+services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
 services::tui_o::writer::adoption::tests::past_sources_over_the_boot_budget_are_not_adopted
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
@@ -9832,6 +9831,7 @@ services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor
+services::tui_o::writer::tests::actor::host_start::a_closed_turn_legacy_never_delivered_is_adopted_past_and_never_posted
 services::tui_o::writer::tests::actor::host_start::a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work

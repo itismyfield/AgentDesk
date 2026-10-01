@@ -2,6 +2,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{self, test_override};
 use crate::services::tui_o::writer::activation::ActivationFacts;
+use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{HostIo, HostParts, Readiness, start};
 
@@ -60,6 +61,7 @@ struct TestIo {
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The gateway never comes up.
     port_down: std::sync::atomic::AtomicBool,
+    legacy: Mutex<Option<Arc<dyn LegacyView>>>,
 }
 
 impl TestIo {
@@ -73,6 +75,7 @@ impl TestIo {
             custody: Mutex::new(Ok(false)),
             on_facts: Mutex::default(),
             port_down: Default::default(),
+            legacy: Mutex::default(),
         })
     }
 
@@ -130,8 +133,9 @@ impl HostIo for TestIo {
         self.custody.lock().unwrap().clone()
     }
 
-    fn legacy(&self) -> Arc<dyn crate::services::tui_o::writer::adoption::LegacyView> {
-        Arc::new(crate::services::tui_o::writer::adoption::NoLegacy)
+    fn legacy(&self) -> Arc<dyn LegacyView> {
+        let legacy = self.legacy.lock().unwrap().clone();
+        legacy.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
     }
 }
 
@@ -736,6 +740,97 @@ async fn a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned
     assert_eq!(era.initial_channels, [CHANNEL]);
     assert!(ready.accepts(CHANNEL));
     assert_eq!(io.alarms.halted(), []);
+}
+
+/// Legacy holding its cursor at `cursor` on `path`, with its delivered frontier at `frontier`.
+struct Cursor {
+    path: PathBuf,
+    cursor: u64,
+    frontier: u64,
+}
+
+impl LegacyView for Cursor {
+    fn started(&self) -> bool {
+        true
+    }
+
+    fn cursor(&self, _: &str) -> LegacyCursor {
+        let (path, offset) = (self.path.clone(), self.cursor);
+        LegacyCursor::Bound { path, offset }
+    }
+
+    fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+        Some(self.frontier)
+    }
+
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_closed_turn_legacy_never_delivered_is_adopted_past_and_never_posted() {
+    let closed = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
+    let debt = [row("m0", "undelivered"), format!("{closed}\n").into_bytes()].concat();
+    for custody in [true, false] {
+        let (harness, path) = fresh(startup);
+        append(&path, &debt);
+        harness.gate.acquired();
+        let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        let cursor = debt.len() as u64;
+        let legacy = Cursor {
+            path: path.clone(),
+            cursor,
+            frontier: 0,
+        };
+        *io.legacy.lock().unwrap() = Some(Arc::new(legacy));
+        *io.custody.lock().unwrap() = Ok(custody);
+        let tasks = start_host(&harness, &io, &ready);
+        polls(3).await;
+        if custody {
+            let released = io.alarms.released();
+            assert!(
+                matches!(released.as_slice(), [(CHANNEL, detail)] if detail.contains("custody")),
+                "{released:?}"
+            );
+            assert_eq!(adoption(CHANNEL), Adoption::Released);
+            assert!(!harness.store.has_channel_dir(CHANNEL));
+            continue;
+        }
+        assert_eq!(adoption(CHANNEL), Adoption::Committed);
+        let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
+        let starts: Vec<_> = init.sources.iter().map(|s| s.delivery_start).collect();
+        assert_eq!(starts, [cursor], "O starts at Legacy's cursor");
+        let source = init.sources[0].source_id.clone();
+        let abandoned = WriterAlarm::Abandoned {
+            source,
+            from: 0,
+            to: cursor,
+        };
+        assert_eq!(*io.alarms.0.lock().unwrap(), [(CHANNEL, abandoned)]);
+        append(&path, &row("m1", "after"));
+        polls(3).await;
+        assert_eq!(harness.port.posts(), ["after"]);
+
+        abort(tasks);
+        polls(2).await;
+        let written = std::fs::read(init_path(&harness, CHANNEL)).unwrap();
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        let _tasks = start_host(&harness, &io, &ready);
+        append(&path, &row("m2", "again"));
+        polls(3).await;
+        assert!(
+            !io.calls().contains(&("facts", CHANNEL)),
+            "a restart recovers"
+        );
+        assert_eq!(io.alarms.0.lock().unwrap().as_slice(), []);
+        assert_eq!(
+            std::fs::read(init_path(&harness, CHANNEL)).unwrap(),
+            written
+        );
+        assert_eq!(harness.port.posts(), ["after", "again"]);
+    }
 }
 
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.

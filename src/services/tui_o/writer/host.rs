@@ -249,6 +249,7 @@ async fn host_channel<I: HostIo>(
                 }
             };
             let local = || io.local_custody(channel, provider);
+            let mut abandoned = None;
             let created = match legacy {
                 None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
                 Some(legacy) => {
@@ -264,6 +265,7 @@ async fn host_channel<I: HostIo>(
                         Ok(snapshot) => snapshot,
                         Err(detail) => return release(&candidate, &alarms, channel, &detail),
                     };
+                    abandoned = snapshot.abandoned();
                     let sources = || snapshot.recheck(&*legacy, &**log, channel);
                     activation::activate_with(&fresh, channel, facts, local, &candidate, sources)
                 }
@@ -271,6 +273,14 @@ async fn host_channel<I: HostIo>(
             if let Err(detail) = created {
                 let detail = format!("first activation: {detail}");
                 return stop(&candidate, &alarms, channel, &detail);
+            }
+            if let Some(alarm) = abandoned {
+                tracing::info!(
+                    channel,
+                    ?alarm,
+                    "[tui_o] adopted past Legacy's undelivered records"
+                );
+                alarms.raise(channel, alarm);
             }
             match recover(&runtime_root, channel) {
                 Ok(Recovered::Store(store)) => store,
@@ -470,6 +480,8 @@ pub(crate) mod test_io {
         pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
         /// The tmux session each channel's binding names, `host-<channel>` when unset.
         pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
+        /// Legacy's custody of a channel as the gateway reads it; none when unset.
+        pub(crate) custody: Mutex<Option<fn(u64) -> bool>>,
     }
 
     impl TestHost {
@@ -482,6 +494,7 @@ pub(crate) mod test_io {
                 on_facts: Mutex::default(),
                 legacy: Mutex::default(),
                 sessions: Mutex::default(),
+                custody: Mutex::default(),
             })
         }
     }
@@ -546,8 +559,9 @@ pub(crate) mod test_io {
             std::future::ready(Ok(locked(&self.facts).clone()))
         }
 
-        fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<bool, String> {
-            Ok(false)
+        fn local_custody(&self, channel: u64, _: ShadowProvider) -> Result<bool, String> {
+            let custody = *locked(&self.custody);
+            Ok(custody.is_some_and(|custody| custody(channel)))
         }
 
         fn legacy(&self) -> Arc<dyn LegacyView> {
