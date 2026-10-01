@@ -240,6 +240,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+        "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/preloop_cleanup_tests.rs",
         "src/services/discord/turn_bridge/voice_completion_tests.rs",
         "src/services/discord/turn_finalizer/finalize/tests/residue_tests.rs",

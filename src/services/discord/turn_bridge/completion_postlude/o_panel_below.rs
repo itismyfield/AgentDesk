@@ -20,6 +20,44 @@ const QUIET: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 2_000
 /// Each move is one POST and one DELETE; the last one is kept for the window's final check.
 const MAX_MOVES: usize = 3;
 
+/// Where a moved panel really lands: the turn's gateway when it posts directly, else bot REST.
+enum Transport {
+    Gateway(Arc<dyn TurnGateway>),
+    Rest(Arc<serenity::Http>),
+}
+
+impl Transport {
+    fn of(shared: &SharedData, gateway: &Arc<dyn TurnGateway>) -> Option<Self> {
+        if gateway.can_deliver_directly() {
+            return Some(Self::Gateway(Arc::clone(gateway)));
+        }
+        shared.serenity_http_or_token_fallback().map(Self::Rest)
+    }
+
+    async fn send(&self, channel_id: ChannelId, text: &str) -> Result<MessageId, String> {
+        match self {
+            Self::Gateway(gateway) => gateway.send_message(channel_id, text).await,
+            Self::Rest(http) => {
+                super::super::super::http::send_channel_message(http, channel_id, text)
+                    .await
+                    .map(|message| message.id)
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    async fn delete(&self, channel_id: ChannelId, id: MessageId) -> Result<(), String> {
+        match self {
+            Self::Gateway(gateway) => gateway.delete_message(channel_id, id).await,
+            Self::Rest(http) => {
+                super::super::super::http::delete_channel_message(http, channel_id, id)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
 type Owner<'a> = (
     &'a Arc<SharedData>,
     &'a Arc<dyn TurnGateway>,
@@ -40,14 +78,15 @@ pub(in crate::services::discord::turn_bridge) fn follow(
     if !(shared.ui.two_message_panel_enabled && shared.ui.status_panel_v2_enabled && o_owned()) {
         return None;
     }
-    let (shared, gateway, provider) = (Arc::clone(shared), Arc::clone(gateway), provider.clone());
+    let transport = Transport::of(shared, gateway)?;
+    let (shared, provider) = (Arc::clone(shared), provider.clone());
     let (user_msg_id, text) = (inflight_state.user_msg_id, completed_text.to_string());
     Some(task_supervisor::spawn_observed(
         "turn_bridge_o_completed_panel_follow",
         async move {
             follow_posts(
                 &shared,
-                gateway.as_ref(),
+                &transport,
                 &provider,
                 channel_id,
                 user_msg_id,
@@ -60,7 +99,7 @@ pub(in crate::services::discord::turn_bridge) fn follow(
 
 async fn follow_posts(
     shared: &SharedData,
-    gateway: &dyn TurnGateway,
+    transport: &Transport,
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_msg_id: u64,
@@ -85,7 +124,7 @@ async fn follow_posts(
         }
         let settled = moves + 1 < MAX_MOVES && quiet_since.elapsed() >= QUIET;
         if posted.is_some_and(|posted| posted > panel.get()) && (settled || last_check) {
-            let target = (shared, gateway, provider, channel_id);
+            let target = (shared, transport, provider, channel_id);
             match move_below(target, user_msg_id, panel, text).await {
                 Some(Ok(next)) => (panel, moves) = (next, moves + 1),
                 Some(Err(())) => return,
@@ -100,12 +139,7 @@ async fn follow_posts(
 
 /// One move: None while this turn's row is still closing, `Err` once the panel is no longer ours.
 async fn move_below(
-    (shared, gateway, provider, channel_id): (
-        &SharedData,
-        &dyn TurnGateway,
-        &ProviderKind,
-        ChannelId,
-    ),
+    (shared, transport, provider, channel_id): (&SharedData, &Transport, &ProviderKind, ChannelId),
     user_msg_id: u64,
     panel: MessageId,
     text: &str,
@@ -119,21 +153,25 @@ async fn move_below(
     if singleton::load(provider, token, channel).map(|b| b.panel_message_id) != Some(panel.get()) {
         return Some(Err(()));
     }
-    let Ok(next) = TurnGateway::send_message(gateway, channel_id, text).await else {
-        return Some(Err(()));
+    // A synthetic id is no Discord message, so it never becomes the channel's panel.
+    let next = match transport.send(channel_id, text).await {
+        Ok(next) if !super::super::headless_delivery::is_synthetic_headless_message_id(next) => {
+            next
+        }
+        _ => return Some(Err(())),
     };
     orphans::enqueue_pending_bind(provider, token, channel, next.get(), None);
     if let Err(error) =
         singleton::move_completed_if_current(provider, token, channel, panel.get(), next.get())
     {
         tracing::info!(channel, panel = panel.get(), %error, "completed O status panel stays put");
-        if gateway.delete_message(channel_id, next).await.is_ok() {
+        if transport.delete(channel_id, next).await.is_ok() {
             orphans::remove(provider, token, channel, next.get());
         }
         return Some(Err(()));
     }
     orphans::remove(provider, token, channel, next.get());
-    if gateway.delete_message(channel_id, panel).await.is_err() {
+    if transport.delete(channel_id, panel).await.is_err() {
         orphans::enqueue(provider, token, channel, panel.get());
     }
     Some(Ok(next))
