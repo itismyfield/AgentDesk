@@ -78,7 +78,14 @@ async fn seed(trace: Trace, pool: &sqlx::PgPool, own: &str) {
             let row = serde_json::from_value(wire).expect("inflight row with a Herdr locator");
             inflight::save_inflight_state_create_new(&row).expect("inflight row");
         }
-        Trace::Nothing | Trace::FailedRead => {}
+        Trace::FailedRead => {
+            // The sessions table goes unreadable; queue and turn storage still work.
+            sqlx::query("ALTER TABLE sessions RENAME TO sessions_unreadable")
+                .execute(pool)
+                .await
+                .expect("hide the sessions table");
+        }
+        Trace::Nothing => {}
     }
 }
 
@@ -115,9 +122,6 @@ async fn first_catch_up_input(trace: Trace) -> Run {
     register_channel(&harness);
     harness.answer_placeholders_immediately();
     seed(trace, &pool, &harness.shared.token_hash).await;
-    if trace == Trace::FailedRead {
-        pool.close().await;
-    }
     let id = recent_message_id();
     harness.seed_channel_history(&[(id, "first input after the bot was away", false)]);
     harness.run_catch_up().await;
