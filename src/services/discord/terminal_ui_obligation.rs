@@ -310,6 +310,7 @@ async fn resolve_terminal_ui_session(
 
 /// Whether the host guard keeps the session the lookup would name, from the inflight row,
 /// the watcher or the channel name, before any of them reads the card stale or missing.
+/// With none of them, only a found legacy row for the channel lets the card go.
 async fn terminal_ui_host_deferred(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -331,7 +332,8 @@ async fn terminal_ui_host_deferred(
         },
     };
     let Some(name) = name else {
-        return false;
+        let nameless = super::host_defer_gate::nameless_sweep_deferred;
+        return nameless(shared, provider, channel_id.get()).await;
     };
     super::host_defer_gate::sweep_session_deferred(shared, provider, channel_id.get(), &name).await
 }
@@ -767,6 +769,96 @@ mod tests {
         pending(10, now - 31);
         sweep_terminal_ui_obligations(&http, &shared, &claude).await;
         let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(10)).is_some();
+        assert!(kept, "a failed row read is not a legacy answer");
+        db.drop().await;
+    }
+
+    // A provider-wide sweep from a runtime with no context for another bot's channel keeps
+    // the card unless that channel's one row is a legacy row with no host trace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg() {
+        use crate::services::discord::host_defer_gate::tests::{Nameless, ScriptedTmux};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _tmux = ScriptedTmux::install();
+        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
+        let with_second_bot = crate::services::discord::host_defer_gate::tests::with_second_bot;
+        let (shared, _registry) = with_second_bot(&pool, "p4c1f-bot-b").await;
+        let http = Arc::new(serenity::Http::new("Bot p4c1f-test"));
+        let root = runtime_store::discord_terminal_ui_obligations_root().expect("root");
+        let claude = ProviderKind::Claude;
+        let channel_of = |n: usize| 1_479_671_301_387_066_000 + n as u64;
+        let now = terminal_ui_obligation_now_unix();
+        let expired = |n: usize| {
+            let obligation = TerminalUiObligation {
+                deadline_unix: now - 31,
+                ..sample_obligation(channel_of(n))
+            };
+            write_obligation_in_root(&root, &obligation).expect("write obligation");
+        };
+        use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
+        async fn rows(
+            pool: &sqlx::PgPool,
+            channels: &[u64],
+            hashes: [&str; 2],
+        ) -> Vec<HostedLookup> {
+            use crate::db::dispatched_session_canonical_identity::{
+                CanonicalSessionIdentity, SessionIdentityKind,
+            };
+            use crate::db::dispatched_sessions::hosted_execution::{
+                HostedLookupKey, load_hosted_execution_pg,
+            };
+            let mut read = Vec::new();
+            for (channel, hash) in channels.iter().flat_map(|c| hashes.map(|h| (c, h))) {
+                let channel_id = channel.to_string();
+                let identity = CanonicalSessionIdentity {
+                    kind: SessionIdentityKind::DiscordChannel,
+                    discord_token_hash: hash,
+                    channel_id: &channel_id,
+                };
+                let key = HostedLookupKey::Canonical {
+                    provider: "claude",
+                    identity,
+                };
+                read.push(load_hosted_execution_pg(pool, key).await);
+            }
+            read
+        }
+        let channels: Vec<u64> = (0..Nameless::ALL.len()).map(channel_of).collect();
+        let hashes = ["p4c1f-bot-b", shared.token_hash.as_str()];
+        for (n, case) in Nameless::ALL.into_iter().enumerate() {
+            let name = claude.build_tmux_session_name(&format!("p4c1f-card-{n}"));
+            let own = shared.token_hash.as_str();
+            case.seed(&pool, "p4c1f-bot-b", own, channel_of(n), &name)
+                .await;
+            expired(n);
+        }
+        let before = rows(&pool, &channels, hashes).await;
+        sweep_terminal_ui_obligations(&http, &shared, &claude).await;
+        for (n, case) in Nameless::ALL.into_iter().enumerate() {
+            let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(n)).is_some();
+            assert_eq!(kept, case != Nameless::Legacy, "{case:?}");
+        }
+        assert_eq!(
+            rows(&pool, &channels, hashes).await,
+            before,
+            "the sweep changes no row"
+        );
+        let mut hashless =
+            crate::services::discord::host_teardown_gate::test_support::shared_on(&pool).await;
+        Arc::get_mut(&mut hashless)
+            .expect("an unshared runtime")
+            .token_hash = String::new();
+        expired(0);
+        sweep_terminal_ui_obligations(&http, &hashless, &claude).await;
+        let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(0)).is_some();
+        assert!(
+            kept,
+            "no bot hash to read the row under is not a legacy answer"
+        );
+        pool.close().await;
+        sweep_terminal_ui_obligations(&http, &shared, &claude).await;
+        let kept = read_obligation_in_root(&root, claude.as_str(), channel_of(0)).is_some();
         assert!(kept, "a failed row read is not a legacy answer");
         db.drop().await;
     }
