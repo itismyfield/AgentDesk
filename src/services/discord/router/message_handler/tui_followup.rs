@@ -720,9 +720,9 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
 /// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
 /// can defer the promotion BEFORE any user-visible teardown (turn-view
 /// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
-/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or nameless
-/// without a legacy row) also defers. Everything else — no session, no tmux pane, remote profile,
-/// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
+/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or no channel
+/// name or session without a legacy row) also defers. Everything else — no tmux pane, remote
+/// profile, non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
 /// dispatch path, whose existing post-claim busy branch owns the defer UX
 /// (queued-card render + 📬 re-attach). This probe must NEVER be load-bearing
 /// for message preservation; it only avoids churn.
@@ -745,10 +745,12 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         return busy;
     }
 
+    let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
     let (tmux_session_name, remote_profile_named, current_path, session_id) = {
         let data = shared.core.lock().await;
         let Some(session) = data.sessions.get(&channel_id) else {
-            return false;
+            drop(data);
+            return nameless(shared, provider, channel_id.get()).await;
         };
         let tmux_session_name = if provider.uses_managed_tmux_backend() {
             session
@@ -766,9 +768,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         )
     };
     let Some(tmux_session_name) = tmux_session_name else {
-        let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
-        let managed = provider.uses_managed_tmux_backend();
-        return managed && nameless(shared, provider, channel_id.get()).await;
+        return nameless(shared, provider, channel_id.get()).await;
     };
     let host = super::super::super::host_defer_gate::channel_session_deferred;
     if host(shared, provider, channel_id.get(), &tmux_session_name).await {

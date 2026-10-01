@@ -52,58 +52,71 @@ pub(super) async fn sweep_session_deferred(
 }
 
 /// [`sweep_session_deferred`] for a pass holding no channel name: only a found legacy row
-/// with no host trace admits it, so no row keeps it too.
+/// with no host trace admits it.
 pub(super) async fn nameless_sweep_deferred(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: u64,
 ) -> bool {
     let gate = nameless_channel_gate(shared, provider, channel_id).await;
-    !matches!(gate, KeyedTeardown::Cleared(_))
+    !matches!(gate, Ok(KeyedTeardown::Cleared(_)))
 }
 
-/// [`channel_session_deferred`] for a channel holding no channel name. A turn with no name
-/// writes no row, so no row keeps main's path as a row not written yet does.
+/// [`channel_session_deferred`] for a managed tmux channel holding no channel name: a found
+/// legacy row admits it, and so does no row for a channel no turn can key or has in flight.
 pub(super) async fn nameless_channel_deferred(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: u64,
 ) -> bool {
-    let gate = nameless_channel_gate(shared, provider, channel_id).await;
-    matches!(gate, KeyedTeardown::Kept)
+    if !provider.uses_managed_tmux_backend() {
+        return false;
+    }
+    // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
+    #[cfg(test)]
+    if shared.pg_pool.is_none() {
+        return false;
+    }
+    match nameless_channel_gate(shared, provider, channel_id).await {
+        Ok(KeyedTeardown::Cleared(_)) => false,
+        Err(HostedLookup::Missing) => !unkeyed_and_idle(provider, channel_id),
+        _ => true,
+    }
+}
+
+/// No registered fallback name lets a turn build the channel's session key, so its turns
+/// write no row and run off tmux, and no inflight row is stored for it.
+fn unkeyed_and_idle(provider: &ProviderKind, channel_id: u64) -> bool {
+    let fallback = super::adk_session::registered_channel_fallback_name;
+    let inflight = super::inflight::load_inflight_state_read_only_result(provider, channel_id);
+    fallback(ChannelId::new(channel_id), provider).is_none() && matches!(inflight, Ok(None))
 }
 
 /// The keyed gate on the name the channel's one row records under its own key, found
-/// through every registered hash; a failed read or two rows keep the channel.
+/// through every registered hash; no row, a failed read or two rows answer as the lookup.
 async fn nameless_channel_gate(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: u64,
-) -> KeyedTeardown {
-    // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
-    #[cfg(test)]
-    if shared.pg_pool.is_none() {
-        return KeyedTeardown::RowMissing;
-    }
+) -> Result<KeyedTeardown, HostedLookup> {
     let Some(pool) = shared.pg_pool.as_ref() else {
-        return KeyedTeardown::Kept;
+        return Err(HostedLookup::Unknown("no postgres pool".to_string()));
     };
     let hashes = provider_hashes(shared, provider).await;
-    let name = match derive_channel_session_name(pool, &hashes, provider, channel_id).await {
-        Ok(name) => name,
-        Err(HostedLookup::Missing) => return KeyedTeardown::RowMissing,
-        Err(lookup) => {
+    let name = derive_channel_session_name(pool, &hashes, provider, channel_id)
+        .await
+        .inspect_err(|lookup| {
             tracing::warn!(
                 caller = CALLER,
                 channel_id,
                 ?lookup,
                 "no channel name; kept"
             );
-            return KeyedTeardown::Kept;
-        }
-    };
+        })?;
     let lookup = identity_lookup(shared, &hashes, None, provider, channel_id, &name).await;
-    keyed(shared, lookup, provider, channel_id, None, &name, CALLER)
+    Ok(keyed(
+        shared, lookup, provider, channel_id, None, &name, CALLER,
+    ))
 }
 
 /// [`channel_session_deferred`] with the turn's own key read too; a turn with no key

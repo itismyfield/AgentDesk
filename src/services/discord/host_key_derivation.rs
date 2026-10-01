@@ -92,7 +92,8 @@ pub(super) fn merge_lookups(lookups: Vec<HostedLookup>) -> HostedLookup {
 }
 
 /// The tmux name the one `(provider, hash, channel)` row behind `hashes` records under its
-/// own key, for a caller with no channel name. No row, a failed read or two rows answer instead.
+/// own key, for a caller with no channel name. No row, a failed read or two rows answer
+/// instead; no row is Missing, which a nameless caller never reads as a legacy answer.
 pub(super) async fn derive_channel_session_name(
     pool: &PgPool,
     hashes: &[String],

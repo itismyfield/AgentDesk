@@ -288,8 +288,9 @@ impl Nameless {
     }
 }
 
-// With no channel name in memory, the promote gate holds the queue front for whatever the
-// one channel row behind a registered bot keeps; a legacy row, or no row, promotes.
+// With no channel name or no session in memory, the promote gate holds the queue front unless
+// the one channel row behind a registered bot is a legacy row with no host trace. No row
+// promotes only for a channel no turn can key, with nothing in flight.
 #[tokio::test]
 async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -299,6 +300,17 @@ async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
     let provider = ProviderKind::Claude;
     let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
     let channel_of = |n: usize| ChannelId::new(1_479_671_301_387_065_000 + n as u64);
+    // The no-row case's channel carries a registered fallback name its turns key rows by.
+    let config = crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let yaml = format!(
+        "server:\n  port: 8791\nagents:\n  - id: p4c1f\n    name: \"P4c1f\"\n    \
+         provider: claude\n    channels:\n      claude:\n        id: \"{}\"\n        \
+         name: \"p4c1f-fallback\"\n",
+        channel_of(3).get()
+    );
+    std::fs::write(&config, yaml).unwrap();
+    let own = shared.token_hash.clone();
     for (n, case) in Nameless::ALL.into_iter().enumerate() {
         let channel = channel_of(n);
         let name = provider.build_tmux_session_name(&format!("p4c1f-promote-{n}"));
@@ -306,13 +318,39 @@ async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
         let mut core = shared.core.lock().await;
         core.sessions.get_mut(&channel).unwrap().channel_name = None;
         drop(core);
-        let own = shared.token_hash.as_str();
-        case.seed(&pool, own, "p4c1f-second-bot", channel.get(), &name)
+        case.seed(&pool, &own, "p4c1f-second-bot", channel.get(), &name)
             .await;
         let held = gate(&shared, &provider, channel).await;
-        let promoted = matches!(case, Nameless::Legacy | Nameless::Missing);
-        assert_eq!(held, !promoted, "{case:?}");
+        assert_eq!(held, case != Nameless::Legacy, "{case:?}");
     }
+    for (n, case) in [(10, Nameless::Hosted), (11, Nameless::Legacy)] {
+        let name = provider.build_tmux_session_name(&format!("p4c1f-promote-{n}"));
+        case.seed(&pool, &own, "p4c1f-second-bot", channel_of(n).get(), &name)
+            .await;
+        let held = gate(&shared, &provider, channel_of(n)).await;
+        assert_eq!(held, case != Nameless::Legacy, "no session, {case:?}");
+    }
+    let unkeyed = channel_of(12);
+    assert!(!gate(&shared, &provider, unkeyed).await, "unkeyed, idle");
+    let row = inflight::InflightTurnState::new(
+        provider.clone(),
+        unkeyed.get(),
+        None,
+        1,
+        unkeyed.get() + 1,
+        unkeyed.get() + 2,
+        "p4c1f in flight".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state_create_new(&row).expect("inflight row");
+    assert!(
+        gate(&shared, &provider, unkeyed).await,
+        "unkeyed, in flight"
+    );
     pool.close().await;
     let unread = gate(&shared, &provider, channel_of(0)).await;
     assert!(unread, "a failed row read is not a legacy answer");
