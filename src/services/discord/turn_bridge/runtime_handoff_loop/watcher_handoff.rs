@@ -101,7 +101,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     #[cfg(unix)]
     let relay_http_available = shared_owned.serenity_http_or_token_fallback().is_some();
     #[cfg(unix)]
-    let on_standby = !shared_owned.gateway_session_ready();
+    let on_standby = !super::gateway_session_ready(shared_owned);
     #[cfg(unix)]
     let intended_relay_owner = if relay_http_available {
         if on_standby {
@@ -249,7 +249,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     if watcher_claimed {
         #[cfg(unix)]
         {
-            let on_standby = !shared_owned.gateway_session_ready();
+            let on_standby = !super::gateway_session_ready(shared_owned);
             if on_standby {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(

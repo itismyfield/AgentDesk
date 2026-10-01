@@ -86,16 +86,6 @@ impl SharedData {
         }
         None
     }
-
-    /// Whether the bot's gateway session is up; without it this process relays on standby.
-    #[cfg(unix)]
-    pub(in crate::services::discord) fn gateway_session_ready(&self) -> bool {
-        #[cfg(test)]
-        if test_rest::gateway_ready() {
-            return true;
-        }
-        self.http.cached_serenity_ctx.get().is_some()
-    }
 }
 
 /// Lets a test stand a recording Discord REST client in for the runtime caches on its thread.
@@ -107,29 +97,6 @@ pub(in crate::services::discord) mod test_rest {
 
     thread_local! {
         static HTTP: RefCell<Option<Arc<serenity::http::Http>>> = const { RefCell::new(None) };
-        #[cfg(unix)]
-        static GATEWAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-
-    #[cfg(unix)]
-    pub(super) fn gateway_ready() -> bool {
-        GATEWAY.with(std::cell::Cell::get)
-    }
-
-    /// Reports a live gateway session on this thread until dropped.
-    #[cfg(unix)]
-    pub(in crate::services::discord) struct GatewayGuard(bool);
-
-    #[cfg(unix)]
-    pub(in crate::services::discord) fn connect_gateway() -> GatewayGuard {
-        GatewayGuard(GATEWAY.with(|cell| cell.replace(true)))
-    }
-
-    #[cfg(unix)]
-    impl Drop for GatewayGuard {
-        fn drop(&mut self) {
-            GATEWAY.with(|cell| cell.set(self.0));
-        }
     }
 
     pub(super) fn current() -> Option<Arc<serenity::http::Http>> {

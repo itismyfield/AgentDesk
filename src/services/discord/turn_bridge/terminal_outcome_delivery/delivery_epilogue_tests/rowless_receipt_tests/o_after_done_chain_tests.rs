@@ -214,7 +214,8 @@ async fn bridge_turn(o_owns: bool, drains: &[&[Frame]]) -> (BridgeCompletionSign
     let selected = [(DRIVER_CHANNEL_ID, ClaudeTui)];
     let _o = test_override::force_channels(if o_owns { &selected[..] } else { &[] });
     // A connected bot, so the adopted watcher's ownership is what the handoff persists.
-    let _gateway = crate::services::discord::shared_state::test_rest::connect_gateway();
+    let _gateway =
+        crate::services::discord::turn_bridge::runtime_handoff_loop::test_gateway::connect();
     let _rest = crate::services::discord::shared_state::test_rest::recording_mock(
         REST_BASE,
         DRIVER_CHANNEL_ID,

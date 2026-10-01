@@ -104,6 +104,41 @@ pub(super) struct RuntimeHandoffLoopState<'a> {
 mod guarded_save;
 #[cfg(test)]
 mod tests;
+
+/// Whether the bot's gateway session is up; without it this process relays on standby.
+#[cfg(unix)]
+fn gateway_session_ready(shared: &SharedData) -> bool {
+    #[cfg(test)]
+    if test_gateway::connected() {
+        return true;
+    }
+    shared.http.cached_serenity_ctx.get().is_some()
+}
+
+/// Lets a test report a live gateway session on its thread.
+#[cfg(all(test, unix))]
+pub(super) mod test_gateway {
+    thread_local! {
+        static CONNECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub(super) fn connected() -> bool {
+        CONNECTED.with(std::cell::Cell::get)
+    }
+
+    /// Restores the previous state when dropped.
+    pub(in crate::services::discord::turn_bridge) struct Guard(bool);
+
+    pub(in crate::services::discord::turn_bridge) fn connect() -> Guard {
+        Guard(CONNECTED.with(|cell| cell.replace(true)))
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CONNECTED.with(|cell| cell.set(self.0));
+        }
+    }
+}
 use guarded_save::{
     guarded_runtime_atomic_stamp, guarded_runtime_handoff_save,
     tmux_ready_state_dirty_after_guarded_save,
