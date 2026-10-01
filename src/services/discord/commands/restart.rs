@@ -188,6 +188,14 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     let channel_id = ctx.channel_id();
     let action = resolve_restart_action(&ctx.data().shared, channel_id).await;
     let preserve_provider_session = provider_supports_resume(&ctx.data().provider);
+    // Refused before the in-flight turn is cancelled: the session is not a legacy tmux one.
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
+    if let Some(reason) = refusal(shared, provider, channel_id, true, true).await {
+        ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
+            .await?;
+        return Ok(());
+    }
 
     // Warn if a turn is in flight, then cancel it via the same path /stop uses.
     let in_flight = mailbox_has_active_turn(&ctx.data().shared, channel_id).await;

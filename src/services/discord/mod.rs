@@ -1,5 +1,6 @@
 mod abandon_request_store;
 mod adk_session;
+pub(crate) mod admin_host_guard;
 pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;

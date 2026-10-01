@@ -365,6 +365,7 @@ src/
 │   │   │   └── auto_queue_preflight_harness_tests.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
+│   │   ├── agents_host_guard_tests.rs
 │   │   ├── agents_setup.rs
 │   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
@@ -1611,6 +1612,8 @@ src/
 │   │   │   └── lifecycle_decision.rs
 │   │   ├── abandon_request_store.rs
 │   │   ├── adk_session.rs
+│   │   ├── admin_host_guard.rs
+│   │   ├── admin_host_guard_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs

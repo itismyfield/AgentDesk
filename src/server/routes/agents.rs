@@ -238,15 +238,19 @@ pub async fn agent_diag(
         .map(|last| now.signed_duration_since(last).num_seconds().max(0));
 
     let tmux_name = extract_tmux_name(&session.session_key);
-    let tui_prompt_readiness = tui_prompt_readiness_json(
-        session.provider.as_deref(),
-        tmux_name.as_deref(),
-        session.cwd.as_deref(),
-        session.provider_session_id.as_deref(),
-    );
+    // A session the host check refuses is reported as such, never probed by its tmux name.
+    let unsupported = diag_host_unsupported(pool, &session, tmux_name.as_deref()).await;
+    let probed_name = tmux_name.as_deref().filter(|_| unsupported.is_none());
+    let tui_prompt_readiness = unsupported.clone().or_else(|| {
+        tui_prompt_readiness_json(
+            session.provider.as_deref(),
+            probed_name,
+            session.cwd.as_deref(),
+            session.provider_session_id.as_deref(),
+        )
+    });
     let inflight = load_inflight_snapshot(session.provider.as_deref(), tmux_name.as_deref());
-    let recent_output = tmux_name
-        .as_deref()
+    let recent_output = probed_name
         .and_then(capture_recent_tmux_output)
         .or_else(|| inflight.as_ref().and_then(inflight_recent_output));
     let events = collect_turn_tool_events(recent_output.as_deref(), inflight.as_ref());
@@ -319,12 +323,14 @@ pub async fn agent_diag(
     let task_notification_kind = inflight
         .as_ref()
         .and_then(|state| state.task_notification_kind.clone());
-    let tmux_relay_adoption = tmux_relay_adoption_json(
-        session.provider.as_deref(),
-        tmux_name.as_deref(),
-        session.thread_channel_id.as_deref(),
-        watcher_snapshot_json.as_ref(),
-    );
+    let tmux_relay_adoption = unsupported.or_else(|| {
+        tmux_relay_adoption_json(
+            session.provider.as_deref(),
+            probed_name,
+            session.thread_channel_id.as_deref(),
+            watcher_snapshot_json.as_ref(),
+        )
+    });
 
     Ok((
         StatusCode::OK,
@@ -382,6 +388,23 @@ pub async fn agent_diag(
             "task_notification_kind": task_notification_kind,
         })),
     ))
+}
+
+/// The diagnostic shown in place of tmux observations when the session's host is not
+/// legacy tmux; `None` keeps main's tmux readings.
+async fn diag_host_unsupported(
+    pool: &sqlx::PgPool,
+    session: &crate::services::agents::query::AgentDiagSession,
+    tmux_name: Option<&str>,
+) -> Option<Value> {
+    let tmux_name = tmux_name?;
+    let provider = session.provider.as_deref().and_then(ProviderKind::from_str);
+    let channel = session.thread_channel_id.as_deref();
+    let channel = channel.and_then(|raw| raw.trim().parse::<u64>().ok());
+    let key = session.session_key.as_str();
+    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
+    let reason = refusal(pool, provider.as_ref(), channel, key, tmux_name).await?;
+    Some(crate::services::discord::admin_host_guard::unsupported_observation(tmux_name, &reason))
 }
 
 #[cfg(unix)]
@@ -1164,3 +1187,7 @@ pub async fn agent_handoff(
         Err(error) => (error.status(), Json(error.body())),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "agents_host_guard_tests.rs"]
+mod host_guard_tests;

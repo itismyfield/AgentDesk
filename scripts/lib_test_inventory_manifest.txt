@@ -176,6 +176,7 @@ cli::utils::memento_hook_install_tests::install_into_empty_settings_creates_both
 cli::utils::memento_hook_install_tests::install_is_idempotent_and_preserves_operator_entries
 cli::utils::memento_hook_install_tests::install_replaces_stale_memento_command_on_re_run
 cli::utils::memento_hook_install_tests::uninstall_removes_only_memento_entries
+cli::utils::reset_tmux_host_tests::reset_tmux_leaves_another_hosts_session_running
 config::cluster_role::tests::role_aliases_round_trip_to_canonical_configuration
 config::cluster_role::tests::unknown_role_cannot_silently_participate_in_hub_election
 config::cluster_semaphore_config_tests::cluster_intake_routing_parses_defaults_and_yaml_fields
@@ -1016,6 +1017,8 @@ server::rate_limit_sync::tests::pressure_keeps_the_base_cadence_whatever_the_tic
 server::rate_limit_sync::tests::unreadable_runtime_config_resolves_to_no_threshold
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
+server::routes::agents::host_guard_tests::auth_login_routes_refuse_a_target_another_host_claims
+server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents::tmux_relay_adoption_state_tests::absent_and_probe_error_states_are_distinct
 server::routes::agents::tmux_relay_adoption_state_tests::live_tmux_with_matching_watcher_is_adopted
 server::routes::agents::tmux_relay_adoption_state_tests::live_tmux_without_matching_watcher_is_reported_as_not_adopted
@@ -2592,6 +2595,8 @@ services::discord::adk_session::context_usage_tests::context_usage_percent_is_bo
 services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strips_profile_label
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
+services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
+services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::agent_handoff::tests::channel_kind_defaults_to_cc
 services::discord::agent_handoff::tests::channel_kind_rejects_unknown_value
 services::discord::agent_handoff::tests::channel_kind_unset_reports_available_kinds
@@ -2824,6 +2829,7 @@ services::discord::commands::response_wording_tests::owner_error_detail_is_folde
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
 services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
+services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::commands::tui_passthrough::tests::local_only_whitelist_matches_passthrough_command_set
 services::discord::commands::tui_passthrough::tests::model_command_is_observation_only_local
 services::discord::commands::voice::auto_join_tests::disabled_voice_guidance_is_stable
@@ -3516,6 +3522,7 @@ services::discord::idle_recap::tests::recap_supersedes_only_older_channel_cards
 services::discord::idle_recap::tests::recap_unknown_provider_uses_conservative_fallback_when_tokens_are_fresh
 services::discord::idle_recap::tests::recap_uses_provider_registry_window_for_matching_latest_turn
 services::discord::idle_recap::tests::should_post_recap_skips_when_turn_active_posts_when_idle
+services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
 services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
 services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
 services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
@@ -8922,6 +8929,7 @@ services::provider_auth_profile::tests::test_004_unknown_mismatch_missing_home_f
 services::provider_auth_profile::tests::test_007_named_claude_profiles_flag_cswap_conflict
 services::provider_auth_profile::tests::test_008_debug_redacts_env_values
 services::provider_auth_profile::tests::test_012_empty_profile_home_never_copies_global
+services::provider_cli::session_guard::host_guard_tests::another_hosts_launch_reads_unknown_not_ended
 services::provider_error_transcript::tests::ignores_normal_error_discussion
 services::provider_error_transcript::tests::qwen_terminal_error_requires_latest_complete_wrapper_envelope
 services::provider_error_transcript::tests::recognizes_narrow_provider_error_envelopes
@@ -9282,6 +9290,7 @@ services::session_activity::tests::parse_session_key_accepts_namespaced_keys
 services::session_activity::tests::parse_session_key_preserves_legacy_host_alias_keys
 services::session_activity::tests::resolve_db_only_unknown_heartbeat_is_not_working
 services::session_activity::tests::resolve_db_only_uses_heartbeat_not_tmux_for_local_keys
+services::session_activity::tests::resolve_reads_another_hosts_local_session_by_heartbeat
 services::session_backend::auth_profiles::tests::account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch
 services::session_backend::output::tests::process_output_is_bounded_and_keeps_complete_utf8_lines
 services::session_backend::output::tests::process_output_uses_bound_file_and_stops_with_native_session

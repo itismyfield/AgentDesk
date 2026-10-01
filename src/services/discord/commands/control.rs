@@ -220,6 +220,17 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     clear_history: bool,
     recreate_tmux: bool,
 ) -> Option<String> {
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    let refused = refusal(
+        shared,
+        provider,
+        channel_id,
+        reset_provider_state,
+        recreate_tmux,
+    );
+    if refused.await.is_some() {
+        return None;
+    }
     let tmux_name = {
         let mut data = shared.core.lock().await;
         data.sessions.get_mut(&channel_id).and_then(|session| {
@@ -299,6 +310,14 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         }
         return;
     };
+    // A refused reset keeps its pending flags for a later turn on a legacy session.
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    if refusal(shared, provider, channel_id, true, plan.recreate_tmux)
+        .await
+        .is_some()
+    {
+        return;
+    }
 
     let _ = reset_channel_provider_state(
         http,
@@ -410,6 +429,11 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Refused before the clear changes anything: its session is not a legacy tmux one.
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    if let Some(reason) = refusal(shared, provider, channel_id, true, false).await {
+        anyhow::bail!("세션을 초기화하지 못했어요: {reason}");
+    }
     let boundary = match shared.pg_pool.as_ref() {
         Some(pool) => Some(session_transcripts::begin_channel_clear_boundary_tx(pool).await?),
         None => None,

@@ -121,20 +121,23 @@ pub fn evaluate_session_migration_guards(
                 // active sessions are allowed with evidence rather than drained.
                 guard.evidence.insert(
                     "status".to_string(),
-                    if active {
-                        "active_old_channel_session".to_string()
-                    } else {
-                        "old_channel_session_not_active".to_string()
+                    match active {
+                        Some(true) => "active_old_channel_session".to_string(),
+                        Some(false) => "old_channel_session_not_active".to_string(),
+                        None => "old_channel_session_host_unknown".to_string(),
                     },
                 );
-                if active {
-                    guard.active_turn_state = "active_old_channel_session".to_string();
-                    guard.evidence.insert(
-                        "safe_end_skipped_reason".to_string(),
-                        "active_session_auto_allowed".to_string(),
-                    );
-                } else {
-                    guard.safe_end_completed_at = Some(Utc::now());
+                match active {
+                    Some(true) => {
+                        guard.active_turn_state = "active_old_channel_session".to_string();
+                        guard.evidence.insert(
+                            "safe_end_skipped_reason".to_string(),
+                            "active_session_auto_allowed".to_string(),
+                        );
+                    }
+                    Some(false) => guard.safe_end_completed_at = Some(Utc::now()),
+                    // Another host's session is neither active nor ended as far as tmux knows.
+                    None => {}
                 }
             }
 
@@ -177,7 +180,11 @@ fn artifacts_for_agent(artifacts: &[LaunchArtifact], agent_id: &str) -> Vec<Laun
     matches
 }
 
-fn artifact_active(artifact: &LaunchArtifact, evidence: &mut HashMap<String, String>) -> bool {
+/// Whether the launch is still running; `None` when its tmux session is another host's.
+fn artifact_active(
+    artifact: &LaunchArtifact,
+    evidence: &mut HashMap<String, String>,
+) -> Option<bool> {
     let mut active = false;
     if let Some(pid) = artifact.process_id {
         let process_alive = crate::services::process::get_process_list()
@@ -189,11 +196,77 @@ fn artifact_active(artifact: &LaunchArtifact, evidence: &mut HashMap<String, Str
 
     #[cfg(unix)]
     if let Some(tmux_session) = artifact.tmux_session.as_deref() {
+        let refusal = crate::services::discord::admin_host_guard::marker_refusal;
+        if let Some(reason) = refusal(tmux_session) {
+            evidence.insert("tmux_live_pane".to_string(), "host_unsupported".to_string());
+            evidence.insert("tmux_host".to_string(), reason);
+            return active.then_some(true);
+        }
         let tmux_alive =
             crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session);
         evidence.insert("tmux_live_pane".to_string(), tmux_alive.to_string());
         active |= tmux_alive;
     }
 
-    active
+    Some(active)
+}
+
+#[cfg(all(test, unix))]
+mod host_guard_tests {
+    use super::*;
+    use crate::services::provider_cli::io::save_launch_artifact;
+
+    // An old-channel launch whose tmux session another host's marker claims reads as unknown,
+    // never as ended, and is not probed by name; an unmarked one is probed as in main.
+    #[test]
+    fn another_hosts_launch_reads_unknown_not_ended() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+        let launches = tempfile::tempdir().expect("launch root");
+        let (herdr, legacy) = (
+            "AgentDesk-claude-p4c2-guard-h",
+            "AgentDesk-claude-p4c2-guard-t",
+        );
+        let marker = crate::services::tmux_common::session_temp_path(herdr, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, "herdr").unwrap();
+        for (agent, name) in [("agent-h", herdr), ("agent-t", legacy)] {
+            let artifact = LaunchArtifact {
+                provider: "claude".to_string(),
+                agent_id: Some(agent.to_string()),
+                channel_id: None,
+                session_key: Some(name.to_string()),
+                channel: "current".to_string(),
+                cli_path: "/bin/claude".to_string(),
+                canonical_path: "/bin/claude".to_string(),
+                cli_version: "1".to_string(),
+                process_id: None,
+                tmux_session: Some(name.to_string()),
+                launched_at: Utc::now(),
+            };
+            save_launch_artifact(launches.path(), &artifact).expect("launch artifact");
+        }
+        let agents = ["agent-h".to_string(), "agent-t".to_string()];
+        let evaluation =
+            evaluate_session_migration_guards(launches.path(), "claude", &agents, "candidate");
+        let guard = |agent: &str| {
+            let found = evaluation
+                .guards
+                .iter()
+                .find(|guard| guard.agent_id == agent);
+            found.expect("guard per agent").clone()
+        };
+        let (herdr_guard, legacy_guard) = (guard("agent-h"), guard("agent-t"));
+        let status = |guard: &SessionMigrationGuard| guard.evidence["status"].clone();
+        assert_eq!(status(&herdr_guard), "old_channel_session_host_unknown");
+        assert_eq!(
+            herdr_guard.safe_end_completed_at, None,
+            "not reported ended"
+        );
+        assert_eq!(herdr_guard.evidence["tmux_live_pane"], "host_unsupported");
+        assert_eq!(status(&legacy_guard), "old_channel_session_not_active");
+        let calls = tmux.take_calls();
+        assert!(calls.iter().all(|call| !call.contains(herdr)), "{calls:?}");
+        assert!(calls.iter().any(|call| call.contains(legacy)), "{calls:?}");
+    }
 }

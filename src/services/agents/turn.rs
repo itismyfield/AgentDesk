@@ -179,10 +179,11 @@ pub async fn load_agent_turn_status_pg(
     }
 
     let session = find_agent_turn_session_pg(pool, agent_id).await?;
-    Ok(build_agent_turn_status(agent_id, session).await)
+    Ok(build_agent_turn_status(pool, agent_id, session).await)
 }
 
 async fn build_agent_turn_status(
+    pool: &sqlx::PgPool,
     agent_id: &str,
     session: Option<AgentTurnSession>,
 ) -> serde_json::Value {
@@ -234,7 +235,13 @@ async fn build_agent_turn_status(
         .as_ref()
         .and_then(|snapshot| snapshot.started_at.clone())
         .or(session.created_at.clone());
-    let (recent_output, recent_output_source) = if let Some(ref tmux_name) = tmux_name {
+    // A session the host check refuses is never captured by its tmux name.
+    let host_unsupported = match tmux_name.as_deref() {
+        Some(name) => turn_host_refusal(pool, &session, name).await,
+        None => None,
+    };
+    let captured_name = tmux_name.as_ref().filter(|_| host_unsupported.is_none());
+    let (recent_output, recent_output_source) = if let Some(tmux_name) = captured_name {
         let tmux_name = tmux_name.clone();
         match tokio::task::spawn_blocking(move || capture_recent_tmux_output(&tmux_name)).await {
             Ok(Some(output)) => (Some(output), "tmux"),
@@ -255,7 +262,7 @@ async fn build_agent_turn_status(
         .filter(|event| event.kind == "tool")
         .count();
 
-    json!({
+    let mut status = json!({
         "agent_id": agent_id,
         "status": session.effective_status,
         "started_at": started_at,
@@ -272,7 +279,35 @@ async fn build_agent_turn_status(
         "prev_tool_status": inflight.as_ref().and_then(|snapshot| snapshot.prev_tool_status.as_deref()).and_then(sanitize_status_line),
         "tool_events": tool_events,
         "tool_count": tool_count,
-    })
+    });
+    if let Some(reason) = host_unsupported {
+        status["host_unsupported"] = json!(reason);
+    }
+    status
+}
+
+/// Why the working session may not be captured by its tmux name, if it may not.
+async fn turn_host_refusal(
+    pool: &sqlx::PgPool,
+    session: &AgentTurnSession,
+    tmux_name: &str,
+) -> Option<String> {
+    let provider = session.provider.as_deref();
+    let provider = provider.and_then(crate::services::provider::ProviderKind::from_str);
+    let channel = session
+        .runtime_channel_id
+        .as_deref()
+        .or(session.thread_channel_id.as_deref());
+    let channel = channel.and_then(|raw| raw.trim().parse::<u64>().ok());
+    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
+    refusal(
+        pool,
+        provider.as_ref(),
+        channel,
+        &session.session_key,
+        tmux_name,
+    )
+    .await
 }
 
 pub async fn list_agent_turn_history_pg_json(

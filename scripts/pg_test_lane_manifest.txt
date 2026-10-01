@@ -42,6 +42,7 @@ src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
+src/server/routes/agents_host_guard_tests.rs
 src/server/routes/agents_turn_deliver.rs
 src/server/routes/auto_queue_lifecycle_pg_tests.rs
 src/server/routes/campaigns.rs
@@ -84,8 +85,10 @@ src/services/cluster/intake_router_hook/owner_record.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/machine_resources/store.rs
+src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
+src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
@@ -206,6 +209,7 @@ server::issue_specs::issue_specs_pg_tests
 server::message_outbox_retry_tests
 server::multinode_regression::multinode_regression_pg_tests
 server::resource_locks::resource_locks_pg_tests
+server::routes::agents::host_guard_tests
 server::routes::agents_turn_deliver::pg_tests
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
@@ -251,14 +255,17 @@ services::cluster::intake_router_hook::pg_tests
 services::cluster::intake_worker::dispatch_stamp_tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::machine_resources::store::tests
+services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
+services::discord::idle_recap_interaction::host_guard_tests
 services::discord::idle_recap_interaction::tests
 services::discord::idle_relay_drift::tests
 services::discord::inflight::host_recovery_guard::keyed_tests
@@ -704,6 +711,7 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_single_le
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
+server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
@@ -921,10 +929,13 @@ services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_onl
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
+services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
+services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
+services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
@@ -936,6 +947,7 @@ services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_ro
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
+services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg

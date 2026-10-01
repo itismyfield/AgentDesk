@@ -46,6 +46,8 @@ enum RecapCompactOutcome {
         reason: String,
     },
     TargetNotLive(NativeCompactRequest),
+    /// The session's host is not legacy tmux: no claim, probe or injection ran.
+    HostUnsupported(String),
     InjectionFailed {
         request: NativeCompactRequest,
         error: String,
@@ -60,6 +62,7 @@ impl RecapCompactOutcome {
                 | Self::ClaimFailed(_)
                 | Self::InvalidTarget
                 | Self::RoutingUnavailable { .. }
+                | Self::HostUnsupported(_)
         )
     }
 }
@@ -381,8 +384,16 @@ async fn handle_idle_recap_compact_interaction(
     let pool_for_pre_inject_fence = pool.clone();
     let outcome = run_native_compact_once(
         target,
-        &crate::services::platform::hostname_short(),
-        &crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
+        (
+            &crate::services::platform::hostname_short(),
+            &crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
+        ),
+        |tmux_session_name: &str| {
+            let refusal = super::admin_host_guard::session_key_refusal;
+            let (pool, name) = (pool.clone(), tmux_session_name.to_string());
+            let (provider, key) = (data.provider.clone(), target_session_key_for_log.clone());
+            async move { refusal(&pool, Some(&provider), Some(channel_id), &key, &name).await }
+        },
         move || async move {
             claim_recap_compact_pointer(&pool_for_claim, &target_for_claim, message_id, channel_id)
                 .await
@@ -448,6 +459,10 @@ async fn handle_idle_recap_compact_interaction(
             );
             "맥락 압축 요청을 현재 노드에서 처리할 수 없습니다. 원래 세션 노드에서 다시 시도하세요."
         }
+        RecapCompactOutcome::HostUnsupported(reason) => {
+            tracing::warn!(message_id, %reason, "idle_recap compact: host unsupported");
+            "맥락 압축 요청 거절: 이 세션의 호스트에서는 맥락 압축을 지원하지 않습니다."
+        }
         RecapCompactOutcome::TargetNotLive(request) => {
             tracing::warn!(
                 message_id,
@@ -475,6 +490,8 @@ async fn handle_idle_recap_compact_interaction(
 }
 
 async fn run_native_compact_once<
+    HostRefusal,
+    HostRefusalFut,
     Claim,
     ClaimFut,
     PreInjectFence,
@@ -485,14 +502,16 @@ async fn run_native_compact_once<
     InjectFut,
 >(
     target: RecapClearTarget,
-    local_hostname: &str,
-    local_instance_id: &str,
+    (local_hostname, local_instance_id): (&str, &str),
+    host_refusal: HostRefusal,
     claim: Claim,
     pre_inject_fence: PreInjectFence,
     is_live: IsLive,
     inject: Inject,
 ) -> RecapCompactOutcome
 where
+    HostRefusal: FnOnce(&str) -> HostRefusalFut,
+    HostRefusalFut: std::future::Future<Output = Option<String>>,
     Claim: FnOnce() -> ClaimFut,
     ClaimFut: std::future::Future<Output = Result<bool, String>>,
     PreInjectFence: FnOnce() -> PreInjectFenceFut,
@@ -526,6 +545,10 @@ where
         };
     }
 
+    // Compact is unsupported on any other host: refused before the claim consumes the card.
+    if let Some(reason) = host_refusal(&identity.tmux_name).await {
+        return RecapCompactOutcome::HostUnsupported(reason);
+    }
     match claim().await {
         Ok(true) => {}
         Ok(false) => return RecapCompactOutcome::AlreadyClaimed,
@@ -853,6 +876,12 @@ mod tests {
         assert!(!is_idle_recap_custom_id("foreign:action:1"));
     }
 
+    const LOCAL_NODE: (&str, &str) = ("mac-mini", "mac-mini-release");
+
+    fn no_host_refusal(_: &str) -> std::future::Ready<Option<String>> {
+        std::future::ready(None)
+    }
+
     fn recap_target(session_key: &str) -> RecapClearTarget {
         RecapClearTarget {
             session_key: session_key.to_string(),
@@ -871,8 +900,8 @@ mod tests {
         let observed = injected.clone();
         let outcome = run_native_compact_once(
             recap_target("claude/token/mac-mini:old-bound-session"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             || async { Ok(true) },
             || async { Ok(true) },
             |target| std::future::ready(target == "old-bound-session"),
@@ -897,8 +926,8 @@ mod tests {
         let observed = injection_calls.clone();
         let outcome = run_native_compact_once(
             recap_target("claude/token/mac-mini:old-bound-session"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             || async { Ok(true) },
             || async { Ok(true) },
             |target| std::future::ready(target == "new-current-session"),
@@ -936,8 +965,8 @@ mod tests {
             let injections = injections.clone();
             run_native_compact_once(
                 recap_target("mac-mini:claimed-session"),
-                "mac-mini",
-                "mac-mini-release",
+                LOCAL_NODE,
+                no_host_refusal,
                 move || async move {
                     let in_flight = claims_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                     max_claims_in_flight.fetch_max(in_flight, Ordering::SeqCst);
@@ -987,8 +1016,8 @@ mod tests {
         let injections = std::sync::Arc::new(AtomicUsize::new(0));
         let outcome = run_native_compact_once(
             recap_target("claude/token/mac-book:foo"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             {
                 let claim_calls = claim_calls.clone();
                 let pointer_consumed = pointer_consumed.clone();
@@ -1041,8 +1070,8 @@ mod tests {
             let observed_claims = claim_calls.clone();
             let outcome = run_native_compact_once(
                 target,
-                "mac-mini",
-                "mac-mini-release",
+                LOCAL_NODE,
+                no_host_refusal,
                 move || {
                     observed_claims.fetch_add(1, Ordering::SeqCst);
                     async { Ok(true) }
@@ -1070,8 +1099,8 @@ mod tests {
         let observed = claim_calls.clone();
         let first = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             move || {
                 observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async { Ok(true) }
@@ -1085,8 +1114,8 @@ mod tests {
         let observed_retries = retried_injections.clone();
         let retry = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             || async { Ok(false) },
             || async { Ok(true) },
             |_| async { true },
@@ -1116,8 +1145,8 @@ mod tests {
         let observed = injection_calls.clone();
         let outcome = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             || async { Err("database unavailable".to_string()) },
             || async { Ok(true) },
             |_| async { true },
@@ -1143,8 +1172,8 @@ mod tests {
         let injections = std::sync::Arc::new(AtomicUsize::new(0));
         let outcome = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             || async { Ok(true) },
             || async { Ok(false) },
             {
@@ -1275,8 +1304,8 @@ mod tests {
         let injections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let outcome = run_native_compact_once(
             target.clone(),
-            "mac-mini",
-            "mac-mini-release",
+            LOCAL_NODE,
+            no_host_refusal,
             {
                 let pool = pool.clone();
                 let target = target.clone();
@@ -1372,5 +1401,81 @@ mod tests {
             prompt_sent_ephemeral("/compact"),
             "다음 프롬프트를 보냈습니다:\n> /compact"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod host_guard_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::services::discord::host_defer_gate::tests::{Case, postgres};
+    use crate::services::discord::host_teardown_gate::test_support::Stored;
+
+    // Compact on a session whose host is not a found legacy row is refused before the claim
+    // consumes the recap card; a legacy row claims and injects as in main.
+    #[tokio::test]
+    async fn compact_is_refused_before_the_claim_on_a_non_legacy_session_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool) = postgres().await;
+        let provider = ProviderKind::Claude;
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let channel = 1_479_671_302_387_064_000 + n as u64;
+            let name = provider.build_tmux_session_name(&format!("p4c2-compact-{n}"));
+            let key = format!("claude/p4c2/mac-mini:{name}");
+            case.seed(&pool, &key, &name, channel).await;
+            let (claims, injects) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (claimed, injected) = (claims.clone(), injects.clone());
+            let target = RecapClearTarget {
+                session_key: key.clone(),
+                provider: "claude".to_string(),
+                owner_instance_id: Some("mac-mini-release".to_string()),
+                turn_generation: 7,
+                channel_matches: true,
+                provider_matches: true,
+                recap_current: true,
+            };
+            let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
+            let outcome = run_native_compact_once(
+                target,
+                ("mac-mini", "mac-mini-release"),
+                |tmux_name: &str| {
+                    let (pool, provider) = (&pool, &provider);
+                    let (key, name) = (key.clone(), tmux_name.to_string());
+                    async move { refusal(pool, Some(provider), Some(channel), &key, &name).await }
+                },
+                move || {
+                    claimed.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(true) }
+                },
+                || async { Ok(true) },
+                |_| async { true },
+                move |_| {
+                    injected.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(()) }
+                },
+            )
+            .await;
+            let counts = (
+                claims.load(Ordering::SeqCst),
+                injects.load(Ordering::SeqCst),
+            );
+            if case == Case::Stored(Stored::Legacy) {
+                assert!(
+                    matches!(outcome, RecapCompactOutcome::Started(_)),
+                    "{outcome:?}"
+                );
+                assert_eq!(counts, (1, 1), "{case:?}");
+            } else {
+                assert!(
+                    matches!(outcome, RecapCompactOutcome::HostUnsupported(_)),
+                    "{case:?}: {outcome:?}"
+                );
+                assert!(outcome.preserves_recap_card(), "{case:?}: the card stays");
+                assert_eq!(counts, (0, 0), "{case:?}: no claim or injection");
+            }
+        }
+        db.drop().await;
     }
 }
