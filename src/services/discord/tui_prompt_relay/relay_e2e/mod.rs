@@ -99,6 +99,9 @@ pub(super) enum ProviderStub {
     StaleResumeThenSuccess,
 }
 
+/// One line per provider launch the stand-in served, `--version` probes aside.
+const PROVIDER_STARTS_FILE: &str = "claude-stub-starts";
+
 fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = root.join("claude-stub");
@@ -109,8 +112,11 @@ fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
              echo 'No conversation found with session ID' >&2; exit 1;; esac\n"
         }
     };
+    let starts = root.join(PROVIDER_STARTS_FILE);
+    let starts = starts.display();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.0.0 (stub)'; exit 0; fi\ncat >/dev/null\n{stale}\
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.0.0 (stub)'; exit 0; fi\n\
+         echo start >> '{starts}'\ncat >/dev/null\n{stale}\
          echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{SESSION_UUID}\"}}'\n\
          echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"{SESSION_UUID}\"}}'\n"
     );
@@ -364,6 +370,12 @@ impl RelayE2eHarness {
 
     pub(super) fn subscribe_completions(&self) -> Receiver<TurnCompletionEvent> {
         subscribe_turn_completion_events(&self.shared)
+    }
+
+    /// Provider launches the `claude` stand-in has served so far.
+    pub(super) fn provider_starts(&self) -> usize {
+        let starts = self.root.path().join(PROVIDER_STARTS_FILE);
+        std::fs::read_to_string(starts).map_or(0, |starts| starts.lines().count())
     }
 
     /// Placeholder POSTs seen by the mock: the harness' dispatch witness.

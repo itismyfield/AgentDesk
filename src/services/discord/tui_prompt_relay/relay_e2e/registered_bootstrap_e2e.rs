@@ -3,9 +3,12 @@
 
 use std::time::Duration;
 
+use tokio::sync::broadcast::Receiver;
+
 use super::{CHANNEL_ID, RelayE2eHarness};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::host_defer_gate::tests::{Nameless, postgres};
+use crate::services::discord::turn_completion_events::TurnCompletionEvent;
 use crate::services::discord::{ProviderKind, inflight, kickoff_idle_queue_channel, router};
 
 const FALLBACK: &str = "p4c1f-registered";
@@ -93,6 +96,7 @@ async fn seed(trace: Trace, pool: &sqlx::PgPool, own: &str) {
 struct Run {
     started: bool,
     queued: usize,
+    completions: Receiver<TurnCompletionEvent>,
     db: TestPostgresDb,
     harness: RelayE2eHarness,
 }
@@ -124,42 +128,61 @@ async fn first_catch_up_input(trace: Trace) -> Run {
     seed(trace, &pool, &harness.shared.token_hash).await;
     let id = recent_message_id();
     harness.seed_channel_history(&[(id, "first input after the bot was away", false)]);
+    let completions = harness.subscribe_completions();
     harness.run_catch_up().await;
-    let shared = &harness.shared;
     assert!(
-        shared.core.lock().await.sessions.is_empty(),
+        harness.shared.core.lock().await.sessions.is_empty(),
         "no channel session"
     );
-    let deps = router::IntakeDeps {
-        http: &harness.ctx.http,
-        cache: Some(&harness.ctx.cache),
-        ctx_for_chained_dispatch: Some(&harness.ctx),
-        shared,
-        token: &harness.data.token,
-    };
-    let channel = harness.channel_id;
-    let outcome = kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel).await;
+    let started = kick_off(&harness).await;
     let queued = harness.mailbox().await.intervention_queue.len();
     Run {
-        started: outcome.started,
+        started,
         queued,
+        completions,
         db,
         harness,
     }
 }
 
+/// The production idle kickoff for the channel; whether it started a turn.
+async fn kick_off(harness: &RelayE2eHarness) -> bool {
+    let deps = router::IntakeDeps {
+        http: &harness.ctx.http,
+        cache: Some(&harness.ctx.cache),
+        ctx_for_chained_dispatch: Some(&harness.ctx),
+        shared: &harness.shared,
+        token: &harness.data.token,
+    };
+    let channel = harness.channel_id;
+    let outcome = kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel).await;
+    outcome.started
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_registered_new_channel_starts_its_first_catch_up_input_once_pg() {
-    let run = first_catch_up_input(Trace::Nothing).await;
+    let mut run = first_catch_up_input(Trace::Nothing).await;
     assert!(
         run.started,
         "the registered name with no row and no trace starts the turn"
     );
     assert_eq!(run.queued, 0, "the input left the queue");
+    let completed = tokio::time::timeout(Duration::from_secs(10), run.completions.recv()).await;
+    completed
+        .expect("the first turn completes")
+        .expect("completion bus open");
     let harness = &run.harness;
-    let posted = harness.wait_for_placeholder_posts(1, Duration::from_secs(5));
-    assert!(posted.await, "the started turn posts its placeholder");
-    assert_eq!(harness.placeholder_posts(), 1, "one turn, started once");
+    // The same history caught up again must not start the answered input a second time.
+    harness.run_catch_up().await;
+    assert!(!kick_off(harness).await, "a second kickoff starts nothing");
+    let mailbox = harness.mailbox().await;
+    assert!(mailbox.intervention_queue.is_empty(), "nothing re-queued");
+    assert_eq!(
+        mailbox.pending_user_dispatch, None,
+        "no dispatch left pending"
+    );
+    assert_eq!(harness.provider_starts(), 1, "the provider started once");
+    assert_eq!(harness.placeholder_posts(), 1, "one turn, one placeholder");
     run.close().await;
 }
 
