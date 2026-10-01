@@ -285,24 +285,29 @@ async fn soft_terminal_read_ending_in_a_split_scalar_baseline() {
     assert_eq!(seen, after, "re-acquire shape, T2");
 }
 
+const DONE: Option<&str> = Some("turn completed");
+const OTHER: Option<&str> = Some("successor-nonce");
+
+type Removal = (
+    Option<&'static str>,
+    Option<&'static str>,
+    Vec<String>,
+    bool,
+);
+
 /// P1-2: pane death while a bound turn streams, after its row was replaced by one with
-/// the same identity axes and another (or no) nonce. Pins which clear removes the successor.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pane_death_clear_against_a_same_identity_successor_baseline() {
-    if !isolated("pane_death_clear_against_a_same_identity_successor_baseline") {
-        return;
-    }
+/// the same identity axes and another (or no) nonce. Records which clear removes the successor.
+async fn pane_death_removals(
+    cases: [(u64, Option<&'static str>, Option<&'static str>); 2],
+    pool: Option<sqlx::PgPool>,
+) -> Vec<Removal> {
     const STREAMING: &str = "ADK6284 bound turn streaming when the pane dies";
-    const DONE: Option<&str> = Some("turn completed");
-    const OTHER: Option<&str> = Some("successor-nonce");
     let mut removals = Vec::new();
-    for (case, exit_reason, successor) in [
-        (8, None, OTHER),
-        (9, None, None),
-        (10, DONE, OTHER),
-        (11, DONE, None),
-    ] {
-        let (mut h, f) = delivered_t0(case).await;
+    for (case, exit_reason, successor) in cases {
+        let seed = turn("T0", T0);
+        let mut h = Harness::on(case, &seed, pool.clone()).await;
+        let f = seed.len() as u64;
+        h.commit(0, f);
         let row = h.row_at(f);
         h.spawn(f);
         h.append(format!("{}{}", user("T1"), said(STREAMING)).as_bytes());
@@ -315,22 +320,50 @@ async fn pane_death_clear_against_a_same_identity_successor_baseline() {
             crate::services::tmux_diagnostics::record_tmux_exit_reason(&h.tmux, reason);
         }
         h.pane("dead");
-        h.until("watcher exit", Harness::watcher_finished).await;
+        h.exited("watcher exit").await;
         let removed = h.events("inflight state row removal");
         let removed_by: Vec<_> = removed.iter().filter_map(|l| field(l, "reason")).collect();
         removals.push((exit_reason, successor, removed_by, h.row().is_some()));
     }
-    // An abnormal death clears through the restart handoff without any identity; a normal
-    // exit reaches the pane-dead clear, which matches identity axes and passes no nonce.
+    removals
+}
+
+// An abnormal death clears through the restart handoff without any identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_death_clear_against_a_same_identity_successor_baseline() {
+    if !isolated("pane_death_clear_against_a_same_identity_successor_baseline") {
+        return;
+    }
+    let removals = pane_death_removals([(8, None, OTHER), (9, None, None)], None).await;
     let unconditional = || vec!["clear_inflight_state".to_owned()];
-    let identity_only = || vec!["clear_inflight_state_if_matches_identity".to_owned()];
     assert_eq!(
         removals,
         vec![
             (None, OTHER, unconditional(), false),
             (None, None, unconditional(), false),
+        ]
+    );
+}
+
+// A normal exit reaches the pane-dead clear past the keyed host gate, which reads the
+// sessions row; it matches identity axes and passes no nonce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_death_clear_after_a_normal_exit_baseline_pg() {
+    if !isolated("pane_death_clear_after_a_normal_exit_baseline_pg") {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let cases = [(10, DONE, OTHER), (11, DONE, None)];
+    let removals = pane_death_removals(cases, Some(pool.clone())).await;
+    let identity_only = || vec!["clear_inflight_state_if_matches_identity".to_owned()];
+    assert_eq!(
+        removals,
+        vec![
             (DONE, OTHER, identity_only(), false),
             (DONE, None, identity_only(), false),
         ]
     );
+    pool.close().await;
+    db.drop().await;
 }

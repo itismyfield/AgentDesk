@@ -808,7 +808,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             Some(tmux_liveness_decision(
                                 cancel.load(Ordering::Relaxed),
                                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                                probe_tmux_session_liveness(&tmux_session_name).await,
+                                host_gate::tmux_alive(&tmux_session_name, channel_id).await,
                             )),
                         ) {
                             WatcherOutputPollDecision::DrainOutput => {}

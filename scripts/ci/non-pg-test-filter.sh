@@ -137,6 +137,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_delivery_custody::pg_tests
   --skip services::discord::terminal_ui_obligation::tests
+  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
+  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   --skip services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
@@ -502,6 +504,15 @@ NON_PG_FILTER_REPLAY=(
   services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
   services::discord::terminal_ui_obligation::tests::terminal_ui_reconcile_action_prefers_complete_then_deadline_then_wait
   services::discord::terminal_ui_obligation::tests::terminal_ui_snapshot_from_inflight_preserves_missing_claude_tui_output_flag
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::collector_death_keeps_a_turn_bound_to_another_host
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rewound_read_below_a_live_row_baseline
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_after_another_relay_committed_part_or_all_baseline
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_handed_over_through_custody_baseline
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
