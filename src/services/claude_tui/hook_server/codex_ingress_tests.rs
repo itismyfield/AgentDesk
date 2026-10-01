@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::TestEnvVarGuard as Guard;
-use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
 use crate::services::codex_tui::{rollout_index, session};
 use crate::services::tui_prompt_dedupe as dedupe;
 use dedupe::binding_context::{
@@ -666,4 +666,146 @@ fn codex_restore_after_a_crash_between_source_and_marker_completes_the_hook_sour
         "the restored source must keep accepting its hooks"
     );
     assert_eq!(h.events(), events, "retry must reuse the durable Source");
+}
+
+fn hooks_switch(on: bool) -> Guard {
+    Guard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+        if on { "1" } else { "0" }.as_ref(),
+    )
+}
+
+/// A live pane whose capture fails, so a rollout-reported ready composer is taken as ready.
+fn live_tmux(root: &Path) -> Guard {
+    use std::os::unix::fs::PermissionsExt;
+    let stub = "#!/bin/bash\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    capture-pane) exit 1 ;;\n    list-panes) echo 0; exit 0 ;;\n  esac\ndone\nexit 0\n";
+    fs::write(root.join("tmux"), stub).unwrap();
+    fs::set_permissions(root.join("tmux"), fs::Permissions::from_mode(0o700)).unwrap();
+    Guard::set_path_after_shared_test_env_lock("PATH", root)
+}
+
+/// Runs the production post-tail handoff of `tail` with a ready composer and returns what the bridge got.
+fn post_tail(h: &Harness, tail: &dedupe::TuiRuntimeBinding) -> Vec<StreamMessage> {
+    crate::services::codex_tui::input::record_rollout_composer_ready(&h.context.tmux_session);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    crate::services::codex::emit_codex_tui_post_tail_handoff(
+        crate::services::codex_tui::rollout_tail::CodexTuiTailResult {
+            read_result: crate::services::provider::ReadOutputResult::Completed { offset: 19 },
+            rollout_path: PathBuf::from(&tail.output_path),
+            final_offset: 19,
+            session_id: tail.session_id.clone(),
+        },
+        sender,
+        None,
+        &h.context.tmux_session,
+    )
+    .unwrap();
+    receiver.try_iter().collect()
+}
+
+fn handed_off(messages: &[StreamMessage], tail: &dedupe::TuiRuntimeBinding) -> bool {
+    messages.iter().any(|message| {
+        matches!(
+            message,
+            StreamMessage::RuntimeReady {
+                handoff: RuntimeHandoff::CodexTui { rollout_path, .. },
+            } if *rollout_path == tail.output_path
+        )
+    })
+}
+
+fn corrupt_binding_log(h: &Harness) {
+    let log = h
+        .root
+        .path()
+        .join(binding_events::BINDING_EVENTS_DIR)
+        .join("8745.log");
+    let mut text = fs::read_to_string(&log).unwrap();
+    text.push_str("{not json\n");
+    fs::write(&log, text).unwrap();
+}
+
+fn marker_path(h: &Harness) -> PathBuf {
+    session::read_codex_tui_rollout_marker(&h.context.tmux_session)
+        .unwrap()
+        .rollout_path
+}
+
+#[test]
+fn codex_tail_with_hooks_on_is_held_when_the_hook_history_is_unreadable() {
+    let h = Harness::new();
+    let _tmux = live_tmux(h.root.path());
+    let _hooks = hooks_switch(true);
+    let old = h.binding();
+    write(&h.path, &h.header);
+    assert_eq!(h.hook().0, 202);
+    let hooked = h.binding();
+    let hooked_marker = marker_path(&h);
+    assert_ne!(hooked.output_path, old.output_path);
+    corrupt_binding_log(&h);
+    let messages = post_tail(&h, &old);
+    assert_eq!(
+        (h.binding(), marker_path(&h)),
+        (hooked, hooked_marker),
+        "[T1:held] an unreadable history must not let the old tail reclaim the hook source"
+    );
+    assert!(
+        !handed_off(&messages, &old),
+        "[T1:held] the held tail must not reach the bridge"
+    );
+}
+
+#[test]
+fn codex_runtime_ready_is_withheld_when_a_hook_replaces_the_source_during_the_readiness_wait() {
+    let h = std::rc::Rc::new(Harness::new());
+    let _tmux = live_tmux(h.root.path());
+    let _hooks = hooks_switch(true);
+    let old = h.binding();
+    write(&h.path, &h.header);
+    assert!(
+        handed_off(&post_tail(&h, &old), &old),
+        "[T2:control] a current source is handed off once the composer is ready"
+    );
+    let hooked = h.clone();
+    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(|seam| {
+        *seam = Some(Box::new(move || assert_eq!(hooked.hook().0, 202)));
+    });
+    let messages = post_tail(&h, &old);
+    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(Option::take);
+    let current = h.path.canonicalize().unwrap().display().to_string();
+    assert_eq!(h.binding().output_path, current, "the hook moved the pane");
+    assert!(
+        !handed_off(&messages, &old),
+        "[T2:withheld] a source a hook replaced during the wait must not be handed off"
+    );
+}
+
+#[test]
+fn codex_post_tail_with_hooks_off_installs_and_hands_off_as_before() {
+    let h = std::rc::Rc::new(Harness::new());
+    let _tmux = live_tmux(h.root.path());
+    let _hooks = hooks_switch(false);
+    let old = h.binding();
+    write(&h.path, &h.header);
+    let hooked = h.clone();
+    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(|seam| {
+        *seam = Some(Box::new(move || assert_eq!(hooked.hook().0, 202)));
+    });
+    let messages = post_tail(&h, &old);
+    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(Option::take);
+    assert!(
+        handed_off(&messages, &old),
+        "[T3:off] with hooks off the handoff is not checked again after the wait"
+    );
+    corrupt_binding_log(&h);
+    let messages = post_tail(&h, &old);
+    assert_eq!(
+        marker_path(&h),
+        PathBuf::from(&old.output_path),
+        "[T3:off] with hooks off an unreadable history still installs the tail"
+    );
+    assert!(
+        handed_off(&messages, &old),
+        "[T3:off] with hooks off the installed tail is handed off"
+    );
 }

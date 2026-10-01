@@ -170,7 +170,7 @@ fn install_binding(
         if launched && dedupe::codex_tail_source_retired(authority, &binding) {
             tracing::info!(
                 tmux_session_name,
-                "Codex tail source already retired by a hook"
+                "Codex tail source retired by a hook or held on an unreadable hook history"
             );
             return false;
         }
