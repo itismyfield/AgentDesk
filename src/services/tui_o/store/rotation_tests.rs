@@ -68,3 +68,42 @@ fn a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool() 
         }
     );
 }
+
+/// Successors as a binary from before the hop fields reads them: by source identity only.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PlainRotation {
+    links: BTreeMap<String, serde_json::Value>,
+    successors: BTreeMap<String, SourceId>,
+}
+
+#[test]
+fn rotation_fields_are_invisible_to_a_reader_of_the_plain_source_map() {
+    let source = SourceId {
+        session_id: "s2".into(),
+        path: "/t/b.jsonl".into(),
+        dev: u64::MAX,
+        ino: u64::MAX - 1,
+    };
+    let mut rotation = Rotation::default();
+    let next = Successor {
+        source: source.clone(),
+        seq: Some(7),
+        tmux_session: Some("tmux".into()),
+        drain_to: Some(u64::MAX),
+        proof: Some(9),
+    };
+    rotation.successors.insert("a".into(), next);
+    let bytes = serde_json::to_vec(&rotation).unwrap();
+    let plain: PlainRotation = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(plain.successors["a"], source, "[T6:plain]");
+    let read: Rotation = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(read, rotation, "[T6:round_trip]");
+    // An older binary writing the file back drops the hop fields; the record reads as legacy.
+    let rewritten = serde_json::to_vec(&plain).unwrap();
+    let reread: Rotation = serde_json::from_slice(&rewritten).unwrap();
+    assert_eq!(
+        reread.successors["a"],
+        Successor::from(source),
+        "[T6:rewritten]"
+    );
+}

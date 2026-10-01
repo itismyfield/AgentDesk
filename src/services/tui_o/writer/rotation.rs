@@ -15,6 +15,7 @@ use super::binding::{BindingCause, BindingEvent, BindingEvents, BindingRecord, B
 use super::deliver::ChannelWriter;
 use super::pieces::{Derived, UnitDeriver};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
+use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::capture::{SourceCapture, file_identity};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify, native_time};
 use crate::services::tui_o::shadow::{
@@ -22,10 +23,10 @@ use crate::services::tui_o::shadow::{
     SourceId, UnitKind,
 };
 use crate::services::tui_o::store::StoreError;
-use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink};
+use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
 use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
 
-/// An old source whose length holds this long after its successor's first record is retired.
+/// A proven old source whose length holds this long after its successor's first record is retired.
 pub const RETIRE_QUIET: Duration = Duration::from_secs(10);
 /// An old source still growing this long after its rotation alarms; both stay read.
 pub const OLD_GROWTH_ALARM: Duration = Duration::from_secs(600);
@@ -107,6 +108,8 @@ pub struct Sources<B> {
     pending_alarmed: Option<u64>,
     /// Set while the binding log cannot be read, so the outage alarms once.
     log_alarmed: bool,
+    /// Hop seq and pane of successor records written without them, as the binding log names them.
+    legacy_hops: HashMap<String, (u64, String)>,
 }
 
 fn halted(context: &'static str) -> impl Fn(StoreError) -> WriterAlarm {
@@ -164,13 +167,72 @@ fn predecessors(rotation: &Rotation, source: &SourceId) -> usize {
         let Some(prev) = rotation
             .successors
             .iter()
-            .find(|(_, next)| source_key(next) == key)
+            .find(|(_, next)| source_key(&next.source) == key)
         else {
             break;
         };
         (key, count) = (prev.0.clone(), count + 1);
     }
     count
+}
+
+/// The session a provider record moves its pane to, when the provider sends that record only on
+/// leaving the session the pane ran; no other record shows an old source stopped being written.
+fn proving_session(event: &BindingEvent) -> Option<&str> {
+    let BindingRecord::Bound {
+        new,
+        cause,
+        evidence,
+        ..
+    } = &event.record
+    else {
+        return None;
+    };
+    if evidence.hook_event != HookEventKind::SessionStart.as_str() {
+        return None;
+    }
+    let leaves = match event.provider {
+        ShadowProvider::Claude => {
+            matches!(
+                cause,
+                BindingCause::Clear | BindingCause::Resume | BindingCause::Fork
+            )
+        }
+        ShadowProvider::Codex => *cause == BindingCause::Clear,
+    };
+    leaves.then(|| match new {
+        BindingTarget::Source(source) => source.session_id.as_str(),
+        BindingTarget::Pending {
+            payload_session_id, ..
+        } => payload_session_id.as_str(),
+    })
+}
+
+/// The old and new source of a hop O applied for `event`: its own source, or the one the
+/// `Resolved` of its Pending names.
+fn hop<'a>(
+    event: &'a BindingEvent,
+    events: &'a [BindingEvent],
+) -> Option<(&'a SourceId, &'a SourceId)> {
+    let BindingRecord::Bound {
+        old: Some(old),
+        new,
+        ..
+    } = &event.record
+    else {
+        return None;
+    };
+    let new = match new {
+        BindingTarget::Source(source) => source,
+        BindingTarget::Pending { .. } => events.iter().find_map(|later| match &later.record {
+            BindingRecord::Resolved {
+                resolves_seq,
+                source,
+            } if *resolves_seq == event.seq => Some(source),
+            _ => None,
+        })?,
+    };
+    (old != new).then_some((old, new))
 }
 
 fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
@@ -213,6 +275,7 @@ impl<B: BindingEvents> Sources<B> {
             readers_alarmed: false,
             pending_alarmed: None,
             log_alarmed: false,
+            legacy_hops: HashMap::new(),
         }
     }
 
@@ -273,11 +336,43 @@ impl<B: BindingEvents> Sources<B> {
                     .is_empty();
             reader.rotated_at = self.rotation.successors.contains_key(&key).then_some(now);
             reader.watch_until = cursor.retired.then_some(now + RETIRED_WATCH);
-            // The rotation-time length is not kept, so the old source's length now stands in.
-            reader.drain_to = reader.rotated_at.and(reader.backlog_end());
+            reader.drain_to = match self.rotation.successors.get(&key) {
+                // A record written before the rotation length was kept holds to the length now.
+                Some(next) if next.seq.is_none() => reader.backlog_end(),
+                Some(next) => next.drain_to.filter(|end| cursor.captured_through < *end),
+                None => None,
+            };
             self.readers.push(reader);
         }
+        self.restore_legacy_hops();
         self.flush(writer)
+    }
+
+    /// Takes each unproven record's missing pane and seq from the last applied hop of its old
+    /// source; a record that hop does not match stays unproven.
+    fn restore_legacy_hops(&mut self) {
+        let legacy = |next: &Successor| next.seq.is_none() && next.proof.is_none();
+        let Some(checkpoint) = self.checkpoint else {
+            return;
+        };
+        if !self.rotation.successors.values().any(legacy) {
+            return;
+        }
+        let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
+            return;
+        };
+        let applied = &events[..events.partition_point(|e| e.seq <= checkpoint)];
+        for (key, next) in self.rotation.successors.iter().filter(|(_, n)| legacy(n)) {
+            let last = applied.iter().rev().find_map(|e| {
+                hop(e, &events)
+                    .filter(|(old, _)| source_key(old) == *key)
+                    .map(|h| (e, h))
+            });
+            if let Some((event, _)) = last.filter(|(_, (_, new))| **new == next.source) {
+                let pane = (event.seq, event.tmux_session.clone());
+                self.legacy_hops.insert(key.clone(), pane);
+            }
+        }
     }
 
     /// Applies binding events past the checkpoint in seq order, stopping at an unresolved bind that
@@ -356,6 +451,7 @@ impl<B: BindingEvents> Sources<B> {
                     let (old, parent) = (old.as_ref(), parent_hint.as_ref());
                     self.bind(writer, event, old, new, *cause, parent)?;
                 }
+                self.prove(writer, event)?;
             }
             let moved = writer.store().set_binding_checkpoint(event.seq);
             moved.map_err(halted("binding checkpoint"))?;
@@ -403,6 +499,38 @@ impl<B: BindingEvents> Sources<B> {
         seeded.map_err(halted("binding checkpoint"))?;
         self.checkpoint = Some(seq);
         Ok(Some(seq))
+    }
+
+    /// Marks each unproven hop of the record's pane that it shows was left, durably before the
+    /// checkpoint passes the record.
+    fn prove<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        event: &BindingEvent,
+    ) -> Result<(), WriterAlarm> {
+        let Some(session) = proving_session(event) else {
+            return Ok(());
+        };
+        let mut proved = false;
+        for (key, next) in &mut self.rotation.successors {
+            let made = match (next.seq, next.tmux_session.as_deref()) {
+                (Some(seq), Some(tmux)) => Some((seq, tmux)),
+                _ => (self.legacy_hops.get(key)).map(|(seq, tmux)| (*seq, tmux.as_str())),
+            };
+            let old = self.readers.iter().find(|r| source_key(&r.source) == *key);
+            let left = old.is_some_and(|old| old.source.session_id != session);
+            let ours =
+                made.is_some_and(|(seq, tmux)| seq <= event.seq && tmux == event.tmux_session);
+            if next.proof.is_none() && ours && left {
+                next.proof = Some(event.seq);
+                proved = true;
+            }
+        }
+        if proved {
+            let written = writer.store().write_rotation(&self.rotation);
+            written.map_err(halted("rotation"))?;
+        }
+        Ok(())
     }
 
     fn wait_resolution<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
@@ -459,13 +587,24 @@ impl<B: BindingEvents> Sources<B> {
             if writer.store().cursor(old).is_none() {
                 return Err(halt("a bind names an old source this channel never read"));
             }
-            self.rotation
-                .successors
-                .insert(source_key(old), new.clone());
-            if let Some(reader) = self.readers.iter_mut().find(|r| r.source == *old) {
+            let old_key = source_key(old);
+            let reader = self.readers.iter_mut().find(|r| r.source == *old);
+            // A record applied again after a crash keeps what its first application measured.
+            let kept = (self.rotation.successors.get(&old_key))
+                .filter(|next| next.seq == Some(event.seq) && next.source == new)
+                .cloned();
+            let next = kept.unwrap_or_else(|| Successor {
+                source: new.clone(),
+                seq: Some(event.seq),
+                tmux_session: Some(event.tmux_session.clone()),
+                drain_to: reader.as_ref().and_then(|reader| reader.backlog_end()),
+                proof: None,
+            });
+            if let Some(reader) = reader {
                 (reader.rotated_at, reader.growth_alarmed) = (Some(Instant::now()), false);
-                reader.drain_to = reader.backlog_end();
+                reader.drain_to = next.drain_to;
             }
+            self.rotation.successors.insert(old_key, next);
         }
         let written = writer.store().write_rotation(&self.rotation);
         written.map_err(halted("rotation"))?;
@@ -585,7 +724,8 @@ impl<B: BindingEvents> Sources<B> {
         self.readers.iter().any(|reader| {
             reader.drain_to.is_some()
                 && reader.reading()
-                && self.rotation.successors.get(&source_key(&reader.source)) == Some(source)
+                && (self.rotation.successors.get(&source_key(&reader.source)))
+                    .is_some_and(|next| next.source == *source)
         })
     }
 
@@ -597,7 +737,8 @@ impl<B: BindingEvents> Sources<B> {
         }
         let holds = |old: &Reader| {
             let successor = self.rotation.successors.get(&source_key(&old.source));
-            let successor = successor.and_then(|s| self.readers.iter().find(|r| r.source == *s));
+            let successor =
+                successor.and_then(|s| self.readers.iter().find(|r| r.source == s.source));
             successor.is_some_and(Reader::reading)
         };
         let stuck = |old: &&Reader| old.pending.is_some() && old.drain_to.is_some() && holds(old);
@@ -704,7 +845,8 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Retires quiet drained old sources, alarms on growth and reader count, and watches retired ones.
+    /// Retires quiet drained old sources whose hop is proven, alarms on growth and reader count, and
+    /// watches retired ones.
     pub fn tend<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
@@ -738,7 +880,9 @@ impl<B: BindingEvents> Sources<B> {
             let Some(successor) = successor else {
                 continue;
             };
-            let successor_captured = captured.contains(&source_key(successor));
+            let successor_captured = captured.contains(&source_key(&successor.source));
+            // Only a provider record shows the old source stopped; a drained quiet one stays read.
+            let proven = successor.proof.is_some();
             let drained = through == len && reader.pending.is_none();
             let grew = reader.quiet.is_some_and(|(held, _)| held != len);
             let late = reader
@@ -754,7 +898,7 @@ impl<B: BindingEvents> Sources<B> {
                 _ => now,
             };
             reader.quiet = Some((len, since));
-            if successor_captured && drained && now - since >= RETIRE_QUIET {
+            if proven && successor_captured && drained && now - since >= RETIRE_QUIET {
                 let retired = writer.store().set_retired(&reader.source, true);
                 retired.map_err(halted("retire"))?;
                 (reader.watch_until, reader.quiet) = (Some(now + RETIRED_WATCH), None);

@@ -334,7 +334,7 @@ async fn a_crash_after_each_durable_write_of_a_rotation_resumes_without_loss_or_
         rotation
             .links
             .insert(source_key(&b), link(&b, 2, None, owed));
-        rotation.successors.insert(source_key(&a), b.clone());
+        rotation.successors.insert(source_key(&a), b.clone().into());
         store.write_rotation(&rotation).unwrap();
         if crash >= Cursor {
             store.attach_source(&b).unwrap();
@@ -379,7 +379,7 @@ async fn a_restart_replays_the_replaced_source_before_the_source_bound_back() {
     rotation
         .links
         .insert(source_key(&b), link(&b, 2, None, owed));
-    rotation.successors.insert(source_key(&b), a.clone());
+    rotation.successors.insert(source_key(&b), a.clone().into());
     store.write_rotation(&rotation).unwrap();
     store.attach_source(&b).unwrap();
     store.set_binding_checkpoint(3).unwrap();
@@ -416,7 +416,7 @@ async fn a_restart_holds_the_new_source_behind_an_old_backlog_even_mid_read() {
     rotation
         .links
         .insert(source_key(&b), link(&b, 2, None, owed));
-    rotation.successors.insert(source_key(&a), b.clone());
+    rotation.successors.insert(source_key(&a), b.clone().into());
     store.write_rotation(&rotation).unwrap();
     store.attach_source(&b).unwrap();
     store.set_binding_checkpoint(2).unwrap();
@@ -456,7 +456,7 @@ async fn a_crash_before_a_decided_boundary_is_written_decides_it_again_from_the_
     let mut rotation = Rotation::default();
     let undecided = link(&b, 2, Some(&a), Boundary::Undecided);
     rotation.links.insert(source_key(&b), undecided);
-    rotation.successors.insert(source_key(&a), b.clone());
+    rotation.successors.insert(source_key(&a), b.clone().into());
     store.write_rotation(&rotation).unwrap();
     store.attach_source(&b).unwrap();
     store.set_binding_checkpoint(2).unwrap();

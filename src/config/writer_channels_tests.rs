@@ -18,6 +18,8 @@ fn load_fixture(
              {writer}\n"
         ),
     )?;
+    // Loading resolves paths against AGENTDESK_ROOT_DIR, which parallel tests set under this lock.
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     load_from_path(&path)
 }
 

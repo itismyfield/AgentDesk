@@ -1386,6 +1386,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
+│   │   │   │   ├── o_tool_first_panel_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
@@ -1460,7 +1461,9 @@ src/
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
-│   │   │   │   └── o_adoption_tests.rs
+│   │   │   │   ├── o_adoption_tests.rs
+│   │   │   │   ├── o_panel.rs
+│   │   │   │   └── rollover_guard.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs
@@ -2060,6 +2063,7 @@ src/
 │   │   │   ├── host_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs

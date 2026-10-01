@@ -328,6 +328,24 @@ async fn discard_pending_current_message_candidate<G: TurnGateway + ?Sized>(
     .await;
 }
 
+/// Binds a just-created candidate now, discarding it when the store fails; true only when the
+/// candidate became the turn's current message.
+pub(super) async fn bind_pending_current_message_candidate<G: TurnGateway + ?Sized>(
+    context: &mut StreamTickCandidateSaveContext<'_, G>,
+    caller: &'static str,
+) -> bool {
+    let Some(candidate) = *context.pending_current_message_candidate else {
+        return false;
+    };
+    let mode = StreamTickSaveMode::MergeConcurrentOwner;
+    let outcome =
+        persist_stream_tick_state_with_candidate_cleanup_mode(context, caller, mode).await;
+    if outcome == GuardedSaveOutcome::IoError {
+        discard_pending_current_message_candidate(context).await;
+    }
+    outcome == GuardedSaveOutcome::Saved && context.inflight_state.current_msg_id == candidate.get()
+}
+
 /// A stream-loop break may happen before the next periodic tick. Give a pending
 /// response candidate one final guarded bind; if the store is unavailable,
 /// discard the unbound Discord message instead of returning an orphan.

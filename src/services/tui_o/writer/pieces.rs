@@ -7,6 +7,9 @@ use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
 use crate::services::tui_o::shadow::unit_plan::{UnitPlan, plan};
 use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, UnitKind};
 
+/// Ledger reason for a tool call left to Legacy's live panel.
+pub const TOOL_CALL_PANEL: &str = "tool_call_panel";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PieceWork {
     pub unit_key: UnitKey,
@@ -124,6 +127,11 @@ impl UnitDeriver {
                 let reason = format!("sealed unit {} reappeared changed", unit_key.native_key);
                 return vec![Derived::Blocked { reason }];
             }
+        }
+        // A tool call shows only as the live panel's last-tool line, never as its own message.
+        if unit_key.kind == UnitKind::Tool {
+            let reason = TOOL_CALL_PANEL.into();
+            return vec![Derived::Excluded { unit_key, reason }];
         }
         match (planned, content) {
             (UnitPlan::Pieces(_), UnitContent::Payload(text)) => {

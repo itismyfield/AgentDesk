@@ -108,6 +108,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::SchemaBlocked { .. } => "schema_blocked",
         WriterAlarm::LedgerViolation { .. } => "ledger_violation",
         WriterAlarm::Halted { .. } => "halted",
+        WriterAlarm::Released { .. } => "released",
         WriterAlarm::ContentTransform { .. } => "content_transform",
         WriterAlarm::Ambiguous { .. } => "ambiguous",
         WriterAlarm::Unresolved { .. } => "unresolved",
@@ -276,6 +277,22 @@ mod tests {
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert!(sent.iter().all(|(channel, _)| *channel == ALERT));
         assert!(sent[0].1.contains("halted on channel 42"), "{sent:?}");
+    }
+
+    #[test]
+    fn a_released_channel_has_its_own_reason_apart_from_halted() {
+        let (router, recorder, health) = router(Some(ALERT));
+        let released = WriterAlarm::Released {
+            detail: "adoption held: no source is bound".into(),
+        };
+        router.raise_at(FAILING, &released, Instant::now());
+        router.raise_at(FAILING, &released, Instant::now());
+        assert_eq!(health.current_at(Instant::now()), ["tui_o:released:42"]);
+        let sent = sent(&recorder);
+        assert!(
+            matches!(sent.as_slice(), [(ALERT, text)] if text.contains("released on channel 42")),
+            "{sent:?}"
+        );
     }
 
     #[test]

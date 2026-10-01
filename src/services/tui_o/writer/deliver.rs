@@ -1,9 +1,10 @@
 //! One channel's delivery. For each piece: take the delivery lease, then under the ownership gate
 //! fsync `Prepared` and start the POST, record the result, and settle unclear ones.
 
+use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use super::pieces::{Derived, PieceWork};
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::ChannelStore;
-use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceOutcome};
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -29,6 +30,53 @@ pub enum Step {
     NoGateway,
     /// The channel stays stopped until an operator acts; its alarm is raised.
     Stopped,
+}
+
+/// Highest message id O posted per channel in this process; Legacy keeps its live panel below it.
+static LAST_POSTED: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(Mutex::default);
+
+pub fn last_posted(channel: u64) -> Option<u64> {
+    let posted = LAST_POSTED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    posted.get(&channel).copied()
+}
+
+#[cfg(test)]
+pub(crate) fn note_posted_for_tests(channel: u64, msg_id: u64) {
+    note_posted(channel, msg_id);
+}
+
+/// What a process restart does to the in-memory position; the guard keeps other restarts out.
+#[cfg(test)]
+pub(crate) fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
+    static RESTARTS: Mutex<()> = Mutex::new(());
+    let restart = RESTARTS.lock().unwrap_or_else(|poison| poison.into_inner());
+    LAST_POSTED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&channel);
+    restart
+}
+
+/// A restarted process learns O's newest post from the recovered ledger, not a later post.
+pub fn seed_last_posted(channel: u64, ledger: &LedgerState) {
+    let posted =
+        (0..ledger.next_serial()).filter_map(|serial| match ledger.piece(serial)?.outcome {
+            Some(PieceOutcome::Posted(msg_id)) => Some(msg_id),
+            _ => None,
+        });
+    if let Some(msg_id) = posted.max() {
+        note_posted(channel, msg_id);
+    }
+}
+
+fn note_posted(channel: u64, msg_id: u64) {
+    let mut posted = LAST_POSTED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let last = posted.entry(channel).or_default();
+    *last = (*last).max(msg_id);
 }
 
 type Request = Pin<Box<dyn Future<Output = PostOutcome> + Send>>;
@@ -92,6 +140,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             paused,
         };
         let ledger = writer.store.ledger();
+        seed_last_posted(channel, ledger);
         let refused =
             (0..ledger.next_serial()).find_map(|serial| match ledger.piece(serial)?.outcome {
                 Some(PieceOutcome::Rejected(status)) => Some(status),
@@ -132,6 +181,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     /// Appends one ledger entry; a store error or a violation the entry exposed stops the channel.
     fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
+        let posted = match entry {
+            LedgerEntry::Posted { msg_id, .. } => Some(msg_id),
+            _ => None,
+        };
         if let Err(error) = self.store.append_ledger(entry) {
             return Err(self.stop(WriterAlarm::Halted {
                 detail: format!("{error:?}"),
@@ -139,7 +192,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         }
         match self.store.ledger().violation().map(str::to_string) {
             Some(detail) => Err(self.stop(WriterAlarm::LedgerViolation { detail })),
-            None => Ok(()),
+            None => {
+                if let Some(msg_id) = posted {
+                    note_posted(self.channel, msg_id);
+                }
+                Ok(())
+            }
         }
     }
 

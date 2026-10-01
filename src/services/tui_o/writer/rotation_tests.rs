@@ -37,7 +37,8 @@ fn retired(harness: &Harness, source: &SourceId) -> bool {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_old_tail_is_posted_before_the_new_source_and_the_old_source_retires_once_quiet() {
+async fn an_old_tail_is_posted_before_the_new_source_and_a_proven_old_source_retires_once_drained_and_quiet()
+ {
     let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
     append(&a_path, &row("m1", "first"));
@@ -500,5 +501,7 @@ async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_c
     halt(stop, task).await;
 }
 
+#[path = "retire_tests.rs"]
+mod retire_tests;
 #[path = "switch_tests.rs"]
 mod switch_tests;

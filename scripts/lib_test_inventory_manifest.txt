@@ -7153,6 +7153,7 @@ services::discord::tui_prompt_relay::tests::genuine_tui_direct_typed_prompt_stil
 services::discord::tui_prompt_relay::tests::genuinely_gone_session_is_still_dead_orphaned_after_retries
 services::discord::tui_prompt_relay::tests::hard_probe_failure_preserves_dead_looking_session
 services::discord::tui_prompt_relay::tests::idle_bridge_stands_down_for_every_resolved_non_bridge_synthetic_claim
+services::discord::tui_prompt_relay::tests::idle_prefix_opens_on_a_tool_call_only_on_o_channels
 services::discord::tui_prompt_relay::tests::idle_response_tail_discord_send_failure_does_not_advance_runtime_binding_offset
 services::discord::tui_prompt_relay::tests::idle_stream_commit_offset_only_on_successful_delivery
 services::discord::tui_prompt_relay::tests::idle_stream_content_classifier_ignores_pure_control_and_empty_done
@@ -7176,6 +7177,7 @@ services::discord::tui_prompt_relay::tests::local_slash_control_note_allows_same
 services::discord::tui_prompt_relay::tests::local_slash_control_note_emission_is_wired_through_prepare_gate
 services::discord::tui_prompt_relay::tests::local_slash_control_note_path_dedupes_and_seals_dropped_half
 services::discord::tui_prompt_relay::tests::notification_strip_drops_bare_control_bytes_but_keeps_whitespace
+services::discord::tui_prompt_relay::tests::o_tool_first_panel_tests::o_channel_panel_shows_a_first_tool_before_the_status_interval
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_clears_recorded_lease_on_drop
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_does_not_clobber_newer_lease
@@ -7656,6 +7658,10 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
+services::discord::turn_bridge::stream_tick::o_adoption_tests::a_failed_old_panel_delete_is_retried_until_the_panel_is_gone
+services::discord::turn_bridge::stream_tick::o_adoption_tests::a_last_tick_tool_goes_into_a_panel_below_o_posts
+services::discord::turn_bridge::stream_tick::o_adoption_tests::legacy_channel_placeholder_is_never_moved
+services::discord::turn_bridge::stream_tick::o_adoption_tests::o_channel_panel_shows_the_last_tool_and_moves_below_o_posts
 services::discord::turn_bridge::stream_tick::o_adoption_tests::only_a_tick_that_streams_a_body_ends_a_pending_adoption
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::absent_anchor_becomes_real_only_after_guarded_bind
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::competing_same_owner_anchor_aborts_stale_bridge_candidate
@@ -7744,6 +7750,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::
 services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_admitted_latch_does_not_narrow_the_exclusion_lease_5264
 services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_terminal_range_end_is_latch_only_5264
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::a_terminal_that_loses_its_delivery_lease_leaves_a_pending_adoption
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::a_watcher_owned_turn_end_deletes_the_o_panel_only_on_o_channels
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191
@@ -9654,6 +9661,7 @@ services::tui_input::durability_tests::supported::reopen_refuses_handle_when_ado
 services::tui_input::durability_tests::supported::replay_stops_at_first_bad_record_and_discards_valid_suffix
 services::tui_input::durability_tests::supported::snapshot_replacement_survives_every_cut_and_resumes_append
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
+services::tui_o::alarm::tests::a_released_channel_has_its_own_reason_apart_from_halted
 services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
@@ -9743,6 +9751,7 @@ services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_
 services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published_file_and_its_crash_alias_untouched
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
 services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
+services::tui_o::store::rotation::tests::rotation_fields_are_invisible_to_a_reader_of_the_plain_source_map
 services::tui_o::store::spool::tests::a_crash_between_spool_fsync_and_cursor_move_is_recovered_by_recomputation
 services::tui_o::store::spool::tests::a_first_batch_may_skip_only_the_torn_first_line
 services::tui_o::store::spool::tests::a_gc_entry_outside_the_logged_chain_deletes_nothing_and_halts
@@ -9777,6 +9786,8 @@ services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_healt
 services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
+services::tui_o::writer::tests::a_restarted_writer_recovers_the_newest_post_from_its_ledger
+services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
@@ -9787,6 +9798,8 @@ services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_rec
 services::tui_o::writer::tests::actor::host_start::a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
+services::tui_o::writer::tests::actor::host_start::a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down
+services::tui_o::writer::tests::actor::host_start::a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logged_clear_retires_it
 services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
@@ -9806,11 +9819,18 @@ services::tui_o::writer::tests::actor::rotation::a_long_growing_old_source_and_a
 services::tui_o::writer::tests::actor::rotation::a_resume_whose_first_new_record_predates_the_bind_posts_nothing_until_resolved
 services::tui_o::writer::tests::actor::rotation::a_source_bound_back_waits_for_the_tail_of_the_source_it_replaces
 services::tui_o::writer::tests::actor::rotation::an_old_backlog_longer_than_one_read_is_posted_before_the_new_source
-services::tui_o::writer::tests::actor::rotation::an_old_tail_is_posted_before_the_new_source_and_the_old_source_retires_once_quiet
+services::tui_o::writer::tests::actor::rotation::an_old_tail_is_posted_before_the_new_source_and_a_proven_old_source_retires_once_drained_and_quiet
 services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_channel_intact
 services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refuses_still_goes_before_the_new_source
 services::tui_o::writer::tests::actor::rotation::an_unknown_bind_holds_back_even_a_fresh_source
 services::tui_o::writer::tests::actor::rotation::each_old_source_retires_only_after_its_own_successor_records_something
+services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
+services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
+services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured
+services::tui_o::writer::tests::actor::rotation::retire_tests::a_rotation_applied_again_after_a_crash_keeps_its_measured_length_and_proof
+services::tui_o::writer::tests::actor::rotation::retire_tests::a_successor_record_without_rotation_fields_holds_to_the_current_length_and_waits_for_evidence
+services::tui_o::writer::tests::actor::rotation::retire_tests::a_tail_without_its_newline_keeps_a_proven_old_source_read_until_it_ends
+services::tui_o::writer::tests::actor::rotation::retire_tests::an_old_source_is_not_retired_without_provider_evidence_however_long_it_stays_quiet
 services::tui_o::writer::tests::actor::rotation::switch_tests::a_corrupt_binding_log_alarms_through_the_port_and_capture_waits_for_a_clean_read
 services::tui_o::writer::tests::actor::rotation::switch_tests::a_crash_after_each_durable_write_of_a_rotation_resumes_without_loss_or_reorder
 services::tui_o::writer::tests::actor::rotation::switch_tests::a_crash_before_a_decided_boundary_is_written_decides_it_again_from_the_spool

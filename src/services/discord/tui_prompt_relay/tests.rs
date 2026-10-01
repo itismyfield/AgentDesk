@@ -3543,6 +3543,39 @@ fn idle_stream_strips_leading_chrome_from_first_text_only() {
     ));
 }
 
+/// On O's channel the first tool call opens the idle stream while the first text is still to
+/// come, so the bridge and its live panel start then; elsewhere a tool call alone opens nothing.
+#[cfg(unix)]
+#[test]
+fn idle_prefix_opens_on_a_tool_call_only_on_o_channels() {
+    let tool = || StreamMessage::ToolUse {
+        name: "Bash".to_string(),
+        input: r#"{"command":"ls"}"#.to_string(),
+        tool_use_id: Some("toolu_1".to_string()),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(tool()).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (prefix, opened, _rx) = super::claude_idle_bridge::buffer_idle_prefix(rx, true);
+        let _ = done_tx.send((prefix, opened));
+    });
+    let (prefix, opened) = done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a tool call opens the stream while the first text is withheld");
+    assert!(opened && matches!(prefix.as_slice(), [StreamMessage::ToolUse { .. }]));
+    drop(tx);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(tool()).unwrap();
+    drop(tx);
+    let (prefix, opened, _rx) = super::claude_idle_bridge::buffer_idle_prefix(rx, false);
+    assert!(
+        !opened && prefix.len() == 1,
+        "a Legacy channel keeps waiting for content"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
@@ -6343,6 +6376,9 @@ mod scenario_census_e2e;
 #[cfg(all(test, unix))]
 mod synthetic_bridge_handoff_pg_tests;
 
+#[cfg(unix)]
+#[path = "tests/o_tool_first_panel_tests.rs"]
+mod o_tool_first_panel_tests;
 #[cfg(unix)]
 mod synthetic_terminal_ordering_tests;
 

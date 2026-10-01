@@ -16,7 +16,7 @@ use super::binding::BindingEvents;
 use super::deliver::ChannelWriter;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::tui_o::channel_policy::Candidate;
+use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::ShadowProvider;
@@ -186,7 +186,23 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
 /// A channel not adopted before its first `init` stays Legacy's for this process.
 fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
-    hold(alarms, channel, &format!("adoption held: {detail}"));
+    let detail = format!("adoption held: {detail}");
+    stop(candidate, alarms, channel, &detail);
+}
+
+/// Names a stop by the adoption it left: a released channel's output is Legacy's, so only an
+/// owned or undecided channel is held.
+fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
+    if candidate.peek() != Adoption::Released {
+        return hold(alarms, channel, detail);
+    }
+    tracing::warn!(
+        channel,
+        detail,
+        "[tui_o] writer host left the channel to Legacy"
+    );
+    let detail = format!("writer host: {detail}");
+    alarms.raise(channel, WriterAlarm::Released { detail });
 }
 
 async fn host_channel<I: HostIo>(
@@ -253,7 +269,8 @@ async fn host_channel<I: HostIo>(
                 }
             };
             if let Err(detail) = created {
-                return hold(&alarms, channel, &format!("first activation: {detail}"));
+                let detail = format!("first activation: {detail}");
+                return stop(&candidate, &alarms, channel, &detail);
             }
             match recover(&runtime_root, channel) {
                 Ok(Recovered::Store(store)) => store,
@@ -265,6 +282,8 @@ async fn host_channel<I: HostIo>(
         }
         Err(detail) => return hold(&alarms, channel, &detail),
     };
+    // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
+    super::deliver::seed_last_posted(channel, store.ledger());
     let port = io.port().await;
     let writer = ChannelWriter::new(store, Arc::clone(&gate), port, io.lease(), alarms);
     let (stop_tx, stop) = watch::channel(false);

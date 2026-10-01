@@ -88,8 +88,9 @@ channel lost its TUI binding. Restore the binding; do not delete the store to ge
   `<runtime_root>/o_store/<channel>/init` exists and lists the current transcript with
   `delivery_start` at Legacy's cursor: 0 for an empty transcript, its length at the restart after
   a warm-up.
-- The release log has no `[tui_o] writer host held the channel` line for the channel, and
-  `/api/health` has no `tui_o:halted:<channel>` reason. `tui_o:paused_no_gateway:<channel>` is
+- The release log has no `[tui_o] writer host held the channel` or `left the channel to Legacy`
+  line for the channel, and `/api/health` has no `tui_o:halted:<channel>` or
+  `tui_o:released:<channel>` reason. `tui_o:paused_no_gateway:<channel>` is
   expected only until the gateway lease is owned.
 - The next restart logs no new init line: the stored init is recovered, never written again.
 
@@ -98,14 +99,15 @@ lost are read again once it is owned. With clustering it uses `cluster.instance_
 the cluster bootstrap published another id; without clustering it waits up to 10 seconds for the
 published id and stops with `this node's instance id is not published yet` otherwise.
 
-When activation stops, the log line and `tui_o:halted:<channel>` name the reason, for example
+When activation stops, the log line and the health reason name why, for example
 `first activation: 1 open intake rows`, `adoption held: <reason>` (§3.1) or, for Codex,
 `first activation: source ... already holds N bytes`.
-A stop before any store write releases the channel: Legacy keeps its output for this process. A
-stop after a store write holds it: output stays withheld and Legacy does not take it over. Do not
-delete store files or edit the list to retry. Leave the channel in the list. A Claude channel
-released before any store write is judged again at the next restart (§3.1); otherwise start again
-with another new channel.
+A stop before any store write releases the channel as `tui_o:released:<channel>`: Legacy keeps
+its output for this process and the deploy health gate does not block on it. A stop after a store
+write holds it as `tui_o:halted:<channel>`: output stays withheld, Legacy does not take it over,
+and deploys block. Do not delete store files or edit the list to retry. Leave the channel in the
+list. A Claude channel released before any store write is judged again at the next restart (§3.1);
+otherwise start again with another new channel.
 
 A held store is never initialized again: an era channel whose `init` is missing or damaged, an
 `init` without `o_era`, or a channel directory without `init` all hold.

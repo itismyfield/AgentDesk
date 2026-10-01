@@ -733,9 +733,10 @@ _health_json_deploy_nonblocking_ere() {
   # deploy (2026-09-07 measurement). A queue depth is backlog, so it only stops
   # counting for a deploy verdict. Standby tokens join the set only once the
   # body proves the node is a standby, and a TUI gateway reason only for a
-  # provider whose role the body verifies. Everything else, including an
-  # unrecognised reason, blocks. No comma: the fallback splits on one.
-  local ere='^(relay_verdict_[^,]+'
+  # provider whose role the body verifies. A TUI O channel released to Legacy
+  # before any store write keeps its output there, so it never blocks. Everything
+  # else, including an unrecognised reason, blocks. No comma: the fallback splits on one.
+  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
