@@ -45,15 +45,20 @@ impl SessionActivityResolver {
         let live_cache = &mut self.tmux_live_cache;
         let ready_cache = &mut self.tmux_ready_cache;
         let mut probe_tmux_live = |tmux_name: &str| {
+            // Another host's session is never probed by name; its heartbeat decides instead.
+            let refusal = crate::services::discord::admin_host_guard::marker_refusal;
+            if refusal(tmux_name).is_some() {
+                return None;
+            }
             if let Some(cached) = live_cache.get(tmux_name) {
-                return *cached;
+                return Some(*cached);
             }
             #[cfg(unix)]
             let live = tmux_session_has_live_pane(tmux_name);
             #[cfg(not(unix))]
             let live = false; // tmux not available on Windows
             live_cache.insert(tmux_name.to_string(), live);
-            live
+            Some(live)
         };
         let mut probe_tmux_ready = |tmux_name: &str| {
             if let Some(cached) = ready_cache.get(tmux_name) {
@@ -134,7 +139,7 @@ impl SessionActivityResolver {
         // sole liveness signal. The closures are unreachable but required by the
         // shared signature.
         let no_local_aliases: HashSet<String> = HashSet::new();
-        let mut never_live = |_tmux_name: &str| false;
+        let mut never_live = |_tmux_name: &str| Some(false);
         let mut never_ready = |_tmux_name: &str| false;
         resolve_effective_state_with(
             &no_local_aliases,
@@ -188,7 +193,7 @@ fn resolve_effective_state_with<LiveProbe, ReadyProbe>(
     probe_tmux_ready: &mut ReadyProbe,
 ) -> EffectiveSessionState
 where
-    LiveProbe: FnMut(&str) -> bool,
+    LiveProbe: FnMut(&str) -> Option<bool>,
     ReadyProbe: FnMut(&str) -> bool,
 {
     let status = normalize_session_status(raw_status, 0);
@@ -204,9 +209,10 @@ where
     let is_live = if has_work_signal {
         match session_key.and_then(parse_session_key) {
             Some((host, tmux_name)) if local_host_aliases.contains(&host) => {
-                let tmux_live = probe_tmux_live(&tmux_name);
-                let tmux_ready = tmux_live && probe_tmux_ready(&tmux_name);
-                tmux_live && !tmux_ready
+                match probe_tmux_live(&tmux_name) {
+                    Some(tmux_live) => tmux_live && !probe_tmux_ready(&tmux_name),
+                    None => heartbeat_is_recent(last_heartbeat, now),
+                }
             }
             Some(_) => heartbeat_is_recent(last_heartbeat, now),
             None => heartbeat_is_recent(last_heartbeat, now),
@@ -332,6 +338,36 @@ mod tests {
         );
         assert!(!state.is_working);
         assert!(resolver.tmux_live_cache.is_empty());
+    }
+
+    // A local session whose host marker is not tmux is read by its heartbeat like a remote
+    // one, never by a tmux probe of its name; an unmarked one is probed as in main.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_reads_another_hosts_local_session_by_heartbeat() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+        let (herdr, legacy) = ("AgentDesk-claude-p4c2-herdr", "AgentDesk-claude-p4c2-tmux");
+        let marker = crate::services::tmux_common::session_temp_path(herdr, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, "herdr").unwrap();
+        let mut resolver = SessionActivityResolver::new();
+        resolver.local_host_aliases = Some(HashSet::from(["localbox".to_string()]));
+        let mut resolve = |name: &str, heartbeat: i64| {
+            let key = format!("localbox:{name}");
+            let state =
+                resolver.resolve(Some(&key), Some("turn_active"), None, Some(&ts(heartbeat)));
+            state.is_working
+        };
+
+        assert!(resolve(herdr, 5), "a recent heartbeat keeps it working");
+        assert!(!resolve(herdr, 900), "a stale heartbeat reads not working");
+        assert_eq!(tmux.take_calls(), Vec::<String>::new(), "no tmux probe");
+        assert!(
+            !resolve(legacy, 5),
+            "main reads the absent tmux pane as not live"
+        );
+        assert!(!tmux.take_calls().is_empty(), "main probes tmux");
     }
 
     #[test]

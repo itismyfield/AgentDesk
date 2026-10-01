@@ -166,6 +166,24 @@ pub async fn tmux_output(
         }
     };
 
+    // Refused before any capture by name: another host's output is not this tmux pane.
+    let provider_kind = provider.as_deref().and_then(ProviderKind::from_str);
+    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
+    if let Some(reason) =
+        refusal(pool, provider_kind.as_ref(), None, &session_key, &tmux_name).await
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": reason,
+                "unsupported": "session_host_not_tmux",
+                "session_id": id,
+                "session_key": session_key,
+                "tmux_name": tmux_name,
+            })),
+        );
+    }
+
     let captured_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)

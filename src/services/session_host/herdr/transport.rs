@@ -140,9 +140,10 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
 
     /// Mutations never open a connection: a replaced server is not written to.
     /// The generation is read under the same lock as the exchange; 0 if none ran.
-    fn attempt(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
+    /// With `expected`, only that connection may carry the call.
+    fn attempt(&self, call: &HerdrCall, expected: Option<u64>) -> (HerdrOutcome, u64) {
         let mut slot = self.slot();
-        if slot.is_none() && call.request.is_read_only() {
+        if slot.is_none() && expected.is_none() && call.request.is_read_only() {
             match self.open() {
                 Ok((connection, _)) => *slot = Some(connection),
                 Err(error) => {
@@ -155,6 +156,10 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
             return (Err(error), 0);
         };
         let generation = connection.generation;
+        if let Some(expected) = expected.filter(|expected| *expected != generation) {
+            let error = format!("connection {generation} is not the verified {expected}");
+            return (Err(HerdrTransportError::NotSent(error)), generation);
+        }
         let outcome = connection.exchange(&self.framing, call, self.config.max_frame_bytes);
         if !matches!(&outcome, Ok(reply) if reply.id == call.id) {
             *slot = None;
@@ -166,10 +171,16 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
 impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
     fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
         if !call.request.is_read_only() {
-            return self.attempt(call);
+            return self.attempt(call, None);
         }
         let deadline = Instant::now() + self.config.read_deadline;
-        observe::retry_read(deadline, self.config.retry_backoff, || self.attempt(call))
+        observe::retry_read(deadline, self.config.retry_backoff, || {
+            self.attempt(call, None)
+        })
+    }
+
+    fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64) {
+        self.attempt(call, Some(generation))
     }
 }
 

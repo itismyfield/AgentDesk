@@ -60,6 +60,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::message_outbox_retry_tests
   --skip server::multinode_regression::multinode_regression_pg_tests
   --skip server::resource_locks::resource_locks_pg_tests
+  --skip server::routes::agents::host_guard_tests
   --skip server::routes::agents_turn_deliver::pg_tests
   --skip server::routes::auto_queue_lifecycle_pg_tests::tests
   --skip server::routes::auto_queue_preflight_harness_tests
@@ -105,14 +106,18 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::dispatch_stamp_tests
   --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::machine_resources::store::tests
+  --skip services::discord::admin_host_guard::tests
   --skip services::discord::catch_up::too_old_notice::tests
   --skip services::discord::commands::control::clear_persist_failure_tests
+  --skip services::discord::commands::restart::host_guard_tests
+  --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
+  --skip services::discord::idle_recap_interaction::host_guard_tests
   --skip services::discord::idle_recap_interaction::tests
   --skip services::discord::idle_relay_drift::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
@@ -126,6 +131,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::tests
+  --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
@@ -279,6 +285,7 @@ NON_PG_FILTER_REPLAY=(
   server::message_outbox_retry_tests::session_release_is_limited_to_terminal_turn_delivery_sources
   server::message_outbox_retry_tests::session_release_requires_matching_terminal_delivery_outbox_marker
   server::message_outbox_retry_tests::session_release_requires_same_failed_outbox_session_when_present
+  server::routes::agents::host_guard_tests::auth_login_routes_refuse_a_target_another_host_claims
   server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_detects_split_brain_completion
   server::routes::campaigns::tests::ledger_body_limit_stays_at_sixteen_mebibytes
   server::routes::campaigns::tests::ledger_put_accepts_a_document_larger_than_the_axum_default_limit

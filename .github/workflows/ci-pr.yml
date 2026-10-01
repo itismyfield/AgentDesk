@@ -255,6 +255,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
+              - 'src/server/routes/agents_host_guard_tests.rs'
               - 'src/server/routes/agents_turn_deliver.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
@@ -297,8 +298,11 @@ jobs:
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
               - 'src/services/cluster/intake_worker/o_route_tests.rs'
               - 'src/services/cluster/machine_resources/store.rs'
+              - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
               - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/restart.rs'
+              - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
@@ -318,6 +322,7 @@ jobs:
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
+              - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
@@ -627,6 +632,7 @@ jobs:
               # compiles them, so they cannot break the lane. This block also
               # covers the inflight std::fs::File advisory-lock owners and the
               # restart-v2 per-platform fs backend, listed by hand until now.
+              - 'src/services/discord/admin_host_guard.rs'
               - 'src/services/discord/catch_up/**'
               - 'src/services/discord/commands/**'
               - 'src/services/discord/delivery_lease_cell.rs'

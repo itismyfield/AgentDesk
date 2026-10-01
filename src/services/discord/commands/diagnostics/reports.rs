@@ -32,6 +32,32 @@ fn tmux_session_exists(_name: &str) -> bool {
     false
 }
 
+/// The channel session's tmux pane state; a session the host check keeps off a by-name
+/// probe reads `unsupported-host`, never `missing`.
+async fn tmux_state_label(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+) -> &'static str {
+    let Some(session_name) = tmux_session_name else {
+        return "unknown";
+    };
+    let refusal = super::super::super::admin_host_guard::channel_refusal;
+    if refusal(shared, provider, channel_id.get(), session_name)
+        .await
+        .is_some()
+    {
+        "unsupported-host"
+    } else if tmux_session_has_live_pane(session_name) {
+        "alive"
+    } else if tmux_session_exists(session_name) {
+        "dead-pane"
+    } else {
+        "missing"
+    }
+}
+
 fn shorten_session_identifier(value: &str) -> String {
     if value.len() > 24 {
         format!("{}...", &value[..24])
@@ -195,17 +221,8 @@ pub(in crate::services::discord) async fn build_health_report(
     let raw_provider_session_id_text =
         raw_provider_session_id.unwrap_or_else(|| "(none)".to_string());
     let raw_provider_session_id_short = shorten_session_identifier(&raw_provider_session_id_text);
-    let tmux_alive = if let Some(ref session_name) = tmux_session_name {
-        if tmux_session_has_live_pane(session_name) {
-            "alive"
-        } else if tmux_session_exists(session_name) {
-            "dead-pane"
-        } else {
-            "missing"
-        }
-    } else {
-        "unknown"
-    };
+    let tmux_alive =
+        tmux_state_label(shared, provider, channel_id, tmux_session_name.as_deref()).await;
     let channel_state = if channel_recovering {
         "recovering"
     } else if active_request {
@@ -321,17 +338,8 @@ pub(in crate::services::discord) async fn build_status_report(
     let raw_provider_session_id_text =
         raw_provider_session_id.unwrap_or_else(|| "(none)".to_string());
     let raw_provider_session_id_short = shorten_session_identifier(&raw_provider_session_id_text);
-    let tmux_alive = if let Some(ref session_name) = tmux_session_name {
-        if tmux_session_has_live_pane(session_name) {
-            "alive"
-        } else if tmux_session_exists(session_name) {
-            "dead-pane"
-        } else {
-            "missing"
-        }
-    } else {
-        "unknown"
-    };
+    let tmux_alive =
+        tmux_state_label(shared, provider, channel_id, tmux_session_name.as_deref()).await;
     let channel_watcher = shared.tmux_watchers.contains_key(&channel_id);
     let channel_recovering = channel_snapshot.recovery_started_at.is_some();
     let channel_state = if channel_recovering {
