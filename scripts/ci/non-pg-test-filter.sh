@@ -514,6 +514,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
+  services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
+  services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::post_commit_failure_emits_result_and_quality_observability

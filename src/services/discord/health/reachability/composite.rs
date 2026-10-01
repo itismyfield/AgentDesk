@@ -242,7 +242,7 @@ pub(in crate::services::discord) struct RelayVerdictReport {
     /// separate from `governs_health_polarity` (the §5.1 switch).
     pub health_polarity_abstained: bool,
     /// Whether this value was allowed to change the health polarity of the
-    /// entry it sits on. False under `RelayVerdictSource::Structural`.
+    /// entry it sits on. False under `RelayVerdictSource::Structural` and on a channel O owns.
     pub governs_health_polarity: bool,
     /// 4987 §-1.3b's ban notice: don't redeliver a non-GREEN entry by hand.
     pub manual_redelivery_banned: bool,

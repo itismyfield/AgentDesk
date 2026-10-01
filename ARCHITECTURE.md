@@ -1376,6 +1376,7 @@ src/
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
+│   │   │   │   ├── registered_bootstrap_e2e.rs
 │   │   │   │   └── stale_resume_retry_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
@@ -1422,7 +1423,9 @@ src/
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
-│   │   │   │   └── contracts.rs
+│   │   │   │   ├── contracts.rs
+│   │   │   │   ├── o_panel_below.rs
+│   │   │   │   └── o_panel_below_tests.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
@@ -2058,6 +2061,8 @@ src/
 │   │   │   ├── binding.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deliver.rs
+│   │   │   ├── fork_lineage.rs
+│   │   │   ├── fork_tests.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── mod.rs
