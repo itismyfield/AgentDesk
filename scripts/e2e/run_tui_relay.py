@@ -110,6 +110,9 @@ E2E_TURN_START_TIMEOUT_MAX_S = 180.0
 # one second and the default two observations may be raised to at most three.
 E2E_FINAL_REFETCH_INTERVAL_MAX_S = 60.0
 E2E_FINAL_REFETCHES_MAX = 3
+# o_panel_below.rs re-posts a completed panel below O's last post for FOLLOW_WINDOW
+# (30s); the extra 5s covers that last POST and DELETE.
+COMPLETION_MOVE_WAIT_S = 35.0
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -3478,8 +3481,14 @@ def run_one_cell(
                 continue
             window.add(message)
 
+    def _ingest_snapshot() -> list[dict[str, Any]]:
+        rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+        _ingest_observed(rows)
+        window.reconcile_snapshot(rows, after_id=after_id)
+        return rows
+
     def _pending_refetch() -> None:
-        _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
+        _ingest_snapshot()
         _update_record_window_snapshot(record, window)
         revalidation = {"assertions": [], "passed": False}
         record.setdefault("revalidated_after_recheck", []).append(revalidation)
@@ -4027,8 +4036,7 @@ def run_one_cell(
     for attempt in range(final_refetches):
         if attempt > 0:
             time.sleep(final_refetch_interval_s)
-        final_rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-        _ingest_observed(final_rows)
+        final_rows = _ingest_snapshot()
 
     _update_record_window_snapshot(record, window)
 
@@ -4646,8 +4654,8 @@ def run_assertion(
         body_marker = params.get("body_marker") if isinstance(params, dict) else params
         required = bool(params.get("required", False)) if isinstance(params, dict) else False
         body_marker = expand_marker(str(body_marker))
-        trace = None
-        for attempt in range(4):
+        trace, move_wait = None, False
+        for attempt in range(int(COMPLETION_MOVE_WAIT_S // 2) + 2):
             try:
                 assertions.completion_chrome_after_body(
                     window,
@@ -4660,17 +4668,26 @@ def run_assertion(
                              if body_marker in body), default=None)
                 if pending_refetch is None or first is None:
                     raise
-                assertions.completion_chrome_after_body(window, body_marker=body_marker)
+                try:
+                    assertions.completion_chrome_after_body(window, body_marker=body_marker)
+                except assertions.CompletionOrderError:
+                    # A completed panel above the body may still be moved below it.
+                    move_wait = True
+                bound, last_attempt = (
+                    (COMPLETION_MOVE_WAIT_S, int(COMPLETION_MOVE_WAIT_S // 2) + 1)
+                    if move_wait else (10.0, 3)
+                )
                 if trace is None:
-                    trace = {"refetches": 0, "deadline_at": first + 10,
+                    trace = {"refetches": 0, "deadline_at": first + bound,
                              "elapsed_s": time.monotonic() - first, "outcome": "FAIL"}
                     record.setdefault("completion_rechecks", []).append(trace)
-                if attempt == 3:
+                trace["deadline_at"] = first + bound
+                if attempt >= last_attempt:
                     trace["outcome"] = "EXHAUSTED"
                     raise
-                time.sleep(min(2.0, max(0.0, first + 10 - time.monotonic())))
+                time.sleep(min(2.0, max(0.0, first + bound - time.monotonic())))
                 trace["elapsed_s"] = time.monotonic() - first
-                if trace["elapsed_s"] >= 10:
+                if trace["elapsed_s"] >= bound:
                     trace["outcome"] = "EXHAUSTED"
                     raise
                 trace["refetches"] += 1
@@ -4678,7 +4695,7 @@ def run_assertion(
                     pending_refetch()
                 finally:
                     trace["elapsed_s"] = time.monotonic() - first
-                if trace["elapsed_s"] >= 10:
+                if trace["elapsed_s"] >= bound:
                     trace["outcome"] = "EXHAUSTED"
                     raise
         if trace is not None:

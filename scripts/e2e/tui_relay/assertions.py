@@ -134,6 +134,10 @@ class AssertionError(Exception):
     pass
 
 
+class CompletionOrderError(AssertionError):
+    """Surviving completion chrome sits above the body, which a panel move can still fix."""
+
+
 def is_our_send(message: dict[str, Any]) -> bool:
     author = message.get("author") or {}
     return str(author.get("id") or "") == OUR_BOT_ID
@@ -267,6 +271,8 @@ class Window:
     messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     raw_messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     message_updates: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Observed ids missing from the latest channel snapshot; raw_messages keeps them.
+    deleted_ids: set[str] = dataclasses.field(default_factory=set)
     first_prompt_at: _dt.datetime | None = None
     prompt_sent_at: list[_dt.datetime] = dataclasses.field(default_factory=list)
 
@@ -301,6 +307,26 @@ class Window:
         self.raw_messages.append(message)
         if is_relay_response(message):
             self.messages.append(message)
+
+    def reconcile_snapshot(self, rows: Sequence[dict[str, Any]], *, after_id: str) -> None:
+        # Discord pages the oldest messages after the cursor, so only ids below the newest
+        # returned id lie inside the fetch; a truncated page never reads as a deletion.
+        present = {_numeric_id(row) for row in rows} - {None}
+        if not present or (cursor := _numeric_id({"id": after_id})) is None:
+            return
+        newest = max(present)
+        self.deleted_ids = {
+            str(message_id)
+            for message in self.raw_messages
+            if (message_id := _numeric_id(message)) is not None
+            and cursor < message_id < newest
+            and message_id not in present
+        }
+
+
+def _numeric_id(message: dict[str, Any]) -> int | None:
+    value = str(message.get("id") or "")
+    return int(value) if value.isdigit() else None
 
 
 def _message_changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
@@ -717,10 +743,13 @@ def completion_chrome_after_body(
     if not body_messages:
         raise AssertionError(f"body marker {body_marker!r} not found in raw window")
     first_body = min(body_messages, key=_message_order_key)
+    # Ordering is judged on the channel's final state: a panel moved below the body
+    # leaves its deleted predecessor in raw_messages.
     completion_messages = [
         message
         for message in _raw_assertion_messages(window)
-        if any(
+        if str(message.get("id") or "") not in window.deleted_ids
+        and any(
             pattern.search(message.get("content") or "")
             for pattern in _COMPLETION_CHROME_PATTERNS
         )
@@ -733,7 +762,7 @@ def completion_chrome_after_body(
         return
     first_completion = min(completion_messages, key=_message_order_key)
     if _message_order_key(first_completion) < _message_order_key(first_body):
-        raise AssertionError(
+        raise CompletionOrderError(
             "completion chrome appeared before body marker "
             f"{body_marker!r}: completion={first_completion.get('id')} "
             f"body={first_body.get('id')}"
