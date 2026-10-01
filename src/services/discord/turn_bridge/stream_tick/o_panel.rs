@@ -28,9 +28,12 @@ pub(super) fn status_frame(
 }
 
 /// Edits the panel when due; a panel above O's newest post is sent again below it, and the old
-/// one is deleted once the new one is bound to the turn. Returns whether anything was written.
-pub(super) async fn refresh_o_status_panel<G: TurnGateway + ?Sized>(
-    mut save: StreamTickCandidateSaveContext<'_, G>,
+/// one goes to the orphan-spinner cleanup (recorded, retried) once the new one is bound to the
+/// turn. Returns whether anything was written.
+pub(super) async fn refresh_o_status_panel(
+    shared: &Arc<SharedData>,
+    owner: &Arc<dyn TurnGateway>,
+    mut save: StreamTickCandidateSaveContext<'_, dyn TurnGateway>,
     frame: String,
     edit_due: bool,
     last_edit_text: &mut String,
@@ -73,10 +76,18 @@ pub(super) async fn refresh_o_status_panel<G: TurnGateway + ?Sized>(
     save.inflight_state.current_msg_len = frame.len();
     *last_edit_text = frame;
     let caller = "turn_bridge::stream_tick::o_status_panel_resend";
-    if bind_pending_current_message_candidate(&mut save, caller).await
-        && let Err(error) = gateway.delete_message(channel_id, panel).await
-    {
-        tracing::warn!(channel_id = channel_id.get(), panel_id, %error, "old O status panel stays");
+    if bind_pending_current_message_candidate(&mut save, caller).await {
+        let (shared, gateway) = (Arc::clone(shared), Arc::clone(owner));
+        let provider = save.provider;
+        cleanup_or_preserve_watcher_orphan_spinner(
+            shared,
+            provider,
+            gateway,
+            channel_id,
+            panel,
+            save.inflight_state,
+        )
+        .await;
     }
     true
 }

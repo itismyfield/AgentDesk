@@ -408,6 +408,12 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/tmux_watcher/terminal_long_chunks.rs": (
         "apply_watcher_long_chunks_legacy:claim",
     ),
+    "src/services/discord/tui_prompt_relay/claude_idle_tail.rs": (
+        "run_claude_idle_response_tail:peek",
+    ),
+    "src/services/discord/tui_prompt_relay/codex_idle_rollout.rs": (
+        "run_codex_idle_response_tail:peek",
+    ),
     "src/services/discord/turn_bridge/headless_delivery.rs": (
         "enqueue_claimed_headless_delivery:claim",
     ),

@@ -641,6 +641,22 @@ async fn a_tool_call_is_left_to_the_panel_and_only_the_body_posts() {
     assert!(deliver::last_posted(CHANNEL) >= Some(posted));
 }
 
+/// A writer opened after a restart learns O's newest post from the recovered ledger.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_writer_recovers_the_newest_post_from_its_ledger() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
+    let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
+        panic!("piece not posted");
+    };
+    drop(writer);
+    deliver::forget_posted_for_tests(CHANNEL);
+    let _restarted = harness.writer();
+    assert!(deliver::last_posted(CHANNEL) >= Some(posted));
+}
+
 /// Guards that no POST's HTTP request starts after ownership closes, for Unknown and Lost alike.
 #[tokio::test(start_paused = true)]
 async fn no_post_starts_its_request_after_ownership_closes() {

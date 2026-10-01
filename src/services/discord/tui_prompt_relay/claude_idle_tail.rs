@@ -378,21 +378,12 @@ pub(super) async fn run_claude_idle_response_tail(
     // `has_boundary` includes an empty Done: its recovery guidance must use the
     // same source admission and terminal receipt as prose. We hand the live
     // `reader_rx` back to drain the remainder into the bridge.
-    let buffered = tokio::task::spawn_blocking(move || {
-        let mut prefix: Vec<StreamMessage> = Vec::new();
-        let mut has_boundary = false;
-        while let Ok(message) = reader_rx.recv() {
-            let is_content = idle_stream_message_is_content(&message);
-            let is_terminal = matches!(message, StreamMessage::Done { .. });
-            prefix.push(message);
-            if is_content || is_terminal {
-                has_boundary = true;
-                break;
-            }
-        }
-        (prefix, has_boundary, reader_rx)
-    })
-    .await;
+    let tool_opens = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+        channel_id.get(),
+        Some(&tmux_session_name),
+    ) == Ok(true);
+    let buffered =
+        tokio::task::spawn_blocking(move || buffer_idle_prefix(reader_rx, tool_opens)).await;
 
     let (prefix, has_boundary, reader_rx) = match buffered {
         Ok(buffered) => buffered,

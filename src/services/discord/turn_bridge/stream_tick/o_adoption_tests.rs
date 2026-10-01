@@ -267,3 +267,30 @@ async fn legacy_channel_placeholder_is_never_moved() {
     assert!(gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty());
     assert_eq!(state.current_msg_id, 18);
 }
+
+/// A moved panel whose old message fails its first delete goes to the orphan-spinner cleanup and
+/// is retried until gone; O's post is never deleted.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_failed_old_panel_delete_is_retried_until_the_panel_is_gone() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let channel = ChannelId::new(42_593_340);
+    let _o = test_override::force_channels(&[(channel.get(), RuntimeHandoffKind::CodexTui)]);
+    crate::services::tui_o::writer::deliver::note_posted_for_tests(channel.get(), 50);
+    let gateway = Arc::new(CapturingGateway {
+        send_id: 60,
+        direct: true,
+        fail_delete_once: 18.into(),
+        ..Default::default()
+    });
+    let shared = panel_with_last_tool(channel);
+    let state = tick_with(shared, channel, BODY, gateway.clone(), false, true).await;
+    assert_eq!(state.current_msg_id, 60);
+    assert_eq!(*gateway.deletes.lock().unwrap(), [18], "first delete fails");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(
+        *gateway.deletes.lock().unwrap(),
+        [18, 18],
+        "the cleanup retries the old panel"
+    );
+}

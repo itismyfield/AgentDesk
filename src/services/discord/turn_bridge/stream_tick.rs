@@ -512,7 +512,8 @@ pub(super) async fn run_bridge_stream_tick(
             bridge_created_response_placeholder_msg_id,
         };
         let due = last_status_edit.elapsed() >= status_interval;
-        if o_panel::refresh_o_status_panel(save, frame, due, &mut last_edit_text).await {
+        let text = &mut last_edit_text;
+        if o_panel::refresh_o_status_panel(&shared_owned, &gateway, save, frame, due, text).await {
             last_status_edit = tokio::time::Instant::now();
             state_dirty = true;
         }
@@ -1122,6 +1123,9 @@ pub(super) mod provider_output_guard_tests {
         pub(in crate::services::discord::turn_bridge) send_id: u64,
         /// Whether the gateway delivers directly, as a live Discord gateway does.
         pub(in crate::services::discord::turn_bridge) direct: bool,
+        /// A message id whose first delete fails with a server error; 0 for none.
+        pub(in crate::services::discord::turn_bridge) fail_delete_once:
+            std::sync::atomic::AtomicU64,
         /// When set, every send or edit is checked against the watched adoption as it is made.
         pub(in crate::services::discord::turn_bridge) check:
             Option<crate::services::tui_o::channel_policy::BodyCheck>,
@@ -1183,7 +1187,17 @@ pub(super) mod provider_output_guard_tests {
                 .lock()
                 .expect("deletes lock")
                 .push(message_id.get());
-            Box::pin(async { Ok(()) })
+            let failing = std::sync::atomic::Ordering::SeqCst;
+            let fail = self
+                .fail_delete_once
+                .compare_exchange(message_id.get(), 0, failing, failing)
+                .is_ok();
+            Box::pin(async move {
+                match fail {
+                    true => Err("HTTP 500 Internal Server Error".to_string()),
+                    false => Ok(()),
+                }
+            })
         }
 
         fn schedule_retry_with_history<'a>(
