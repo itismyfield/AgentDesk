@@ -517,7 +517,7 @@ pub(super) async fn run_terminal_commit_epilogue(
             dispatch_ok,
             watcher_handled_mailbox_finish,
         ) {
-            let tmux_alive = probe_tmux_session_liveness(&tmux_session_name).await;
+            let tmux_alive = host_gate::tmux_alive(&tmux_session_name, channel_id).await;
             let confirmed_end = relay_coord.confirmed_end_offset.load(Ordering::Acquire);
             let tmux_tail_offset = std::fs::metadata(&output_path)
                 .map(|meta| meta.len())

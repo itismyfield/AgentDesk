@@ -323,12 +323,15 @@ pub(super) async fn run_pre_emit_guard(
         if let Some(ref sid) = stale_sid {
             let _ = crate::services::discord::internal_api::clear_stale_session_id(sid).await;
         }
-        if host_gate::watcher_session_is_tmux(
+        if host_gate::admits_teardown(
+            shared,
             watcher_provider,
             channel_id,
             tmux_session_name,
             "stale_resume_retry",
-        ) {
+        )
+        .await
+        {
             crate::services::termination_audit::record_termination_for_tmux(
                 tmux_session_name,
                 None,

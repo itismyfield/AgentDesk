@@ -14,6 +14,14 @@ pub(crate) fn evaluate_liveness_probe(
 }
 
 pub(crate) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
+    probe_tmux_session_liveness_with_row(tmux_session_name, None).await
+}
+
+/// [`probe_tmux_session_liveness`] that also reads the host the inflight `row` records.
+pub(crate) async fn probe_tmux_session_liveness_with_row(
+    tmux_session_name: &str,
+    row: Option<crate::services::discord::InflightTurnState>,
+) -> bool {
     let marker_path = crate::services::tmux_common::session_dead_marker_path(tmux_session_name);
     let marker_present = std::path::Path::new(&marker_path).exists();
 
@@ -21,7 +29,7 @@ pub(crate) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({
             let name = tmux_session_name.to_string();
-            move || host_liveness::observe_liveness(&name, None)
+            move || host_liveness::observe_liveness(&name, row.as_ref())
         }),
     )
     .await;
