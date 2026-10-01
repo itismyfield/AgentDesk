@@ -1502,7 +1502,9 @@ src/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
-│   │   │   │   └── process_table.rs
+│   │   │   │   ├── process_table.rs
+│   │   │   │   ├── stop_host.rs
+│   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs

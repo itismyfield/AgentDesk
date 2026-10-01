@@ -28751,6 +28751,42 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:323f42487dc96a9a10fe8a1e17cf63eb1be1d58fd89ba5b865e6e3a07c1169cf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9b8df2f9bf24172719a55650cdf5e83682bde127e5110a5e79ea3484a408598c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a5810dd9dfec10c1f0b7107c28966eec6e9a6f7edcb5088901a86fa44f4cde37"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ce4e9a5d523564effbaf3f2bcd604623e61efe480a51338b12781be0683d1285"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/turn_bridge/voice_completion_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
