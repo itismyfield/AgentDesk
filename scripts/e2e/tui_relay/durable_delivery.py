@@ -1,4 +1,8 @@
-"""Read-after-write validator for the E-35 durable delivery record probe."""
+"""Read-after-write validator for the E-35 durable delivery record probe.
+
+A channel with an O store `init` is O's: its receipt is the O ledger's posted entry for the
+message. Every other channel is judged by the Legacy durable delivery record.
+"""
 import json
 import time
 from pathlib import Path
@@ -129,14 +133,87 @@ def _scan_records(runtime_root: Path, *, provider: str, channel_id: int,
     }
 
 
+def _o_owns(o_store_root: Path, channel_id: int) -> bool:
+    # Same rule as the server's adoption: an `init` entry, readable or not, commits the channel.
+    try:
+        (o_store_root / str(channel_id) / "init").lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _scan_o_ledger(o_store_root: Path, *, provider: str, channel_id: int,
+                   message_id: int) -> dict[str, Any]:
+    ledger = o_store_root / str(channel_id) / "ledger.jsonl"
+    try:
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        return {"status": "unevaluable", "reason": f"O ledger unavailable: {error}"}
+    prepared: dict[int, dict[str, Any]] = {}
+    matches: list[tuple[int, dict[str, Any] | None]] = []
+    malformed = 0
+    for line in lines:
+        try:
+            entry = json.loads(line)["entry"]
+        except (ValueError, KeyError, TypeError):
+            entry = None
+        if not isinstance(entry, dict):
+            malformed += 1
+            continue
+        kind, serial = entry.get("type"), _json_int(entry.get("serial"), 0)
+        if serial is None:
+            continue
+        if kind == "prepared":
+            prepared[serial] = entry
+        elif kind == "posted" and _json_int(entry.get("msg_id")) == message_id:
+            matches.append((serial, prepared.get(serial)))
+    if len(matches) != 1:
+        reason = f"expected one O ledger posted record, found {len(matches)}"
+        if malformed:
+            reason += f"; malformed_lines={malformed}"
+        return {"status": "failed", "reason": reason, "o_posted_records": len(matches)}
+    serial, piece = matches[0]
+    unit = piece.get("unit_key") if piece is not None else None
+    if not (
+        isinstance(unit, dict)
+        and _json_int(unit.get("channel_id")) == channel_id
+        and _identity_string(unit.get("provider"))
+        and unit.get("provider") == provider
+    ):
+        return {"status": "failed", "reason": "O posted record lacks a prepared unit for this channel"}
+    return {
+        "status": "evaluated",
+        "reason": "O ledger posted record observed",
+        "ledger": str(ledger),
+        "serial": serial,
+        "unit_kind": unit.get("kind"),
+        "response_message_id": str(message_id),
+    }
+
+
+def _scan(runtime_root: Path, *, provider: str, channel_id: int,
+          message_id: int) -> dict[str, Any]:
+    # The O store sits beside `runtime/` under the AgentDesk root.
+    o_store_root = runtime_root.parent / "o_store"
+    if _o_owns(o_store_root, channel_id):
+        result = _scan_o_ledger(o_store_root, provider=provider, channel_id=channel_id,
+                                message_id=message_id)
+        result["output_owner"] = "o"
+        return result
+    result = _scan_records(runtime_root, provider=provider, channel_id=channel_id,
+                           message_id=message_id)
+    result["output_owner"] = "legacy"
+    return result
+
+
 def scan_records(runtime_root: Path, *, provider: str, channel_id: str,
                  message_id: str) -> dict[str, Any]:
     channel, message = _expected_id(channel_id), _expected_id(message_id)
     if not _identity_string(provider) or channel is None or message is None:
         return _invalid_query()
-    return _scan_records(
-        runtime_root, provider=provider, channel_id=channel, message_id=message
-    )
+    return _scan(runtime_root, provider=provider, channel_id=channel, message_id=message)
 
 
 def poll_records(
@@ -153,11 +230,9 @@ def poll_records(
         result = _invalid_query()
         result["elapsed_s"] = round(monotonic() - started, 3)
         return result
-    result = _scan_records(runtime_root, provider=provider, channel_id=channel,
-                           message_id=message)
+    result = _scan(runtime_root, provider=provider, channel_id=channel, message_id=message)
     while result["status"] != "evaluated" and monotonic() < deadline:
         sleep(min(interval_s, max(0.0, deadline - monotonic())))
-        result = _scan_records(runtime_root, provider=provider, channel_id=channel,
-                               message_id=message)
+        result = _scan(runtime_root, provider=provider, channel_id=channel, message_id=message)
     result["elapsed_s"] = round(monotonic() - started, 3)
     return result

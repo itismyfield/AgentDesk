@@ -3300,6 +3300,7 @@ services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_s
 services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
 services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
 services::discord::health::snapshot::tests::an_expired_relay_verdict_is_recorded_without_degrading_the_snapshot
+services::discord::health::snapshot::tests::an_o_owned_channel_keeps_the_legacy_relay_verdict_off_health
 services::discord::health::snapshot::tests::an_unwitnessed_executor_never_confirms_the_pane_idle_witness
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
