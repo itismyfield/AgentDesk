@@ -104,6 +104,8 @@ mod completion_delivery;
 // #3834 r2: behavior-preserving extraction of the restart-path inflight recovery
 // scan (`restore_inflight_turns`) plus its tmux retry/output-path helpers into a
 // leaf module. Entry points are re-exported below so external paths stay stable.
+#[path = "recovery_engine/host_reconcile.rs"]
+pub(in crate::services::discord) mod host_reconcile;
 #[cfg(test)]
 #[path = "recovery_engine/o_cut_recorder.rs"]
 pub(in crate::services::discord) mod o_cut_recorder;
