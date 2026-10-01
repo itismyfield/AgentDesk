@@ -40,7 +40,10 @@ pub(super) fn session_exists(tmux_session_name: &str) -> Result<bool, String> {
     match TmuxHost.presence(HostSessionRef::tmux(tmux_session_name)) {
         HostPresence::Present => Ok(true),
         HostPresence::Missing => Ok(false),
-        HostPresence::ProbeFailed if !tmux_server_socket().exists() => Ok(false),
+        // Only a socket confirmed absent means no server; an unreadable one stays unobserved.
+        HostPresence::ProbeFailed if matches!(tmux_server_socket().try_exists(), Ok(false)) => {
+            Ok(false)
+        }
         HostPresence::ProbeFailed => {
             tracing::warn!(
                 tmux_session_name,

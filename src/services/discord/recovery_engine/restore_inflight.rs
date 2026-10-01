@@ -2163,6 +2163,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         ),
                     });
                 }
+                // A result read past a pane the host never confirmed live: no watcher handoff.
+                Ok(RestoredRead::Ended) => {}
                 Ok(RestoredRead::Died) => {
                     // Session truly died during restart recovery. Fall back
                     // to the generic auto-retry path so restart handling

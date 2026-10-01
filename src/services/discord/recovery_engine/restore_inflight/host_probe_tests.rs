@@ -186,7 +186,7 @@ fn pane_flag_tmux() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
 }
 
 // After the restore reader reads its session dead, an unobserved pane hands nothing to a
-// watcher and retries nothing: the row stays as stored while a live pane is handed off.
+// watcher and retries nothing, even once a result arrives; only a confirmed pane is handed off.
 #[tokio::test]
 async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -198,10 +198,10 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
     let provider = ProviderKind::Claude;
     let transcripts = tempfile::tempdir().unwrap();
     let mut cases = Vec::new();
-    for (n, after) in [HostLiveness::ProbeError, HostLiveness::Live]
-        .into_iter()
-        .enumerate()
-    {
+    use HostLiveness::{Live, ProbeError};
+    // Unobserved throughout, live at once, and unobserved until just before its result.
+    let answers = [ProbeError, Live, ProbeError];
+    for (n, after) in answers.into_iter().enumerate() {
         let channel = ChannelId::new(1_479_671_301_387_160_000 + n as u64);
         let name = provider.build_tmux_session_name(&format!("p5c-reader-{n}"));
         let key = channel_key(&shared, &name);
@@ -250,7 +250,7 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
     let restored: Vec<_> = cases.iter().map(|case| stored(case.0)).collect();
     assert!(
         restored.iter().all(Option::is_some),
-        "restore keeps both rows"
+        "restore keeps every row"
     );
     // Swapped in place: replacing a guard would clear the new answer on the old one's drop.
     for (_, name, after, ..) in &cases {
@@ -258,28 +258,84 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
     }
     std::fs::write(tmux.path().join("dead"), "").unwrap();
     let _ = std::fs::remove_file(tmux.path().join("calls"));
-    let (channel, name, ..) = &cases[0];
-    let polled = format!("list-panes -t ={name}:");
-    let read_dead = || {
+    let read_dead = |name: &str| {
         let calls = std::fs::read_to_string(tmux.path().join("calls")).unwrap_or_default();
-        calls.contains(&polled)
+        calls.contains(&format!("list-panes -t ={name}:"))
     };
     let handed_off = || stored(cases[1].0) != restored[1];
+    let deferred = || [0, 2].iter().all(|n| read_dead(&cases[*n].1));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !(handed_off() && read_dead()) && std::time::Instant::now() < deadline {
+    while !(handed_off() && deferred()) && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     assert!(handed_off(), "a live pane's handoff moves its row");
-    assert!(read_dead(), "the reader read the unobserved pane dead");
+    assert!(deferred(), "the readers read the unobserved panes dead");
     // Past the pane re-check's retries, which a handoff or a retry would follow.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    for n in [0, 2] {
+        let label = &cases[n].1;
+        assert_eq!(
+            stored(cases[n].0),
+            restored[n],
+            "{label}: row kept as stored"
+        );
+    }
 
-    assert_eq!(
-        stored(*channel),
-        restored[0],
-        "an unobserved pane keeps the row as stored"
+    // A watcher handoff stamps the row's input path before the finished turn clears it.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handoffs: Vec<_> = [0, 2]
+        .map(|n| {
+            let (provider, channel, stop) = (provider.clone(), cases[n].0.get(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let row = inflight::load_inflight_state(&provider, channel);
+                    if row.is_some_and(|row| row.input_fifo_path.is_some()) {
+                        return true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                false
+            })
+        })
+        .into();
+    std::fs::remove_file(tmux.path().join("dead")).unwrap();
+    inject_liveness(HostSessionRef::tmux(&cases[2].1), Some(Live));
+    for n in [0, 2] {
+        let record = format!(
+            "{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"p5c-result-{n}\"}}\n"
+        );
+        let transcript = transcripts.path().join(format!("{n}.jsonl"));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, record.as_bytes()).unwrap();
+    }
+    let finished = || [0, 2].iter().all(|n| stored(cases[*n].0).is_none());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !finished() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(finished(), "both results finish their turns");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let handoffs: Vec<bool> = handoffs.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(
+        !handoffs[0],
+        "a result past an unobserved pane is never handed off"
     );
-    assert!(!shared.tmux_watchers.has_live_watcher_handle(name));
+    assert!(
+        handoffs[1],
+        "a pane confirmed live is handed off with its result"
+    );
+    for n in [0, 2] {
+        let result = format!("p5c-result-{n}");
+        let posts = discord
+            .contents()
+            .iter()
+            .filter(|c| c.contains(&result))
+            .count();
+        assert_eq!(posts, 1, "{result} relayed once");
+    }
     drop((cases, transcripts));
     pool.close().await;
     db.drop().await;

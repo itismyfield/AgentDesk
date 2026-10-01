@@ -208,8 +208,8 @@ fn the_wrapper_follow_up_poll_reads_dead_only_on_a_confirmed_death() {
     }
 }
 
-// A failed presence probe while tmux has a server keeps every runtime file and starts
-// nothing; with no server socket there is no session, so the fresh path runs as before.
+// A failed presence probe while tmux has a server, or its socket cannot be read, keeps every
+// runtime file and starts nothing; with no server socket the fresh path runs as before.
 #[test]
 fn a_failed_presence_probe_never_prepares_a_fresh_session() {
     const NAME: &str = "adk-p5c-claude-presence-unobserved";
@@ -227,8 +227,8 @@ fn a_failed_presence_probe_never_prepares_a_fresh_session() {
     let _attached = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("TMUX");
     unsafe { std::env::remove_var("TMUX") };
     let uid = unsafe { libc::getuid() };
-    let socket = sockets.path().join(format!("tmux-{uid}")).join("default");
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let socket_dir = sockets.path().join(format!("tmux-{uid}"));
+    let socket = socket_dir.join("default");
     let session = HostSessionRef::tmux(NAME);
     let _presence = InjectedPresenceGuard::set(session, HostPresence::ProbeFailed);
     let _pane = InjectedLivenessGuard::set(session, HostLiveness::Live);
@@ -237,11 +237,17 @@ fn a_failed_presence_probe_never_prepares_a_fresh_session() {
     let entries: [(&str, fn(&str, Option<&TeardownClearance>) -> _); 2] =
         [("tui", tui_turn), ("wrapper", wrapper_turn)];
     for (entry, turn) in entries {
-        for server in [true, false] {
-            if server {
-                std::fs::write(&socket, "").unwrap();
-            } else {
-                std::fs::remove_file(&socket).unwrap();
+        // A file in place of the socket directory makes the socket lookup itself fail.
+        for (socket_state, server) in [("present", true), ("unreadable", true), ("absent", false)] {
+            let _ = std::fs::remove_dir_all(&socket_dir);
+            let _ = std::fs::remove_file(&socket_dir);
+            match socket_state {
+                "present" => {
+                    std::fs::create_dir_all(&socket_dir).unwrap();
+                    std::fs::write(&socket, "").unwrap();
+                }
+                "unreadable" => std::fs::write(&socket_dir, "").unwrap(),
+                _ => {}
             }
             for file in &files {
                 std::fs::create_dir_all(std::path::Path::new(file).parent().unwrap()).unwrap();
@@ -253,10 +259,11 @@ fn a_failed_presence_probe_never_prepares_a_fresh_session() {
                 .all(|file| std::fs::read_to_string(file).is_ok_and(|body| body == "sentinel"));
             let calls = tmux.take_calls();
             if server {
-                assert!(kept, "{entry}: runtime files kept, {result:?}");
-                assert_eq!(calls, Vec::<String>::new(), "{entry}");
+                let label = format!("{entry} socket {socket_state}");
+                assert!(kept, "{label}: runtime files kept, {result:?}");
+                assert_eq!(calls, Vec::<String>::new(), "{label}");
                 let error = result.expect_err(entry);
-                assert!(error.contains("unobserved"), "{entry}: {error}");
+                assert!(error.contains("unobserved"), "{label}: {error}");
             } else {
                 assert!(
                     !kept,

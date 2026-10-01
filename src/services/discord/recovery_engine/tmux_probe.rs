@@ -225,11 +225,12 @@ pub(super) struct RestoredReader {
     pub(super) output_path: String,
 }
 
-/// How a restore reader ended: hand the session to a watcher from an offset, or retry a
-/// turn whose session died.
+/// How a restore reader ended: hand the session to a watcher from an offset, retry a turn
+/// whose session died, or end a finished turn with no handoff.
 pub(super) enum RestoredRead {
     HandOff(u64),
     Died,
+    Ended,
 }
 
 /// Reads restored output to a result; a death the host cannot confirm keeps reading from
@@ -246,6 +247,7 @@ pub(super) fn read_restored_output(
         name,
         ..
     } = reader;
+    let mut deferred = false;
     loop {
         let probe = reader_probe(
             provider,
@@ -262,8 +264,13 @@ pub(super) fn read_restored_output(
             probe,
         )?;
         let died_at = match read {
-            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset }
+                if !deferred =>
+            {
                 return Ok(RestoredRead::HandOff(offset));
+            }
+            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+                return Ok(settle_deferred(reader, offset));
             }
             ReadOutputResult::SessionDied { offset } => offset,
         };
@@ -280,9 +287,24 @@ pub(super) fn read_restored_output(
             RestartProbe::Missing => return Ok(RestoredRead::Died),
             RestartProbe::Defer => {
                 tracing::info!(name, "restore reader: pane unobserved, reading on");
+                deferred = true;
                 std::thread::sleep(recovery_retry_backoff(3));
                 offset = died_at;
             }
+        }
+    }
+}
+
+/// A read that ended after an unobserved pane hands the session to a watcher only on a
+/// confirmed live pane; the result already read is never read again.
+fn settle_deferred(reader: &RestoredReader, offset: u64) -> RestoredRead {
+    // The bridge takes a handoff only just after the terminal, so the host is asked once.
+    match restart_pane_local(&reader.provider, &reader.name, &reader.row) {
+        RestartProbe::Alive => RestoredRead::HandOff(offset),
+        probe => {
+            let name = reader.name.as_str();
+            tracing::info!(name, ?probe, "restore reader: ended with no handoff");
+            RestoredRead::Ended
         }
     }
 }
