@@ -367,6 +367,16 @@ fn kill_agentdesk_tmux_sessions_local() -> usize {
 
     let mut count = 0;
     for name in &names {
+        // A name whose host marker is not tmux belongs to another host; it is left running.
+        let refusal = crate::services::discord::admin_host_guard::marker_refusal;
+        if let Some(reason) = name
+            .starts_with("AgentDesk-")
+            .then(|| refusal(name))
+            .flatten()
+        {
+            println!("   skipped: {} ({})", name, reason);
+            continue;
+        }
         if name.starts_with("AgentDesk-") {
             if crate::services::platform::tmux::kill_session(
                 name,
@@ -506,5 +516,34 @@ mod memento_hook_install_tests {
         let cmd = memento_entries[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(!cmd.contains("old payload"));
         assert!(cmd.contains("mcp__memento__context"));
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod reset_tmux_host_tests {
+    // `reset-tmux` leaves a listed session another host's marker claims untouched; an
+    // unmarked AgentDesk session is killed as in main.
+    #[test]
+    fn reset_tmux_leaves_another_hosts_session_running() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+        let (herdr, legacy) = (
+            "AgentDesk-claude-p4c2-reset-h",
+            "AgentDesk-claude-p4c2-reset-t",
+        );
+        let marker = crate::services::tmux_common::session_temp_path(herdr, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, "herdr").unwrap();
+        tmux.list(&[herdr, legacy]);
+
+        super::kill_agentdesk_tmux_sessions_local();
+        let calls = tmux.take_calls();
+        let kills = |name: &str| {
+            let kill = |call: &&String| call.starts_with("kill-session") && call.contains(name);
+            calls.iter().filter(kill).count()
+        };
+        assert_eq!(kills(herdr), 0, "{calls:?}");
+        assert_eq!(kills(legacy), 1, "{calls:?}");
     }
 }

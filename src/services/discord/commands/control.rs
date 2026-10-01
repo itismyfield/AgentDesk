@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::db::session_transcripts;
 use crate::services::provider::{CancelToken, ProviderKind};
 
+use super::super::admin_host_guard::ManagedReset;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
@@ -219,7 +220,12 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     reset_provider_state: bool,
     clear_history: bool,
     recreate_tmux: bool,
-) -> Option<String> {
+) -> ManagedReset {
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    let (reset, recreate) = (reset_provider_state, recreate_tmux);
+    if let Some(reason) = refusal(shared, provider, channel_id, reset, recreate, None).await {
+        return ManagedReset::Refused(reason);
+    }
     let tmux_name = {
         let mut data = shared.core.lock().await;
         data.sessions.get_mut(&channel_id).and_then(|session| {
@@ -265,16 +271,18 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
         }
     }
 
-    tmux_name
+    ManagedReset::Applied(tmux_name)
 }
 
+/// The reset a pending flag asked for, if any. A refused one keeps its flags and is reported;
+/// the caller's turn runs on the session as it is, as with any turn the host guard admits.
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     fast_mode_channel_id: serenity::ChannelId,
-) {
+) -> Option<ManagedReset> {
     let fast_mode_reset_pending =
         fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider);
     let codex_goals_reset_pending = matches!(provider, ProviderKind::Codex)
@@ -297,10 +305,9 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         if fast_mode_channel_id != channel_id {
             sync_session_reset_pending(shared, fast_mode_channel_id);
         }
-        return;
+        return None;
     };
-
-    let _ = reset_channel_provider_state(
+    let reset = reset_channel_provider_state(
         http,
         shared,
         provider,
@@ -311,6 +318,10 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         plan.recreate_tmux,
     )
     .await;
+    // A refused reset keeps its pending flags; the channel is told why it did not apply.
+    if reset.report(http, channel_id, plan.reset_source).await {
+        return Some(reset);
+    }
 
     if fast_mode_reset_pending {
         clear_fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider);
@@ -330,6 +341,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     if fast_mode_channel_id != channel_id {
         sync_session_reset_pending(shared, fast_mode_channel_id);
     }
+    Some(reset)
 }
 
 fn choose_clear_session_key(
@@ -410,6 +422,12 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Refused before the clear changes anything: its session is not a legacy tmux one.
+    let refusal = super::super::admin_host_guard::managed_reset_refusal;
+    let target = explicit_session_key;
+    if let Some(reason) = refusal(shared, provider, channel_id, true, false, target).await {
+        anyhow::bail!("세션을 초기화하지 못했어요: {reason}");
+    }
     let boundary = match shared.pg_pool.as_ref() {
         Some(pool) => Some(session_transcripts::begin_channel_clear_boundary_tx(pool).await?),
         None => None,

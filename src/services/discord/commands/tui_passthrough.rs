@@ -1,7 +1,7 @@
 use crate::services::claude_tui::input::SelectorNavigation;
 use crate::services::provider::ProviderKind;
 
-use super::super::{Context, Error, check_auth};
+use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{effective_provider_for_channel, fallback_channel_name_for_feature_toggle};
 
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
@@ -179,6 +179,26 @@ fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) 
     )
 }
 
+/// Why a passthrough may not reach the channel's session: a host the check keeps off its
+/// tmux name, before any probe, then no live pane.
+async fn passthrough_block(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_name: &str,
+    command: ClaudeSlashPassthrough,
+) -> Option<String> {
+    let refusal = super::super::admin_host_guard::channel_refusal;
+    if let Some(reason) = refusal(shared, provider, channel_id, tmux_name).await {
+        return Some(format!(
+            "{}를 전달하지 않았어요: {reason}",
+            command.slash_name()
+        ));
+    }
+    let live = crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_name);
+    (!live).then(|| live_session_required_notice(command))
+}
+
 fn live_session_required_notice(command: ClaudeSlashPassthrough) -> String {
     format!(
         "{} needs a live Claude tmux session for this channel. Start or resume the Claude session first.",
@@ -246,8 +266,10 @@ async fn run_claude_passthrough(
         ctx.say(live_session_required_notice(command)).await?;
         return Ok(());
     };
-    if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_name) {
-        ctx.say(live_session_required_notice(command)).await?;
+    let (shared, channel_id) = (&ctx.data().shared, ctx.channel_id().get());
+    let block = passthrough_block(shared, &effective_provider, channel_id, &tmux_name, command);
+    if let Some(notice) = block.await {
+        ctx.say(notice).await?;
         return Ok(());
     }
 
@@ -407,5 +429,47 @@ mod tests {
         // Intentionally not a pass-through variant (no handler) → stays out of the
         // variant-pinned LOCAL_ONLY_SLASH_COMMANDS set.
         assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod host_guard_tests {
+    use super::*;
+    use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
+    use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+
+    // A passthrough to a kept session is refused before any tmux probe by its name; a
+    // legacy row, or no row yet, probes the pane as in main.
+    #[tokio::test]
+    async fn passthrough_is_refused_before_probing_a_kept_session_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let provider = ProviderKind::Claude;
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let channel = 1_479_671_302_387_063_000 + n as u64;
+            let name = provider.build_tmux_session_name(&format!("p4c2-passthrough-{n}"));
+            case.seed(&pool, &channel_key(&shared, &name), &name, channel)
+                .await;
+            tmux.take_calls();
+            let command = ClaudeSlashPassthrough::Cost;
+            let block = passthrough_block(&shared, &provider, channel, &name, command).await;
+            let probes = tmux.take_calls();
+            if case.admitted() {
+                assert_eq!(
+                    block,
+                    Some(live_session_required_notice(command)),
+                    "{case:?}"
+                );
+                assert!(!probes.is_empty(), "{case:?}: main probes the pane");
+            } else {
+                let notice = block.expect("a kept session refuses the passthrough");
+                assert!(notice.starts_with("/cost를 전달하지 않았어요"), "{notice}");
+                assert_eq!(probes, Vec::<String>::new(), "{case:?}: no tmux probe");
+            }
+        }
+        db.drop().await;
     }
 }
