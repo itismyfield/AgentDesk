@@ -123,12 +123,21 @@ pub(super) async fn handle_known_owner(
                 "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
                 ctx.channel_id
             );
-            if should_delete_bridge_created_watcher_orphan_response(
-                shared_owned.ui.status_panel_v2_enabled,
-                ctx.watcher_handoff_claim_outcome,
-                ctx.bridge_created_response_placeholder_msg_id,
-                ctx.current_msg_id,
-            ) {
+            // On O's channel the placeholder never carries a body, so the turn's end retires it.
+            let o_panel = super::super::terminal_controller_cutover::bridge_o_body_peek_decision(
+                ctx.channel_id,
+                inflight_state,
+                gateway.can_deliver_directly(),
+            ) == Ok(true)
+                && optional_durable_current_msg_id_from_detached(ctx.current_msg_id).is_some();
+            if o_panel
+                || should_delete_bridge_created_watcher_orphan_response(
+                    shared_owned.ui.status_panel_v2_enabled,
+                    ctx.watcher_handoff_claim_outcome,
+                    ctx.bridge_created_response_placeholder_msg_id,
+                    ctx.current_msg_id,
+                )
+            {
                 // #3607: preserve committed terminal anchors; delete, record,
                 // and retry only genuine non-terminal orphan spinners.
                 cleanup_or_preserve_watcher_orphan_spinner(

@@ -49,6 +49,8 @@ struct TestIo {
     custody: Mutex<Result<bool, String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The gateway never comes up.
+    port_down: std::sync::atomic::AtomicBool,
 }
 
 impl TestIo {
@@ -61,6 +63,7 @@ impl TestIo {
             facts: Mutex::new(Ok(ActivationFacts::default())),
             custody: Mutex::new(Ok(false)),
             on_facts: Mutex::default(),
+            port_down: Default::default(),
         })
     }
 
@@ -78,7 +81,13 @@ impl HostIo for TestIo {
     fn port(&self) -> impl Future<Output = Arc<FakePort>> + Send {
         self.calls.lock().unwrap().push(("port", 0));
         let port = Arc::clone(&self.port);
-        async move { port }
+        let down = self.port_down.load(Ordering::SeqCst);
+        async move {
+            if down {
+                std::future::pending::<()>().await;
+            }
+            port
+        }
     }
 
     fn lease(&self) -> Arc<FakeLease> {
@@ -323,6 +332,31 @@ async fn without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o(
     assert!(!ready.is_ready(CHANNEL));
     let owned = cutover::o_owns_tui_output_for_channel(CHANNEL, Some(ClaudeTui));
     assert_eq!(owned, Ok(true), "Legacy does not take the body back");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down() {
+    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
+    let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
+        panic!("piece not posted");
+    };
+    drop(writer);
+    let _restart = deliver::forget_posted_for_tests(CHANNEL);
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.port_down.store(true, Ordering::SeqCst);
+    let tasks = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert_eq!(
+        io.calls(),
+        [("port", 0)],
+        "the actor still waits for its gateway"
+    );
+    assert!(deliver::last_posted(CHANNEL) >= Some(posted));
+    abort(tasks);
 }
 
 fn p5_log(root: &Path, channel: u64, line: &[u8]) {
