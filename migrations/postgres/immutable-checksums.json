@@ -670,6 +670,11 @@
       "path": "migrations/postgres/0131_sessions_hosted_execution.sql",
       "sha256": "48b3814552340658f95f27ec23ee689a8af8a0a8c803bb419b44594e1b30d76d",
       "version": 131
+    },
+    {
+      "path": "migrations/postgres/0132_drop_office_tables.sql",
+      "sha256": "84a8836d815fbcf2c56c8aeeedc4aab46a29fb3dd64af34d2b771115bbf88680",
+      "version": 132
     }
   ],
   "version": 1

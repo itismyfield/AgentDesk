@@ -1482,6 +1482,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (GUARD_ADAPTER, 1),
                 ("src/services/discord/inflight.rs", 0),
                 ("src/services/discord/host_key_derivation.rs", 1),
+                ("src/services/discord/host_defer_gate.rs", 1),
             ],
         ),
         ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
@@ -1825,7 +1826,7 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
 #[test]
 fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const SWEEP: &str = "a spawn-time sweep; each site's reason is checked below";
-    const BEFORE_WRITER: &str = "runs before the turn's writer posts the sessions row";
+    const BEFORE_WRITER: &str = "behind the turn-key host check, before the writer posts the row";
     const UNKEYED: &str = "a turn with no session key keeps the main teardown";
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";

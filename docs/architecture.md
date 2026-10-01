@@ -509,17 +509,10 @@ CREATE TABLE messages (
   created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 오피스
-CREATE TABLE offices (
-  id                  TEXT PRIMARY KEY,
-  name                TEXT,
-  layout              TEXT                 -- JSON
-);
-
+-- 부서
 CREATE TABLE departments (
   id                  TEXT PRIMARY KEY,
-  name                TEXT,
-  office_id           TEXT REFERENCES offices(id)
+  name                TEXT
 );
 
 -- KV 메타 (설정, 마이그레이션 트래킹)

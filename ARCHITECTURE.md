@@ -1119,6 +1119,7 @@ src/
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
 │   │   │   │   ├── provider_isolation.rs
+│   │   │   │   ├── provider_isolation_host_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -1622,6 +1623,8 @@ src/
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
+│   │   ├── host_defer_gate.rs
+│   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
 │   │   ├── host_key_derivation_tests.rs
 │   │   ├── host_liveness.rs
