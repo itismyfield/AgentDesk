@@ -720,8 +720,8 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
 /// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
 /// can defer the promotion BEFORE any user-visible teardown (turn-view
 /// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
-/// claim). A session the host guard keeps (Herdr, unknown or conflicting host) also
-/// defers. Everything else — no session, no tmux pane, remote profile,
+/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or nameless
+/// without a legacy row) also defers. Everything else — no session, no tmux pane, remote profile,
 /// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
 /// dispatch path, whose existing post-claim busy branch owns the defer UX
 /// (queued-card render + 📬 re-attach). This probe must NEVER be load-bearing
@@ -766,7 +766,9 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         )
     };
     let Some(tmux_session_name) = tmux_session_name else {
-        return false;
+        let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
+        let managed = provider.uses_managed_tmux_backend();
+        return managed && nameless(shared, provider, channel_id.get()).await;
     };
     let host = super::super::super::host_defer_gate::channel_session_deferred;
     if host(shared, provider, channel_id.get(), &tmux_session_name).await {

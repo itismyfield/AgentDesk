@@ -1,11 +1,13 @@
-//! Host check for router, idle and resume paths that act on a channel's tmux name:
-//! Herdr, unknown or conflicting evidence defers before any kill, clear, evict or release.
+//! Host check for router, idle and resume paths that act on a channel's tmux name, or hold
+//! none: Herdr, unknown or conflicting evidence defers before any kill, clear, evict or release.
 
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
 use super::SharedData;
-use super::host_key_derivation::{derive_hosted_lookup, merge_lookups};
+use super::host_key_derivation::{
+    derive_channel_session_name, derive_hosted_lookup, merge_lookups,
+};
 use super::inflight::{KeyedTeardown, keyed_teardown, teardown_for_lookup};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
@@ -47,6 +49,61 @@ pub(super) async fn sweep_session_deferred(
     kept(
         shared, lookup, provider, channel_id, None, tmux_name, CALLER,
     )
+}
+
+/// [`sweep_session_deferred`] for a pass holding no channel name: only a found legacy row
+/// with no host trace admits it, so no row keeps it too.
+pub(super) async fn nameless_sweep_deferred(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> bool {
+    let gate = nameless_channel_gate(shared, provider, channel_id).await;
+    !matches!(gate, KeyedTeardown::Cleared(_))
+}
+
+/// [`channel_session_deferred`] for a channel holding no channel name. A turn with no name
+/// writes no row, so no row keeps main's path as a row not written yet does.
+pub(super) async fn nameless_channel_deferred(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> bool {
+    let gate = nameless_channel_gate(shared, provider, channel_id).await;
+    matches!(gate, KeyedTeardown::Kept)
+}
+
+/// The keyed gate on the name the channel's one row records under its own key, found
+/// through every registered hash; a failed read or two rows keep the channel.
+async fn nameless_channel_gate(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> KeyedTeardown {
+    // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
+    #[cfg(test)]
+    if shared.pg_pool.is_none() {
+        return KeyedTeardown::RowMissing;
+    }
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return KeyedTeardown::Kept;
+    };
+    let hashes = provider_hashes(shared, provider).await;
+    let name = match derive_channel_session_name(pool, &hashes, provider, channel_id).await {
+        Ok(name) => name,
+        Err(HostedLookup::Missing) => return KeyedTeardown::RowMissing,
+        Err(lookup) => {
+            tracing::warn!(
+                caller = CALLER,
+                channel_id,
+                ?lookup,
+                "no channel name; kept"
+            );
+            return KeyedTeardown::Kept;
+        }
+    };
+    let lookup = identity_lookup(shared, &hashes, None, provider, channel_id, &name).await;
+    keyed(shared, lookup, provider, channel_id, None, &name, CALLER)
 }
 
 /// [`channel_session_deferred`] with the turn's own key read too; a turn with no key
@@ -108,7 +165,7 @@ async fn identity_lookup(
     merge_lookups(vec![exact, derived])
 }
 
-/// The keyed gate's answer on `lookup`, with the marker and inflight evidence it reads.
+/// Whether the keyed gate keeps the session on `lookup`.
 fn kept(
     shared: &SharedData,
     lookup: HostedLookup,
@@ -118,10 +175,26 @@ fn kept(
     tmux_name: &str,
     caller: &str,
 ) -> bool {
+    let gate = keyed(
+        shared, lookup, provider, channel_id, exact, tmux_name, caller,
+    );
+    matches!(gate, KeyedTeardown::Kept)
+}
+
+/// The keyed gate's answer on `lookup`, with the marker and inflight evidence it reads.
+fn keyed(
+    shared: &SharedData,
+    lookup: HostedLookup,
+    provider: &ProviderKind,
+    channel_id: u64,
+    exact: Option<&str>,
+    tmux_name: &str,
+    caller: &str,
+) -> KeyedTeardown {
     let own =
         super::adk_session::build_namespaced_session_key(&shared.token_hash, provider, tmux_name);
     let key = exact.unwrap_or(&own);
-    let gate = teardown_for_lookup(
+    teardown_for_lookup(
         lookup,
         provider,
         channel_id,
@@ -129,8 +202,7 @@ fn kept(
         tmux_name,
         None,
         caller,
-    );
-    matches!(gate, KeyedTeardown::Kept)
+    )
 }
 
 /// Sync [`sweep_session_deferred`] for the rehydration pass on the blocking pool;
