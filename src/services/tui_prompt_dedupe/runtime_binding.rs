@@ -6,7 +6,9 @@ mod claude_source;
 pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
 pub(crate) use claude_source::{Persisted, Record};
 mod codex_hook;
-pub(crate) use codex_hook::{codex_tail_source_retired, observe_codex_hook};
+pub(crate) use codex_hook::{
+    codex_tail_source_retired, observe_codex_hook, publish_unless_codex_tail_retired,
+};
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
 

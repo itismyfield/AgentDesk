@@ -172,12 +172,12 @@ fn retiring_source(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel_id: u64,
     binding: &TuiRuntimeBinding,
-) -> Option<binding_events::SourceId> {
+) -> std::io::Result<Option<binding_events::SourceId>> {
     let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(authority.session()) else {
-        return None;
+        return Ok(None);
     };
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
-        return None;
+        return Ok(None);
     }
     binding_events::codex::source_ahead(
         channel_id,
@@ -186,13 +186,10 @@ fn retiring_source(
         binding.session_id.as_deref(),
         std::path::Path::new(&binding.output_path),
     )
-    .unwrap_or_else(|error| {
-        tracing::warn!(%error, tmux_session = authority.session(), "Codex binding history unreadable");
-        None
-    })
 }
 
-/// A finished tail must not republish a source that a later hook already replaced.
+/// A finished tail must not republish a source that a later hook already replaced,
+/// nor, with hooks on, one whose hook history cannot be read.
 pub(crate) fn codex_tail_source_retired(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
@@ -203,7 +200,40 @@ pub(crate) fn codex_tail_source_retired(
             .get(authority.session())
             .map(|c| c.value)
     });
-    channel.is_some_and(|channel| retiring_source(authority, channel, binding).is_some())
+    let Some(channel) = channel else {
+        return false;
+    };
+    match retiring_source(authority, channel, binding) {
+        Ok(retired) => retired.is_some(),
+        // With hooks off no hook can have moved the pane, so the tail installs as before.
+        Err(error) if !crate::services::codex::codex_direct_tui_hook_overrides_enabled() => {
+            tracing::warn!(%error, tmux_session = authority.session(), "Codex binding history unreadable");
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                tmux_session = authority.session(),
+                "Codex binding history unreadable; the tail source is held"
+            );
+            true
+        }
+    }
+}
+
+/// Runs `publish` unless a hook replaced `binding`'s source; the check and `publish` share one authority.
+pub(crate) fn publish_unless_codex_tail_retired(
+    binding: &TuiRuntimeBinding,
+    tmux_session_name: &str,
+    publish: impl FnOnce(),
+) -> bool {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        let publishes = !codex_tail_source_retired(authority, binding);
+        if publishes {
+            publish();
+        }
+        publishes
+    })
 }
 
 /// Restore completes a hook source whose event is durable but whose marker was never written.
@@ -213,8 +243,14 @@ pub(super) fn restored_source(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) -> Option<TuiRuntimeBinding> {
+    // An unreadable history restores the marker: dropping the binding would leave the pane unobservable.
     let Some(current) = (provider == "codex")
-        .then(|| retiring_source(authority, channel_id, &binding))
+        .then(|| {
+            retiring_source(authority, channel_id, &binding).unwrap_or_else(|error| {
+                tracing::warn!(%error, tmux_session = authority.session(), "Codex binding history unreadable");
+                None
+            })
+        })
         .flatten()
         .filter(binding_events::codex::source_file_matches)
     else {
