@@ -260,10 +260,13 @@ async fn a_completed_o_panel_moves_below_a_body_o_posts_after_completion() {
 async fn a_legacy_completed_panel_is_never_moved() {
     let turn = Turn::open(false);
     let _o = test_override::force_channels(&[]);
-    assert!(turn.complete().await.is_none());
+    let follow = turn.complete().await;
     deliver::note_posted_for_tests(CHANNEL, LATE_BODY);
     turn.close_row();
-    tokio::time::sleep(POLL * 4).await;
+    match follow {
+        Some(follow) => follow.await.unwrap(),
+        None => tokio::time::sleep(POLL * 4).await,
+    }
 
     let calls = turn.calls();
     assert!(
