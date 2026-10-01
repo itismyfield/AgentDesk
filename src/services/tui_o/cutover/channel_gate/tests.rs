@@ -44,7 +44,7 @@ async fn claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs()
     let owned = claim_then_send(claim(52), || async { ran.set(true) }).await;
     assert_eq!(owned, Ok(BodySend::OwnedByO));
     let indirect = claim(52).map(|claim| claim.direct(false));
-    let held = claim_then_send(indirect, || async { ran.set(true) }).await;
-    assert_eq!(held, Err(IdentityError::NonDirectGateway));
+    let indirect = claim_then_send(indirect, || async { ran.set(true) }).await;
+    assert_eq!(indirect, Ok(BodySend::OwnedByO));
     assert!(!ran.get(), "nothing is sent on O's channel");
 }

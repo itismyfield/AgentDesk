@@ -11,8 +11,6 @@ use crate::services::tui_o::{
 pub(crate) enum IdentityError {
     #[error("writer boot snapshot is unavailable")]
     MissingSnapshot,
-    #[error("selected TUI destination has no direct Discord gateway")]
-    NonDirectGateway,
     #[error("Discord destination channel is unknown")]
     UnknownChannel,
     #[error("selected channel runtime kind is unknown")]
@@ -97,7 +95,7 @@ impl<'a> BodyClaim<'a> {
         }
     }
 
-    /// A caller without a direct gateway cannot skip for O, so an O-owned channel is held.
+    /// A caller without a direct gateway; see [`o_keeps_body`].
     pub(crate) fn direct(self, direct: bool) -> Self {
         Self { direct, ..self }
     }
@@ -107,11 +105,19 @@ impl<'a> BodyClaim<'a> {
             KindOf::Known(kind) => o_owns_tui_output_for_channel(self.channel_id, kind),
             KindOf::Tmux(session) => o_owns_tui_output_for_channel_tmux(self.channel_id, session),
         }?;
-        if owned && !self.direct {
-            return Err(IdentityError::NonDirectGateway.hold(self.channel_id));
-        }
-        Ok(owned)
+        Ok(o_keeps_body(self.channel_id, owned, self.direct))
     }
+}
+
+/// An owned channel's body is O's whatever the caller's gateway. A caller without a direct one
+/// alarms the channel when this process's writer is not taking it, as that body waits for O.
+pub(crate) fn o_keeps_body(channel_id: u64, owned: bool, direct: bool) -> bool {
+    if owned && !direct && !super::intake_route::accepts(channel_id) {
+        let detail = "writer is not taking a body from a caller without a direct gateway".into();
+        let alarm = WriterAlarm::Halted { detail };
+        AlarmRouter::for_process(None, None).raise_at(channel_id, &alarm, Instant::now());
+    }
+    owned
 }
 
 /// What became of a body offered to [`claim_then_send`].

@@ -83,7 +83,7 @@ fn judge(provider: &str, channel: u64, kind: RuntimeHandoffKind) -> IntakeRoute 
     }
 }
 
-fn accepts(channel: u64) -> bool {
+pub(super) fn accepts(channel: u64) -> bool {
     #[cfg(test)]
     if let Some(answer) = test_probe::answer(channel) {
         return answer;
