@@ -1576,6 +1576,7 @@ services::claude::local_tmux_lifecycle_tests::routine_binding_clear_starts_fresh
 services::claude::process_session_launch::tests::account_switch_drops_only_the_resume_argument_and_its_token
 services::claude::simple_launch_env_tests::simple_command_clears_an_inherited_absolute_compact_window
 services::claude::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
+services::claude::tui_session_launch::herdr_env_tests::herdr_launch_child_loses_the_herdr_pane_env_while_tmux_keeps_its_launch_env
 services::claude::tui_session_launch::herdr_off_tests::claude_launch_entry_stays_on_tmux_and_starts_no_herdr_preparation
 services::claude::tui_session_launch::host_marker_tests::claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_mark_still_launches
 services::claude::tui_session_launch::tests::binding_context_t7_claude_launch_fails_before_tmux
@@ -8467,6 +8468,7 @@ services::health_diagnostics::tests::every_health_path_database_await_is_bracket
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
+services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
 services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
 services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
 services::issue_announcements::tests::renders_active_card_with_agent_and_timestamp
@@ -9372,6 +9374,7 @@ services::session_host::herdr::transport::tests::herdr_socket_reads_retry_within
 services::session_host::herdr::transport::tests::herdr_socket_remote_error_is_a_failed_probe
 services::session_host::herdr::transport::tests::herdr_socket_reply_must_match_id_and_type
 services::session_host::herdr::transport::tests::herdr_socket_round_trip_sends_schema_requests
+services::session_host::herdr::transport::tests::herdr_socket_sends_a_mutation_only_on_the_connection_its_check_read
 services::session_host::herdr::transport::tests::herdr_socket_serializes_mutations_per_connection
 services::session_host::herdr::transport::tests::herdr_socket_unclear_replies_never_confirm_input
 services::session_host::herdr::wire::tests::herdr_line_frame_bounds_and_partial_frames
@@ -9384,12 +9387,14 @@ services::session_host::herdr_host::tests::herdr_complete_snapshot_decides_prese
 services::session_host::herdr_host::tests::herdr_endpoint_requires_every_field_and_an_absolute_socket
 services::session_host::herdr_host::tests::herdr_execution_pid_is_the_shell_pid_not_a_foreground_pid
 services::session_host::herdr_host::tests::herdr_fake_transport_rejects_an_unscripted_request
+services::session_host::herdr_host::tests::herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it
 services::session_host::herdr_host::tests::herdr_items_have_no_production_caller
 services::session_host::herdr_host::tests::herdr_keys_and_non_herdr_refs_make_no_transport_call
 services::session_host::herdr_host::tests::herdr_liveness_needs_a_root_shell_pid
 services::session_host::herdr_host::tests::herdr_observation_projection_truth_table
 services::session_host::herdr_host::tests::herdr_probe_failures_never_read_as_missing_or_dead
 services::session_host::herdr_host::tests::herdr_process_info_from_another_connection_is_not_liveness
+services::session_host::herdr_host::tests::herdr_production_restore_reader_refuses_every_input_before_any_call
 services::session_host::herdr_host::tests::herdr_reply_needs_exactly_one_of_result_or_error
 services::session_host::herdr_host::tests::herdr_requests_serialize_with_schema_method_names
 services::session_host::herdr_host::tests::herdr_send_text_keeps_ambiguous_outcomes_indeterminate

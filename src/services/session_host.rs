@@ -23,6 +23,7 @@ pub(crate) mod test_support;
 mod tmux_host;
 mod traits;
 
+pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume};
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,

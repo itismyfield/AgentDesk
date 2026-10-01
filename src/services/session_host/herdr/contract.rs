@@ -27,6 +27,8 @@ pub(crate) trait HerdrTransport: Send + Sync {
     /// The outcome and the generation of the connection that carried it, read
     /// together so a concurrent reconnect cannot relabel the reply.
     fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64);
+    /// Sends `call` only on the open connection with `generation`; otherwise `NotSent`.
+    fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64);
 }
 
 enum Fault {
