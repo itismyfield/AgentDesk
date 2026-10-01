@@ -63,8 +63,7 @@ use self::backend_routing::{
 use crate::services::provider_teardown::TeardownClearance;
 #[cfg(unix)]
 use crate::services::{
-    provider_teardown::teardown_tmux,
-    session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool},
+    provider_teardown::teardown_tmux, session_host::legacy_collapse::tmux_live_pane_bool,
     tmux_diagnostics::should_recreate_session_after_followup_fifo_error,
 };
 
@@ -1746,7 +1745,7 @@ fn execute_streaming_local_tui_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_present_bool(tmux_session_name);
+    let session_exists = host_gate::session_exists(tmux_session_name)?;
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -2501,7 +2500,7 @@ fn execute_streaming_local_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_present_bool(tmux_session_name);
+    let session_exists = host_gate::session_exists(tmux_session_name)?;
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,

@@ -8,7 +8,9 @@ use crate::services::provider::session_probe::{
 };
 use crate::services::provider::{ProviderKind, SessionProbe};
 #[cfg(unix)]
-use crate::services::session_host::HostKind;
+use crate::services::session_host::{
+    HostKind, HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
+};
 #[cfg(unix)]
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
@@ -29,6 +31,42 @@ pub(super) fn tmux_turn_admitted(tmux_session_name: &str) -> Result<(), String> 
             ))
         }
     }
+}
+
+/// Whether the session exists for a startup decision; a failed probe is `Err` before any
+/// cleanup or fresh preparation, unless tmux has no server socket and so no session.
+#[cfg(unix)]
+pub(super) fn session_exists(tmux_session_name: &str) -> Result<bool, String> {
+    match TmuxHost.presence(HostSessionRef::tmux(tmux_session_name)) {
+        HostPresence::Present => Ok(true),
+        HostPresence::Missing => Ok(false),
+        HostPresence::ProbeFailed if !tmux_server_socket().exists() => Ok(false),
+        HostPresence::ProbeFailed => {
+            tracing::warn!(
+                tmux_session_name,
+                "claude turn deferred: presence unobserved"
+            );
+            Err(format!(
+                "presence of tmux session {tmux_session_name} is unobserved: no cleanup or fresh launch"
+            ))
+        }
+    }
+}
+
+/// The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else
+/// `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`.
+#[cfg(unix)]
+fn tmux_server_socket() -> std::path::PathBuf {
+    let attached = std::env::var("TMUX").unwrap_or_default();
+    let attached = attached.split(',').next().unwrap_or_default();
+    if !attached.is_empty() {
+        return attached.into();
+    }
+    let dir = std::env::var_os("TMUX_TMPDIR").filter(|dir| !dir.is_empty());
+    let dir = std::path::PathBuf::from(dir.unwrap_or_else(|| "/tmp".into()));
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    dir.join(format!("tmux-{uid}")).join("default")
 }
 
 /// The live-pane answer for a startup decision; a present session whose pane probe fails is

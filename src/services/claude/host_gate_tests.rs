@@ -207,3 +207,63 @@ fn the_wrapper_follow_up_poll_reads_dead_only_on_a_confirmed_death() {
         assert_eq!((probe.is_alive)(), alive, "{pane:?}");
     }
 }
+
+// A failed presence probe while tmux has a server keeps every runtime file and starts
+// nothing; with no server socket there is no session, so the fresh path runs as before.
+#[test]
+fn a_failed_presence_probe_never_prepares_a_fresh_session() {
+    const NAME: &str = "adk-p5c-claude-presence-unobserved";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = FakeTmux::install(NAME);
+    let sockets = tempfile::tempdir().unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _tmpdir = set("TMUX_TMPDIR", sockets.path());
+    // A resolvable CLI the fake tmux never runs, so the fresh path reaches its preparation.
+    let cli = sockets.path().join("claude");
+    std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _cli = set("AGENTDESK_CLAUDE_PATH", &cli);
+    let _attached = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("TMUX");
+    unsafe { std::env::remove_var("TMUX") };
+    let uid = unsafe { libc::getuid() };
+    let socket = sockets.path().join(format!("tmux-{uid}")).join("default");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let session = HostSessionRef::tmux(NAME);
+    let _presence = InjectedPresenceGuard::set(session, HostPresence::ProbeFailed);
+    let _pane = InjectedLivenessGuard::set(session, HostLiveness::Live);
+    let files = ["jsonl", "prompt", "generation"]
+        .map(|ext| crate::services::tmux_common::session_temp_path(NAME, ext));
+    let entries: [(&str, fn(&str, Option<&TeardownClearance>) -> _); 2] =
+        [("tui", tui_turn), ("wrapper", wrapper_turn)];
+    for (entry, turn) in entries {
+        for server in [true, false] {
+            if server {
+                std::fs::write(&socket, "").unwrap();
+            } else {
+                std::fs::remove_file(&socket).unwrap();
+            }
+            for file in &files {
+                std::fs::create_dir_all(std::path::Path::new(file).parent().unwrap()).unwrap();
+                std::fs::write(file, "sentinel").unwrap();
+            }
+            let result = turn(NAME, Some(&cleared(NAME)));
+            let kept = files
+                .iter()
+                .all(|file| std::fs::read_to_string(file).is_ok_and(|body| body == "sentinel"));
+            let calls = tmux.take_calls();
+            if server {
+                assert!(kept, "{entry}: runtime files kept, {result:?}");
+                assert_eq!(calls, Vec::<String>::new(), "{entry}");
+                let error = result.expect_err(entry);
+                assert!(error.contains("unobserved"), "{entry}: {error}");
+            } else {
+                assert!(
+                    !kept,
+                    "{entry}: no server, fresh path as before: {result:?}"
+                );
+            }
+            crate::services::tmux_common::cleanup_session_temp_files(NAME);
+        }
+    }
+}

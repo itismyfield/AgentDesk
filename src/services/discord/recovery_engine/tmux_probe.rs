@@ -119,7 +119,7 @@ fn typed(provider: &ProviderKind) -> bool {
 }
 
 /// The row's pane, retried while tmux settles, with no host-guard read.
-pub(super) fn restart_pane_local(
+fn restart_pane_local(
     provider: &ProviderKind,
     name: &str,
     row: &InflightTurnState,
@@ -204,7 +204,7 @@ async fn admit_death(
 
 /// The restore reader's poll probe: a Claude row whose host evidence is not local tmux
 /// polls its transcript without a tmux probe; any other row keeps the legacy tmux probe.
-pub(super) fn reader_probe(
+fn reader_probe(
     provider: &ProviderKind,
     row: &InflightTurnState,
     name: &str,
@@ -214,6 +214,77 @@ pub(super) fn reader_probe(
     let tmux = (!typed(provider) || host_liveness::local_tmux(name, Some(row))).then_some(name);
     let probe = crate::services::claude::host_gate::host_poll_probe;
     probe(tmux, provider.clone(), Some(runtime_kind), output_path)
+}
+
+/// The session a restore reader follows: its provider, row, tmux name and output.
+pub(super) struct RestoredReader {
+    pub(super) provider: ProviderKind,
+    pub(super) row: InflightTurnState,
+    pub(super) name: String,
+    pub(super) runtime_kind: RuntimeHandoffKind,
+    pub(super) output_path: String,
+}
+
+/// How a restore reader ended: hand the session to a watcher from an offset, or retry a
+/// turn whose session died.
+pub(super) enum RestoredRead {
+    HandOff(u64),
+    Died,
+}
+
+/// Reads restored output to a result; a death the host cannot confirm keeps reading from
+/// the same offset with nothing sent, so the row stays as stored until an answer.
+pub(super) fn read_restored_output(
+    reader: &RestoredReader,
+    mut offset: u64,
+    tx: &std::sync::mpsc::Sender<StreamMessage>,
+    cancel: Arc<CancelToken>,
+) -> Result<RestoredRead, String> {
+    let RestoredReader {
+        provider,
+        row,
+        name,
+        ..
+    } = reader;
+    loop {
+        let probe = reader_probe(
+            provider,
+            row,
+            name,
+            reader.runtime_kind,
+            &reader.output_path,
+        );
+        let read = crate::services::session_backend::read_output_file_until_result(
+            &reader.output_path,
+            offset,
+            tx.clone(),
+            Some(cancel.clone()),
+            probe,
+        )?;
+        let died_at = match read {
+            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+                return Ok(RestoredRead::HandOff(offset));
+            }
+            ReadOutputResult::SessionDied { offset } => offset,
+        };
+        // dcserver restart can read as a death with no new output while the CLI idles.
+        match restart_pane_local(provider, name, row) {
+            RestartProbe::Alive => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
+                    row.channel_id
+                );
+                return Ok(RestoredRead::HandOff(died_at));
+            }
+            RestartProbe::Missing => return Ok(RestoredRead::Died),
+            RestartProbe::Defer => {
+                tracing::info!(name, "restore reader: pane unobserved, reading on");
+                std::thread::sleep(recovery_retry_backoff(3));
+                offset = died_at;
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

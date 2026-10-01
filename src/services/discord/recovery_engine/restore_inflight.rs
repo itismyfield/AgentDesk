@@ -20,7 +20,7 @@ use super::terminal_watcher::restart_report_watcher_start;
 use super::{restart_report::clear_loaded_restart_report, *};
 
 use super::tmux_probe::{
-    RestartProbe, reader_probe, restart_pane, restart_pane_local, restart_session,
+    RestoredRead, RestoredReader, read_restored_output, restart_pane, restart_session,
 };
 
 #[cfg(not(unix))]
@@ -2138,80 +2138,44 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
         let (tx, rx) = mpsc::channel();
         let cancel_for_reader = cancel_token.clone();
-        let output_for_reader = output_path.clone();
         let input_for_reader = input_fifo_path.clone();
-        let tmux_for_reader = tmux_session_name.clone();
         let start_offset = state.last_offset;
         let recovery_session_id = state.session_id.clone();
-        let runtime_kind_for_reader = runtime_kind;
         let retry_channel_id = channel_id.get();
-        let provider_for_reader = provider.clone();
-        let row_for_reader = state.clone();
-        let probe = reader_probe(
-            provider,
-            &state,
-            &tmux_session_name,
+        let reader = RestoredReader {
+            provider: provider.clone(),
+            row: state.clone(),
+            name: tmux_session_name.clone(),
             runtime_kind,
-            &output_path,
-        );
+            output_path: output_path.clone(),
+        };
         std::thread::spawn(move || {
-            match crate::services::session_backend::read_output_file_until_result(
-                &output_for_reader,
-                start_offset,
-                tx.clone(),
-                Some(cancel_for_reader),
-                probe,
-            ) {
-                Ok(ReadOutputResult::Completed { offset })
-                | Ok(ReadOutputResult::Cancelled { offset }) => {
+            match read_restored_output(&reader, start_offset, &tx, cancel_for_reader) {
+                Ok(RestoredRead::HandOff(offset)) => {
                     let _ = tx.send(StreamMessage::RuntimeReady {
                         handoff: runtime_handoff_for_recovery(
-                            runtime_kind_for_reader,
-                            output_for_reader,
+                            reader.runtime_kind,
+                            reader.output_path,
                             input_for_reader,
-                            tmux_for_reader,
+                            reader.name,
                             recovery_session_id,
                             offset,
                         ),
                     });
                 }
-                Ok(ReadOutputResult::SessionDied { offset }) => {
-                    // Check if tmux pane is actually alive — dcserver restart
-                    // may cause SessionDied because no new output arrived, but
-                    // the Claude CLI process could still be idle (waiting for input).
-                    let probe =
-                        restart_pane_local(&provider_for_reader, &tmux_for_reader, &row_for_reader);
-                    let pane_alive = probe != RestartProbe::Missing;
+                Ok(RestoredRead::Died) => {
+                    // Session truly died during restart recovery. Fall back
+                    // to the generic auto-retry path so restart handling
+                    // does not get a special handoff-only branch.
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    if pane_alive {
-                        // Session is alive but idle — hand off to watcher instead of retrying
-                        tracing::info!(
-                            "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
-                            retry_channel_id
-                        );
-                        let _ = tx.send(StreamMessage::RuntimeReady {
-                            handoff: runtime_handoff_for_recovery(
-                                runtime_kind_for_reader,
-                                output_for_reader,
-                                input_for_reader,
-                                tmux_for_reader,
-                                recovery_session_id,
-                                offset,
-                            ),
-                        });
-                    } else {
-                        // Session truly died during restart recovery. Fall back
-                        // to the generic auto-retry path so restart handling
-                        // does not get a special handoff-only branch.
-                        tracing::warn!(
-                            "  [{ts}] ↻ Recovery: session died, signaling generic auto-retry (channel {})",
-                            retry_channel_id
-                        );
-                        let _ = tx.send(StreamMessage::Done {
-                            result: "__session_died_retry__".to_string(),
-                            session_id: recovery_session_id,
-                        });
-                    }
+                    tracing::warn!(
+                        "  [{ts}] ↻ Recovery: session died, signaling generic auto-retry (channel {})",
+                        retry_channel_id
+                    );
+                    let _ = tx.send(StreamMessage::Done {
+                        result: "__session_died_retry__".to_string(),
+                        session_id: recovery_session_id,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(StreamMessage::Error {
@@ -2223,7 +2187,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 }
             }
         });
-
         let recovery_dispatch_id = parse_dispatch_id(&state.user_text)
             .or(lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await);
         let recovery_dispatch_kind =

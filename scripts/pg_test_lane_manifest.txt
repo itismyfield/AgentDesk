@@ -956,6 +956,7 @@ services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_star
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
+services::discord::recovery_engine::restore_inflight::host_probe_tests::a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg
 services::discord::recovery_engine::restore_inflight::host_probe_tests::restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg

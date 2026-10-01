@@ -162,3 +162,115 @@ async fn restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A PATH-first tmux whose sessions exist and whose panes read dead once `dead` exists.
+fn pane_flag_tmux() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("tmux");
+    let body = "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
+                echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in has-session) exit 0 ;;\n\
+                list-panes) if [ -f \"$d/dead\" ]; then echo 1; else echo 0; fi; exit 0 ;;\n\
+                esac\nexit 1\n";
+    std::fs::write(&binary, body).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![dir.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    (dir, set("PATH", std::path::Path::new(&path)))
+}
+
+// After the restore reader reads its session dead, an unobserved pane hands nothing to a
+// watcher and retries nothing: the row stays as stored while a live pane is handed off.
+#[tokio::test]
+async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy_output = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (tmux, _path) = pane_flag_tmux();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let transcripts = tempfile::tempdir().unwrap();
+    let mut cases = Vec::new();
+    for (n, after) in [HostLiveness::ProbeError, HostLiveness::Live]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = ChannelId::new(1_479_671_301_387_160_000 + n as u64);
+        let name = provider.build_tmux_session_name(&format!("p5c-reader-{n}"));
+        let key = channel_key(&shared, &name);
+        seed(&pool, &key, &name, channel.get(), Stored::Legacy).await;
+        let session = HostSessionRef::tmux(&name);
+        let pane = InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent);
+        let presence = InjectedPresenceGuard::set(session, HostPresence::Present);
+        let transcript = transcripts.path().join(format!("{n}.jsonl"));
+        std::fs::write(&transcript, "").unwrap();
+        // A restart leaves the row with no live mailbox turn, so the recovery kicks off.
+        let user_msg = channel.get() + 1;
+        let text = "restored reader fixture".to_string();
+        let tmux_name = Some(name.clone());
+        let mut row = inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg,
+            user_msg + 1,
+            text,
+            None,
+            tmux_name,
+            None,
+            None,
+            0,
+        );
+        row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        row.output_path = Some(transcript.display().to_string());
+        inflight::save_inflight_state(&row).unwrap();
+        cases.push((channel, name, after, pane, presence));
+    }
+    let discord = o_cut_recorder::start(cases[0].0.get()).await;
+
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+
+    for (_, name, after, pane, _) in &mut cases {
+        *pane = InjectedLivenessGuard::set(HostSessionRef::tmux(name), *after);
+    }
+    std::fs::write(tmux.path().join("dead"), "").unwrap();
+    let _ = std::fs::remove_file(tmux.path().join("calls"));
+    let owner = |channel: ChannelId| {
+        inflight::load_inflight_state(&provider, channel.get())
+            .and_then(|row| row.watcher_owner_channel_id)
+    };
+    let (channel, name, ..) = &cases[0];
+    let polled = format!("list-panes -t ={name}:");
+    let read_dead = || {
+        let calls = std::fs::read_to_string(tmux.path().join("calls")).unwrap_or_default();
+        calls.contains(&polled)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while (owner(cases[1].0).is_none() || !read_dead()) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(
+        owner(cases[1].0).is_some(),
+        "a live pane is handed to a watcher"
+    );
+    assert!(read_dead(), "the reader read the unobserved pane dead");
+    // Past the pane re-check's retries, which a handoff or a retry would follow.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let row = inflight::load_inflight_state(&provider, channel.get());
+    let row = row.expect("an unobserved pane keeps the row");
+    assert_eq!(row.watcher_owner_channel_id, None, "nothing is handed off");
+    assert!(!shared.tmux_watchers.has_live_watcher_handle(name));
+    for (_, name, ..) in &cases {
+        crate::services::tmux_common::cleanup_session_temp_files(name);
+    }
+    drop((cases, transcripts));
+    pool.close().await;
+    db.drop().await;
+}
