@@ -123,7 +123,8 @@ async fn guard(
     .await
 }
 
-// PATH is replaced only in the child, never in the parallel test runner.
+// PATH is replaced only in the child, never in the parallel test runner. The fake tmux
+// confirms the session is gone; a silent failure would be an unanswered probe, not a death.
 #[cfg(unix)]
 fn isolated(name: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -131,7 +132,8 @@ fn isolated(name: &str) {
     let tmux = root.path().join("tmux");
     std::fs::write(
         &tmux,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/probes\"\nexit 1\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/probes\"\n\
+         echo \"can't find session\" >&2\nexit 1\n",
     )
     .unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();

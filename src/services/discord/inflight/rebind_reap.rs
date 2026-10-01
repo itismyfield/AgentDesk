@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::platform::tmux::PaneLiveness;
+use crate::services::provider::session_probe::SessionLiveness;
 
 /// #3635: runtime-liveness oracle for the dead-watcher rebind-origin reap path.
 ///
@@ -31,15 +32,20 @@ pub(super) fn runtime_watcher_is_proven_dead(state: &InflightTurnState) -> bool 
     if session.is_empty() {
         return false;
     }
-    // A transient probe failure is "unknown", not "dead" — preserve.
+    // A transient probe failure or another host is "unknown", not "dead" — preserve.
     #[cfg(not(test))]
-    let pane = crate::services::tmux_diagnostics::tmux_session_pane_liveness(session);
+    let pane = local_pane_liveness(session, state);
     #[cfg(test)]
-    let pane = tests::tmux_session_pane_liveness(session);
+    let pane = tests::tmux_session_pane_liveness(session, state);
     if pane == PaneLiveness::ProbeError {
         return false;
     }
     proven_dead_from_signals(pane, watcher_runtime_activity_recent(session))
+}
+
+fn local_pane_liveness(session: &str, state: &InflightTurnState) -> PaneLiveness {
+    let liveness = crate::services::discord::host_liveness::observe_liveness(session, Some(state));
+    crate::services::discord::host_liveness::as_pane_liveness(liveness)
 }
 
 /// Pure proven-dead/idle-stuck decision from the two probed signals,
@@ -408,6 +414,7 @@ pub(in crate::services::discord) fn reap_dead_watcher_rebind_origin_locked(
 /// Not called from the boot path: a just-restarted watcher's session reads
 /// as dead at cold start, so the liveness gate only fires in the warm sweeper.
 pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin(
+    shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     state: &InflightTurnState,
     age_secs: u64,
@@ -424,6 +431,26 @@ pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin(
             .unwrap_or(false);
     if !proven_dead {
         return false;
+    }
+    // The host guard reads the stored rows before the proven-dead row is unlinked.
+    let session = state
+        .tmux_session_name
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    let (dead, caller) = (SessionLiveness::Missing, "dead_watcher_rebind_reap");
+    let gate = crate::services::discord::host_liveness::tmux_verdict_gate(
+        shared,
+        provider,
+        state.channel_id,
+        session,
+        dead,
+        caller,
+    );
+    match gate.await {
+        // A structurally abandoned rebind origin had no Discord turn start to write its row.
+        KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => {}
+        KeyedTeardown::Kept => return false,
     }
     reap_dead_watcher_rebind_origin_locked(provider, state, current_generation)
 }

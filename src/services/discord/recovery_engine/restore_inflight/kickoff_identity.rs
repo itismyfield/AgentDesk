@@ -1,5 +1,8 @@
 use super::*;
+use crate::services::discord::host_liveness;
+use crate::services::discord::inflight::KeyedTeardown;
 use crate::services::platform::tmux::PaneLiveness;
+use crate::services::provider::session_probe::SessionLiveness;
 use std::num::NonZeroU64;
 
 pub(super) struct RecoveryKickoffIdentity {
@@ -55,7 +58,38 @@ pub(super) fn plan_ownerless_dead_pane_row(
     })
 }
 
+/// Whether tmux confirms the row's pane dead and the host guard admits that answer.
+pub(super) async fn ownerless_pane_dead_admitted(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: &str,
+) -> bool {
+    let (name, row) = (tmux_session_name.to_string(), state.clone());
+    let observe = move || host_liveness::observe_liveness(&name, Some(&row));
+    let observed = tokio::task::spawn_blocking(observe).await;
+    let observed = observed.unwrap_or(SessionLiveness::ProbeFailed);
+    let (channel, caller) = (state.channel_id, "recovery_ownerless_dead_pane");
+    if observed != SessionLiveness::Missing {
+        return false;
+    }
+    let gate = host_liveness::tmux_verdict_gate(
+        shared,
+        provider,
+        channel,
+        tmux_session_name,
+        observed,
+        caller,
+    );
+    match gate.await {
+        // An ownerless row is watcher-reacquired: no turn start ever wrote its sessions row.
+        KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => true,
+        KeyedTeardown::Kept => false,
+    }
+}
+
 /// Ownerless rows get no mailbox turn: notify and dispose a dead pane, keep a live one.
+/// A failed probe or another host keeps the row as a live pane does.
 pub(super) async fn dispose_ownerless_row(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -64,10 +98,11 @@ pub(super) async fn dispose_ownerless_row(
     tmux_session_name: &str,
     output_path: &str,
 ) {
-    let liveness =
-        crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness(tmux_session_name)
-            .await;
-    let Some(plan) = plan_ownerless_dead_pane_row(state, liveness, output_path) else {
+    if !ownerless_pane_dead_admitted(shared, provider, state, tmux_session_name).await {
+        return;
+    }
+    let dead = PaneLiveness::DeadOrAbsent;
+    let Some(plan) = plan_ownerless_dead_pane_row(state, dead, output_path) else {
         return;
     };
     let outcome =

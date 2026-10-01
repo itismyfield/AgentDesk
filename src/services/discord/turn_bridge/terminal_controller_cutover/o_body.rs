@@ -5,8 +5,8 @@ use crate::services::tui_o::cutover::{self, IdentityError};
 
 type Gate = fn(u64, Option<RuntimeHandoffKind>) -> Result<bool, IdentityError>;
 
-/// Direct TUI bodies follow destination membership; uncertain selected identities are held.
-/// Only read: a pending adoption stays pending, and a body claims at its transport instead.
+/// TUI bodies follow destination membership on any gateway; uncertain selected identities are
+/// held. Only read: a pending adoption stays pending, and a body claims at its transport instead.
 pub(in crate::services::discord::turn_bridge) fn bridge_o_body_peek_decision(
     channel_id: ChannelId,
     inflight: &InflightTurnState,
@@ -38,10 +38,11 @@ fn decision(
     o_owns: Gate,
 ) -> Result<bool, IdentityError> {
     let owned = o_owns(channel_id.get(), kind(channel_id, inflight))?;
-    if owned && !can_deliver_directly {
-        return Err(IdentityError::NonDirectGateway.hold(channel_id.get()));
-    }
-    Ok(owned)
+    Ok(cutover::o_keeps_body(
+        channel_id.get(),
+        owned,
+        can_deliver_directly,
+    ))
 }
 
 /// A bridge body sent under `claim`; O owning the channel or a held identity sent nothing, which
