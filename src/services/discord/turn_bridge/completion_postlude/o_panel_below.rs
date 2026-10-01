@@ -36,7 +36,9 @@ impl Transport {
 
     async fn send(&self, channel_id: ChannelId, text: &str) -> Result<MessageId, String> {
         match self {
-            Self::Gateway(gateway) => gateway.send_message(channel_id, text).await,
+            Self::Gateway(gateway) => {
+                TurnGateway::send_message(gateway.as_ref(), channel_id, text).await
+            }
             Self::Rest(http) => {
                 super::super::super::http::send_channel_message(http, channel_id, text)
                     .await
