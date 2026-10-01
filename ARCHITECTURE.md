@@ -1362,6 +1362,7 @@ src/
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
+│   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs

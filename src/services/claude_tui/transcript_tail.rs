@@ -108,7 +108,7 @@ pub fn claude_project_dir_candidates_for_cwd(
 /// per-session transcript identity tracked at handoff, which the binding does
 /// not yet carry (session_id is registered as None by the Discord turn).
 /// Returns `None` when no project directory or no qualifying transcript exists.
-/// Headless SDK transcripts sharing the project dir are never candidates.
+/// Headless SDK transcripts, and files whose entrypoint cannot be read, are never candidates.
 pub fn latest_claude_transcript_for_cwd(
     cwd: &Path,
     modified_since: std::time::SystemTime,
@@ -117,7 +117,7 @@ pub fn latest_claude_transcript_for_cwd(
 ) -> Option<PathBuf> {
     claude_transcript_files_for_cwd_since(cwd, modified_since, claude_home, exclude)
         .into_iter()
-        .find(|path| !claude_transcript_is_headless_sdk(path))
+        .find(|path| claude_transcript_may_be_tui(path))
 }
 
 /// #3212 (codex P1): like [`latest_claude_transcript_for_cwd`] but returns ALL
@@ -131,7 +131,7 @@ pub fn latest_claude_transcript_for_cwd(
 ///
 /// `modified_since` floors the result to transcripts at/after this session's
 /// launch (pass `UNIX_EPOCH` to disable); `exclude` drops transcripts already
-/// claimed by OTHER live sessions' bindings. Headless SDK transcripts are dropped.
+/// claimed by OTHER live sessions' bindings. Headless SDK and undetermined transcripts are dropped.
 pub fn claude_transcripts_for_cwd_since(
     cwd: &Path,
     modified_since: std::time::SystemTime,
@@ -140,7 +140,7 @@ pub fn claude_transcripts_for_cwd_since(
 ) -> Vec<PathBuf> {
     let mut found =
         claude_transcript_files_for_cwd_since(cwd, modified_since, claude_home, exclude);
-    found.retain(|path| !claude_transcript_is_headless_sdk(path));
+    found.retain(|path| claude_transcript_may_be_tui(path));
     found
 }
 
@@ -205,33 +205,70 @@ fn claude_transcript_files_for_cwd_since(
 /// Prefix bytes read to find a transcript's recorded entrypoint; SDK prompts can precede it.
 const CLAUDE_ENTRYPOINT_PROBE_BYTES: u64 = 1024 * 1024;
 
-/// True when the first record carrying `entrypoint` names an SDK one (`sdk-cli`, ...): a
-/// headless `claude -p` session, never an interactive TUI. Unknown or unreadable is false.
-pub(crate) fn claude_transcript_is_headless_sdk(path: &Path) -> bool {
+/// What a transcript's bounded prefix says about the Claude session that writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeTranscriptEntrypoint {
+    /// The first record carrying `entrypoint` names an interactive one (`cli`).
+    Interactive,
+    /// The first record carrying `entrypoint` names an SDK one (`sdk-cli`, ...): headless `claude -p`.
+    HeadlessSdk,
+    /// The whole file was read and records no entrypoint yet, as a fresh compaction successor.
+    NotYetRecorded,
+    /// The probe bound ran out before an entrypoint, or the file could not be read.
+    Undetermined,
+}
+
+pub(crate) fn claude_transcript_entrypoint(path: &Path) -> ClaudeTranscriptEntrypoint {
+    use ClaudeTranscriptEntrypoint::{HeadlessSdk, Interactive, NotYetRecorded, Undetermined};
     #[derive(serde::Deserialize)]
     struct EntrypointProbe {
         entrypoint: Option<String>,
     }
     let Ok(file) = std::fs::File::open(path) else {
-        return false;
+        return Undetermined;
     };
-    let mut reader =
-        std::io::BufReader::new(std::io::Read::take(file, CLAUDE_ENTRYPOINT_PROBE_BYTES));
-    let mut line = Vec::new();
+    // One byte past the bound tells a file that ends at the bound from one that runs past it.
+    let probe = std::io::Read::take(file, CLAUDE_ENTRYPOINT_PROBE_BYTES + 1);
+    let mut reader = std::io::BufReader::new(probe);
+    let (mut line, mut read) = (Vec::new(), 0u64);
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return false,
-            Ok(_) if line.last() != Some(&b'\n') => return false,
-            Ok(_) => {}
+            Err(_) => return Undetermined,
+            Ok(0) => return NotYetRecorded,
+            Ok(n) => read += n as u64,
+        }
+        if read > CLAUDE_ENTRYPOINT_PROBE_BYTES {
+            return Undetermined;
+        }
+        // A partial last line inside the bound is a record still being written.
+        if line.last() != Some(&b'\n') {
+            return NotYetRecorded;
         }
         if let Ok(EntrypointProbe {
             entrypoint: Some(entrypoint),
         }) = serde_json::from_slice::<EntrypointProbe>(&line)
         {
-            return entrypoint.starts_with("sdk-");
+            return if entrypoint.starts_with("sdk-") {
+                HeadlessSdk
+            } else {
+                Interactive
+            };
         }
     }
+}
+
+/// True only when the transcript's recorded entrypoint is an SDK one.
+pub(crate) fn claude_transcript_is_headless_sdk(path: &Path) -> bool {
+    claude_transcript_entrypoint(path) == ClaudeTranscriptEntrypoint::HeadlessSdk
+}
+
+/// A TUI candidate records an interactive entrypoint or none yet; SDK and undetermined files are not.
+fn claude_transcript_may_be_tui(path: &Path) -> bool {
+    matches!(
+        claude_transcript_entrypoint(path),
+        ClaudeTranscriptEntrypoint::Interactive | ClaudeTranscriptEntrypoint::NotYetRecorded
+    )
 }
 
 // #3034: test-only — see `TranscriptReplayOutcome` note. Pins the JSONL replay
@@ -523,9 +560,23 @@ mod tests {
             ),
         )
         .unwrap();
+        // Past the probe bound the entrypoint is undetermined, as is a file that cannot be read.
+        let beyond = project_dir.join("44444444-4444-4444-8444-444444444444.jsonl");
+        let bound = CLAUDE_ENTRYPOINT_PROBE_BYTES as usize;
+        std::fs::write(
+            &beyond,
+            format!(
+                "{{\"type\":\"queue-operation\",\"content\":\"{}\"}}\n\
+                 {{\"type\":\"user\",\"entrypoint\":\"sdk-cli\"}}\n",
+                "x".repeat(bound)
+            ),
+        )
+        .unwrap();
+        let unreadable = project_dir.join("55555555-5555-4555-8555-555555555555.jsonl");
+        std::fs::create_dir(&unreadable).unwrap();
         let base =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        for (offset, path) in [(0, &cli), (60, &fresh), (120, &sdk)] {
+        for (offset, path) in [(0, &cli), (60, &fresh), (120, &sdk), (180, &beyond)] {
             std::fs::File::options()
                 .write(true)
                 .open(path)

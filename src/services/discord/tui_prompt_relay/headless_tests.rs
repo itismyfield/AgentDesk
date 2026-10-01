@@ -78,15 +78,19 @@ impl HeadlessPane {
         };
         let now = std::time::SystemTime::now();
         let ago = |secs| now - std::time::Duration::from_secs(secs);
-        let tui_record = r#"{"type":"user","entrypoint":"cli","timestamp":"2026-10-01T06:00:00Z"}"#;
-        let headless_records = concat!(
-            r#"{"type":"queue-operation","content":"brief"}"#,
-            "\n",
-            r#"{"type":"user","entrypoint":"sdk-cli","timestamp":"2026-10-01T06:20:00Z"}"#,
-        );
+        let record = |session: &str, entrypoint: &str, at: &str| {
+            let record = serde_json::json!({
+                "type": "user", "sessionId": session, "entrypoint": entrypoint, "timestamp": at,
+            });
+            record.to_string()
+        };
+        let tui_record = record(&pane.tui, "cli", "2026-10-01T06:00:00Z");
+        let queued = serde_json::json!({"type": "queue-operation", "sessionId": pane.headless});
+        let sdk_record = record(&pane.headless, "sdk-cli", "2026-10-01T06:20:00Z");
+        let headless_records = format!("{queued}\n{sdk_record}");
         set_mtime(&script, ago(600));
-        set_mtime(&pane.write(&pane.tui, tui_record), ago(120));
-        set_mtime(&pane.write(&pane.headless, headless_records), ago(60));
+        set_mtime(&pane.write(&pane.tui, &tui_record), ago(120));
+        set_mtime(&pane.write(&pane.headless, &headless_records), ago(60));
         pane
     }
 
@@ -180,5 +184,69 @@ fn the_idle_relay_tails_the_tui_transcript_instead_of_a_bound_headless_one() {
     );
 
     assert_eq!(tailed, Some(pane.path(&pane.tui)));
+    pane.expect_bound_to_tui();
+}
+
+#[test]
+fn a_restart_leaves_a_log_verified_headless_source_for_the_tui_transcript() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _ingress = Ingress::new();
+    let _reset = Reset;
+    let pane = HeadlessPane::new(root.path(), 7_563);
+    let headless = pane.path(&pane.headless);
+    let headless_path = headless.display().to_string();
+    dedupe::register_tmux_channel(&pane.tmux, pane.channel);
+    dedupe::register_provider_session("claude", &pane.headless, &pane.tmux);
+    dedupe::register_launched_tmux_runtime_binding(&pane.tmux, claude(&headless, &pane.headless));
+    // The hook check verified the headless session as this pane's source under its spawn nonce.
+    let (dev, ino) = crate::services::tui_o::shadow::capture::file_identity(
+        &std::fs::metadata(&headless).unwrap(),
+    );
+    let source = SourceId {
+        session_id: pane.headless.clone(),
+        path: headless.clone(),
+        dev,
+        ino,
+    };
+    let proposal = Proposal {
+        channel_id: pane.channel,
+        provider: "claude",
+        tmux_session: &pane.tmux,
+        session_id: Some(&pane.headless),
+        path: &headless_path,
+        replaced: None,
+        cause: CauseSource::Hook(BindingCause::Unknown),
+        hook: None,
+    };
+    assert_eq!(
+        record_verified(&proposal, &source).unwrap(),
+        Committed::Appended
+    );
+    let mut row = crate::services::discord::inflight::InflightTurnState::new(
+        crate::services::provider::ProviderKind::Claude,
+        pane.channel,
+        None,
+        1,
+        7_563_001,
+        7_563_002,
+        "headless lane brief".to_string(),
+        None,
+        Some(pane.tmux.clone()),
+        Some(headless_path.clone()),
+        None,
+        0,
+    );
+    row.full_response = "headless lane output".to_string();
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+    // A restart forgets every in-memory binding; only the log and the launch artifacts remain.
+    forget_channel_for_tests(pane.channel);
+    dedupe::reset_state_for_tests();
+    crate::services::tui_prompt_dedupe::pending::reset_restore_outcomes_for_tests();
+
+    super::super::rehydrate_claude_tui_pane(&pane.shared, &pane.tmux);
+    pane.expect_bound_to_tui();
+    // The next pass reads the log the replacement wrote and keeps the TUI binding.
+    super::super::rehydrate_claude_tui_pane(&pane.shared, &pane.tmux);
     pane.expect_bound_to_tui();
 }

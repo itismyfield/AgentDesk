@@ -341,7 +341,7 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
         launch,
         claude_tui_rehydrated_binding,
     );
-    if restored.is_some_and(|outcome| outcome.skips_launch_refresh()) {
+    if super::headless::restore_holds(tmux_session_name, restored) {
         return;
     }
     let fresh_binding = super::headless::tui_binding(shared, tmux_session_name, fresh_binding);

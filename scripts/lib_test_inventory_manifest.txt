@@ -6891,6 +6891,8 @@ services::discord::tui_direct_pending_start::tests::enforce_mode_stale_foreign_d
 services::discord::tui_direct_pending_start::tests::finalized_when_no_prior_inflight_and_no_blocking_turn_and_binding
 services::discord::tui_direct_pending_start::tests::generalized_helper_records_marker_for_watcher_lease_and_own_row
 services::discord::tui_direct_pending_start::tests::generalized_helper_skips_non_watcher_lease
+services::discord::tui_direct_pending_start::tests::headless_row_tests::a_restart_preserved_row_on_a_headless_transcript_yields_to_the_next_tui_turn
+services::discord::tui_direct_pending_start::tests::headless_row_tests::a_session_bound_row_on_a_tui_transcript_still_blocks_the_next_turn
 services::discord::tui_direct_pending_start::tests::inline_claim_marker_wiring_records_only_when_claimed
 services::discord::tui_direct_pending_start::tests::legacy_mode_stale_foreign_demote_keeps_its_pre_a1_session_and_pointer_check
 services::discord::tui_direct_pending_start::tests::live_worker_with_capped_attempt_count_is_not_abandoned
@@ -6964,6 +6966,7 @@ services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_bi
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_launch_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::a_restart_binds_the_tui_transcript_when_the_launch_script_names_a_headless_one
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::a_restart_leaves_a_log_verified_headless_source_for_the_tui_transcript
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::the_idle_relay_tails_the_tui_transcript_instead_of_a_bound_headless_one
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::the_rehydrate_pass_moves_a_live_headless_binding_back_to_the_tui_transcript
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_corrupt_log_keeps_the_pass_from_registering_launch_a

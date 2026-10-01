@@ -6,14 +6,41 @@ use super::claude_idle_runtime::{claude_tui_launch_context, other_session_claime
 use super::launch_script::claude_tui_rehydrated_binding;
 use super::*;
 
-/// The launch binding to rehydrate: a launch script naming a headless SDK transcript yields the
-/// pane's TUI transcript instead, or nothing when there is none.
+/// Whether a restore keeps the binding it settled: a log-restored binding on a headless SDK
+/// transcript does not, so the pass replaces it with the pane's TUI transcript.
+pub(super) fn restore_holds(
+    tmux_session_name: &str,
+    restored: Option<crate::services::tui_prompt_dedupe::pending::PendingRestore>,
+) -> bool {
+    use crate::services::tui_prompt_dedupe::pending::PendingRestore;
+    match restored {
+        Some(PendingRestore::BoundFromLedger {
+            exact_wait: None, ..
+        }) => bound_to_headless(tmux_session_name).is_none(),
+        restored => restored.is_some_and(|outcome| outcome.skips_launch_refresh()),
+    }
+}
+
+fn bound_to_headless(
+    tmux_session_name: &str,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name).filter(
+        |bound| {
+            crate::services::claude_tui::transcript_tail::claude_transcript_is_headless_sdk(
+                Path::new(&bound.output_path),
+            )
+        },
+    )
+}
+
+/// The launch binding to rehydrate: a launch script naming a headless SDK transcript, or no
+/// launch binding while the pane is bound to one, yields the pane's TUI transcript instead.
 pub(super) fn tui_binding(
     shared: &Arc<SharedData>,
     tmux_session_name: &str,
     fresh: Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
-    let fresh = fresh?;
+    let fresh = fresh.or_else(|| bound_to_headless(tmux_session_name))?;
     let launch_path = Path::new(&fresh.output_path);
     if !crate::services::claude_tui::transcript_tail::claude_transcript_is_headless_sdk(launch_path)
     {
