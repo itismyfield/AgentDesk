@@ -221,6 +221,21 @@ pub(crate) fn codex_tail_source_retired(
     }
 }
 
+/// Runs `publish` unless a hook replaced `binding`'s source; the check and `publish` share one authority.
+pub(crate) fn publish_unless_codex_tail_retired(
+    binding: &TuiRuntimeBinding,
+    tmux_session_name: &str,
+    publish: impl FnOnce(),
+) -> bool {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        let publishes = !codex_tail_source_retired(authority, binding);
+        if publishes {
+            publish();
+        }
+        publishes
+    })
+}
+
 /// Restore completes a hook source whose event is durable but whose marker was never written.
 pub(super) fn restored_source(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,

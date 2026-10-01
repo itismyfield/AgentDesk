@@ -601,23 +601,6 @@ fn register_codex_tui_idle_relay_binding(
     )
 }
 
-/// Sends `ready` unless a hook replaced the tail's source; the check and the send share one authority.
-fn send_unless_replaced(
-    tmux_session_name: &str,
-    tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
-    sender: &Sender<StreamMessage>,
-    ready: StreamMessage,
-) -> bool {
-    let binding = codex_tui_idle_relay_binding(tmux_session_name, tail_result);
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        if crate::services::tui_prompt_dedupe::codex_tail_source_retired(authority, &binding) {
-            return false;
-        }
-        let _ = sender.send(ready);
-        true
-    })
-}
-
 fn codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
@@ -2063,8 +2046,7 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
         // so it still needs the rollout binding even when RuntimeReady is
         // suppressed by the post-turn readiness guard.
         if !register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result) {
-            // A hook already moved the pane, or with hooks on its history is unreadable;
-            // handing off this source could reclaim the pane.
+            // A hook moved the pane, or with hooks on its history is unreadable: a handoff could reclaim it.
             return Ok(());
         }
         #[cfg(test)]
@@ -2113,7 +2095,11 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
                 };
                 if !codex_direct_tui_hook_overrides_enabled() {
                     let _ = sender.send(ready);
-                } else if !send_unless_replaced(tmux_session_name, &tail_result, &sender, ready) {
+                } else if !crate::services::tui_prompt_dedupe::publish_unless_codex_tail_retired(
+                    &codex_tui_idle_relay_binding(tmux_session_name, &tail_result),
+                    tmux_session_name,
+                    || drop(sender.send(ready)),
+                ) {
                     tracing::info!(
                         tmux_session = tmux_session_name,
                         "Codex tail source was replaced during the readiness wait; suppressing RuntimeReady"
