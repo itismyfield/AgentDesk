@@ -104,8 +104,6 @@ mod completion_delivery;
 // #3834 r2: behavior-preserving extraction of the restart-path inflight recovery
 // scan (`restore_inflight_turns`) plus its tmux retry/output-path helpers into a
 // leaf module. Entry points are re-exported below so external paths stay stable.
-#[path = "recovery_engine/host_reconcile.rs"]
-pub(in crate::services::discord) mod host_reconcile;
 #[cfg(test)]
 #[path = "recovery_engine/o_cut_recorder.rs"]
 pub(in crate::services::discord) mod o_cut_recorder;
@@ -115,6 +113,10 @@ mod o_recovery_cut_tests;
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
+// Unix only, like the `tmux::execution_identity` comparison it calls.
+#[cfg(unix)]
+#[path = "recovery_engine/host_reconcile.rs"]
+pub(in crate::services::discord) mod host_reconcile;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome
 // handling before restart-path watcher spawn into a leaf module.
 #[path = "recovery_engine/restore_persist_outcome.rs"]
