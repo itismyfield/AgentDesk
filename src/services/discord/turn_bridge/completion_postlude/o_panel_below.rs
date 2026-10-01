@@ -18,12 +18,16 @@ const POLL: Duration = Duration::from_millis(250);
 /// Each move is one POST and one DELETE; a turn never moves its panel more often than this.
 const MAX_MOVES: usize = 3;
 
+type Owner<'a> = (
+    &'a Arc<SharedData>,
+    &'a Arc<dyn TurnGateway>,
+    &'a ProviderKind,
+    ChannelId,
+);
+
 /// Starts the follow when this completed turn's channel is O's and keeps a two-message panel.
-pub(in crate::services::discord::turn_bridge) fn follow_o_posts_after_completion(
-    shared: &Arc<SharedData>,
-    gateway: &Arc<dyn TurnGateway>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
+pub(in crate::services::discord::turn_bridge) fn follow(
+    (shared, gateway, provider, channel_id): Owner<'_>,
     inflight_state: &InflightTurnState,
     completed_text: &str,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -39,7 +43,7 @@ pub(in crate::services::discord::turn_bridge) fn follow_o_posts_after_completion
     Some(task_supervisor::spawn_observed(
         "turn_bridge_o_completed_panel_follow",
         async move {
-            follow(
+            follow_posts(
                 &shared,
                 gateway.as_ref(),
                 &provider,
@@ -52,7 +56,7 @@ pub(in crate::services::discord::turn_bridge) fn follow_o_posts_after_completion
     ))
 }
 
-async fn follow(
+async fn follow_posts(
     shared: &SharedData,
     gateway: &dyn TurnGateway,
     provider: &ProviderKind,
@@ -82,7 +86,7 @@ async fn follow(
         if singleton::load(provider, token, channel).map(|b| b.panel_message_id) != Some(panel) {
             return;
         }
-        let Ok(next) = gateway.send_message(channel_id, text).await else {
+        let Ok(next) = TurnGateway::send_message(gateway, channel_id, text).await else {
             return;
         };
         orphans::enqueue_pending_bind(provider, token, channel, next.get(), None);
