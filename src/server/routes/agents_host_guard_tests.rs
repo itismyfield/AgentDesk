@@ -129,6 +129,10 @@ async fn auth_login_routes_refuse_a_target_another_host_claims() {
     use super::super::provider_auth_profiles::{LoginStartBody, login_start, remove_profile};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let tmux = ScriptedTmux::install();
+    // A regression must not reach the real profile root under the user's home.
+    let scratch_home = tempfile::tempdir().expect("scratch home");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _home = set("HOME", scratch_home.path());
     let provider = crate::services::provider::ProviderKind::Claude;
     let profile = "p4c2-herdr-login";
     let session =
