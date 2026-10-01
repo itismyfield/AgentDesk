@@ -41,6 +41,9 @@ pub struct TuiOConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct WriterChannelsConfig {
     pub channels: std::collections::BTreeSet<u64>,
+    /// Selects every `agents[].channels` binding that resolves to a Claude or Codex TUI.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub all_tui: bool,
 }
 
 /// Bounded copy of bot-authored message events for allowlisted channels.

@@ -208,6 +208,7 @@ config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalat
 config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_timezone
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
+config::writer_channels_tests::writer_all_tui_selects_only_tui_bindings_and_applies_on_restart
 config::writer_channels_tests::writer_channels_disk_loader_normalizes_and_reports_restart_required
 config::writer_channels_tests::writer_channels_disk_loader_rejects_invalid_membership_and_identity
 config_live_reload::tests::gateway_handback_breaker_changes_need_no_restart
@@ -3277,6 +3278,7 @@ services::discord::health::session_enrichment::tests::a_generation_stamp_moving_
 services::discord::health::session_enrichment::tests::a_probe_fault_withholds_the_executor_witness_instead_of_claiming_absence
 services::discord::health::session_enrichment::tests::a_registry_with_no_session_is_absent_even_on_an_exhausted_budget
 services::discord::health::session_enrichment::tests::an_exhausted_tmux_budget_withholds_a_live_session
+services::discord::health::session_enrichment::tests::another_host_is_never_witnessed_absent_or_read_dead
 services::discord::health::session_enrichment::tests::health_load_carries_the_live_watcher_transcript_into_the_enrichment
 services::discord::health::session_enrichment::tests::health_load_carries_the_row_birth_offset_into_the_durable_observation_5943
 services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
@@ -3657,6 +3659,7 @@ services::discord::inflight::rebind_origin_reap_tests::preserves_fresh_rebind_wi
 services::discord::inflight::rebind_origin_reap_tests::proven_dead_window_is_conservative
 services::discord::inflight::rebind_origin_reap_tests::reaps_abandoned_rebind_past_deadline
 services::discord::inflight::rebind_origin_reap_tests::reaps_on_generation_mismatch_within_deadline
+services::discord::inflight::rebind_reap::tests::dead_watcher_rebind_reap_unlinks_only_a_row_the_host_guard_admits_pg
 services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_delegates_signals
 services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_preserves_probe_error
 services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
@@ -3699,6 +3702,7 @@ services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
+services::discord::inflight::removal::host_liveness_stale_tests::stale_row_stays_when_its_host_evidence_is_not_tmux
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
@@ -4531,11 +4535,12 @@ services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pan
 services::discord::placeholder_sweeper::abandon_guard::tests::controller_detach_is_gated_by_identity_and_committed_state_delete
 services::discord::placeholder_sweeper::abandon_guard::tests::dead_pane_without_runtime_files_converges_to_cleanup
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_defers_queue_to_completion_authority
-services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888
+services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::discord_probe_maps_to_the_only_valid_cleanup_evidence
 services::discord::placeholder_sweeper::abandon_guard::tests::live_pane_preserves_the_tmux_session_even_when_activity_is_not_recent
 services::discord::placeholder_sweeper::abandon_guard::tests::missing_tmux_name_preserves_mailbox_state
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_allows_tokenless_bounded_eviction_but_revival_preserves_row
+services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::production_cleanup_plan_pins_evidence_probe_policy_and_delete_gate
 services::discord::placeholder_sweeper::abandon_guard::tests::real_turn_without_a_tmux_name_preserves_mailbox_state
 services::discord::placeholder_sweeper::abandon_guard::tests::revived_after_abandoned_edit_preserves_row_and_requires_visible_repair
@@ -4878,6 +4883,7 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::restart_r
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::owned_row_kickoff_identity_matches_persisted_ids
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_apply_disposes_row_per_relay_outcome_without_anchor_or_queue_loss
+services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_guard_precedes_recovery_marker_and_kickoff
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_plan_maps_pane_liveness_to_disposition_inputs
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_reacquired_row_has_no_kickoff_identity
@@ -4901,6 +4907,7 @@ services::discord::recovery_engine::restore_inflight::tests::restore_clear_and_r
 services::discord::recovery_engine::restore_inflight::tests::restore_reconcile_wrappers_preserve_current_rows_and_use_rebind_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::restore_inflight::tests::restore_snapshot_warns_only_for_current_generation_rows
+services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
 services::discord::recovery_engine::routing_orphan::tests::probe_error_is_treated_as_alive_not_dead
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::committed_terminal_delivery_is_not_recoverable_active_turn
@@ -4947,11 +4954,13 @@ services::discord::recovery_engine::terminal_text_idempotency::tests::same_turn_
 services::discord::recovery_engine::terminal_text_idempotency::tests::same_turn_second_recovery_attempt_uses_recorded_anchor_not_fresh_post
 services::discord::recovery_engine::terminal_text_idempotency::tests::unreset_frontier_still_records_the_durable_write
 services::discord::recovery_engine::terminal_text_idempotency::tests::zero_channel_or_anchor_ids_skip_recovery_context_without_panicking
+services::discord::recovery_engine::terminal_watcher::host_presence_tests::drain_skips_the_quiet_period_only_for_a_confirmed_missing_session
 services::discord::recovery_engine::terminal_watcher::restart_report_tests::restart_report_alive_watcher_uses_rebased_output_path_and_offset
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_for_adopted_transcript_uses_persisted_eof_after_restart
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_prefers_newer_saved_last_offset
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_rewinds_only_when_output_truncated_below_floor
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_uses_turn_start_floor_when_last_offset_is_zero
+services::discord::recovery_engine::tmux_probe::tests::restart_probes_read_dead_only_on_a_confirmed_tmux_answer
 services::discord::recovery_known_ids::recovery_known_message_ids_tests::active_turn_outranks_a_stale_queue_entry_for_the_same_id
 services::discord::recovery_known_ids::recovery_known_message_ids_tests::each_source_reports_its_own_arm
 services::discord::recovery_known_ids::recovery_known_message_ids_tests::held_lease_keeps_reservation_known_past_the_orphan_window
@@ -6690,6 +6699,7 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::release_that_takes_no_session_row_reports_no_consumed_ghost
+services::discord::tmux::watcher_lifecycle::liveness::tests::watcher_probe_reads_dead_only_on_a_confirmed_tmux_death
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_hard_result_after_committed_turn_requires_direct_input_evidence
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_with_actively_streaming_pane_is_not_suppressed
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_with_pending_synthetic_start_is_not_suppressed
@@ -9630,6 +9640,8 @@ services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
+services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
+services::tui_o::channel_policy::tests::a_committed_channel_left_out_of_the_selection_stays_o_on_the_home
 services::tui_o::channel_policy::tests::a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it
 services::tui_o::channel_policy::tests::a_placement_never_waits_on_another_channels_adoption_in_progress
 services::tui_o::channel_policy::tests::a_selected_channel_starts_committed_only_over_a_readable_init

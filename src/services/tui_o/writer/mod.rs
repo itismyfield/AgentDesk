@@ -137,6 +137,8 @@ pub enum WriterAlarm {
     RotationStalled {
         source: SourceId,
     },
+    /// The home keeps a channel it committed to O although its writer selection no longer names it.
+    SelectionMissing,
 }
 
 pub trait AlarmSink: Send + Sync {

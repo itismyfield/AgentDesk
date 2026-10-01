@@ -93,8 +93,12 @@ src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
 src/services/discord/idle_recap_interaction.rs
 src/services/discord/inflight/host_recovery_guard_keyed_tests.rs
+src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
+src/services/discord/placeholder_sweeper/abandon_guard.rs
+src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
+src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/tests.rs
@@ -253,7 +257,11 @@ services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
 services::discord::inflight::host_recovery_guard::keyed_tests
+services::discord::inflight::rebind_reap::tests
 services::discord::inflight::removal::custody_notice_tests
+services::discord::placeholder_sweeper::abandon_guard::tests
+services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
+services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
@@ -921,6 +929,7 @@ services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::inflight::host_recovery_guard::keyed_tests::keyed_teardown_admits_only_a_found_legacy_row_pg
+services::discord::inflight::rebind_reap::tests::dead_watcher_rebind_reap_unlinks_only_a_row_the_host_guard_admits_pg
 services::discord::inflight::removal::custody_notice_tests::a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::a_failed_notice_row_is_enqueued_again_by_the_next_boot_pg
 services::discord::inflight::removal::custody_notice_tests::a_root_reading_the_dm_session_readdresses_an_unclaimed_notice_pg
@@ -933,6 +942,10 @@ services::discord::inflight::removal::custody_notice_tests::custody_without_a_tu
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
+services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
+services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
+services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
+services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg

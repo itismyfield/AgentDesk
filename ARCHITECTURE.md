@@ -1028,6 +1028,7 @@ src/
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
 │   │   │   ├── routing_orphan.rs
+│   │   │   ├── routing_orphan_tests.rs
 │   │   │   ├── runtime.rs
 │   │   │   ├── state_extractors.rs
 │   │   │   ├── status_panel.rs
@@ -1585,6 +1586,7 @@ src/
 │   │   │   │   ├── claims.rs
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
+│   │   │   │   ├── liveness_tests.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
@@ -1623,6 +1625,7 @@ src/
 │   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
 │   │   ├── host_key_derivation_tests.rs
+│   │   ├── host_liveness.rs
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
