@@ -59,11 +59,21 @@ pub(super) async fn nameless_sweep_deferred(
     channel_id: u64,
 ) -> bool {
     let gate = nameless_channel_gate(shared, provider, channel_id).await;
-    !matches!(gate, Ok(KeyedTeardown::Cleared(_)))
+    let held = !matches!(gate, Ok(KeyedTeardown::Cleared(_)));
+    if held {
+        tracing::warn!(
+            caller = CALLER,
+            channel_id,
+            lookup = ?gate.as_ref().err(),
+            "no channel name; card kept"
+        );
+    }
+    held
 }
 
-/// [`channel_session_deferred`] for a managed tmux channel holding no channel name: a found
-/// legacy row admits it, and so does no row for a channel no turn can key or has in flight.
+/// [`channel_session_deferred`] for a managed tmux channel holding no channel name. The
+/// registered fallback name the session key uses takes the named path; with none, only a
+/// found legacy row, or no row for a channel with nothing in flight, admits it.
 pub(super) async fn nameless_channel_deferred(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -77,11 +87,32 @@ pub(super) async fn nameless_channel_deferred(
     if shared.pg_pool.is_none() {
         return false;
     }
-    match nameless_channel_gate(shared, provider, channel_id).await {
+    let channel = ChannelId::new(channel_id);
+    if let Some(name) = super::adk_session::registered_channel_fallback_name(channel, provider) {
+        let tmux_name = provider.build_tmux_session_name(&name);
+        return channel_session_deferred(shared, provider, channel_id, &tmux_name).await;
+    }
+    let gate = nameless_channel_gate(shared, provider, channel_id).await;
+    let held = match &gate {
         Ok(KeyedTeardown::Cleared(_)) => false,
         Err(HostedLookup::Missing) => !unkeyed_and_idle(provider, channel_id),
         _ => true,
+    };
+    if held {
+        tracing::warn!(
+            caller = CALLER,
+            channel_id,
+            lookup = ?gate.as_ref().err(),
+            "no channel name; promote held"
+        );
+    } else if gate.is_err() {
+        tracing::info!(
+            caller = CALLER,
+            channel_id,
+            "unkeyed idle channel with no row; promotes"
+        );
     }
+    held
 }
 
 /// No registered fallback name lets a turn build the channel's session key, so its turns
@@ -103,16 +134,7 @@ async fn nameless_channel_gate(
         return Err(HostedLookup::Unknown("no postgres pool".to_string()));
     };
     let hashes = provider_hashes(shared, provider).await;
-    let name = derive_channel_session_name(pool, &hashes, provider, channel_id)
-        .await
-        .inspect_err(|lookup| {
-            tracing::warn!(
-                caller = CALLER,
-                channel_id,
-                ?lookup,
-                "no channel name; kept"
-            );
-        })?;
+    let name = derive_channel_session_name(pool, &hashes, provider, channel_id).await?;
     let lookup = identity_lookup(shared, &hashes, None, provider, channel_id, &name).await;
     Ok(keyed(
         shared, lookup, provider, channel_id, None, &name, CALLER,

@@ -241,6 +241,8 @@ pub(crate) enum Nameless {
     LegacyHerdrMarker,
     /// Legacy rows for the channel under two registered bot hashes.
     TwoRows,
+    /// A hosted row stored under the session key alone, with no bot hash for the channel.
+    HostedKeyOnly,
 }
 
 impl Nameless {
@@ -269,13 +271,16 @@ impl Nameless {
         let mut row_owner = owner(&channel.to_string());
         row_owner.discord_token_hash = hash.to_string();
         let raw = match self {
-            Self::Hosted => Some(wire(&record(&row_owner, "n1", HostedState::Bound))),
+            Self::Hosted | Self::HostedKeyOnly => {
+                Some(wire(&record(&row_owner, "n1", HostedState::Bound)))
+            }
             Self::Future => Some(future_schema(&row_owner)),
             _ => None,
         };
         let key = |hash: &str| build(hash, &ProviderKind::Claude, tmux_name);
+        let identity = (self != Self::HostedKeyOnly).then_some(hash);
         if self != Self::Missing {
-            seed_row(pool, "claude", Some(hash), &key(hash), channel, raw).await;
+            seed_row(pool, "claude", identity, &key(hash), channel, raw).await;
         }
         if self == Self::TwoRows {
             seed_row(pool, "claude", Some(other), &key(other), channel, None).await;
@@ -288,8 +293,8 @@ impl Nameless {
     }
 }
 
-// A nameless or absent memory session holds the promote unless a legacy row admits it; no row
-// promotes only for a channel no turn can key, with nothing in flight.
+// A nameless or absent unregistered session holds the promote unless a legacy row admits it;
+// no row promotes only with nothing in flight.
 #[tokio::test]
 async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -299,16 +304,6 @@ async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
     let provider = ProviderKind::Claude;
     let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
     let channel_of = |n: usize| ChannelId::new(1_479_671_301_387_065_000 + n as u64);
-    // The no-row case's channel carries a registered fallback name its turns key rows by.
-    let config = crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
-    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let yaml = format!(
-        "server:\n  port: 8791\nagents:\n  - id: p4c1f\n    name: \"P4c1f\"\n    \
-         provider: claude\n    channels:\n      claude:\n        id: \"{}\"\n        \
-         name: \"p4c1f-fallback\"\n",
-        channel_of(3).get()
-    );
-    std::fs::write(&config, yaml).unwrap();
     let own = shared.token_hash.clone();
     for (n, case) in Nameless::ALL.into_iter().enumerate() {
         let channel = channel_of(n);
@@ -320,7 +315,8 @@ async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
         case.seed(&pool, &own, "p4c1f-second-bot", channel.get(), &name)
             .await;
         let held = gate(&shared, &provider, channel).await;
-        assert_eq!(held, case != Nameless::Legacy, "{case:?}");
+        let promoted = matches!(case, Nameless::Legacy | Nameless::Missing);
+        assert_eq!(held, !promoted, "{case:?}");
     }
     for (n, case) in [(10, Nameless::Hosted), (11, Nameless::Legacy)] {
         let name = provider.build_tmux_session_name(&format!("p4c1f-promote-{n}"));

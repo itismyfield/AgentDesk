@@ -7012,6 +7012,8 @@ services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_a
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_read_during_a_refused_announcement_is_announced_afterwards
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
 services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
