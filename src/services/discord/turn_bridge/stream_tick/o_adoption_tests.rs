@@ -8,6 +8,19 @@ const BODY: &str = "ADK-C1A-bridge-tick-body";
 
 /// One real bridge stream tick for a Codex TUI turn whose anchor already exists.
 async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGateway>, done: bool) {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    tick_with(shared, channel, full_response, gateway, done, false).await;
+}
+
+/// The same tick on `shared`, in footer mode or not; returns the turn's inflight state after it.
+async fn tick_with(
+    shared: Arc<SharedData>,
+    channel: ChannelId,
+    full_response: &str,
+    gateway: Arc<CapturingGateway>,
+    done: bool,
+    footer: bool,
+) -> InflightTurnState {
     let mut inflight_state = InflightTurnState::new(
         ProviderKind::Codex,
         channel.get(),
@@ -28,7 +41,6 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
     let mut baseline = inflight_state.clone();
     let mut expected_current_message = (18, 0);
-    let shared = crate::services::discord::make_shared_data_for_tests();
     let gateway: Arc<dyn TurnGateway> = gateway;
     let mut current_msg_id = crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(18);
     let (mut full_response, mut sent, mut confirmed) = (full_response.to_string(), 0, 0);
@@ -64,7 +76,7 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
             turn_id: "c1a-adoption-tick",
             expected_identity: &expected,
             status_interval: std::time::Duration::ZERO,
-            single_message_panel_footer_mode: false,
+            single_message_panel_footer_mode: footer,
             footer_owner:
                 crate::services::discord::footer_view_reconciler::CompletionFooterOwner::new(
                     77_010, 0,
@@ -124,6 +136,7 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
     )
     .await;
     assert_eq!(outcome, StreamTickOutcome::Continue);
+    inflight_state
 }
 
 /// A tick that streams no body (no unsent visible text, or a done tick that leaves the answer to
@@ -164,4 +177,93 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
     let edits = body.edits.lock().unwrap().clone();
     let shown: Vec<_> = edits.iter().filter(|edit| edit.contains(BODY)).collect();
     assert_eq!(shown.len(), 1, "{edits:?}");
+}
+
+/// A footer-mode shared state whose live panel saw `Bash` start in `channel`.
+fn panel_with_last_tool(channel: ChannelId) -> Arc<SharedData> {
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared)
+        .expect("fresh shared")
+        .ui
+        .status_panel_v2_enabled = true;
+    let events = crate::services::discord::placeholder_live_events::status_events_from_tool_use(
+        "Bash",
+        r#"{"command":"cargo test"}"#,
+    );
+    shared
+        .ui
+        .placeholder_live_events
+        .push_status_events(channel, events);
+    shared
+}
+
+/// On O's channel the placeholder is the live panel: a status frame with the last tool and no
+/// body, sent again below O's newest post with the old panel deleted once the new one is bound.
+#[tokio::test(flavor = "current_thread")]
+async fn o_channel_panel_shows_the_last_tool_and_moves_below_o_posts() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let (channel, moved) = (ChannelId::new(42_593_320), ChannelId::new(42_593_321));
+    let _o = test_override::force_channels(&[
+        (channel.get(), RuntimeHandoffKind::CodexTui),
+        (moved.get(), RuntimeHandoffKind::CodexTui),
+    ]);
+    let shared = panel_with_last_tool(channel);
+
+    let edit = Arc::new(CapturingGateway {
+        direct: true,
+        ..Default::default()
+    });
+    let state = tick_with(shared.clone(), channel, BODY, edit.clone(), false, true).await;
+    let edits = edit.edits.lock().unwrap().clone();
+    assert!(
+        matches!(edits.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
+        "{edits:?}"
+    );
+    assert!(edit.sends.lock().unwrap().is_empty() && edit.deletes.lock().unwrap().is_empty());
+    assert_eq!(state.current_msg_id, 18);
+
+    crate::services::tui_o::writer::deliver::note_posted_for_tests(moved.get(), 50);
+    let resend = Arc::new(CapturingGateway {
+        send_id: 60,
+        direct: true,
+        ..Default::default()
+    });
+    let shared = panel_with_last_tool(moved);
+    let state = tick_with(shared, moved, BODY, resend.clone(), false, true).await;
+    let sends = resend.sends.lock().unwrap().clone();
+    assert!(
+        matches!(sends.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
+        "{sends:?}"
+    );
+    assert_eq!(*resend.deletes.lock().unwrap(), [18]);
+    assert_eq!(state.current_msg_id, 60);
+    let durable = crate::services::discord::inflight::load_inflight_state_read_only(
+        &ProviderKind::Codex,
+        moved.get(),
+    )
+    .expect("durable row");
+    assert_eq!(
+        durable.current_msg_id, 60,
+        "the moved panel is the turn's bound placeholder"
+    );
+}
+
+/// A channel O does not own never moves its placeholder below O's posts.
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_channel_placeholder_is_never_moved() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let channel = ChannelId::new(42_593_330);
+    let _legacy = test_override::force_channels(&[]);
+    crate::services::tui_o::writer::deliver::note_posted_for_tests(channel.get(), 50);
+    let gateway = Arc::new(CapturingGateway {
+        send_id: 60,
+        direct: true,
+        ..Default::default()
+    });
+    let shared = panel_with_last_tool(channel);
+    let state = tick_with(shared, channel, "", gateway.clone(), false, true).await;
+    assert!(gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty());
+    assert_eq!(state.current_msg_id, 18);
 }

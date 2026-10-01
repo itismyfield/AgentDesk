@@ -1579,3 +1579,38 @@ async fn a_terminal_that_loses_its_delivery_lease_leaves_a_pending_adoption() {
     check.assert_settled();
     assert_eq!(check.adoption(), Adoption::Pending);
 }
+
+/// A turn the watcher owns retires the placeholder at its end only on O's channel, where the
+/// placeholder is the live panel and never holds a body; a Legacy channel keeps main's choice.
+#[tokio::test]
+async fn a_watcher_owned_turn_end_deletes_the_o_panel_only_on_o_channels() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::test_override;
+    for o_owned in [false, true] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        driver.inflight.runtime_kind = Some(ClaudeTui);
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+            .expect("seed the TUI-kind row");
+        let owned = [(DRIVER_CHANNEL_ID, ClaudeTui)];
+        let _boot = test_override::force_channels(if o_owned { &owned } else { &[] });
+        let (mut ctx, state) = driver.parts();
+        ctx.bridge_output_owner = Some(BridgeOutputOwner::WatcherRelay);
+        tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+            .await
+            .expect("terminal outcome delivery must not hang");
+        let calls: Vec<_> = driver.observations().into_iter().map(|o| o.call).collect();
+        let deletes = calls
+            .iter()
+            .filter(|call| **call == DriverCall::Delete)
+            .count();
+        assert_eq!(
+            deletes,
+            usize::from(o_owned),
+            "o_owned={o_owned}: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&DriverCall::Send),
+            "o_owned={o_owned}: {calls:?}"
+        );
+    }
+}

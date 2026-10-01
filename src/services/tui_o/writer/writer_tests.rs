@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 use super::confirm::{self, Verdict};
-use super::deliver::{ChannelWriter, Step};
-use super::pieces::{Derived, PieceWork, UnitDeriver};
+use super::deliver::{self, ChannelWriter, Step};
+use super::pieces::{self, Derived, PieceWork, UnitDeriver};
 use super::*;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, UnitKind};
@@ -583,6 +583,62 @@ fn derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest() {
         deriver.derive(&torn).as_slice(),
         [Derived::Blocked { .. }]
     ));
+}
+
+/// A tool call is recorded excluded for the live panel and never posted; the body after it posts
+/// and becomes the channel's newest O post.
+#[tokio::test(start_paused = true)]
+async fn a_tool_call_is_left_to_the_panel_and_only_the_body_posts() {
+    let record = |row: serde_json::Value| {
+        let line = serde_json::to_vec(&row).unwrap();
+        let end = line.len() as u64 + 1;
+        CapturedRecord {
+            start: 0,
+            end,
+            line,
+        }
+    };
+    let assistant = |id: &str, block: serde_json::Value| {
+        record(
+            serde_json::json!({"type": "assistant", "uuid": format!("u-{id}"),
+            "apiBlockIndex": 0, "message": {"id": id, "content": [block]}}),
+        )
+    };
+    let tool_use = serde_json::json!({"type": "tool_use", "id": "toolu_1", "name": "Bash",
+        "input": {"command": "ls"}});
+    let codex_call = record(serde_json::json!({"type": "response_item", "payload": {
+        "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "shell",
+        "arguments": "{}"}}));
+    let mut codex = UnitDeriver::new(CHANNEL, ShadowProvider::Codex);
+    let excluded = |items: &[Derived]| {
+        matches!(items, [Derived::Excluded { unit_key, reason }]
+            if unit_key.kind == UnitKind::Tool && reason == pieces::TOOL_CALL_PANEL)
+    };
+    assert!(excluded(&codex.derive(&codex_call)));
+
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    let tool = deriver.derive(&assistant("msg_t", tool_use));
+    assert!(excluded(&tool), "{tool:?}");
+    let body_block = serde_json::json!({"type": "text", "text": "done"});
+    let items = [tool, deriver.derive(&assistant("msg_b", body_block))].concat();
+    for item in &items {
+        assert_eq!(writer.deliver(item).await, Step::Done);
+    }
+    assert_eq!(harness.port.posts(), ["done"]);
+    let tool_key = UnitKey {
+        native_key: "msg_t:0".into(),
+        kind: UnitKind::Tool,
+        ..unit("")
+    };
+    let ledger = writer.store().ledger();
+    assert_eq!(ledger.excluded(&tool_key), Some(pieces::TOOL_CALL_PANEL));
+    let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "msg_b:0") else {
+        panic!("body not posted");
+    };
+    assert!(deliver::last_posted(CHANNEL) >= Some(posted));
 }
 
 /// Guards that no POST's HTTP request starts after ownership closes, for Unknown and Lost alike.

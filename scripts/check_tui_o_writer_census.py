@@ -207,7 +207,9 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "turn_bridge/status_panel.rs": {".edit_message": 1, "TurnGateway::edit_message": 1, "edit_channel_message*": 2},
     "turn_bridge/status_panel/fallback.rs": {".send_message": 1, "send_channel_message*": 2},
     "turn_bridge/stream_loop/types.rs": {"replace_message_with_outcome": 1},
-    "turn_bridge/stream_tick.rs": {"TurnGateway::edit_message": 5, "TurnGateway::send_message": 1},
+    "turn_bridge/stream_tick.rs": {"TurnGateway::edit_message": 3, "TurnGateway::send_message": 1},
+    "turn_bridge/stream_tick/o_panel.rs": {"TurnGateway::edit_message": 1, "TurnGateway::send_message": 1},
+    "turn_bridge/stream_tick/rollover_guard.rs": {"TurnGateway::edit_message": 2},
     "turn_bridge/terminal_controller_cutover.rs": {"deliver_turn_output*": 2},
     "turn_bridge/terminal_delivery.rs": {"send_long_message*": 1},
     "turn_bridge/terminal_outcome_delivery.rs": {"TurnGateway::edit_message": 1, "replace_message_with_outcome": 1},
@@ -313,6 +315,8 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/status_panel/fallback.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/stream_loop/types.rs": ("W10e", "COV:W10"),
     "turn_bridge/stream_tick.rs": ("W14", "CUT_D"),
+    "turn_bridge/stream_tick/o_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
+    "turn_bridge/stream_tick/rollover_guard.rs": ("W14a", "COV:W14"),
     "turn_bridge/terminal_controller_cutover.rs": ("W10b-c", "COV:W10"),
     "turn_bridge/terminal_delivery.rs": ("W10d", "COV:W10"),
     "turn_bridge/terminal_outcome_delivery.rs": (
@@ -415,9 +419,11 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "deliver:claim",
     ),
     "src/services/discord/turn_bridge/stream_tick.rs": (
-        "guarded_bridge_rollover_edit:claim",
         "run_bridge_stream_tick:peek",
         "run_bridge_stream_tick:claim",
+    ),
+    "src/services/discord/turn_bridge/stream_tick/rollover_guard.rs": (
+        "guarded_bridge_rollover_edit:claim",
     ),
     "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
         "bridge_o_body_peek_decision:peek",
@@ -432,6 +438,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "handle_cancel_prompt_replace:claim",
     ),
     "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": (
+        "handle_known_owner:peek",
         "resume_with_gateway:peek",
         "resume_with_gateway:claim",
     ),
