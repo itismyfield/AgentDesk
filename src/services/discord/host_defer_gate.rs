@@ -71,9 +71,8 @@ pub(super) async fn nameless_sweep_deferred(
     held
 }
 
-/// [`channel_session_deferred`] for a managed tmux channel holding no channel name. The
-/// registered fallback name the session key uses takes the named path; with none, only a
-/// found legacy row, or no row for a channel with nothing in flight, admits it.
+/// [`channel_session_deferred`] on the registered fallback name for a channel holding none;
+/// unregistered, only a found legacy row, or no row with nothing in flight, admits it.
 pub(super) async fn nameless_channel_deferred(
     shared: &SharedData,
     provider: &ProviderKind,
