@@ -124,9 +124,18 @@ pub(super) async fn handle_terminal_abort_exits(
         *state.prompt_too_long_killed = true;
 
         let sess = (*tmux_session_name).clone();
+        let provider = watcher_provider.clone();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             tokio::task::spawn_blocking(move || {
+                if !host_gate::watcher_session_is_tmux(
+                    &provider,
+                    channel_id,
+                    &sess,
+                    "prompt_too_long",
+                ) {
+                    return;
+                }
                 crate::services::termination_audit::record_termination_for_tmux(
                     &sess,
                     None,

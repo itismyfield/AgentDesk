@@ -19,19 +19,27 @@ mod streaming_baseline_tests;
 #[path = "o_delegated_watcher_tests.rs"]
 mod o_delegated_watcher_tests;
 
+#[cfg(test)]
+#[path = "post_stream_exit_host_tests.rs"]
+mod post_stream_exit_host_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 // `$1` after global flags. Builtins only: a failed read or an unknown state is recorded,
-// never mistaken for another pane state.
+// never mistaken for another pane state. `deadpane` keeps the session with a dead pane,
+// `unanswered` has no server socket, `listfail` fails only `list-panes`; kills are logged.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 while [ "${1#-}" != "$1" ]; do shift; done
 read -r state < "ROOT/pane" || state="unreadable"
-case "$state" in busy|idle|dead) ;; *) echo "$* on pane '$state'" >> "ROOT/tmux-errors"; exit 97 ;; esac
+case "$state" in busy|idle|dead|deadpane|unanswered|listfail) ;; *) echo "$* on pane '$state'" >> "ROOT/tmux-errors"; exit 97 ;; esac
 case "$1" in
-  has-session) [ "$state" = dead ] && { echo "can't find session" >&2; exit 1; }; exit 0 ;;
-  list-panes) [ "$state" = dead ] && echo 1 || echo 0; exit 0 ;;
+  has-session) [ "$state" = dead ] && { echo "can't find session" >&2; exit 1; }
+    [ "$state" = unanswered ] && { echo "error connecting to ROOT/no-socket" >&2; exit 1; }; exit 0 ;;
+  list-panes) [ "$state" = listfail ] && exit 1
+    case "$state" in dead|deadpane) echo 1 ;; *) echo 0 ;; esac; exit 0 ;;
+  kill-session) echo "$*" >> "ROOT/tmux-kills"; exit 0 ;;
   capture-pane) [ "$state" = busy ] && printf '%s\n' '⏺ Running 1 shell command…' '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;
 esac
 exit 0
@@ -322,7 +330,7 @@ impl Harness {
         }
         let live = crate::services::tmux_diagnostics::tmux_session_has_live_pane(&self.tmux);
         let busy = super::super::liveness::watcher_pane_actively_streaming(&self.tmux);
-        let expected = (state != "dead", state == "busy");
+        let expected = (matches!(state, "busy" | "idle"), state == "busy");
         assert_eq!((live, busy), expected, "fake tmux {state}");
     }
 
@@ -361,9 +369,7 @@ impl Harness {
     /// Registers and starts a watcher at `offset`; a running one is cancelled first,
     /// which hands its turn over through cancellation custody.
     pub(super) fn spawn(&mut self, offset: u64) {
-        if let Some(old) = self.watcher.take() {
-            old.cancel.store(true, Ordering::Release);
-        }
+        self.cancel();
         let cancel = Arc::new(AtomicBool::new(false));
         let resume = Arc::new(Mutex::new(None));
         let paused = Arc::new(AtomicBool::new(false));
@@ -424,6 +430,23 @@ impl Harness {
 
     pub(super) fn len(&self) -> u64 {
         std::fs::metadata(&self.path).unwrap().len()
+    }
+
+    /// Cancels the running watcher, if any.
+    pub(super) fn cancel(&self) {
+        if let Some(watcher) = self.watcher.as_ref() {
+            watcher.cancel.store(true, Ordering::Release);
+        }
+    }
+
+    /// `kill-session` calls the fake `tmux` received for this session.
+    pub(super) fn kills(&self) -> usize {
+        let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
+        let kills = std::fs::read_to_string(format!("{root}/tmux-kills")).unwrap_or_default();
+        kills
+            .lines()
+            .filter(|line| line.contains(&self.tmux))
+            .count()
     }
 
     pub(super) fn watcher_finished(&self) -> bool {

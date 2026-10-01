@@ -6541,6 +6541,9 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegat
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_watcher_turn_shows_no_body_and_records_no_frontier
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_reach_only_a_local_tmux_session
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rewound_read_below_a_live_row_baseline

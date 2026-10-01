@@ -193,6 +193,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/o_delegated_watcher_tests.rs",
         "src/services/discord/tmux_watcher/owed_range_baseline_tests.rs",
         "src/services/discord/tmux_watcher/panel_decisions_tests.rs",
+        "src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs",
         "src/services/discord/tmux_watcher/session_bound_ack_tests.rs",
         "src/services/discord/tmux_watcher/single_message_footer_tests.rs",
         "src/services/discord/tmux_watcher/streaming_baseline_tests.rs",
