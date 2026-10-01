@@ -7158,6 +7158,7 @@ services::discord::tui_prompt_relay::tests::local_slash_control_note_allows_same
 services::discord::tui_prompt_relay::tests::local_slash_control_note_emission_is_wired_through_prepare_gate
 services::discord::tui_prompt_relay::tests::local_slash_control_note_path_dedupes_and_seals_dropped_half
 services::discord::tui_prompt_relay::tests::notification_strip_drops_bare_control_bytes_but_keeps_whitespace
+services::discord::tui_prompt_relay::tests::o_tool_first_panel_tests::o_channel_panel_shows_a_first_tool_before_the_status_interval
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_clears_recorded_lease_on_drop
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_does_not_clobber_newer_lease
@@ -9775,6 +9776,7 @@ services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_rec
 services::tui_o::writer::tests::actor::host_start::a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
+services::tui_o::writer::tests::actor::host_start::a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down
 services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
