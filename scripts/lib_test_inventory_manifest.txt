@@ -1551,6 +1551,11 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
+services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
+services::claude::host_gate::tests::a_session_marked_for_another_host_is_never_probed_killed_or_relaunched
+services::claude::host_gate::tests::a_stale_tui_session_is_cleaned_only_under_its_clearance
+services::claude::host_gate::tests::the_wrapper_follow_up_poll_reads_dead_only_on_a_confirmed_death
 services::claude::launch_env_tests::binding_context_t3b_wrapper_clears_inherited_context
 services::claude::launch_env_tests::launch_env_exports_absolute_compact_window_behind_its_isolation_fence
 services::claude::local_tmux_lifecycle_tests::claude_tui_handoff_uses_runtime_ready_without_fifo
@@ -4890,6 +4895,8 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::replacement_owner_survives_recovery_send_race
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
+services::discord::recovery_engine::restore_inflight::host_probe_tests::a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg
+services::discord::recovery_engine::restore_inflight::host_probe_tests::restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::owned_row_kickoff_identity_matches_persisted_ids
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_apply_disposes_row_per_relay_outcome_without_anchor_or_queue_loss
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
@@ -6950,6 +6957,8 @@ services::discord::tui_prompt_relay::claude_idle_runtime::tests::continuation_ca
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::the_idle_tick_settles_session_rotations_before_relaying_bindings
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::timestamp_continuation_binding_supersedes_stale_launch_binding
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::transcript_binding_refresh_requires_recent_activity
+services::discord::tui_prompt_relay::claude_idle_tail::host_tests::a_session_marked_for_another_host_never_reads_a_live_pane
+services::discord::tui_prompt_relay::claude_idle_tail::host_tests::the_idle_tail_reads_a_session_dead_only_through_its_tmux_host
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::claude_idle_scans_thread_the_row_prompt_id
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_latest_matching_prompt_uses_last_complete_match
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_scan_finds_user_prompt_and_stops_at_prompt_end

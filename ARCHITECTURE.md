@@ -540,6 +540,8 @@ src/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
+│   │   ├── host_gate.rs
+│   │   ├── host_gate_tests.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── stream_result.rs
 │   │   └── tui_session_launch.rs
@@ -1011,6 +1013,7 @@ src/
 │   │   │   ├── rebind_runtime/
 │   │   │   │   └── codex_relay_generation.rs
 │   │   │   ├── restore_inflight/
+│   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
@@ -1396,6 +1399,7 @@ src/
 │   │   │   ├── claude_idle_bridge.rs
 │   │   │   ├── claude_idle_runtime.rs
 │   │   │   ├── claude_idle_tail.rs
+│   │   │   ├── claude_idle_tail_host_tests.rs
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_tests.rs
