@@ -25,6 +25,24 @@ pub(super) fn should_delegate_bridge_relay_to_watcher(
         && !recovery_retry
 }
 
+/// A watcher adopted only after Done resumes past the body O consumed, so it never ends the
+/// turn and the bridge keeps the terminal.
+pub(super) fn o_body_needs_bridge_terminal(
+    watcher_adopted_after_done: bool,
+    full_response: &str,
+    channel_id: ChannelId,
+    inflight_state: &InflightTurnState,
+    can_deliver_directly: bool,
+) -> bool {
+    watcher_adopted_after_done
+        && !full_response.trim().is_empty()
+        && super::terminal_controller_cutover::bridge_o_body_peek_decision(
+            channel_id,
+            inflight_state,
+            can_deliver_directly,
+        ) == Ok(true)
+}
+
 /// A watcher owner adopted by the durable bridge-entry merge owns the whole
 /// turn, including detached bytes, only while that exact owner epoch remains
 /// current. Later handoff claims invalidate the epoch before owner-kind ABA.

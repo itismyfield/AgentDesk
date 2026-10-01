@@ -95,6 +95,7 @@ pub(super) struct RuntimeHandoffLoopState<'a> {
     pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
     pub(super) tmux_handed_off: &'a mut bool,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
+    pub(super) watcher_adopted_after_done: &'a mut bool,
     pub(super) state_dirty: &'a mut bool,
     pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
     pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
@@ -130,6 +131,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     let mut watcher_handoff_claim_outcome = *state.watcher_handoff_claim_outcome;
     let mut tmux_handed_off = *state.tmux_handed_off;
     let mut watcher_owns_assistant_relay = *state.watcher_owns_assistant_relay;
+    let mut watcher_adopted_after_done = *state.watcher_adopted_after_done;
     let mut state_dirty = *state.state_dirty;
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut last_activity_heartbeat_at = *state.last_activity_heartbeat_at;
@@ -144,6 +146,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     let pre_frame_watcher_handoff_claim_outcome = watcher_handoff_claim_outcome;
     let pre_frame_tmux_handed_off = tmux_handed_off;
     let pre_frame_watcher_owns_assistant_relay = watcher_owns_assistant_relay;
+    let pre_frame_watcher_adopted_after_done = watcher_adopted_after_done;
     let pre_frame_state_dirty = state_dirty;
     let pre_frame_terminal_control_drain_until = terminal_control_drain_until;
     let pre_frame_last_activity_heartbeat_at = last_activity_heartbeat_at;
@@ -625,6 +628,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                             tmux_handed_off: &mut tmux_handed_off,
                             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                            watcher_adopted_after_done: &mut watcher_adopted_after_done,
                             state_dirty: &mut state_dirty,
                             terminal_control_drain_until: &mut terminal_control_drain_until,
                         },
@@ -658,6 +662,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                             tmux_handed_off: &mut tmux_handed_off,
                             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                            watcher_adopted_after_done: &mut watcher_adopted_after_done,
                             state_dirty: &mut state_dirty,
                             terminal_control_drain_until: &mut terminal_control_drain_until,
                         },
@@ -692,6 +697,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                             tmux_handed_off: &mut tmux_handed_off,
                             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                            watcher_adopted_after_done: &mut watcher_adopted_after_done,
                             state_dirty: &mut state_dirty,
                             terminal_control_drain_until: &mut terminal_control_drain_until,
                         },
@@ -857,6 +863,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
         watcher_handoff_claim_outcome = pre_frame_watcher_handoff_claim_outcome;
         tmux_handed_off = pre_frame_tmux_handed_off;
         watcher_owns_assistant_relay = pre_frame_watcher_owns_assistant_relay;
+        watcher_adopted_after_done = pre_frame_watcher_adopted_after_done;
         state_dirty = pre_frame_state_dirty;
         terminal_control_drain_until = pre_frame_terminal_control_drain_until;
         last_activity_heartbeat_at = pre_frame_last_activity_heartbeat_at;
@@ -871,6 +878,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     *state.watcher_handoff_claim_outcome = watcher_handoff_claim_outcome;
     *state.tmux_handed_off = tmux_handed_off;
     *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;
+    *state.watcher_adopted_after_done = watcher_adopted_after_done;
     *state.state_dirty = state_dirty;
     *state.terminal_control_drain_until = terminal_control_drain_until;
     *state.last_activity_heartbeat_at = last_activity_heartbeat_at;

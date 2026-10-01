@@ -326,6 +326,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut watcher_owns_assistant_relay =
             matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
         let mut watcher_relay_available_for_turn = false;
+        let mut watcher_adopted_after_done = false;
         let mut watcher_delivery_pin = initial_watcher_delivery_pin;
         let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
         // Durable recovery must honor typed non-bridge owners too. `Unknown`
@@ -670,6 +671,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 bridge_spans: &mut bridge_spans,
                 status_panel_generation: &mut status_panel_generation,
                 entry_watcher_epoch_current: &mut bridge_entry_watcher_owner_epoch_current,
+                watcher_adopted_after_done: &mut watcher_adopted_after_done,
             },
         )
         .await;
@@ -718,6 +720,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 standby_relay_owns_output,
                 watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn,
+                watcher_adopted_after_done,
                 bridge_entry_watcher_owner_epoch_current,
                 response_sent_offset,
                 tmux_last_offset,

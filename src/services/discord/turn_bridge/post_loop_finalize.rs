@@ -43,6 +43,7 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) standby_relay_owns_output: bool,
     pub(super) watcher_owns_assistant_relay: bool,
     pub(super) watcher_relay_available_for_turn: bool,
+    pub(super) watcher_adopted_after_done: bool,
     pub(super) bridge_entry_watcher_owner_epoch_current: bool,
     pub(super) response_sent_offset: usize,
     pub(super) tmux_last_offset: Option<u64>,
@@ -117,6 +118,7 @@ pub(super) async fn run_post_loop_finalize(
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
     let watcher_owns_assistant_relay = ctx.watcher_owns_assistant_relay;
     let watcher_relay_available_for_turn = ctx.watcher_relay_available_for_turn;
+    let watcher_adopted_after_done = ctx.watcher_adopted_after_done;
     let bridge_entry_watcher_owner_epoch_current = ctx.bridge_entry_watcher_owner_epoch_current;
     let response_sent_offset = ctx.response_sent_offset;
     let tmux_last_offset = ctx.tmux_last_offset;
@@ -369,16 +371,24 @@ pub(super) async fn run_post_loop_finalize(
         );
     let response_unsent = response_portion_after_offset(&full_response, response_sent_offset);
     let response_pending_trimmed_empty = response_unsent.trim().is_empty();
+    let o_body_needs_bridge_terminal = watcher_handoff::o_body_needs_bridge_terminal(
+        watcher_adopted_after_done,
+        &full_response,
+        channel_id,
+        &inflight_state,
+        gateway.can_deliver_directly(),
+    );
     let bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
-        || should_delegate_bridge_relay_to_watcher(
-            watcher_owns_assistant_relay,
-            watcher_relay_available_for_turn,
-            !response_pending_trimmed_empty,
-            cancelled,
-            is_prompt_too_long,
-            transport_error,
-            recovery_retry,
-        );
+        || (!o_body_needs_bridge_terminal
+            && should_delegate_bridge_relay_to_watcher(
+                watcher_owns_assistant_relay,
+                watcher_relay_available_for_turn,
+                !response_pending_trimmed_empty,
+                cancelled,
+                is_prompt_too_long,
+                transport_error,
+                recovery_retry,
+            ));
     let bridge_output_owner = classify_bridge_output_owner(
         standby_relay_owns_output
             && !cancelled
