@@ -145,6 +145,19 @@ pub(super) struct RelayE2eHarness {
     root: tempfile::TempDir,
 }
 
+impl Drop for RelayE2eHarness {
+    /// A synthetic start left pending in this root would block the next harness's kickoff.
+    fn drop(&mut self) {
+        let pending = crate::services::discord::tui_direct_pending_start::load_all();
+        for record in pending
+            .iter()
+            .filter(|record| record.channel_id == CHANNEL_ID)
+        {
+            crate::services::discord::tui_direct_pending_start::delete(record);
+        }
+    }
+}
+
 impl RelayE2eHarness {
     pub(super) async fn start() -> Self {
         Self::start_with_provider(ProviderStub::Success).await
