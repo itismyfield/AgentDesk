@@ -249,6 +249,35 @@ async fn o_channel_panel_shows_the_last_tool_and_moves_below_o_posts() {
     );
 }
 
+/// The last tick that shows a still unshown tool moves the panel below O's posts, never edits it
+/// in place above them.
+#[tokio::test(flavor = "current_thread")]
+async fn a_last_tick_tool_goes_into_a_panel_below_o_posts() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let channel = ChannelId::new(42_593_325);
+    let _o = test_override::force_channels(&[(channel.get(), RuntimeHandoffKind::CodexTui)]);
+    crate::services::tui_o::writer::deliver::note_posted_for_tests(channel.get(), 50);
+    let gateway = Arc::new(CapturingGateway {
+        send_id: 60,
+        direct: true,
+        ..Default::default()
+    });
+    let shared = panel_with_last_tool(channel);
+    let state = tick_with(shared, channel, BODY, gateway.clone(), true, true).await;
+    assert!(
+        gateway.edits.lock().unwrap().is_empty(),
+        "the panel above O's post is not edited"
+    );
+    let sends = gateway.sends.lock().unwrap().clone();
+    assert!(
+        matches!(sends.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
+        "{sends:?}"
+    );
+    assert_eq!(*gateway.deletes.lock().unwrap(), [18]);
+    assert_eq!(state.current_msg_id, 60);
+}
+
 /// A channel O does not own never moves its placeholder below O's posts.
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_channel_placeholder_is_never_moved() {

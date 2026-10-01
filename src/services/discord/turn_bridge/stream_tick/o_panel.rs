@@ -49,14 +49,18 @@ pub(super) async fn refresh_o_status_panel(
         return false;
     }
     let o_posted = crate::services::tui_o::writer::deliver::last_posted(channel_id.get());
-    if done || o_posted.is_none_or(|posted| posted < panel_id) {
+    let unshown = tool_label(&frame).is_some_and(|tool| !last_edit_text.contains(tool));
+    // The last tick only shows a tool still unshown, below O's posts like any other tick.
+    if done && !unshown {
+        return false;
+    }
+    if o_posted.is_none_or(|posted| posted < panel_id) {
         let changed = super::super::super::single_message_panel::streaming_footer_text_changed(
             true,
             last_edit_text,
             &frame,
         );
         // The panel's first tool, or one still unshown on the last tick, goes out at once.
-        let unshown = tool_label(&frame).is_some_and(|tool| !last_edit_text.contains(tool));
         let first = tool_label(last_edit_text).is_none();
         if !(unshown && (first || done) || edit_due && !done)
             || !changed

@@ -7640,6 +7640,7 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_roll
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
 services::discord::turn_bridge::stream_tick::o_adoption_tests::a_failed_old_panel_delete_is_retried_until_the_panel_is_gone
+services::discord::turn_bridge::stream_tick::o_adoption_tests::a_last_tick_tool_goes_into_a_panel_below_o_posts
 services::discord::turn_bridge::stream_tick::o_adoption_tests::legacy_channel_placeholder_is_never_moved
 services::discord::turn_bridge::stream_tick::o_adoption_tests::o_channel_panel_shows_the_last_tool_and_moves_below_o_posts
 services::discord::turn_bridge::stream_tick::o_adoption_tests::only_a_tick_that_streams_a_body_ends_a_pending_adoption
