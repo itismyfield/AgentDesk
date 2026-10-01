@@ -346,10 +346,11 @@ async fn a_refused_dispatch_reset_stops_before_the_turn_pg() {
     Case::Stored(Stored::Hosted)
         .seed(&pool, &key, &name, thread.get())
         .await;
-    let pointer =
-        "UPDATE sessions SET active_turn_delivery_outbox_id = 4242 WHERE session_key = $1";
+    let pointer = "UPDATE sessions SET active_turn_delivery_outbox_id = 4242, \
+                   thread_channel_id = $2 WHERE session_key = $1";
     sqlx::query(pointer)
         .bind(&key)
+        .bind(thread.get().to_string())
         .execute(&pool)
         .await
         .expect("pointer");
