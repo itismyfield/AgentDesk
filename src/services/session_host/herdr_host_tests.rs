@@ -30,6 +30,8 @@ struct FakeTransport {
     /// Moves to a new connection on every call, like a reconnecting transport.
     reconnects: bool,
     generation: AtomicU64,
+    /// E7 readings in order; once empty, Off on the current connection.
+    restore: Mutex<VecDeque<RestoreResume>>,
 }
 
 impl HerdrTransport for FakeTransport {
@@ -42,6 +44,23 @@ impl HerdrTransport for FakeTransport {
         };
         (self.reply(call), generation)
     }
+
+    fn call_on(&self, call: &HerdrCall, generation: u64) -> (contract::HerdrOutcome, u64) {
+        let current = self.generation.load(Ordering::SeqCst);
+        if generation != current {
+            let error = HerdrTransportError::NotSent(format!("connection {current}"));
+            return (Err(error), current);
+        }
+        self.calls.lock().unwrap().push(call.clone());
+        (self.reply(call), current)
+    }
+}
+
+fn scripted_restore(transport: &FakeTransport) -> RestoreResume {
+    let next = transport.restore.lock().unwrap().pop_front();
+    next.unwrap_or(RestoreResume::Off {
+        generation: transport.generation.load(Ordering::SeqCst),
+    })
 }
 
 impl FakeTransport {
@@ -69,7 +88,7 @@ fn fake(script: Vec<Step>, reconnects: bool) -> HerdrHost<FakeTransport> {
         reconnects,
         ..FakeTransport::default()
     };
-    HerdrHost::new(endpoint, transport)
+    HerdrHost::new(endpoint, transport).with_restore_reader(scripted_restore)
 }
 
 fn host(script: Vec<Step>) -> HerdrHost<FakeTransport> {
@@ -435,6 +454,74 @@ fn herdr_keys_and_non_herdr_refs_make_no_transport_call() {
     assert!(calls(&herdr).is_empty());
     let caps = herdr.capabilities();
     assert!(caps.send_text && caps.capture_screen && !caps.send_keys && !caps.interrupt);
+}
+
+/// Text, Enter, draft clear (C-e, C-u) and cancel (Escape, interrupt) as the executor sends them.
+fn every_input(herdr: &HerdrHost<FakeTransport>) -> Vec<Result<HostMutation, HostError>> {
+    let mut outcomes = vec![herdr.send_text(pane(), "x")];
+    for keys in [&["Enter"][..], &["C-e", "C-u"], &["Escape"]] {
+        outcomes.push(herdr.send_keys(pane(), keys));
+    }
+    outcomes.push(herdr.interrupt(pane()));
+    outcomes
+}
+
+fn restore_refused() -> Result<HostMutation, HostError> {
+    Ok(HostMutation::Refused(HostRefusal::Precondition(
+        RESTORE_RESUME_NOT_OFF.into(),
+    )))
+}
+
+#[test]
+fn herdr_production_restore_reader_refuses_every_input_before_any_call() {
+    let endpoint = HerdrEndpoint::new("mac-mini", "pilot", Path::new("/tmp/h.sock"), "adk")
+        .expect("valid endpoint");
+    let herdr = HerdrHost::new(endpoint, FakeTransport::default());
+    for outcome in every_input(&herdr) {
+        assert_eq!(
+            outcome,
+            restore_refused(),
+            "no effective-config read exists"
+        );
+    }
+    assert!(
+        calls(&herdr).is_empty(),
+        "an unverified server gets no input"
+    );
+}
+
+#[test]
+fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
+    let with_readings = |readings: Vec<RestoreResume>| {
+        let herdr = host(vec![(send_call("x"), ok())]);
+        *herdr.transport.restore.lock().unwrap() = readings.into();
+        herdr
+    };
+    for reading in [RestoreResume::On, RestoreResume::Unverified] {
+        let herdr = with_readings(vec![reading; 5]);
+        for outcome in every_input(&herdr) {
+            assert_eq!(outcome, restore_refused(), "{reading:?}");
+        }
+        assert!(calls(&herdr).is_empty(), "{reading:?}");
+    }
+
+    let off = RestoreResume::Off { generation: 0 };
+    let herdr = with_readings(vec![off, RestoreResume::Unverified]);
+    assert_eq!(herdr.send_text(pane(), "x"), Ok(HostMutation::Confirmed));
+    assert_eq!(
+        herdr.send_text(pane(), "x"),
+        restore_refused(),
+        "an earlier Off is not reused"
+    );
+    assert_eq!(calls(&herdr).len(), 1);
+
+    let herdr = with_readings(vec![off]);
+    herdr.transport.generation.store(1, Ordering::SeqCst);
+    assert!(
+        matches!(herdr.send_text(pane(), "x"), Err(HostError::Transport(_))),
+        "a reading from before a reconnect admits nothing"
+    );
+    assert!(calls(&herdr).is_empty());
 }
 
 #[test]

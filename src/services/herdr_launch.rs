@@ -17,16 +17,23 @@ use crate::db::dispatched_sessions::hosted_execution::{
     record_pane_location_pg,
 };
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
-use crate::services::session_host::HostKind;
+pub(crate) use crate::services::session_host::RESTORE_RESUME_NOT_OFF;
+use crate::services::session_host::{HostKind, RestoreResume};
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, PreparedIncarnation, stable_host_identity,
 };
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
-pub(crate) const RESTORE_RESUME_NOT_OFF: &str = "restore_resume_not_off";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
 const EVIDENCE_PROVENANCE: &str = "herdr_launch";
+/// What Herdr gives every pane process; a provider that sees them may report to Herdr.
+pub(crate) const HERDR_PANE_ENV: [&str; 4] = [
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_BIN_PATH",
+    "HERDR_SOCKET_PATH",
+];
 
 /// Whether a Claude TUI launch goes to Herdr, decided before any launch I/O. Nothing
 /// admits Herdr yet, so every launch stays on tmux.
@@ -35,14 +42,12 @@ pub(crate) const fn herdr_admitted_for_claude_launch(_channel_id: Option<u64>) -
 }
 
 /// A configured Herdr endpoint; no field falls back to a default socket, session or pane.
-/// `restore_resume` is the server's effective resume-on-restore setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrLaunchEndpoint {
     pub execution_node: String,
     pub config_key: String,
     pub socket_addr: String,
     pub herdr_session: String,
-    pub restore_resume: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +57,8 @@ pub(crate) struct HerdrCreateRequest {
     pub label: String,
     pub cwd: PathBuf,
     pub command: String,
+    /// The connection that read resume-on-restore off just before; only it may carry the create.
+    pub restore_off_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +74,8 @@ pub(crate) enum HerdrCreateOutcome {
 
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
 pub(crate) trait HerdrLaunchHost: Send + Sync {
+    /// A fresh read of the endpoint server's effective resume-on-restore; never cached.
+    fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume;
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome;
     /// Root shell and provider process of the new pane, when both can be read.
     fn launch_evidence(&self, location: &HostedLocation) -> Option<(ProcessStamp, ProcessStamp)>;
@@ -132,15 +141,32 @@ fn admit(endpoint: Option<&HerdrLaunchEndpoint>) -> Result<&HerdrLaunchEndpoint,
     #[cfg(test)]
     ADMISSIONS.with(|count| count.set(count.get() + 1));
     let filled = |values: [&str; 3]| values.iter().all(|value| !value.trim().is_empty());
-    let endpoint = endpoint
+    endpoint
         .filter(|e| filled([&e.execution_node, &e.config_key, &e.herdr_session]))
         .filter(|e| Path::new(&e.socket_addr).is_absolute())
-        .ok_or(HerdrLaunchError::Unsupported(ENDPOINT_MISSING))?;
-    // A server that resumes agents on restore could relaunch behind the stored execution.
-    if endpoint.restore_resume != Some(false) {
-        return Err(HerdrLaunchError::Unsupported(RESTORE_RESUME_NOT_OFF));
-    }
-    Ok(endpoint)
+        .ok_or(HerdrLaunchError::Unsupported(ENDPOINT_MISSING))
+}
+
+/// E7: a server that resumes agents on restore could relaunch behind the stored execution.
+async fn restore_off_generation(
+    host: &Arc<dyn HerdrLaunchHost>,
+    endpoint: &HerdrLaunchEndpoint,
+) -> Option<u64> {
+    let endpoint = endpoint.clone();
+    on_blocking_thread(host, move |host| host.restore_resume(&endpoint))
+        .await?
+        .admitted_generation()
+}
+
+/// Removes the Herdr pane variables on the line before the script's provider `exec`, after
+/// every export; the first `exec` line, since its arguments may hold any text.
+pub(crate) fn unset_herdr_env_before_exec(script: &str) -> Result<String, String> {
+    let exec = script
+        .find("\nexec ")
+        .ok_or("launch script has no provider exec")?
+        + 1;
+    let unset = format!("unset {}\n", HERDR_PANE_ENV.join(" "));
+    Ok(format!("{}{unset}{}", &script[..exec], &script[exec..]))
 }
 
 /// Prepares and starts one Herdr execution for `launch.owner`'s canonical row.
@@ -151,6 +177,9 @@ pub(crate) async fn launch_herdr_session(
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
+    if restore_off_generation(&host, &endpoint).await.is_none() {
+        return Err(HerdrLaunchError::Unsupported(RESTORE_RESUME_NOT_OFF));
+    }
     let owner = launch.owner;
     let observed = load_row(pool, &owner).await?;
     match &observed.record {
@@ -177,11 +206,16 @@ pub(crate) async fn launch_herdr_session(
     }
     record_herdr_host_marker(&owner.logical_key).map_err(HerdrLaunchError::Marker)?;
 
+    // Read again right before create: the first reading may predate a reconnect or reload.
+    let Some(restore_off_generation) = restore_off_generation(&host, &endpoint).await else {
+        return Err(HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into()));
+    };
     let request = HerdrCreateRequest {
         endpoint: endpoint.clone(),
         label: owner.logical_key.clone(),
         cwd: command.cwd,
         command: command.command,
+        restore_off_generation,
     };
     let created = on_blocking_thread(&host, move |host| host.create(&request)).await;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {
