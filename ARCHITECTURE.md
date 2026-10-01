@@ -753,7 +753,9 @@ src/
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
 │   │   │   ├── herdr_observation.rs
-│   │   │   └── herdr_observation_tests.rs
+│   │   │   ├── herdr_observation_tests.rs
+│   │   │   ├── herdr_report_order.rs
+│   │   │   └── herdr_report_order_tests.rs
 │   │   ├── footer_view_reconciler/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
@@ -1021,6 +1023,8 @@ src/
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
+│   │   │   ├── host_reconcile.rs
+│   │   │   ├── host_reconcile_tests.rs
 │   │   │   ├── idle_captured_response.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind_output_path.rs

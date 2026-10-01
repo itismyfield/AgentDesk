@@ -96,22 +96,28 @@ impl HostReconcile {
     }
 }
 
-/// The stored record against its exact pane. The record stays the expectation: nothing
-/// observed is stored, and an unreadable or foreign endpoint is never read for a verdict.
+/// The found row's record against its exact pane; a missing, failed or conflicting read is
+/// never legacy.
 pub(crate) fn reconcile_hosted(
     lookup: &HostedLookup,
     reader: &dyn HerdrExecutionReader,
 ) -> HostReconcile {
+    match lookup {
+        HostedLookup::Found(found) => reconcile_record(&found.record, reader),
+        other => HostReconcile::Unresolved(format!("{other:?}")),
+    }
+}
+
+/// The record stays the expectation: nothing observed is stored, and a pane is read only
+/// on the stored endpoint.
+fn reconcile_record(record: &HostedRecord, reader: &dyn HerdrExecutionReader) -> HostReconcile {
     use HerdrExecutionMatch::Unknown;
-    let record = match lookup {
-        HostedLookup::Found(found) => match &found.record {
-            HostedRecord::Legacy => return HostReconcile::Legacy,
-            HostedRecord::Known(record) => record,
-            HostedRecord::Unknown(_) => {
-                return HostReconcile::Unresolved("unreadable hosted record".to_string());
-            }
-        },
-        other => return HostReconcile::Unresolved(format!("{other:?}")),
+    let record = match record {
+        HostedRecord::Legacy => return HostReconcile::Legacy,
+        HostedRecord::Known(record) => record,
+        HostedRecord::Unknown(_) => {
+            return HostReconcile::Unresolved("unreadable hosted record".to_string());
+        }
     };
     if record.state == HostedState::Retired {
         return HostReconcile::Unresolved("retired hosted record".to_string());
