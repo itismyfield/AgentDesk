@@ -1,5 +1,5 @@
 //! Adoption of a selected Claude channel that already holds output: O starts at Legacy's own
-//! cursor when every record past Legacy's delivered frontier is a turn end or TUI bookkeeping.
+//! cursor after a closed turn. Records Legacy left undelivered before it are reported, not posted.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
@@ -180,8 +181,7 @@ struct Turns {
     open: bool,
     /// Whether the frontier is 0 or ends a record.
     frontier_on_line: bool,
-    output_past: Option<u64>,
-    prompt_past: Option<u64>,
+    undelivered: Option<u64>,
 }
 
 /// What neither Legacy nor O posts: turn ends and the TUI's own bookkeeping. Anything else
@@ -208,8 +208,7 @@ impl Turns {
             closed_at: 0,
             open: false,
             frontier_on_line: frontier == 0,
-            output_past: None,
-            prompt_past: None,
+            undelivered: None,
         }
     }
 
@@ -237,12 +236,10 @@ impl Turns {
             .any(|fact| !opens(fact) && !matches!(fact, RecordFact::Idle(_)));
         let user = record.as_ref().and_then(|r| r.get("type")) == Some(&Value::from("user"));
         let prompts = user || facts.iter().any(opens);
-        let past = match record {
-            Some(_) if !posts && prompts => &mut self.prompt_past,
-            Some(record) if !posts && quiet(&record) => return,
-            _ => &mut self.output_past,
-        };
-        past.get_or_insert(start);
+        if !posts && !prompts && record.as_ref().is_some_and(quiet) {
+            return;
+        }
+        self.undelivered.get_or_insert(start);
     }
 }
 
@@ -298,10 +295,12 @@ pub struct Snapshot {
     /// The current source first, then the ones bound before it.
     pinned: Vec<Pinned>,
     named: Vec<SourceId>,
+    /// The first record past Legacy's delivered frontier that is not quiet.
+    undelivered: Option<u64>,
 }
 
 /// Pins every source the channel's `events` bind; the current one starts at Legacy's cursor, after
-/// a closed turn and with only quiet records past Legacy's delivered frontier.
+/// a closed turn and with Legacy's delivered frontier on a record at or before it.
 pub fn pin(
     legacy: &dyn LegacyView,
     events: &[BindingEvent],
@@ -338,14 +337,6 @@ pub fn pin(
             "frontier {frontier} ends no record within ..={start}"
         ));
     }
-    if let Some(at) = turns.output_past {
-        return Err(format!(
-            "a record at {at} past frontier {frontier} may post"
-        ));
-    }
-    if let Some(at) = turns.prompt_past {
-        return Err(format!("a prompt at {at} is past frontier {frontier}"));
-    }
     let mut pinned = vec![head];
     let mut past: Vec<&SourceId> = Vec::new();
     for &source in bound.iter().rev() {
@@ -369,6 +360,7 @@ pub fn pin(
         tmux,
         pinned,
         named: named.into_iter().cloned().collect(),
+        undelivered: turns.undelivered,
     })
 }
 
@@ -420,6 +412,16 @@ impl Snapshot {
     /// Where O starts on the current source.
     pub fn start(&self) -> u64 {
         self.pinned.first().map_or(0, |pinned| pinned.len)
+    }
+
+    /// The records Legacy left undelivered before O's start; neither writer posts them.
+    pub fn abandoned(&self) -> Option<WriterAlarm> {
+        let current = self.pinned.first()?;
+        Some(WriterAlarm::Abandoned {
+            source: current.source.clone(),
+            from: self.undelivered?,
+            to: current.len,
+        })
     }
 }
 

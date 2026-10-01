@@ -116,8 +116,10 @@ A held store is never initialized again: an era channel whose `init` is missing 
 
 A Claude TUI channel whose transcript already holds output, the warm-up canary included, is added
 the same way. Codex channels with output are not adopted: they stay on Legacy. O starts at the
-cursor Legacy reads that transcript from in the new process, so neither writer skips or repeats a
-byte. Every check of §1 still applies; in addition all of these must hold after the restart, or the
+cursor Legacy reads that transcript from in the new process, so neither writer repeats a byte.
+Records Legacy left undelivered before that cursor are posted by neither: the adoption reports
+their range once as `tui_o:abandoned:<channel>` (`Abandoned { source, from, to }`). Every check of
+§1 still applies; in addition all of these must hold after the restart, or the
 channel stays on Legacy for that process with `adoption held: <reason>`:
 
 - Legacy's first rehydrate pass ran within 60 seconds (`legacy cursor not established` otherwise),
@@ -125,11 +127,11 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
 - The transcript ends at that cursor on a line boundary, and its last turn is closed: no user or
   assistant record follows the last turn end.
 - The delivery record is authoritative and its frontier ends a record at or before the cursor
-  (`frontier F ends no record`). Legacy's reader can end a turn at its `stop_hook_summary`, so the
-  records after it may only be turn ends and TUI bookkeeping: `turn_duration`, `informational`,
+  (`frontier F ends no record`). Legacy's reader can end a turn at its `stop_hook_summary`, so
+  turn ends and TUI bookkeeping after it are not undelivered: `turn_duration`, `informational`,
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
-  `file-history-snapshot` and `hook_success` attachments. A prompt or any other record there
-  holds the channel (`a prompt at N is past frontier F`, `a record at N past frontier F may post`).
+  `file-history-snapshot` and `hook_success` attachments. The first prompt or other record there
+  starts the abandoned range; it no longer holds the channel.
 - Earlier transcripts the log bound total at most 64 files and 128 MiB (`past sources exceed
   budget`).
 - Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
