@@ -68,6 +68,9 @@ pub(in crate::services::discord) struct DestructiveCancelProbeSnapshot {
     /// the key a `TerminalDeliveryFence` re-reads the lease against cannot drift
     /// from the row the rest of the gate is pinned to.
     pub delivery_lease_key: DeliveryLeaseKey,
+    /// The row's output is a headless SDK session's transcript, not the pane's, so its turn
+    /// state says nothing about whether the pane is ready for input.
+    pub output_is_headless_sdk: bool,
 }
 
 impl DestructiveCancelProbeSnapshot {
@@ -120,6 +123,7 @@ impl DestructiveCancelProbeSnapshot {
             output_len,
             relay_frontier,
             delivery_lease_key,
+            output_is_headless_sdk: false,
         }
     }
 }
@@ -361,11 +365,13 @@ pub(in crate::services::discord) async fn evaluate(
     let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() else {
         return DestructiveCancelGate::Denied("tmux_readiness_evidence_missing");
     };
-    if !super::relay_recovery::idle_tmux_repair_ready_for_input(
-        provider,
-        channel.get(),
-        tmux_session,
-    ) {
+    if !snapshot.output_is_headless_sdk
+        && !super::relay_recovery::idle_tmux_repair_ready_for_input(
+            provider,
+            channel.get(),
+            tmux_session,
+        )
+    {
         return DestructiveCancelGate::Denied("tmux_pane_not_ready_for_input");
     }
 

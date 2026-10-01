@@ -736,6 +736,25 @@ fn inflight_output_is_headless_sdk(state: &inflight::InflightTurnState) -> bool 
         })
 }
 
+/// The gate probe for a reclaimable stale foreign row, marking a headless SDK transcript so
+/// the gate does not read that session's turn state as the pane's readiness.
+pub(super) fn stale_foreign_probe(
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+    mailbox_active_user_msg_id: Option<u64>,
+    channel: poise::serenity_prelude::ChannelId,
+) -> super::super::destructive_cancel_gate::DestructiveCancelProbeSnapshot {
+    let mut probe =
+        super::super::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
+            shared,
+            state,
+            mailbox_active_user_msg_id,
+            channel,
+        );
+    probe.output_is_headless_sdk = inflight_output_is_headless_sdk(state);
+    probe
+}
+
 pub(super) fn stale_foreign_cancel_finalize_context() -> turn_finalizer::FinalizeContext {
     turn_finalizer::FinalizeContext {
         clear_inflight: true,
