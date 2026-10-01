@@ -743,6 +743,8 @@ impl ProducerPane {
         let env = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let rotations = dedupe::lock_claude_session_rotations_for_tests();
         dedupe::reset_state_for_tests();
+        // An earlier pane's hooks may still wait in the adoption queue this pane shares by name.
+        crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests();
         let root = tempfile::tempdir().unwrap();
         p5::set_test_root(Some(root.path()));
         let tmux = "o-superseded-pane";
@@ -903,5 +905,58 @@ async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
         "[O:restart]"
     );
     assert!(!harness.alarms.taken().iter().any(stalled), "[O:restart]");
+    halt(stop, task).await;
+}
+
+/// The real judgment logs no record for a resume of the session the pane already holds verified,
+/// so that hook proves no old source; a /clear it does log proves every hop of the pane.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logged_clear_retires_it()
+{
+    use super::super::binding::BindingLog;
+    let [a, b, d] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
+    let mut bound_a = None;
+    let harness = Harness::build(|runtime| {
+        let path = runtime.join(format!("{a}.jsonl"));
+        let body = session_row(&a);
+        std::fs::write(&path, &body).unwrap();
+        let source_id = source_id_for(&a, &path).unwrap();
+        bound_a = Some(path);
+        let delivery_start = body.len() as u64;
+        let prefix_hash = hex::encode(Sha256::digest(&body));
+        vec![InitSource {
+            source_id,
+            delivery_start,
+            prefix_hash,
+        }]
+    });
+    harness.gate.acquired();
+    let a_path = bound_a.unwrap();
+    let a_source = source_id_for(&a, &a_path).unwrap();
+    let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
+    let pane = ProducerPane::launch(&a, &a_path);
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    std::fs::write(path(&b), session_row(&b)).unwrap();
+    pane.send("user_prompt_submit", None, &b, &path(&b), 10);
+    assert_eq!(pane.bound().as_deref(), Some(b.as_str()), "[P21:bound_b]");
+    let before = bindings.binding_events_since(CHANNEL, 0).unwrap();
+    pane.send("session_start", Some("resume"), &b, &path(&b), 20);
+    let after = bindings.binding_events_since(CHANNEL, 0).unwrap();
+    assert_eq!(after, before, "[P21:unchanged]");
+    polls(15).await;
+    let retired = |source: &SourceId| harness.channel().cursor(source).unwrap().retired;
+    assert!(!retired(&a_source), "[P21:unproven]");
+
+    pane.send("session_start", Some("clear"), &d, &path(&d), 30);
+    std::fs::write(path(&d), session_row(&d)).unwrap();
+    pane.send("user_prompt_submit", None, &d, &path(&d), 31);
+    assert_eq!(pane.bound().as_deref(), Some(d.as_str()), "[P21:bound_d]");
+    polls(15).await;
+    let b_source = source_id_for(&b, &path(&b)).unwrap();
+    assert!(retired(&a_source), "[P21:clear_proves_a]");
+    assert!(retired(&b_source), "[P21:clear_proves_b]");
     halt(stop, task).await;
 }
