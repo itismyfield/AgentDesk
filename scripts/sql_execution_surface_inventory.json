@@ -27995,6 +27995,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:cf3fd2171d9c7fd1d9f85efb27cfebe5c3152057e0a7096525a43d3123455462"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",

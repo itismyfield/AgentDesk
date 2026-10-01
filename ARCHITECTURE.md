@@ -1378,6 +1378,7 @@ src/
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
+│   │   │   │   ├── registered_bootstrap_e2e.rs
 │   │   │   │   └── stale_resume_retry_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs

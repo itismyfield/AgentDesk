@@ -3457,6 +3457,7 @@ services::discord::health::watcher_respawn::tests::unwatched_candidates_include_
 services::discord::health::watcher_respawn::tests::watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
+services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_with_no_channel_name_pg
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::http::tests::discord_content_or_zwsp_replaces_empty_content
@@ -6114,6 +6115,7 @@ services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_re
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_restart_retries_original_snapshot
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_unknown_schema_and_changed_snapshot_survive
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_valid_json_corruption_is_not_acknowledged
+services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::terminal_ui_obligation::tests::obligation_store_round_trips_lists_and_clears
 services::discord::terminal_ui_obligation::tests::terminal_ui_claude_tui_without_runtime_output_path_stays_not_ready
@@ -7020,6 +7022,8 @@ services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_a
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_read_during_a_refused_announcement_is_announced_afterwards
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
 services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
