@@ -4,16 +4,21 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use super::*;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodySend, claim_then_send};
 
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;
+#[path = "stream_tick/o_panel.rs"]
+mod o_panel;
+#[path = "stream_tick/rollover_guard.rs"]
+mod rollover_guard;
 use guarded_persist::{
     GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
     dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,
     persist_stream_tick_heartbeat, persist_stream_tick_state_with_candidate_cleanup,
     sync_stream_tick_tool_fields, visible_mutation_authority_after_guarded_save,
 };
+use rollover_guard::{GuardedRolloverEditOutcome, guarded_bridge_rollover_edit};
 
 pub(super) type LongRunningPlaceholderActive = Option<(
     super::super::placeholder_controller::PlaceholderKey,
@@ -132,65 +137,6 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
     pub(super) last_adk_heartbeat: &'a mut std::time::Instant,
     pub(super) last_inflight_long_run_heartbeat: &'a mut std::time::Instant,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuardedRolloverEditOutcome {
-    Clean,
-    Held,
-    Blocked,
-}
-
-async fn guarded_bridge_rollover_edit<G: TurnGateway + ?Sized>(
-    gateway: &G,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    unsent_response: &str,
-    frozen_chunk: &str,
-    claim: Option<BodyClaim<'_>>,
-) -> Result<GuardedRolloverEditOutcome, String> {
-    use crate::services::provider_output_guard::{
-        ProviderOutputVerdict, inspect_provider_streaming_rollover, safe_blocked_body,
-    };
-
-    match inspect_provider_streaming_rollover(provider, unsent_response, frozen_chunk) {
-        ProviderOutputVerdict::Clean => {
-            let freeze =
-                || TurnGateway::edit_message(gateway, channel_id, message_id, frozen_chunk);
-            match claim_then_send(claim, freeze).await {
-                Ok(BodySend::Sent(edit)) => edit.map(|()| GuardedRolloverEditOutcome::Clean),
-                // O took the channel or its identity is held: keep the frame, like a held one.
-                Ok(BodySend::OwnedByO) | Err(_) => Ok(GuardedRolloverEditOutcome::Held),
-            }
-        }
-        ProviderOutputVerdict::Hold { kind } => {
-            tracing::warn!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                verdict = "hold",
-                kind = kind.as_str(),
-                output_bytes = frozen_chunk.len(),
-                output_chars = frozen_chunk.chars().count(),
-                "held turn-bridge streaming rollover frame"
-            );
-            Ok(GuardedRolloverEditOutcome::Held)
-        }
-        ProviderOutputVerdict::Blocked { kind } => {
-            tracing::warn!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                verdict = "blocked",
-                kind = kind.as_str(),
-                output_bytes = frozen_chunk.len(),
-                output_chars = frozen_chunk.chars().count(),
-                "blocked turn-bridge streaming rollover frame"
-            );
-            TurnGateway::edit_message(gateway, channel_id, message_id, safe_blocked_body(kind))
-                .await
-                .map(|()| GuardedRolloverEditOutcome::Blocked)
-        }
-    }
 }
 
 pub(super) async fn run_bridge_stream_tick(
@@ -543,6 +489,36 @@ pub(super) async fn run_bridge_stream_tick(
     if o_body_cut == Ok(true) {
         response_sent_offset = full_response.len();
         inflight_state.response_sent_offset = response_sent_offset;
+    }
+    if o_body_cut == Ok(true) && single_message_panel_footer_mode {
+        let frame = o_panel::status_frame(
+            shared_owned.as_ref(),
+            channel_id,
+            &provider,
+            status_panel_started_at,
+            indicator,
+        );
+        let save = StreamTickCandidateSaveContext {
+            gateway: gateway.as_ref(),
+            provider: &provider,
+            token_hash: &shared_owned.token_hash,
+            channel_id,
+            persisted_baseline: persisted_inflight_baseline,
+            inflight_state: &mut *inflight_state,
+            expected_identity: stream_tick_expected,
+            expected_current_message,
+            current_msg_id: &mut current_msg_id,
+            pending_current_message_candidate,
+            bridge_created_response_placeholder_msg_id,
+        };
+        let due = last_status_edit.elapsed() >= status_interval;
+        let text = &mut last_edit_text;
+        let timing = (due, done);
+        if o_panel::refresh_o_status_panel(&shared_owned, &gateway, save, frame, timing, text).await
+        {
+            last_status_edit = tokio::time::Instant::now();
+            state_dirty = true;
+        }
     }
     let anchor_ready = if !body_held
         && !done
@@ -1145,6 +1121,13 @@ pub(super) mod provider_output_guard_tests {
         pub(in crate::services::discord::turn_bridge) sends: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) edits: Mutex<Vec<String>>,
         pub(in crate::services::discord::turn_bridge) deletes: Mutex<Vec<u64>>,
+        /// Id a send returns; 0 keeps the default 2.
+        pub(in crate::services::discord::turn_bridge) send_id: u64,
+        /// Whether the gateway delivers directly, as a live Discord gateway does.
+        pub(in crate::services::discord::turn_bridge) direct: bool,
+        /// A message id whose first delete fails with a server error; 0 for none.
+        pub(in crate::services::discord::turn_bridge) fail_delete_once:
+            std::sync::atomic::AtomicU64,
         /// When set, every send or edit is checked against the watched adoption as it is made.
         pub(in crate::services::discord::turn_bridge) check:
             Option<crate::services::tui_o::channel_policy::BodyCheck>,
@@ -1169,7 +1152,8 @@ pub(super) mod provider_output_guard_tests {
                 .lock()
                 .expect("sends lock")
                 .push(_content.to_string());
-            Box::pin(async { Ok(MessageId::new(2)) })
+            let id = if self.send_id == 0 { 2 } else { self.send_id };
+            Box::pin(async move { Ok(MessageId::new(id)) })
         }
 
         fn edit_message<'a>(
@@ -1205,7 +1189,17 @@ pub(super) mod provider_output_guard_tests {
                 .lock()
                 .expect("deletes lock")
                 .push(message_id.get());
-            Box::pin(async { Ok(()) })
+            let failing = std::sync::atomic::Ordering::SeqCst;
+            let fail = self
+                .fail_delete_once
+                .compare_exchange(message_id.get(), 0, failing, failing)
+                .is_ok();
+            Box::pin(async move {
+                match fail {
+                    true => Err("HTTP 500 Internal Server Error".to_string()),
+                    false => Ok(()),
+                }
+            })
         }
 
         fn schedule_retry_with_history<'a>(
@@ -1243,6 +1237,10 @@ pub(super) mod provider_output_guard_tests {
 
         fn can_chain_locally(&self) -> bool {
             false
+        }
+
+        fn can_deliver_directly(&self) -> bool {
+            self.direct
         }
 
         fn bot_owner_provider(&self) -> Option<ProviderKind> {

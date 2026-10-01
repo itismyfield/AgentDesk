@@ -107,6 +107,36 @@ pub(super) fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
     }
 }
 
+/// Whether a tool call opens this idle tail's stream: only on a channel whose body O posts.
+pub(super) fn idle_tail_tool_opens(channel_id: ChannelId, tmux_session_name: &str) -> bool {
+    let session = Some(tmux_session_name);
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+        channel_id.get(),
+        session,
+    ) == Ok(true)
+}
+
+/// Pulls leading frames until the first content or terminal frame; when `tool_opens` (O's
+/// channel, whose live panel is the only place a tool shows) a tool call opens the stream too.
+pub(super) fn buffer_idle_prefix(
+    reader_rx: mpsc::Receiver<StreamMessage>,
+    tool_opens: bool,
+) -> (Vec<StreamMessage>, bool, mpsc::Receiver<StreamMessage>) {
+    let mut prefix: Vec<StreamMessage> = Vec::new();
+    let mut has_boundary = false;
+    while let Ok(message) = reader_rx.recv() {
+        let is_content = idle_stream_message_is_content(&message)
+            || (tool_opens && matches!(message, StreamMessage::ToolUse { .. }));
+        let is_terminal = matches!(message, StreamMessage::Done { .. });
+        prefix.push(message);
+        if is_content || is_terminal {
+            has_boundary = true;
+            break;
+        }
+    }
+    (prefix, has_boundary, reader_rx)
+}
+
 /// #3256: the stream-through path commits the runtime-binding offset whenever
 /// the single bridge turn delivered successfully, including empty-response guidance.
 #[cfg(unix)]

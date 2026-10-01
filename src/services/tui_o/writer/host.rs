@@ -265,6 +265,8 @@ async fn host_channel<I: HostIo>(
         }
         Err(detail) => return hold(&alarms, channel, &detail),
     };
+    // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
+    super::deliver::seed_last_posted(channel, store.ledger());
     let port = io.port().await;
     let writer = ChannelWriter::new(store, Arc::clone(&gate), port, io.lease(), alarms);
     let (stop_tx, stop) = watch::channel(false);

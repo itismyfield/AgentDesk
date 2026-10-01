@@ -426,11 +426,14 @@ async fn run_codex_idle_response_tail(
         })
         .expect("spawn codex idle response tail reader thread");
 
+    // On O's channel a tool call opens the stream: its live panel is the only place a tool shows.
+    let tool_opens = idle_tail_tool_opens(channel_id, &tmux_session_name);
     let buffered = tokio::task::spawn_blocking(move || {
         let mut prefix: Vec<StreamMessage> = Vec::new();
         let mut has_content = false;
         while let Ok(message) = reader_rx.recv() {
-            let is_content = idle_stream_message_is_content(&message);
+            let is_content = idle_stream_message_is_content(&message)
+                || (tool_opens && matches!(message, StreamMessage::ToolUse { .. }));
             let is_terminal = matches!(message, StreamMessage::Done { .. });
             prefix.push(message);
             if is_content {
