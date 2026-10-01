@@ -70,6 +70,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     let state_dirty = state.state_dirty;
     let terminal_control_drain_until = state.terminal_control_drain_until;
     let state_dirty_before_handoff = *state_dirty;
+    let relay_owned_before = *watcher_owns_assistant_relay && *watcher_relay_available_for_turn;
     let persisted_baseline = inflight_state.clone();
     let expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&persisted_baseline);
@@ -474,6 +475,19 @@ pub(super) fn handle_watcher_runtime_handoff(
             *watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
             inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
         }
+    }
+    // A watcher adopted after Done resumes past this turn's text, which O's cut marks sent;
+    // the bridge keeps the terminal, as it does in Legacy where that text stays pending.
+    if done
+        && !relay_owned_before
+        && *watcher_relay_available_for_turn
+        && !inflight_state.full_response.trim().is_empty()
+        && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+            channel_id.get(),
+            Some(runtime_kind),
+        ) == Ok(true)
+    {
+        *watcher_relay_available_for_turn = false;
     }
     *state_dirty = tmux_ready_state_dirty_after_guarded_save(*state_dirty, Some(outcome));
     if done {

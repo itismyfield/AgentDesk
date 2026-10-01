@@ -419,6 +419,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": (
         "handle_watcher_runtime_handoff:peek",
+        "handle_watcher_runtime_handoff:peek",
     ),
     "src/services/discord/turn_bridge/stream_loop/types.rs": (
         "deliver:claim",
