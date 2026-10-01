@@ -441,10 +441,14 @@ fn codex_resume_supports_hook_trust_bypass(
     }
 }
 
+/// Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no".
 pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
-    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS").map_or(true, |value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
@@ -1982,8 +1986,8 @@ fn resolve_codex_tui_tail_result(
 
 #[cfg(test)]
 thread_local! {
-    /// Runs once between the post-tail install and the readiness wait.
-    pub(crate) static AFTER_IDLE_RELAY_INSTALL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs once between a ready composer and the RuntimeReady recheck.
+    pub(crate) static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Post-tail StreamMessage emission for the Codex Direct TUI launch: handles
@@ -2049,10 +2053,6 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
             // A hook moved the pane, or with hooks on its history is unreadable: a handoff could reclaim it.
             return Ok(());
         }
-        #[cfg(test)]
-        if let Some(seam) = AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(Option::take) {
-            seam();
-        }
 
         // #2325: gate the RuntimeReady handoff on the Codex TUI composer
         // actually being ready for input. RuntimeReady is the signal the
@@ -2085,6 +2085,10 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
+                #[cfg(test)]
+                if let Some(seam) = AFTER_READINESS_WAIT.with_borrow_mut(Option::take) {
+                    seam();
+                }
                 let ready = StreamMessage::RuntimeReady {
                     handoff: RuntimeHandoff::CodexTui {
                         rollout_path: tail_result.rollout_path.display().to_string(),

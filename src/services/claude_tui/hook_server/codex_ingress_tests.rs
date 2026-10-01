@@ -668,11 +668,14 @@ fn codex_restore_after_a_crash_between_source_and_marker_completes_the_hook_sour
     assert_eq!(h.events(), events, "retry must reuse the durable Source");
 }
 
-fn hooks_switch(on: bool) -> Guard {
-    Guard::set_value_after_shared_test_env_lock(
-        "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
-        if on { "1" } else { "0" }.as_ref(),
-    )
+/// Sets the hook switch, or leaves it unset for `None`; restored on drop.
+fn hooks_switch(value: Option<&str>) -> Guard {
+    let guard = Guard::capture_after_shared_test_env_lock("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+    match value {
+        Some(value) => unsafe { std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value) },
+        None => unsafe { std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS") },
+    }
+    guard
 }
 
 /// A live pane whose capture fails, so a rollout-reported ready composer is taken as ready.
@@ -735,7 +738,7 @@ fn marker_path(h: &Harness) -> PathBuf {
 fn codex_tail_with_hooks_on_is_held_when_the_hook_history_is_unreadable() {
     let h = Harness::new();
     let _tmux = live_tmux(h.root.path());
-    let _hooks = hooks_switch(true);
+    let _hooks = hooks_switch(Some("1"));
     let old = h.binding();
     write(&h.path, &h.header);
     assert_eq!(h.hook().0, 202);
@@ -759,7 +762,7 @@ fn codex_tail_with_hooks_on_is_held_when_the_hook_history_is_unreadable() {
 fn codex_runtime_ready_is_withheld_when_a_hook_replaces_the_source_during_the_readiness_wait() {
     let h = std::rc::Rc::new(Harness::new());
     let _tmux = live_tmux(h.root.path());
-    let _hooks = hooks_switch(true);
+    let _hooks = hooks_switch(None);
     let old = h.binding();
     write(&h.path, &h.header);
     assert!(
@@ -767,11 +770,11 @@ fn codex_runtime_ready_is_withheld_when_a_hook_replaces_the_source_during_the_re
         "[T2:control] a current source is handed off once the composer is ready"
     );
     let hooked = h.clone();
-    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(|seam| {
+    crate::services::codex::AFTER_READINESS_WAIT.with_borrow_mut(|seam| {
         *seam = Some(Box::new(move || assert_eq!(hooked.hook().0, 202)));
     });
     let messages = post_tail(&h, &old);
-    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(Option::take);
+    crate::services::codex::AFTER_READINESS_WAIT.with_borrow_mut(Option::take);
     let current = h.path.canonicalize().unwrap().display().to_string();
     assert_eq!(h.binding().output_path, current, "the hook moved the pane");
     assert!(
@@ -784,15 +787,15 @@ fn codex_runtime_ready_is_withheld_when_a_hook_replaces_the_source_during_the_re
 fn codex_post_tail_with_hooks_off_installs_and_hands_off_as_before() {
     let h = std::rc::Rc::new(Harness::new());
     let _tmux = live_tmux(h.root.path());
-    let _hooks = hooks_switch(false);
+    let _hooks = hooks_switch(Some("0"));
     let old = h.binding();
     write(&h.path, &h.header);
     let hooked = h.clone();
-    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(|seam| {
+    crate::services::codex::AFTER_READINESS_WAIT.with_borrow_mut(|seam| {
         *seam = Some(Box::new(move || assert_eq!(hooked.hook().0, 202)));
     });
     let messages = post_tail(&h, &old);
-    crate::services::codex::AFTER_IDLE_RELAY_INSTALL.with_borrow_mut(Option::take);
+    crate::services::codex::AFTER_READINESS_WAIT.with_borrow_mut(Option::take);
     assert!(
         handed_off(&messages, &old),
         "[T3:off] with hooks off the handoff is not checked again after the wait"
@@ -807,5 +810,70 @@ fn codex_post_tail_with_hooks_off_installs_and_hands_off_as_before() {
     assert!(
         handed_off(&messages, &old),
         "[T3:off] with hooks off the installed tail is handed off"
+    );
+}
+
+/// A hook moves the pane from A to B; returns A as the stale claim.
+fn hooked_away(h: &Harness) -> dedupe::TuiRuntimeBinding {
+    let old = h.binding();
+    write(&h.path, &h.header);
+    assert_eq!(h.hook().0, 202);
+    old
+}
+
+#[test]
+fn codex_stale_marker_and_recovery_writes_cannot_name_a_retired_source_with_hooks_on() {
+    let h = Harness::new();
+    let _tmux = dedupe::binding_context::tests::fake_tmux(h.root.path());
+    let _hooks = hooks_switch(None);
+    let old = hooked_away(&h);
+    let hooked = (h.binding(), marker_path(&h));
+    let stale = PathBuf::from(&old.output_path);
+    session::write_codex_tui_rollout_marker_with_start_offset(
+        &h.context.tmux_session,
+        &stale,
+        old.session_id.as_deref(),
+        Some(5),
+    )
+    .unwrap();
+    assert_eq!(
+        marker_path(&h),
+        hooked.1,
+        "[T4:marker] a pre-tail or rebind cursor write must not move the marker back"
+    );
+    session::install_codex_tui_runtime_binding(&h.context.tmux_session, Some(19), old);
+    assert_eq!(
+        (h.binding(), marker_path(&h)),
+        hooked,
+        "[T4:rebind] a recovery install must not rebind the pane to a retired source"
+    );
+}
+
+#[test]
+fn codex_stale_marker_and_recovery_writes_with_hooks_off_behave_as_before() {
+    let h = Harness::new();
+    let _tmux = dedupe::binding_context::tests::fake_tmux(h.root.path());
+    let _hooks = hooks_switch(Some("0"));
+    let old = hooked_away(&h);
+    let stale = PathBuf::from(&old.output_path);
+    session::write_codex_tui_rollout_marker_with_start_offset(
+        &h.context.tmux_session,
+        &stale,
+        old.session_id.as_deref(),
+        Some(5),
+    )
+    .unwrap();
+    assert_eq!(
+        marker_path(&h),
+        stale,
+        "[T5:off] the marker write goes through"
+    );
+    let hooked = h.binding();
+    session::install_codex_tui_runtime_binding(&h.context.tmux_session, Some(19), old.clone());
+    assert_ne!(hooked.output_path, old.output_path);
+    assert_eq!(
+        h.binding().output_path,
+        old.output_path,
+        "[T5:off] the recovery install goes through"
     );
 }
