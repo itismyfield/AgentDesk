@@ -1362,6 +1362,7 @@ src/
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
+│   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs
@@ -1396,6 +1397,8 @@ src/
 │   │   │   ├── claude_idle_runtime.rs
 │   │   │   ├── claude_idle_tail.rs
 │   │   │   ├── codex_idle_rollout.rs
+│   │   │   ├── headless.rs
+│   │   │   ├── headless_tests.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs

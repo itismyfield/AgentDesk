@@ -152,6 +152,7 @@ mod claude_idle_bridge;
 mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
+mod headless;
 // #5188: session-rotation settle pass (pure planner always compiled + tested).
 mod session_rotation_settle;
 #[cfg(unix)]
