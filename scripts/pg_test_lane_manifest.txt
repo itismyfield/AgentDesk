@@ -113,6 +113,8 @@ src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/terminal_delivery_custody/pg_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
+src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
+src/services/discord/tmux_watcher/streaming_baseline_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
@@ -272,6 +274,8 @@ services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
@@ -1032,6 +1036,9 @@ services::discord::task_notification_delivery::tests::unknown_reference_repair_a
 services::discord::task_notification_delivery::tests::watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_pg
 services::discord::task_notification_delivery::tests::watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg
 services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_take_the_keyed_host_verdict_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::current_generation_live_row_is_not_consumed
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::failed_ownership_proof_withholds_the_session_release
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row

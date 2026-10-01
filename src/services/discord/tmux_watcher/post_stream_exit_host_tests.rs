@@ -1,53 +1,98 @@
-//! The real watcher loop tearing a session down at exit, on Legacy and O channels: only a
-//! local tmux session whose pane tmux or the wrapper confirms dead loses its row or is killed.
+//! The real watcher loop on Legacy and O channels: only a session the keyed host gate admits
+//! is killed, and only a local tmux death ends a turn or clears its row.
 
 use super::*;
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::host_teardown_gate::test_support::{Stored, channel_key, seed};
 use crate::services::tmux_common::{session_dead_marker_path, session_temp_path};
 
 const T0: &str = "ADK-P4B2 T0 delivered before the watcher attached";
+const STREAMING: &str = "ADK-P4B2 T1 streaming when the pane dies";
+const RESET: &str = "세션을 초기화했습니다";
+const NOT_RESET: &str = "세션을 초기화하지 않았습니다";
 const LEGACY_BASE: u64 = 40;
-const O_BASE: u64 = 50;
+const O_BASE: u64 = 60;
+const PER_GROUP: u64 = 20;
 
 fn turn(prompt: &str, body: &str) -> String {
     format!("{}{}{}", user(prompt), said(body), stop())
 }
 
 fn o_channels() -> String {
-    let ids: Vec<String> = (O_BASE..O_BASE + 6)
+    let ids: Vec<String> = (O_BASE..O_BASE + PER_GROUP)
         .map(|case| format!("[{},\"claude_tui\"]", 6_284_100 + case))
         .collect();
     format!("[{}]", ids.join(","))
 }
 
+/// The host evidence the `.host_kind` marker and the inflight row carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Host {
+    /// No marker and no row locator.
+    Local,
+    /// A Herdr marker.
+    Marker,
+    /// A row bound to a Herdr pane.
+    Locator,
+    /// A row locator this build cannot read.
+    UnknownLocator,
+    /// A tmux marker beside a row bound to a Herdr pane.
+    Conflict,
+    /// A row bound to a Herdr pane that names no tmux session.
+    Nameless,
+}
+
 /// A watcher attached past a delivered T0 with its row, on an O-bound session when `o`.
-/// `host` is a `.host_kind` marker, or `locator` for a row bound to a Herdr pane.
+/// `stored` is the sessions row when `pool` is given; `exit` is the recorded exit reason.
 async fn attached(
     case: u64,
     o: bool,
-    host: Option<&str>,
+    host: Host,
+    db: Option<(&sqlx::PgPool, Stored)>,
+    exit: Option<&str>,
 ) -> (
     Harness,
     Option<crate::services::tui_o::cutover::test_override::TuiSessionGuard>,
 ) {
-    let seed = turn("T0", T0);
-    let mut h = Harness::new(case, &seed).await;
-    let f = seed.len() as u64;
+    let seed_text = turn("T0", T0);
+    let mut h = Harness::on(case, &seed_text, db.map(|(pool, _)| pool.clone())).await;
+    if let Some((pool, stored)) = db {
+        let key = channel_key(&h.shared, &h.tmux);
+        seed(pool, &key, &h.tmux, h.channel.get(), stored).await;
+    }
+    let f = seed_text.len() as u64;
     h.commit(0, f);
     let bound = o.then(|| {
         crate::services::tui_o::cutover::test_override::bind_claude_tui_session(&h.tmux, &h.path)
     });
-    if let Some(host) = host.filter(|host| *host != "locator") {
-        std::fs::write(session_temp_path(&h.tmux, "host_kind"), host).unwrap();
+    let marker = match host {
+        Host::Marker => Some("herdr"),
+        Host::Conflict => Some("tmux"),
+        _ => None,
+    };
+    if let Some(marker) = marker {
+        std::fs::write(session_temp_path(&h.tmux, "host_kind"), marker).unwrap();
     }
-    crate::services::tmux_diagnostics::record_tmux_exit_reason(&h.tmux, "turn completed");
-    let row = h.row_at(f);
-    if host == Some("locator") {
-        let mut bound = serde_json::to_value(&row).unwrap();
-        bound["hosted_record_id"] = serde_json::json!(7);
-        bound["hosted_execution_nonce"] = serde_json::json!("p4b2-nonce");
-        bound["host_locator"] =
-            serde_json::json!({"host_kind": "herdr", "host_session_id": "w1", "pane": "w1-1"});
-        h.save(&serde_json::from_value(bound).unwrap());
+    if let Some(exit) = exit {
+        crate::services::tmux_diagnostics::record_tmux_exit_reason(&h.tmux, exit);
+    }
+    let mut row = serde_json::to_value(h.row_at(f)).unwrap();
+    let herdr = serde_json::json!({"host_kind": "herdr", "host_session_id": "w1", "pane": "w1-1"});
+    match host {
+        Host::Locator | Host::Conflict | Host::Nameless => row["host_locator"] = herdr,
+        Host::UnknownLocator => {
+            row["host_locator"] =
+                serde_json::json!({"host_kind": "zellij", "host_session_id": "z1"})
+        }
+        Host::Local | Host::Marker => {}
+    }
+    if host == Host::Nameless {
+        row["tmux_session_name"] = serde_json::Value::Null;
+    }
+    if row["host_locator"].is_object() {
+        row["hosted_record_id"] = serde_json::json!(7);
+        row["hosted_execution_nonce"] = serde_json::json!("p4b2-nonce");
+        h.save(&serde_json::from_value(row).unwrap());
         assert!(
             h.row().unwrap().host_locator.is_some(),
             "the binding is stored"
@@ -57,37 +102,56 @@ async fn attached(
     (h, bound)
 }
 
-#[derive(Clone, Copy)]
+/// Removal reasons this channel's inflight row logged.
+fn removals(h: &Harness) -> Vec<String> {
+    let removed = h.events("inflight state row removal");
+    removed.iter().filter_map(|l| field(l, "reason")).collect()
+}
+
+#[derive(Clone, Copy, Debug)]
 enum End {
     Death,
     Cancel,
 }
 
+// The post-stream clear and kill run only past the keyed host gate (sessions row, marker and
+// inflight row) and only on a pane tmux or the wrapper confirms dead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn watcher_exit_tears_down_only_a_confirmed_local_tmux_death() {
+async fn watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg() {
     let channels = o_channels();
     let o = crate::services::tui_o::cutover::test_override::CHANNELS_ENV;
     let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "post_stream_exit_host_tests",
-        "watcher_exit_tears_down_only_a_confirmed_local_tmux_death",
+        "watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg",
         &[(flag, "1"), (o, &channels)],
     ) {
         return;
     }
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
     use End::{Cancel, Death};
-    // (`.host_kind`, pane, `.pane_dead`, how the watcher ends, row kept, kills)
+    use Stored::{Future, Hosted, Legacy, Missing};
+    // (sessions row, local host, pane, `.pane_dead`, how the watcher ends, row kept, kills)
     let cases = [
-        (None, "deadpane", false, Death, false, 1),
-        (None, "unanswered", false, Cancel, true, 0),
-        (None, "unanswered", true, Death, false, 0),
-        (None, "listfail", false, Cancel, true, 0),
-        (Some("herdr"), "deadpane", true, Cancel, true, 0),
-        (Some("locator"), "deadpane", false, Cancel, true, 0),
+        (Missing, Host::Local, "deadpane", false, Death, false, 1),
+        (Legacy, Host::Local, "deadpane", false, Death, false, 1),
+        (Hosted, Host::Local, "deadpane", false, Death, true, 0),
+        (Future, Host::Local, "deadpane", false, Death, true, 0),
+        (Missing, Host::Local, "unanswered", false, Cancel, true, 0),
+        (Missing, Host::Local, "unanswered", true, Death, false, 0),
+        (Missing, Host::Local, "listfail", false, Cancel, true, 0),
+        (Missing, Host::Marker, "deadpane", true, Cancel, true, 0),
+        (Missing, Host::Locator, "deadpane", false, Cancel, true, 0),
+        (Missing, Host::Nameless, "deadpane", false, Cancel, true, 0),
     ];
     for (base, o) in [(LEGACY_BASE, false), (O_BASE, true)] {
-        for (n, (host, pane, pane_dead, end, row_kept, kills)) in cases.into_iter().enumerate() {
-            let (h, bound) = attached(base + n as u64, o, host).await;
+        for (n, (stored, host, pane, pane_dead, end, row_kept, kills)) in
+            cases.into_iter().enumerate()
+        {
+            let db = Some((&pool, stored));
+            let done = Some("turn completed");
+            let (mut h, bound) = attached(base + n as u64, o, host, db, done).await;
             // The pane changes first: a `.pane_dead` beside a live pane is cleared as stale.
             h.pane(pane);
             if pane_dead {
@@ -96,12 +160,59 @@ async fn watcher_exit_tears_down_only_a_confirmed_local_tmux_death() {
             if let Cancel = end {
                 h.cancel();
             }
-            let label = format!("o={o} {host:?} {pane} pane_dead={pane_dead}");
-            h.until(&label, Harness::watcher_finished).await;
+            let label = format!("o={o} {stored:?} {host:?} {pane} pane_dead={pane_dead}");
+            h.exited(&label).await;
             assert_eq!((h.row().is_some(), h.kills()), (row_kept, kills), "{label}");
             let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
             assert_eq!(binding(&h.tmux).is_some(), bound.is_some(), "{label}");
         }
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+// A streaming turn whose pane dies with no exit reason hands off and clears its row only when
+// the row records no other host; otherwise the watcher keeps reading and the row stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collector_death_keeps_a_turn_bound_to_another_host() {
+    if !isolated_in(
+        "post_stream_exit_host_tests",
+        "collector_death_keeps_a_turn_bound_to_another_host",
+        &[],
+    ) {
+        return;
+    }
+    let hosts = [
+        Host::Local,
+        Host::Locator,
+        Host::UnknownLocator,
+        Host::Conflict,
+        Host::Nameless,
+    ];
+    for (n, host) in hosts.into_iter().enumerate() {
+        let (mut h, _) = attached(LEGACY_BASE + n as u64, false, host, None, None).await;
+        h.append(format!("{}{}", user("T1"), said(STREAMING)).as_bytes());
+        h.until("streaming preview", |h| h.showing(STREAMING)).await;
+        let deferred = || Harness::logged("tmux probe deferred").len();
+        let before = deferred();
+        h.pane("dead");
+        if host == Host::Local {
+            h.exited("watcher exit").await;
+            assert_eq!(removals(&h), ["clear_inflight_state"], "{host:?}");
+            assert!(h.row().is_none(), "{host:?}");
+            continue;
+        }
+        // The probe ran and deferred, and the watcher went on polling.
+        h.until("deferred probe", |_| deferred() > before).await;
+        let seen = crate::services::discord::tmux_watcher_now_ms();
+        h.until("still polling", |h| h.heartbeat() > seen).await;
+        assert!(!h.watcher_finished(), "{host:?}");
+        assert!(removals(&h).is_empty(), "{host:?}");
+        h.cancel();
+        h.exited("watcher exit").await;
+        let row = h.row().unwrap_or_else(|| panic!("{host:?}: row kept"));
+        assert!(row.host_locator.is_some(), "{host:?}");
+        assert!(removals(&h).is_empty(), "{host:?}");
     }
 }
 
@@ -118,34 +229,37 @@ async fn terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead() {
     ) {
         return;
     }
+    let cases = [(Host::Local, "unanswered"), (Host::Marker, "deadpane")];
     for (base, o) in [(LEGACY_BASE, false), (O_BASE, true)] {
-        for (n, host) in [None, Some("herdr")].into_iter().enumerate() {
-            let (h, _bound) = attached(base + n as u64, o, host).await;
-            h.pane(if host.is_some() {
-                "deadpane"
-            } else {
-                "unanswered"
-            });
+        for (n, (host, pane)) in cases.into_iter().enumerate() {
+            let label = format!("o={o} {host:?} {pane}");
+            let (mut h, _bound) = attached(base + n as u64, o, host, None, None).await;
+            h.pane(pane);
             h.append(turn("T1", "ADK-P4B2 T1 body").as_bytes());
             h.drained("terminal frame").await;
-            assert!(!h.watcher_finished(), "o={o} {host:?}");
+            let seen = crate::services::discord::tmux_watcher_now_ms();
+            h.until("still polling", |h| h.heartbeat() > seen).await;
+            assert!(!h.watcher_finished(), "{label}");
             h.cancel();
-            h.until("watcher exit", Harness::watcher_finished).await;
-            assert_eq!(h.kills(), 0, "o={o} {host:?}");
+            h.exited("watcher exit").await;
+            assert_eq!(h.kills(), 0, "{label}");
         }
     }
 }
 
-// The prompt-too-long and stale-resume kills reach only a local tmux session.
+// The prompt-too-long and stale-resume kills run only past the keyed host gate; a refused
+// prompt-too-long kill says the session was not reset and leaves the restart handoff armed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn abort_kills_reach_only_a_local_tmux_session() {
+async fn abort_kills_take_the_keyed_host_verdict_pg() {
     if !isolated_in(
         "post_stream_exit_host_tests",
-        "abort_kills_reach_only_a_local_tmux_session",
+        "abort_kills_take_the_keyed_host_verdict_pg",
         &[],
     ) {
         return;
     }
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
     let result = |text: &str| {
         let line = serde_json::json!({"type": "result", "subtype": "error_during_execution",
             "is_error": true, "result": text});
@@ -153,17 +267,46 @@ async fn abort_kills_reach_only_a_local_tmux_session() {
     };
     let prompt_too_long = result("Prompt is too long");
     let stale = result("No conversation found with session ID: adk-p4b2");
-    let cases = [
-        (None, &prompt_too_long, 1),
-        (Some("herdr"), &prompt_too_long, 0),
-        (None, &stale, 1),
-        (Some("herdr"), &stale, 0),
+    use Stored::{Future, Hosted, Legacy, Missing};
+    let stores = [
+        (Missing, Host::Local),
+        (Legacy, Host::Local),
+        (Hosted, Host::Local),
+        (Future, Host::Local),
+        (Missing, Host::Marker),
     ];
-    for (n, (host, line, kills)) in cases.into_iter().enumerate() {
-        let (h, _) = attached(LEGACY_BASE + n as u64, false, host).await;
-        // The next turn's frame is read only after the abort line was handled.
-        h.append(format!("{line}{}", turn("T2", "ADK-P4B2 T2 body")).as_bytes());
-        h.drained("next turn frame").await;
-        assert_eq!(h.kills(), kills, "{host:?} {line}");
+    let mut case = LEGACY_BASE;
+    for line in [&prompt_too_long, &stale] {
+        for (stored, host) in stores {
+            let admitted = matches!(stored, Missing | Legacy) && host == Host::Local;
+            let label = format!("{stored:?} {host:?} {line}");
+            let (mut h, _) = attached(case, false, host, Some((&pool, stored)), None).await;
+            case += 1;
+            if line == &stale {
+                // The next turn's frame is read only after the abort line was handled.
+                h.append(format!("{line}{}", turn("T2", "ADK-P4B2 T2 body")).as_bytes());
+                h.drained("next turn frame").await;
+                assert_eq!(h.kills(), admitted as usize, "{label}");
+                continue;
+            }
+            h.append(line.as_bytes());
+            let notice = if admitted { RESET } else { NOT_RESET };
+            h.until(&label, |h| h.showing(notice)).await;
+            assert_eq!(h.kills(), admitted as usize, "{label}");
+            assert!(
+                !h.showing(if admitted { NOT_RESET } else { RESET }),
+                "{label}"
+            );
+            if host != Host::Local {
+                continue;
+            }
+            // An abnormal death hands the turn off only when no kill ran.
+            h.pane("dead");
+            h.exited(&label).await;
+            let handoff = removals(&h).contains(&"clear_inflight_state".to_owned());
+            assert_eq!(handoff, !admitted, "{label}: {:?}", removals(&h));
+        }
     }
+    pool.close().await;
+    db.drop().await;
 }
