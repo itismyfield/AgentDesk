@@ -792,11 +792,14 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     );
     #[cfg(unix)]
     reconcile_managed_tmux_runtime_kind_for_config(
+        shared,
         &provider,
         channel_id,
+        adk_session_key.as_deref(),
         tmux_session_name.as_deref(),
         prelaunch_runtime_kind,
-    );
+    )
+    .await;
 
     // Routine turns execute in a synthetic child channel, while their model is
     // configured on the real agent channel carried in routine metadata. Resolve
