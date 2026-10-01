@@ -165,15 +165,16 @@ async fn restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg() {
     db.drop().await;
 }
 
-/// A PATH-first tmux whose sessions exist and whose panes read dead once `dead` exists.
+/// A PATH-first tmux whose sessions exist and whose panes read dead once `dead` exists;
+/// every other command succeeds quietly so a claimed watcher stays up.
 fn pane_flag_tmux() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("tmux");
     let body = "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
-                echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in has-session) exit 0 ;;\n\
-                list-panes) if [ -f \"$d/dead\" ]; then echo 1; else echo 0; fi; exit 0 ;;\n\
-                esac\nexit 1\n";
+                echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
+                list-panes) if [ -f \"$d/dead\" ]; then echo 1; else echo 0; fi ;;\n\
+                capture-pane) echo pane ;;\nesac\nexit 0\n";
     std::fs::write(&binary, body).unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut paths = vec![dir.path().to_path_buf()];
@@ -185,10 +186,112 @@ fn pane_flag_tmux() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     (dir, set("PATH", std::path::Path::new(&path)))
 }
 
-// After the restore reader reads its session dead, an unobserved pane hands nothing to a
-// watcher and retries nothing, even once a result arrives; only a confirmed pane is handed off.
+/// What happens to a restored reader's session after its first unobserved death.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Then {
+    /// Stays unobserved and later reads a result.
+    Unobserved,
+    /// Reads live at the next death check, with no result.
+    LiveAtOnce,
+    /// Reads live before its result arrives.
+    LiveBeforeResult,
+    /// Its result is held while the host fails once, then reads live.
+    FailedThenLive,
+    /// Its result is held while the host fails once, then reads missing.
+    FailedThenMissing,
+    /// Reads live, then the turn is cancelled.
+    CancelledLive,
+    /// The turn is cancelled while the host stays unobserved.
+    CancelledUnobserved,
+    /// Its result is held while the host fails, the turn is stopped, then reads live.
+    StoppedWhileHeld,
+}
+
+impl Then {
+    const ALL: [Self; 8] = [
+        Self::Unobserved,
+        Self::LiveAtOnce,
+        Self::LiveBeforeResult,
+        Self::FailedThenLive,
+        Self::FailedThenMissing,
+        Self::CancelledLive,
+        Self::CancelledUnobserved,
+        Self::StoppedWhileHeld,
+    ];
+
+    fn has_result(self) -> bool {
+        !matches!(
+            self,
+            Self::LiveAtOnce | Self::CancelledLive | Self::CancelledUnobserved
+        )
+    }
+
+    fn settles(self) -> bool {
+        matches!(
+            self,
+            Self::FailedThenLive | Self::FailedThenMissing | Self::StoppedWhileHeld
+        )
+    }
+
+    /// The reader's end, RuntimeReady sent, handoff taken by the bridge, result posts.
+    fn expected(self) -> (&'static str, usize, bool, Option<usize>) {
+        match self {
+            Self::Unobserved | Self::FailedThenMissing => ("ended", 0, false, Some(1)),
+            Self::LiveAtOnce => ("handoff", 1, true, None),
+            Self::LiveBeforeResult | Self::FailedThenLive => ("handoff", 1, true, Some(1)),
+            Self::CancelledLive | Self::CancelledUnobserved => ("ended", 0, false, None),
+            Self::StoppedWhileHeld => ("handoff", 1, false, Some(0)),
+        }
+    }
+}
+
+/// Whether a watcher handoff stamped the row's input path, which restore never does, and
+/// how many watcher claims on its session were seen; a standby claim is retired at once.
+fn watch_handoffs(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel: ChannelId,
+    name: String,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<(bool, usize)> {
+    std::thread::spawn(move || {
+        let (mut stamped, mut claims) = (false, Vec::new());
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let row = inflight::load_inflight_state(&provider, channel.get());
+            stamped |= row.is_some_and(|row| row.input_fifo_path.is_some());
+            if let Some(handle) = shared.tmux_watchers.get(&channel)
+                && handle.tmux_session_name == name
+            {
+                let claim = Arc::as_ptr(&handle.cancel) as usize;
+                if !claims.contains(&claim) {
+                    claims.push(claim);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        (stamped, claims.len())
+    })
+}
+
+/// Waits for `reached`, polling; a step never reached fails the test.
+async fn reach(what: &str, mut reached: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    while !reached() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never reached: {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+// After a restored reader's session goes unobserved, a terminal waits for the host: only a
+// confirmed live pane is handed off, right behind the terminal, and a cancel hands off nothing.
 #[tokio::test]
 async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
+    use super::super::tmux_probe::reader_trace::{self, Event};
+    use crate::services::provider::session_probe::SessionLiveness;
+    use HostLiveness::{DeadOrAbsent, Live, ProbeError};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy_output = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (tmux, _path) = pane_flag_tmux();
@@ -198,23 +301,19 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
     let provider = ProviderKind::Claude;
     let transcripts = tempfile::tempdir().unwrap();
     let mut cases = Vec::new();
-    use HostLiveness::{Live, ProbeError};
-    // Unobserved throughout, live at once, and unobserved until just before its result.
-    let answers = [ProbeError, Live, ProbeError];
-    for (n, after) in answers.into_iter().enumerate() {
+    for (n, then) in Then::ALL.into_iter().enumerate() {
         let channel = ChannelId::new(1_479_671_301_387_160_000 + n as u64);
         let name = provider.build_tmux_session_name(&format!("p5c-reader-{n}"));
         let key = channel_key(&shared, &name);
         seed(&pool, &key, &name, channel.get(), Stored::Legacy).await;
         let session = HostSessionRef::tmux(&name);
-        let pane = InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent);
+        let pane = InjectedLivenessGuard::set(session, DeadOrAbsent);
         let presence = InjectedPresenceGuard::set(session, HostPresence::Present);
         let transcript = transcripts.path().join(format!("{n}.jsonl"));
         std::fs::write(&transcript, "").unwrap();
         // A restart leaves the row with no live mailbox turn, so the recovery kicks off.
         let user_msg = channel.get() + 1;
         let text = "restored reader fixture".to_string();
-        let tmux_name = Some(name.clone());
         let mut row = inflight::InflightTurnState::new(
             provider.clone(),
             channel.get(),
@@ -224,7 +323,7 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
             user_msg + 1,
             text,
             None,
-            tmux_name,
+            Some(name.clone()),
             None,
             None,
             0,
@@ -232,110 +331,159 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
         row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
         row.output_path = Some(transcript.display().to_string());
         inflight::save_inflight_state(&row).unwrap();
-        cases.push((channel, name, after, pane, presence));
+        cases.push((then, channel, name, transcript, pane, presence));
     }
-    let discord = o_cut_recorder::start(cases[0].0.get()).await;
+    let discord = o_cut_recorder::start(cases[0].1.get()).await;
+    let set = |name: &str, answer| inject_liveness(HostSessionRef::tmux(name), Some(answer));
+    let unobserved = |name: &str| {
+        let deaths = reader_trace::events(name).into_iter().filter(|event| {
+            *event
+                == Event::Observed {
+                    settling: false,
+                    liveness: SessionLiveness::ProbeFailed,
+                }
+        });
+        deaths.count() >= 3
+    };
+    let ended = |name: &str| {
+        let events = reader_trace::events(name);
+        events.iter().find_map(|event| match event {
+            Event::Ended(end) => Some(*end),
+            _ => None,
+        })
+    };
+    let sent = |name: &str| {
+        let events = reader_trace::events(name);
+        events
+            .iter()
+            .filter(|event| **event == Event::RuntimeReady)
+            .count()
+    };
+    let posts = |result: &str| {
+        discord
+            .contents()
+            .iter()
+            .filter(|c| c.contains(result))
+            .count()
+    };
 
     restore_inflight_turns(&discord.http, &shared, &provider).await;
 
-    // The live bridge's own bookkeeping moves these; a handoff moves the rest.
-    let stored = |channel: ChannelId| {
-        let row = inflight::load_inflight_state(&provider, channel.get())?;
-        let mut row = serde_json::to_value(row).unwrap();
-        for volatile in ["current_msg_len", "save_generation", "updated_at"] {
-            row.as_object_mut().unwrap().remove(volatile);
-        }
-        Some(row)
-    };
-    let restored: Vec<_> = cases.iter().map(|case| stored(case.0)).collect();
-    assert!(
-        restored.iter().all(Option::is_some),
-        "restore keeps every row"
-    );
-    // Swapped in place: replacing a guard would clear the new answer on the old one's drop.
-    for (_, name, after, ..) in &cases {
-        inject_liveness(HostSessionRef::tmux(name), Some(*after));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watched: Vec<_> = cases
+        .iter()
+        .map(|(_, channel, name, ..)| {
+            let (shared, stop) = (shared.clone(), stop.clone());
+            watch_handoffs(shared, provider.clone(), *channel, name.clone(), stop)
+        })
+        .collect();
+    // Every pane reads dead; the host answers live for one session and fails for the rest.
+    for (then, _, name, ..) in &cases {
+        set(
+            name,
+            if *then == Then::LiveAtOnce {
+                Live
+            } else {
+                ProbeError
+            },
+        );
     }
     std::fs::write(tmux.path().join("dead"), "").unwrap();
+    for (then, _, name, ..) in &cases {
+        match then {
+            Then::LiveAtOnce => reach(name, || ended(name) == Some("handoff")).await,
+            _ => reach(name, || unobserved(name)).await,
+        }
+    }
+    // Panes read live again; a reader seen polling again has no death check in flight.
     let _ = std::fs::remove_file(tmux.path().join("calls"));
-    let read_dead = |name: &str| {
-        let calls = std::fs::read_to_string(tmux.path().join("calls")).unwrap_or_default();
-        calls.contains(&format!("list-panes -t ={name}:"))
-    };
-    let handed_off = || stored(cases[1].0) != restored[1];
-    let deferred = || [0, 2].iter().all(|n| read_dead(&cases[*n].1));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !(handed_off() && deferred()) && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-    assert!(handed_off(), "a live pane's handoff moves its row");
-    assert!(deferred(), "the readers read the unobserved panes dead");
-    // Past the pane re-check's retries, which a handoff or a retry would follow.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    for n in [0, 2] {
-        let label = &cases[n].1;
-        assert_eq!(
-            stored(cases[n].0),
-            restored[n],
-            "{label}: row kept as stored"
-        );
-    }
-
-    // A watcher handoff stamps the row's input path before the finished turn clears it.
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handoffs: Vec<_> = [0, 2]
-        .map(|n| {
-            let (provider, channel, stop) = (provider.clone(), cases[n].0.get(), stop.clone());
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let row = inflight::load_inflight_state(&provider, channel);
-                    if row.is_some_and(|row| row.input_fifo_path.is_some()) {
-                        return true;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                false
-            })
-        })
-        .into();
     std::fs::remove_file(tmux.path().join("dead")).unwrap();
-    inject_liveness(HostSessionRef::tmux(&cases[2].1), Some(Live));
-    for n in [0, 2] {
-        let record = format!(
-            "{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"p5c-result-{n}\"}}\n"
-        );
-        let transcript = transcripts.path().join(format!("{n}.jsonl"));
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(transcript)
-            .unwrap();
-        std::io::Write::write_all(&mut file, record.as_bytes()).unwrap();
+    for (then, _, name, ..) in &cases {
+        if *then != Then::LiveAtOnce {
+            let polled = format!("list-panes -t ={name}:");
+            let calls = || std::fs::read_to_string(tmux.path().join("calls")).unwrap_or_default();
+            reach(name, || calls().contains(&polled)).await;
+        }
     }
-    let finished = || [0, 2].iter().all(|n| stored(cases[*n].0).is_none());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !finished() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    for (then, channel, name, transcript, ..) in &cases {
+        if matches!(then, Then::LiveBeforeResult | Then::CancelledLive) {
+            set(name, Live);
+        }
+        if matches!(then, Then::CancelledLive | Then::CancelledUnobserved) {
+            let cancel = super::super::mailbox_snapshot(&shared, *channel)
+                .await
+                .cancel_token;
+            let cancel = cancel.expect("the restored turn holds its token");
+            cancel
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if then.has_result() {
+            let record = format!(
+                "{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"p5c-result-{name}\"}}\n"
+            );
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(transcript)
+                .unwrap();
+            std::io::Write::write_all(&mut file, record.as_bytes()).unwrap();
+        }
     }
-    assert!(finished(), "both results finish their turns");
+    // A held result's first settle answer fails; the second is the case's own.
+    for (then, channel, name, ..) in &cases {
+        if then.settles() {
+            let held = Event::Observed {
+                settling: true,
+                liveness: SessionLiveness::ProbeFailed,
+            };
+            reach(name, || reader_trace::events(name).contains(&held)).await;
+            if *then == Then::StoppedWhileHeld {
+                let cancel = super::super::mailbox_snapshot(&shared, *channel)
+                    .await
+                    .cancel_token;
+                let cancel = cancel.expect("the restored turn holds its token");
+                cancel
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            set(
+                name,
+                if *then == Then::FailedThenMissing {
+                    DeadOrAbsent
+                } else {
+                    Live
+                },
+            );
+        }
+    }
+    for (then, _, name, ..) in &cases {
+        reach(name, || ended(name).is_some()).await;
+        let result = format!("p5c-result-{name}");
+        if then.expected().3 == Some(1) {
+            reach(&result, || posts(&result) >= 1).await;
+        }
+    }
+    // Past the bridge's residual window, so a handoff sent would have been taken.
+    let settled = std::time::Instant::now();
+    reach("residual window", || {
+        settled.elapsed() > std::time::Duration::from_secs(2)
+    })
+    .await;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let handoffs: Vec<bool> = handoffs.into_iter().map(|h| h.join().unwrap()).collect();
-    assert!(
-        !handoffs[0],
-        "a result past an unobserved pane is never handed off"
-    );
-    assert!(
-        handoffs[1],
-        "a pane confirmed live is handed off with its result"
-    );
-    for n in [0, 2] {
-        let result = format!("p5c-result-{n}");
-        let posts = discord
-            .contents()
-            .iter()
-            .filter(|c| c.contains(&result))
-            .count();
-        assert_eq!(posts, 1, "{result} relayed once");
+    let mut wrong = Vec::new();
+    for ((then, _, name, ..), watched) in cases.iter().zip(watched) {
+        let (end, ready, taken, result_posts) = then.expected();
+        let (stamped, claims) = watched.join().unwrap();
+        let posted = result_posts.map(|_| posts(&format!("p5c-result-{name}")));
+        let seen = (ended(name), sent(name), stamped, posted);
+        if seen != (Some(end), ready, taken, result_posts) || claims > usize::from(taken) {
+            wrong.push(format!(
+                "{then:?}: (end, RuntimeReady sent, taken by the bridge, result posts) {seen:?}, \
+                 watcher claims {claims}"
+            ));
+        }
     }
+    assert!(wrong.is_empty(), "{wrong:#?}");
     drop((cases, transcripts));
     pool.close().await;
     db.drop().await;

@@ -33,12 +33,16 @@ pub(super) fn observe_liveness_with_retry(name: &str) -> SessionLiveness {
 
 fn liveness_with_retry(name: &str, row: Option<&InflightTurnState>) -> SessionLiveness {
     let mut liveness = observe_liveness(name, row);
+    #[cfg(test)]
+    reader_trace::observed(name, liveness);
     for attempt in 1..=2u32 {
         if matches!(liveness, SessionLiveness::Alive | SessionLiveness::Unknown) {
             break;
         }
         std::thread::sleep(recovery_retry_backoff(attempt));
         liveness = observe_liveness(name, row);
+        #[cfg(test)]
+        reader_trace::observed(name, liveness);
         if liveness == SessionLiveness::Alive {
             tracing::info!(
                 "  [recovery] tmux pane alive on retry {} for {}",
@@ -234,7 +238,7 @@ pub(super) enum RestoredRead {
 }
 
 /// Reads restored output to a result; a death the host cannot confirm keeps reading from
-/// the same offset with nothing sent, so the row stays as stored until an answer.
+/// the same offset, and from then on a terminal and the frames after it wait for the host.
 pub(super) fn read_restored_output(
     reader: &RestoredReader,
     mut offset: u64,
@@ -256,55 +260,180 @@ pub(super) fn read_restored_output(
             reader.runtime_kind,
             &reader.output_path,
         );
-        let read = crate::services::session_backend::read_output_file_until_result(
-            &reader.output_path,
-            offset,
-            tx.clone(),
-            Some(cancel.clone()),
-            probe,
-        )?;
-        let died_at = match read {
-            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset }
+        let read = |sender| {
+            crate::services::session_backend::read_output_file_until_result(
+                &reader.output_path,
+                offset,
+                sender,
+                Some(cancel.clone()),
+                probe,
+            )
+        };
+        // Held terminals go out only after the host is asked, so the bridge gets a terminal
+        // and its handoff back to back, as on a read that never deferred.
+        let (read, held) = if deferred {
+            read_holding_terminal(tx, read)
+        } else {
+            (read(tx.clone()), Vec::new())
+        };
+        let step = match read {
+            Err(error) => Err(error),
+            Ok(ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset })
                 if !deferred =>
             {
-                return Ok(RestoredRead::HandOff(offset));
+                Ok(Some(RestoredRead::HandOff(offset)))
             }
-            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
-                return Ok(settle_deferred(reader, offset));
-            }
-            ReadOutputResult::SessionDied { offset } => offset,
-        };
-        // dcserver restart can read as a death with no new output while the CLI idles.
-        match restart_pane_local(provider, name, row) {
-            RestartProbe::Alive => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
-                    row.channel_id
-                );
-                return Ok(RestoredRead::HandOff(died_at));
-            }
-            RestartProbe::Missing => return Ok(RestoredRead::Died),
-            RestartProbe::Defer => {
-                tracing::info!(name, "restore reader: pane unobserved, reading on");
-                deferred = true;
-                std::thread::sleep(recovery_retry_backoff(3));
+            // The bridge finalizes a cancel before it would take a later handoff.
+            Ok(ReadOutputResult::Cancelled { .. }) => Ok(Some(RestoredRead::Ended)),
+            Ok(ReadOutputResult::Completed { offset }) => Ok(Some(settle_result(reader, offset))),
+            Ok(ReadOutputResult::SessionDied { offset: died_at }) => {
                 offset = died_at;
+                Ok(after_death(reader, died_at))
             }
+        };
+        for frame in held {
+            let _ = tx.send(frame);
+        }
+        if let Some(end) = step? {
+            return Ok(end);
+        }
+        deferred = true;
+        std::thread::sleep(recovery_retry_backoff(3));
+    }
+}
+
+/// One read whose frames from its first terminal on are held back, in order, while earlier
+/// frames stream on.
+fn read_holding_terminal<R>(
+    tx: &std::sync::mpsc::Sender<StreamMessage>,
+    read: impl FnOnce(std::sync::mpsc::Sender<StreamMessage>) -> R,
+) -> (R, Vec<StreamMessage>) {
+    use crate::services::discord::turn_bridge::is_done_setting_terminal_frame as terminal;
+    let (inner_tx, inner_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let forward = scope.spawn(move || {
+            let mut held = Vec::new();
+            for frame in inner_rx {
+                if !held.is_empty() || terminal(&frame) {
+                    held.push(frame);
+                } else {
+                    let _ = tx.send(frame);
+                }
+            }
+            held
+        });
+        let read = read(inner_tx);
+        (read, forward.join().unwrap_or_default())
+    })
+}
+
+/// The answer after a read saw its session die; `None` while the pane stays unobserved.
+fn after_death(reader: &RestoredReader, died_at: u64) -> Option<RestoredRead> {
+    // dcserver restart can read as a death with no new output while the CLI idles.
+    match restart_pane_local(&reader.provider, &reader.name, &reader.row) {
+        RestartProbe::Alive => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
+                reader.row.channel_id
+            );
+            Some(RestoredRead::HandOff(died_at))
+        }
+        RestartProbe::Missing => Some(RestoredRead::Died),
+        RestartProbe::Defer => {
+            let name = reader.name.as_str();
+            tracing::info!(name, "restore reader: pane unobserved, reading on");
+            None
         }
     }
 }
 
-/// A read that ended after an unobserved pane hands the session to a watcher only on a
-/// confirmed live pane; the result already read is never read again.
-fn settle_deferred(reader: &RestoredReader, offset: u64) -> RestoredRead {
-    // The bridge takes a handoff only just after the terminal, so the host is asked once.
+/// A result read past an unobserved pane is handed to a watcher only on a confirmed live pane.
+fn settle_result(reader: &RestoredReader, offset: u64) -> RestoredRead {
+    #[cfg(test)]
+    let _settling = reader_trace::Settling::enter();
     match restart_pane_local(&reader.provider, &reader.name, &reader.row) {
         RestartProbe::Alive => RestoredRead::HandOff(offset),
-        probe => {
+        verdict => {
             let name = reader.name.as_str();
-            tracing::info!(name, ?probe, "restore reader: ended with no handoff");
+            tracing::info!(name, ?verdict, "restore reader: result kept from a watcher");
             RestoredRead::Ended
+        }
+    }
+}
+
+/// What a restore reader did, for tests: each pane observation (and whether it settled a
+/// held result), each RuntimeReady it sent, and how it ended.
+#[cfg(test)]
+pub(super) mod reader_trace {
+    use super::SessionLiveness;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(in crate::services::discord) enum Event {
+        Observed {
+            settling: bool,
+            liveness: SessionLiveness,
+        },
+        RuntimeReady,
+        Ended(&'static str),
+    }
+
+    static EVENTS: Mutex<Vec<(String, Event)>> = Mutex::new(Vec::new());
+
+    std::thread_local! {
+        static SETTLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn push(name: &str, event: Event) {
+        let mut events = EVENTS.lock().unwrap_or_else(|poison| poison.into_inner());
+        events.push((name.to_string(), event));
+    }
+
+    pub(super) fn observed(name: &str, liveness: SessionLiveness) {
+        let settling = SETTLING.with(std::cell::Cell::get);
+        push(name, Event::Observed { settling, liveness });
+    }
+
+    pub(in crate::services::discord) fn runtime_ready(name: &str) {
+        push(name, Event::RuntimeReady);
+    }
+
+    pub(in crate::services::discord) fn end_of(
+        read: &Result<super::RestoredRead, String>,
+    ) -> &'static str {
+        match read {
+            Ok(super::RestoredRead::HandOff(_)) => "handoff",
+            Ok(super::RestoredRead::Died) => "died",
+            Ok(super::RestoredRead::Ended) => "ended",
+            Err(_) => "error",
+        }
+    }
+
+    /// Recorded once the reader thread has sent everything it will send.
+    pub(in crate::services::discord) fn ended(name: &str, end: &'static str) {
+        push(name, Event::Ended(end));
+    }
+
+    pub(in crate::services::discord) fn events(name: &str) -> Vec<Event> {
+        let events = EVENTS.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mine = events.iter().filter(|(owner, _)| owner == name);
+        mine.map(|(_, event)| event.clone()).collect()
+    }
+
+    /// Marks this thread's observations as settling a held result until dropped.
+    pub(super) struct Settling;
+
+    impl Settling {
+        pub(super) fn enter() -> Self {
+            SETTLING.with(|settling| settling.set(true));
+            Self
+        }
+    }
+
+    impl Drop for Settling {
+        fn drop(&mut self) {
+            SETTLING.with(|settling| settling.set(false));
         }
     }
 }

@@ -2150,8 +2150,16 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             output_path: output_path.clone(),
         };
         std::thread::spawn(move || {
-            match read_restored_output(&reader, start_offset, &tx, cancel_for_reader) {
+            let read = read_restored_output(&reader, start_offset, &tx, cancel_for_reader);
+            #[cfg(test)]
+            let traced = (
+                reader.name.clone(),
+                super::tmux_probe::reader_trace::end_of(&read),
+            );
+            match read {
                 Ok(RestoredRead::HandOff(offset)) => {
+                    #[cfg(test)]
+                    super::tmux_probe::reader_trace::runtime_ready(&reader.name);
                     let _ = tx.send(StreamMessage::RuntimeReady {
                         handoff: runtime_handoff_for_recovery(
                             reader.runtime_kind,
@@ -2188,6 +2196,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     });
                 }
             }
+            #[cfg(test)]
+            super::tmux_probe::reader_trace::ended(&traced.0, traced.1);
         });
         let recovery_dispatch_id = parse_dispatch_id(&state.user_text)
             .or(lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await);
