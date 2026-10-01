@@ -230,3 +230,124 @@ async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
     }
     db.drop().await;
 }
+
+/// What the channel rows say to a runtime that holds no channel name for the channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Nameless {
+    Legacy,
+    Hosted,
+    Future,
+    Missing,
+    LegacyHerdrMarker,
+    /// Legacy rows for the channel under two registered bot hashes.
+    TwoRows,
+    /// A hosted row stored under the session key alone, with no bot hash for the channel.
+    HostedKeyOnly,
+}
+
+impl Nameless {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Legacy,
+        Self::Hosted,
+        Self::Future,
+        Self::Missing,
+        Self::LegacyHerdrMarker,
+        Self::TwoRows,
+    ];
+
+    /// Seeds the case's `(claude, hash, channel)` row keyed by `tmux_name`; two rows add `other`'s.
+    pub(crate) async fn seed(
+        self,
+        pool: &PgPool,
+        hash: &str,
+        other: &str,
+        channel: u64,
+        tmux_name: &str,
+    ) {
+        use crate::db::dispatched_sessions::hosted_execution::HostedState;
+        use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, record};
+        let seed_row = crate::services::discord::host_key_derivation::tests::seed_row;
+        let build = crate::services::discord::adk_session::build_namespaced_session_key;
+        let mut row_owner = owner(&channel.to_string());
+        row_owner.discord_token_hash = hash.to_string();
+        let raw = match self {
+            Self::Hosted | Self::HostedKeyOnly => {
+                Some(wire(&record(&row_owner, "n1", HostedState::Bound)))
+            }
+            Self::Future => Some(future_schema(&row_owner)),
+            _ => None,
+        };
+        let key = |hash: &str| build(hash, &ProviderKind::Claude, tmux_name);
+        let identity = (self != Self::HostedKeyOnly).then_some(hash);
+        if self != Self::Missing {
+            seed_row(pool, "claude", identity, &key(hash), channel, raw).await;
+        }
+        if self == Self::TwoRows {
+            seed_row(pool, "claude", Some(other), &key(other), channel, None).await;
+        }
+        if self == Self::LegacyHerdrMarker {
+            let marker = crate::services::tmux_common::session_temp_path(tmux_name, "host_kind");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(marker, "herdr").unwrap();
+        }
+    }
+}
+
+// A nameless or absent unregistered session holds the promote unless a legacy row admits it;
+// no row promotes only with nothing in flight.
+#[tokio::test]
+async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = with_second_bot(&pool, "p4c1f-second-bot").await;
+    let provider = ProviderKind::Claude;
+    let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+    let channel_of = |n: usize| ChannelId::new(1_479_671_301_387_065_000 + n as u64);
+    let own = shared.token_hash.clone();
+    for (n, case) in Nameless::ALL.into_iter().enumerate() {
+        let channel = channel_of(n);
+        let name = provider.build_tmux_session_name(&format!("p4c1f-promote-{n}"));
+        map_channel(&shared, channel, "unnamed").await;
+        let mut core = shared.core.lock().await;
+        core.sessions.get_mut(&channel).unwrap().channel_name = None;
+        drop(core);
+        case.seed(&pool, &own, "p4c1f-second-bot", channel.get(), &name)
+            .await;
+        let held = gate(&shared, &provider, channel).await;
+        let promoted = matches!(case, Nameless::Legacy | Nameless::Missing);
+        assert_eq!(held, !promoted, "{case:?}");
+    }
+    for (n, case) in [(10, Nameless::Hosted), (11, Nameless::Legacy)] {
+        let name = provider.build_tmux_session_name(&format!("p4c1f-promote-{n}"));
+        case.seed(&pool, &own, "p4c1f-second-bot", channel_of(n).get(), &name)
+            .await;
+        let held = gate(&shared, &provider, channel_of(n)).await;
+        assert_eq!(held, case != Nameless::Legacy, "no session, {case:?}");
+    }
+    let unkeyed = channel_of(12);
+    assert!(!gate(&shared, &provider, unkeyed).await, "unkeyed, idle");
+    let row = inflight::InflightTurnState::new(
+        provider.clone(),
+        unkeyed.get(),
+        None,
+        1,
+        unkeyed.get() + 1,
+        unkeyed.get() + 2,
+        "p4c1f in flight".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state_create_new(&row).expect("inflight row");
+    assert!(
+        gate(&shared, &provider, unkeyed).await,
+        "unkeyed, in flight"
+    );
+    pool.close().await;
+    let unread = gate(&shared, &provider, channel_of(0)).await;
+    assert!(unread, "a failed row read is not a legacy answer");
+    db.drop().await;
+}
