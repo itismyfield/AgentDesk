@@ -35,6 +35,10 @@ fn wrapper_turn(name: &str, clearance: Option<&TeardownClearance>) -> Result<(),
     )
 }
 
+type Turn = fn(&str, Option<&TeardownClearance>) -> Result<(), String>;
+
+const ENTRIES: [(&str, Turn); 2] = [("tui", tui_turn), ("wrapper", wrapper_turn)];
+
 fn write_marker(name: &str, body: &str) -> String {
     let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
@@ -49,9 +53,7 @@ fn a_session_marked_for_another_host_is_never_probed_killed_or_relaunched() {
     const NAME: &str = "adk-p5c-claude-marked";
     let _root = crate::config::TestRuntimeRootGuard::new();
     let tmux = FakeTmux::install(NAME);
-    let entries: [(&str, fn(&str, Option<&TeardownClearance>) -> _); 2] =
-        [("tui", tui_turn), ("wrapper", wrapper_turn)];
-    for (entry, turn) in entries {
+    for (entry, turn) in ENTRIES {
         for body in ["herdr", "process", "zellij"] {
             let marker = write_marker(NAME, body);
             let error = turn(NAME, Some(&cleared(NAME))).expect_err(body);
@@ -164,9 +166,7 @@ fn a_failed_pane_probe_never_reads_as_a_stale_session() {
     let (tmux, _env) = pane_probe_failing_tmux();
     let session = HostSessionRef::tmux(NAME);
     let _presence = InjectedPresenceGuard::set(session, HostPresence::Present);
-    let entries: [(&str, fn(&str, Option<&TeardownClearance>) -> _); 2] =
-        [("tui", tui_turn), ("wrapper", wrapper_turn)];
-    for (entry, turn) in entries {
+    for (entry, turn) in ENTRIES {
         for (pane, recreated) in [
             (HostLiveness::ProbeError, false),
             (HostLiveness::DeadOrAbsent, true),
@@ -234,9 +234,7 @@ fn a_failed_presence_probe_never_prepares_a_fresh_session() {
     let _pane = InjectedLivenessGuard::set(session, HostLiveness::Live);
     let files = ["jsonl", "prompt", "generation"]
         .map(|ext| crate::services::tmux_common::session_temp_path(NAME, ext));
-    let entries: [(&str, fn(&str, Option<&TeardownClearance>) -> _); 2] =
-        [("tui", tui_turn), ("wrapper", wrapper_turn)];
-    for (entry, turn) in entries {
+    for (entry, turn) in ENTRIES {
         // A file in place of the socket directory makes the socket lookup itself fail.
         for (socket_state, server) in [("present", true), ("unreadable", true), ("absent", false)] {
             let _ = std::fs::remove_dir_all(&socket_dir);
