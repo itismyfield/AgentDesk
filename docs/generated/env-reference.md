@@ -138,7 +138,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:106` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs:1267` |  |
-| `TMUX` | `src/services/claude/host_gate.rs:60` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
-| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs:65` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX` | `src/services/claude/host_gate.rs:63` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs:68` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs:471` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |
