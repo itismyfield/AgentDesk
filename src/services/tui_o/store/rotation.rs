@@ -33,7 +33,7 @@ pub enum Boundary {
 pub struct SourceLink {
     pub source: SourceId,
     pub seq: u64,
-    /// The verified parent whose keys mask the inherited prefix.
+    /// The verified parent; rows whose identities its consumed bytes hold are not owed again.
     pub parent: Option<SourceId>,
     pub committed_at: DateTime<Utc>,
     pub boundary: Boundary,

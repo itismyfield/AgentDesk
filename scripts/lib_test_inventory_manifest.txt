@@ -9807,7 +9807,6 @@ services::tui_o::writer::tests::actor::rotation::a_failing_binding_log_holds_cap
 services::tui_o::writer::tests::actor::rotation::a_fork_posts_only_what_follows_the_eight_rows_it_inherited
 services::tui_o::writer::tests::actor::rotation::a_gap_in_the_binding_log_stops_the_channel_at_the_last_applied_seq
 services::tui_o::writer::tests::actor::rotation::a_long_growing_old_source_and_a_fourth_reader_alarm_while_every_row_still_posts
-services::tui_o::writer::tests::actor::rotation::a_resume_whose_first_new_record_predates_the_bind_posts_nothing_until_resolved
 services::tui_o::writer::tests::actor::rotation::a_source_bound_back_waits_for_the_tail_of_the_source_it_replaces
 services::tui_o::writer::tests::actor::rotation::an_old_backlog_longer_than_one_read_is_posted_before_the_new_source
 services::tui_o::writer::tests::actor::rotation::an_old_tail_is_posted_before_the_new_source_and_a_proven_old_source_retires_once_drained_and_quiet
@@ -9815,6 +9814,15 @@ services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refu
 services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refuses_still_goes_before_the_new_source
 services::tui_o::writer::tests::actor::rotation::an_unknown_bind_holds_back_even_a_fresh_source
 services::tui_o::writer::tests::actor::rotation::each_old_source_retires_only_after_its_own_successor_records_something
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_decides_the_same_whether_or_not_the_writer_restarts_after_its_retired_parent_is_replaced
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_decides_the_same_whether_or_not_the_writer_restarts_while_its_parent_advances
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_is_owed_from_its_first_new_row_whatever_its_timestamps_say
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_that_cannot_be_matched_to_its_parent_posts_nothing_until_resolved
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_whose_parent_bytes_are_gone_posts_nothing_until_resolved
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_copied_after_the_fork_start_is_not_posted_again
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_the_channel_had_not_read_is_not_counted_as_inherited
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_row_a_pending_parent_also_holds_is_still_posted_after_the_fork_start
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured
