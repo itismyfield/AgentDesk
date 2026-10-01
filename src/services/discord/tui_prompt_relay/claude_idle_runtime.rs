@@ -662,7 +662,7 @@ pub(super) fn freshest_claude_transcript_for_session(
         };
         let candidate_mtime = transcript_mtime(&candidate_path);
         if candidate_mtime <= bound_mtime
-            || !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+            || !super::claude_idle_tail::local_tmux_pane_live(tmux_session_name)
         {
             return Some((bound_path, binding.session_id.clone()));
         }

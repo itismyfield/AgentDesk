@@ -51,6 +51,7 @@ mod active_usage;
 mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
+pub(crate) mod host_gate;
 mod stream_result;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
@@ -64,9 +65,7 @@ use crate::services::provider_teardown::TeardownClearance;
 use crate::services::{
     provider_teardown::teardown_tmux,
     session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool},
-    tmux_diagnostics::{
-        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
-    },
+    tmux_diagnostics::should_recreate_session_after_followup_fifo_error,
 };
 
 #[cfg(unix)]
@@ -1736,6 +1735,7 @@ fn execute_streaming_local_tui_tmux(
     system_prompt: Option<&str>,
     hook_endpoint: String,
 ) -> Result<(), String> {
+    host_gate::tmux_turn_admitted(tmux_session_name)?;
     debug_log(&format!(
         "=== execute_streaming_local_tui_tmux START: {} ===",
         tmux_session_name
@@ -1772,7 +1772,7 @@ fn execute_streaming_local_tui_tmux(
     let mut transcript_path_string = transcript_path.display().to_string();
     let mut resume = session_resolution.resume;
 
-    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
+    let has_live_pane = host_gate::live_pane(tmux_session_name, session_exists)? && profile_matches;
     if session_exists
         && has_live_pane
         && !resume
@@ -1821,7 +1821,7 @@ fn execute_streaming_local_tui_tmux(
             }
         }
     } else if session_exists {
-        cleanup_stale_claude_tui_session(tmux_session_name);
+        cleanup_stale_claude_tui_session(tmux_session_name, teardown)?;
     }
 
     if let Some(ref token) = cancel_token {
@@ -1981,27 +1981,17 @@ fn run_claude_tui_fresh_turn_and_finalize(
     Ok(())
 }
 
-/// Tear down a stale (no live pane) Claude TUI tmux session before recreating it.
-/// Verbatim extraction of the pre-refactor `else if session_exists` branch.
+/// Tears down a stale Claude TUI tmux session before it is recreated, only under the
+/// turn's own clearance; a kept session ends the turn before any relaunch.
 #[cfg(unix)]
-fn cleanup_stale_claude_tui_session(tmux_session_name: &str) {
+fn cleanup_stale_claude_tui_session(
+    tmux_session_name: &str,
+    teardown: Option<&TeardownClearance>,
+) -> Result<(), String> {
     debug_log("Stale Claude TUI tmux session found — recreating");
-    crate::services::termination_audit::record_termination_for_tmux(
-        tmux_session_name,
-        None,
-        "claude_tui_provider",
-        "stale_session_recreate",
-        Some("stale claude tui session cleanup before recreate"),
-        None,
-    );
-    record_tmux_exit_reason(
-        tmux_session_name,
-        "stale claude tui session cleanup before recreate",
-    );
-    crate::services::platform::tmux::kill_session(
-        tmux_session_name,
-        "stale claude tui session cleanup before recreate",
-    );
+    let reason = "stale claude tui session cleanup before recreate";
+    let (component, code) = ("claude_tui_provider", "stale_session_recreate");
+    teardown_tmux(teardown, tmux_session_name, component, code, reason)
 }
 
 /// On success returns the read result, the harvest counters, and the actual
@@ -2499,6 +2489,7 @@ fn execute_streaming_local_tmux(
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
+    host_gate::tmux_turn_admitted(tmux_session_name)?;
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
         tmux_session_name
@@ -2536,7 +2527,7 @@ fn execute_streaming_local_tmux(
     // (under `runtime_root()/runtime/sessions/`) or the legacy `/tmp/` path
     // that older wrappers still hold open fds to — so a dcserver restart
     // that lost its /tmp files does not invalidate a still-alive tmux pane.
-    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
+    let has_live_pane = host_gate::live_pane(tmux_session_name, session_exists)? && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
@@ -2895,7 +2886,7 @@ fn send_followup_to_tmux(
             start_offset,
             sender.clone(),
             cancel_token.clone(),
-            SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Claude),
+            host_gate::tmux_wrapper_poll_probe(tmux_session_name),
         )
     })?;
 

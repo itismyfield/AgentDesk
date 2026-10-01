@@ -19,7 +19,9 @@ use super::idle_captured_response::{
 use super::terminal_watcher::restart_report_watcher_start;
 use super::{restart_report::clear_loaded_restart_report, *};
 
-use super::tmux_probe::{tmux_has_session_with_retry, tmux_session_alive_with_retry};
+use super::tmux_probe::{
+    RestartProbe, reader_probe, restart_pane, restart_pane_local, restart_session,
+};
 
 #[cfg(not(unix))]
 fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Option<String> {
@@ -562,9 +564,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             // re-attaches a watcher to pick up the remaining output).
             // If the session is dead, delegate to the flush loop for fallback.
             let tmux_name = restart_tmux_name;
-            let session_alive = tmux_name
-                .as_deref()
-                .map_or(false, tmux_session_alive_with_retry);
+            let probe = restart_pane(shared, provider, &state, tmux_name.as_deref()).await;
+            let Some(session_alive) = probe.alive() else {
+                continue;
+            };
             // Derive channel_name from tmux session name if not in inflight state.
             // Validate before mutating restart-report state so other same-provider
             // bots do not log/clear reports for channels they do not own.
@@ -1454,9 +1457,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             }
         }
 
-        let can_recover = tmux_session_name
-            .as_deref()
-            .map_or(false, |name| tmux_has_session_with_retry(name));
+        let probe = restart_session(shared, provider, &state, tmux_session_name.as_deref()).await;
+        let Some(can_recover) = probe.alive() else {
+            continue;
+        };
 
         if matches!(
             recovery_phase_after_tmux_probe(can_recover, None),
@@ -1679,7 +1683,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         // If the tmux pane is alive, skip the recovery reader entirely. The idle
         // session gets a watcher immediately rather than deferring to
         // restore_tmux_watchers() — that ~50s gap raced and lost the response.
-        let pane_alive = tmux_session_alive_with_retry(&tmux_session_name);
+        let probe = restart_pane(shared, provider, &state, Some(&tmux_session_name)).await;
+        let Some(pane_alive) = probe.alive() else {
+            continue;
+        };
         if matches!(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
             RecoveryPhase::WatcherReattach
@@ -2139,18 +2146,21 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         let runtime_kind_for_reader = runtime_kind;
         let retry_channel_id = channel_id.get();
         let provider_for_reader = provider.clone();
+        let row_for_reader = state.clone();
+        let probe = reader_probe(
+            provider,
+            &state,
+            &tmux_session_name,
+            runtime_kind,
+            &output_path,
+        );
         std::thread::spawn(move || {
             match crate::services::session_backend::read_output_file_until_result(
                 &output_for_reader,
                 start_offset,
                 tx.clone(),
                 Some(cancel_for_reader),
-                crate::services::provider::SessionProbe::tmux_with_structured_output(
-                    tmux_for_reader.clone(),
-                    provider_for_reader,
-                    Some(runtime_kind_for_reader),
-                    output_for_reader.clone(),
-                ),
+                probe,
             ) {
                 Ok(ReadOutputResult::Completed { offset })
                 | Ok(ReadOutputResult::Cancelled { offset }) => {
@@ -2169,7 +2179,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     // Check if tmux pane is actually alive — dcserver restart
                     // may cause SessionDied because no new output arrived, but
                     // the Claude CLI process could still be idle (waiting for input).
-                    let pane_alive = tmux_session_alive_with_retry(&tmux_for_reader);
+                    let probe =
+                        restart_pane_local(&provider_for_reader, &tmux_for_reader, &row_for_reader);
+                    let pane_alive = probe != RestartProbe::Missing;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     if pane_alive {
                         // Session is alive but idle — hand off to watcher instead of retrying
@@ -2680,6 +2692,9 @@ mod tests {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "restore_inflight/host_probe_tests.rs"]
+mod host_probe_tests;
 #[cfg(test)]
 #[path = "restore_inflight/kickoff_identity_tests.rs"]
 mod kickoff_identity_tests;

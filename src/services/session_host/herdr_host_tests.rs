@@ -1355,6 +1355,8 @@ fn herdr_items_have_no_production_caller() {
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
     // Liveness consumers' local host reading: marker and row locator, never a Herdr route.
     const LIVENESS: &str = "src/services/discord/host_liveness.rs";
+    // A Claude turn's own marker check before it probes, kills or launches by name.
+    const CLAUDE_TURN_GATE: &str = "src/services/claude/host_gate.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1372,11 +1374,25 @@ fn herdr_items_have_no_production_caller() {
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
         (
             "HostKindMarker",
-            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, LIVENESS],
+            &[
+                MARKER,
+                GUARD_ADAPTER,
+                CLEANUP_GATE,
+                RESOLVE,
+                LIVENESS,
+                CLAUDE_TURN_GATE,
+            ],
         ),
         (
             "read_host_kind_marker",
-            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER, LIVENESS],
+            &[
+                MARKER,
+                CLEANUP_GATE,
+                RESOLVE,
+                GUARD_ADAPTER,
+                LIVENESS,
+                CLAUDE_TURN_GATE,
+            ],
         ),
         (
             "host_marker::",
@@ -1386,6 +1402,7 @@ fn herdr_items_have_no_production_caller() {
                 RESOLVE,
                 CLAUDE_LAUNCH,
                 LIVENESS,
+                CLAUDE_TURN_GATE,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
@@ -1863,7 +1880,6 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                     BEFORE_WRITER,
                 ),
                 ("src/services/provider_teardown.rs", 1, UNKEYED),
-                ("src/services/claude.rs", 1, OWNED),
                 ("src/services/codex.rs", 1, OWNED),
                 (
                     "src/services/provider/cancel_token_cleanup/executor.rs",
@@ -2381,11 +2397,12 @@ fn fn_body(code: &str, signature: &str) -> std::ops::Range<usize> {
     open..code.len()
 }
 
-// Dormant guard: nothing outside the owner names the typed probe entries; inside it
-// the observer runs only in the dormant `for_target` body, which nothing calls.
+// Only the Claude turn gate names the typed probe entries outside the owner; inside it
+// the observer runs only in the `for_target` body, which the owner never calls.
 #[test]
 fn typed_session_probe_entries_have_no_production_caller() {
     const OWNER: &str = "src/services/provider/session_probe.rs";
+    const CONSUMER: &str = "src/services/claude/host_gate.rs";
     const ENTRIES: &[&str] = &[
         "SessionProbeTarget",
         "SessionProbe::for_target",
@@ -2399,7 +2416,7 @@ fn typed_session_probe_entries_have_no_production_caller() {
     );
     let mut violations: Vec<String> = sources
         .iter()
-        .filter(|(relative, _)| relative.as_str() != OWNER)
+        .filter(|(relative, _)| ![OWNER, CONSUMER].contains(&relative.as_str()))
         .flat_map(|(relative, prod)| {
             ENTRIES
                 .iter()
