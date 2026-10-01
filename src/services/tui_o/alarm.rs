@@ -108,6 +108,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::SchemaBlocked { .. } => "schema_blocked",
         WriterAlarm::LedgerViolation { .. } => "ledger_violation",
         WriterAlarm::Halted { .. } => "halted",
+        WriterAlarm::Released { .. } => "released",
         WriterAlarm::ContentTransform { .. } => "content_transform",
         WriterAlarm::Ambiguous { .. } => "ambiguous",
         WriterAlarm::Unresolved { .. } => "unresolved",
