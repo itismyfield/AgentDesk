@@ -1,6 +1,5 @@
-//! On a channel whose body O posts, a two-message status panel is created at turn start, so the
-//! completed panel would stay above the bodies O posts later. After completion it is sent again
-//! below O's newest post and the old one is deleted, for a bounded window after the turn ends.
+//! A two-message panel opens before O posts the turn's body, so for a bounded window after the
+//! turn ends its completed panel is sent again below O's newest post and the old one deleted.
 
 use std::time::Duration;
 
