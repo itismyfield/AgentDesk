@@ -15,12 +15,17 @@ use tokio::sync::watch;
 use super::TuiRuntimeBinding;
 use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::claude_tui::source_verify::{Observation, PinJudgment, judge_pin};
+#[cfg(test)]
+use crate::services::claude_tui::source_verify::n2b_mutant;
+use crate::services::claude_tui::source_verify::{
+    Observation, PinJudgment, SourceHistory, judge_pin,
+};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
+mod claude_fold;
 pub(crate) mod codex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,14 +82,16 @@ pub(crate) struct BindingEvent {
     pub committed_at: DateTime<Utc>,
 }
 
-/// A log line: the event plus whether its source passed the Claude source check. The flag sits
-/// beside the event so readers of `BindingEvent` see the same record either way.
+/// A log line: the event plus whether its source passed the Claude source check and when its hook
+/// was published. Both sit beside the event so readers of `BindingEvent` see the same record.
 #[derive(Deserialize)]
 struct Logged {
     #[serde(flatten)]
     event: BindingEvent,
     #[serde(default)]
     verified: bool,
+    #[serde(default)]
+    published_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize)]
@@ -93,6 +100,8 @@ struct LoggedRef<'a> {
     event: &'a BindingEvent,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    published_at: Option<DateTime<Utc>>,
 }
 
 /// A binding change whose event could not be persisted; the binding was not published.
@@ -109,6 +118,8 @@ pub(crate) struct HookSignal {
     pub source: Option<String>,
     pub transcript_path: Option<String>,
     pub received_at: DateTime<Utc>,
+    /// The relay's publish time; publish times of one host are what order a pane's transitions.
+    pub published_at: Option<DateTime<Utc>>,
 }
 
 impl HookSignal {
@@ -119,6 +130,7 @@ impl HookSignal {
             source: text("source"),
             transcript_path: text("transcript_path"),
             received_at: Utc::now(),
+            published_at: None,
         }
     }
 
@@ -204,6 +216,7 @@ struct PaneState {
     /// `(session, reason)` of the latest refusal, so only a repeat of the same judgment is dropped.
     rejected: Option<(String, String)>,
     nonce: Option<String>,
+    claude: claude_fold::ClaudeFold,
 }
 
 /// How a proposal is written. Only `Stat` reads the file; the others record the caller's judgment.
@@ -220,6 +233,8 @@ struct Writer {
     panes: HashMap<String, PaneState>,
     parents_synced: bool,
     poisoned: bool,
+    /// An unreadable line or seq gap came after the last record applied.
+    tainted: bool,
 }
 
 struct ChannelLog {
@@ -400,9 +415,10 @@ pub(crate) enum Committed {
     Recheck,
 }
 
-/// What a plan does to the log: append a record and whether its source was verified, or keep it.
+/// What a plan does to the log: append a record, whether its source was verified and its hook's
+/// publish time, or keep it.
 enum Planned {
-    Append(BindingEvent, bool),
+    Append(BindingEvent, bool, Option<DateTime<Utc>>),
     Keep(Committed),
 }
 
@@ -469,23 +485,27 @@ pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<O
     Ok(pinned)
 }
 
-/// The (dev, ino) a verified record pinned for the pane, if its current source is `path` of `session`.
-pub(crate) fn pinned_file(
+/// The pane's pinned source and its Claude history in execution `nonce`, read from the writer that
+/// records them.
+pub(crate) fn claude_history(
     channel_id: u64,
     tmux_session: &str,
-    session: &str,
-    path: &str,
-) -> io::Result<Option<crate::services::cluster::stream_relay::SourceFileIdentity>> {
-    let current = pinned_source(channel_id, tmux_session)?;
-    let current = current.filter(|c| c.session_id == session && c.path == Path::new(path));
-    #[cfg(unix)]
-    let pin = |c: SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
-        dev: c.dev,
-        ino: c.ino,
-    };
-    #[cfg(not(unix))]
-    let pin = |_: SourceId| crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable;
-    Ok(current.map(pin))
+    nonce: Option<&str>,
+) -> io::Result<(Option<SourceId>, SourceHistory)> {
+    let mut found = (None, SourceHistory::default());
+    commit_with(channel_id, |writer| {
+        let pane = writer.panes.get(tmux_session);
+        let pin = pane
+            .filter(|pane| pane.verified)
+            .and_then(|pane| pane.current.clone());
+        let history = match pane {
+            Some(pane) => pane.claude.history(nonce, writer.tainted),
+            None => claude_fold::ClaudeFold::default().history(nonce, writer.tainted),
+        };
+        found = (pin, history);
+        Planned::Keep(Committed::Unchanged)
+    })?;
+    Ok(found)
 }
 
 fn commit(proposal: &Proposal, mode: Plan) -> io::Result<Committed> {
@@ -518,18 +538,22 @@ fn commit_with(
     let Some(writer) = log.writer.as_mut() else {
         return Ok(Committed::Unchanged);
     };
-    let (record, verified) = match plan(writer) {
-        Planned::Append(record, verified) => (record, verified),
+    let (record, verified, published_at) = match plan(writer) {
+        Planned::Append(record, verified, published_at) => (record, verified, published_at),
         Planned::Keep(committed) => return Ok(committed),
     };
-    if let Err(error) = writer.append(&path, &record, verified) {
+    #[cfg(test)]
+    let logged = published_at.filter(|_| !n2b_mutant("live"));
+    #[cfg(not(test))]
+    let logged = published_at;
+    if let Err(error) = writer.append(&path, &record, verified, logged) {
         // A line that could not be cut back off is re-read from disk before the next append.
         if writer.poisoned {
             log.writer = None;
         }
         return Err(error);
     }
-    writer.apply(&record, verified);
+    writer.apply(&record, verified, published_at);
     log.notify.send_replace(record.seq);
     Ok(Committed::Appended)
 }
@@ -596,16 +620,52 @@ impl Writer {
             panes: HashMap::new(),
             parents_synced: read.total_len > 0,
             poisoned: false,
+            tainted: false,
         };
-        (read.records.iter()).for_each(|logged| writer.apply(&logged.event, logged.verified));
+        let mut next = 1;
+        for logged in &read.records {
+            // A skipped line holds its seq, so a gap is where an unreadable record was.
+            writer.tainted |= logged.event.seq != next;
+            next = logged.event.seq + 1;
+            writer.apply(&logged.event, logged.verified, logged.published_at);
+        }
+        if read.lines >= next {
+            writer
+                .panes
+                .values_mut()
+                .for_each(|pane| pane.claude.taint());
+            writer.tainted = true;
+        }
         Ok(writer)
     }
 
-    fn apply(&mut self, record: &BindingEvent, verified: bool) {
+    fn apply(
+        &mut self,
+        record: &BindingEvent,
+        verified: bool,
+        published_at: Option<DateTime<Utc>>,
+    ) {
         self.last_seq = self.last_seq.max(record.seq);
+        let tainted = std::mem::take(&mut self.tainted);
+        if tainted {
+            self.panes.values_mut().for_each(|pane| pane.claude.taint());
+        }
         let pane = self.panes.entry(record.tmux_session.clone()).or_default();
         if record.execution_nonce.is_some() {
             pane.nonce = record.execution_nonce.clone();
+        }
+        if record.provider == "claude" {
+            let step = claude_fold::step(record, pane.pending.as_ref().map(|p| p.seq));
+            #[cfg(test)]
+            let kept = n2b_mutant("supersede-off");
+            #[cfg(not(test))]
+            let kept = false;
+            // A hook that moved the pane to another session supersedes the Pending it waited on.
+            if step == claude_fold::Step::Switch && !kept {
+                pane.pending = None;
+            }
+            pane.claude
+                .apply(record, verified, published_at, step, tainted);
         }
         match &record.new {
             BindingTarget::Source(source) => {
@@ -641,6 +701,11 @@ impl Writer {
                 ..
             } => pane.rejected = Some((payload_session_id.clone(), reason.clone())),
         }
+        debug_assert!(
+            record.provider != "claude" || pane.claude.awaits(pane.pending.as_ref()),
+            "[I-P] the writer's Pending and the fold's awaiting session diverged at seq {}",
+            record.seq
+        );
     }
 
     /// What the pane's pin makes of `seen`, an observation of the proposal's path.
@@ -781,6 +846,7 @@ impl Writer {
         };
         let hook_event = p.hook.map(|hook| hook.event.clone());
         let received_at = p.hook.map_or_else(Utc::now, |hook| hook.received_at);
+        let published_at = p.hook.and_then(|hook| hook.published_at);
         let event = BindingEvent {
             seq: self.last_seq + 1,
             channel_id: p.channel_id,
@@ -797,14 +863,21 @@ impl Writer {
             },
             committed_at: Utc::now(),
         };
-        Planned::Append(event, verified)
+        Planned::Append(event, verified, published_at)
     }
 
     /// Append and fsync one line; on failure the line is cut back off so no reader sees it.
-    fn append(&mut self, path: &Path, record: &BindingEvent, verified: bool) -> io::Result<()> {
+    fn append(
+        &mut self,
+        path: &Path,
+        record: &BindingEvent,
+        verified: bool,
+        published_at: Option<DateTime<Utc>>,
+    ) -> io::Result<()> {
         let logged = LoggedRef {
             event: record,
             verified,
+            published_at,
         };
         let mut line = serde_json::to_vec(&logged).map_err(io::Error::other)?;
         line.push(b'\n');

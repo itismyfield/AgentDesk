@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 90
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 91
 - Platform and third-party variables: 27
 
 ## AgentDesk variables
@@ -59,16 +59,16 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_GH_PATH` | `src/github/mod.rs:20` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DISCORD_NONCE` | `src/services/discord/outbound/manual_delivery/headless_nonce.rs:8` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DURABLE_OUTBOX` | `src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:8` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:39` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:41` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH` | `src/services/claude_tui/hook_relay.rs:44` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs:35` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:47` |  |
-| `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs:36` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:51` |  |
-| `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:49` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:40` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:42` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH` | `src/services/claude_tui/hook_relay.rs:45` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs:36` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:48` |  |
+| `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs:37` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:52` |  |
+| `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:50` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:43` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:53` |  |
+| `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:54` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:672` (+2 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:35` (+1 more) |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs:21` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
@@ -81,6 +81,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_MEMENTO_HOOK` | `src/cli/utils.rs:152` | #2655: marker key that identifies AgentDesk-managed hook entries in a Claude Code `settings.json`. |
 | `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs:221` |  |
 | `AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` | `src/services/routines/migrated.rs:207` |  |
+| `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs:117` | Test-only switch naming the one rule a mutation run disables. |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs:132` (+2 more) |  |
 | `AGENTDESK_OBSIDIAN_SKILL_ROOT` | `src/services/operator_connectors.rs:147` (+3 more) |  |
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs:67` (+1 more) |  |

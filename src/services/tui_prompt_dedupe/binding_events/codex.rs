@@ -125,7 +125,7 @@ pub(crate) fn record(
         .transpose()?;
     let committed = commit_with(channel, |writer| {
         match writer.plan_codex(context, session, hook, source) {
-            Some(event) => Planned::Append(event, false),
+            Some(event) => Planned::Append(event, false, None),
             None => Planned::Keep(Committed::Unchanged),
         }
     })?;

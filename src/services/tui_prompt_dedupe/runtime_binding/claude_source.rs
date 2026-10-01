@@ -1,12 +1,16 @@
 //! The Claude source check a hook's continuation candidate passes before the pane follows it.
-//! The candidate is the payload's own transcript; its first record and file identity decide.
+//! The candidate is the payload's own transcript; its first record and file identity decide, and the
+//! pane's history in the binding log decides whether a session it left may come back.
 
 use std::io;
 use std::path::Path;
 
 use super::*;
 use crate::services::claude_tui::source_verify::{
-    self, ClaudeHookSource, ClaudeSource, OpenedTranscript, SourceRejection, SourceVerdict,
+    self, ClaudeHookSource, OpenedTranscript, SourceHistory, SourceRejection, SourceVerdict,
+};
+use crate::services::tui_prompt_dedupe::binding_context::{
+    SpawnNonceMarker, observe_spawn_nonce_marker,
 };
 use binding_events::{Committed, SourceId};
 
@@ -155,39 +159,34 @@ impl Candidate<'_> {
             }
             Ok(Checked::Refused(refusal, reason)) => {
                 *skip = Some(refusal);
-                if reject(reason) {
-                    tracing::warn!(
+                let published_at = self.hook.published_at.map(|t| t.to_rfc3339());
+                match (reject(reason), refusal) {
+                    (true, AdoptSkip::ResumeConflict) => tracing::error!(
+                        tmux,
+                        payload,
+                        candidate,
+                        ?published_at,
+                        source_unresolved = true,
+                        "Claude return to a left session not proven; nothing adopted"
+                    ),
+                    (true, _) => tracing::warn!(
                         tmux,
                         payload,
                         candidate,
                         reason,
                         "Claude hook source refused"
-                    );
+                    ),
+                    (false, _) => {}
                 }
                 return false;
             }
         };
         *skip = unlogged;
-        if let Some(current) = self.bound.session_id.as_deref()
-            && current != self.command_session_id
-            && current != payload
-        {
-            *skip = Some(AdoptSkip::MtimeUnreadable);
-            let Some(current_mtime) =
-                super::super::pending::bound_transcript_mtime(tmux, self.bound)
-            else {
-                return false;
-            };
-            let candidate_mtime = std::fs::metadata(candidate).and_then(|m| m.modified());
-            let Ok(candidate_mtime) = candidate_mtime else {
-                return false;
-            };
-            *skip = unlogged;
-            if current_mtime.is_some_and(|current| candidate_mtime <= current) {
-                *skip = Some(AdoptSkip::OlderThanBound);
-                reject("older_than_bound_transcript");
-                return false;
-            }
+        #[cfg(test)]
+        if source_verify::n2b_mutant("mtime") && self.older_than_bound(candidate) {
+            *skip = Some(AdoptSkip::SourceRejected(SourceRejection::Regression));
+            reject("older_than_bound_transcript");
+            return false;
         }
         #[cfg(test)]
         after_check();
@@ -227,31 +226,40 @@ impl Candidate<'_> {
         }
     }
 
-    /// Judges the candidate against the pane's bound source; `Err` when its log cannot be loaded.
+    /// Judges the candidate against the pane's bound source and the history its log holds for this
+    /// execution; `Err` when the log cannot be loaded. A pane without a channel has no history.
     fn check(&self) -> io::Result<Checked> {
         let (bound, payload) = (self.bound, self.payload_session_id);
         let candidate = self.hook.transcript_path.as_deref().unwrap_or_default();
         let bound_session = bound.session_id.clone().unwrap_or_default();
-        let file = match &self.proposal {
-            Some(p) => binding_events::pinned_file(
-                p.channel_id,
-                p.tmux_session,
-                &bound_session,
-                &bound.output_path,
-            )?,
-            None => None,
+        let nonce = match observe_spawn_nonce_marker(self.tmux_session) {
+            SpawnNonceMarker::Known(nonce) => Some(nonce),
+            _ => None,
         };
-        let history = [ClaudeSource {
-            session_id: bound_session,
-            path: bound.output_path.clone().into(),
-            file,
-        }];
+        let (pin, history) = match &self.proposal {
+            Some(p) => {
+                binding_events::claude_history(p.channel_id, p.tmux_session, nonce.as_deref())?
+            }
+            None => (None, SourceHistory::default()),
+        };
+        #[cfg(test)]
+        let (pin, history) = n2b_seams::checked((pin, history));
+        let pin = pin.filter(|pin| {
+            pin.session_id == bound_session && pin.path == Path::new(&bound.output_path)
+        });
         let source = ClaudeHookSource::from_signal(payload, self.hook, candidate.into());
         if let Err(error) = self.opened {
             tracing::warn!(candidate, %error, "Claude transcript unreadable; judged against its pin");
         }
-        let verdict =
-            source_verify::verify_claude_source(&source, self.root, self.opened.as_ref(), &history);
+        let opened = self.opened.as_ref();
+        let verdict = source_verify::verify_claude_source(
+            &source,
+            self.root,
+            opened,
+            &bound_session,
+            pin.as_ref(),
+            &history,
+        );
         Ok(match verdict {
             SourceVerdict::Current => Checked::Bound,
             SourceVerdict::Confirm(source) | SourceVerdict::Rotate(source) => {
@@ -262,8 +270,9 @@ impl Candidate<'_> {
             }
             SourceVerdict::Pending => Checked::Waiting,
             SourceVerdict::Recheck => Checked::Recheck,
-            // A one-entry history names no left session, so a conflict is refused like a regression.
-            SourceVerdict::PendingConflict => refused(SourceRejection::Regression),
+            SourceVerdict::PendingConflict => {
+                Checked::Refused(AdoptSkip::ResumeConflict, "resume_conflict")
+            }
             SourceVerdict::Rejected(rejection) => refused(rejection),
             SourceVerdict::Anomaly => Checked::Refused(AdoptSkip::SourceAnomaly, "source_anomaly"),
         })
@@ -277,6 +286,7 @@ fn refused(rejection: SourceRejection) -> Checked {
         SourceRejection::FirstRecordMismatch => "first_record_mismatch",
         SourceRejection::IdentityUnavailable => "identity_unavailable",
         SourceRejection::Regression => "regression",
+        SourceRejection::UnprovenStart => "unproven_start",
     };
     Checked::Refused(AdoptSkip::SourceRejected(rejection), reason)
 }
@@ -291,5 +301,68 @@ thread_local! {
 pub(crate) fn after_check() {
     if let Some(seam) = AFTER_CHECK.with_borrow_mut(Option::take) {
         seam();
+    }
+}
+
+#[cfg(test)]
+pub(crate) use n2b_seams::{BEFORE_AUTHORITY, before_authority};
+
+#[cfg(test)]
+mod n2b_seams {
+    use super::*;
+
+    thread_local! {
+        /// Runs once before a hook takes its pane's authority.
+        pub(crate) static BEFORE_AUTHORITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+        static STALE_HISTORY: std::cell::RefCell<Option<(Option<SourceId>, SourceHistory)>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Before a hook takes its pane's authority: the mutation reads the history here and keeps
+    /// that copy for this hook's check, past any hook the seam lands meanwhile.
+    pub(crate) fn before_authority(command_session_id: &str) {
+        let mut stale = None;
+        if source_verify::n2b_mutant("auth") {
+            let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            let key = PromptKey::new("claude", command_session_id);
+            let tmux = state
+                .tmux_by_provider_session
+                .get(&key)
+                .map(|e| e.value.clone());
+            let channel = tmux.as_ref().and_then(|t| state.channel_by_tmux.get(t));
+            let channel = channel.map(|e| e.value);
+            drop(state);
+            if let (Some(tmux), Some(channel)) = (tmux, channel) {
+                let nonce = match observe_spawn_nonce_marker(&tmux) {
+                    SpawnNonceMarker::Known(nonce) => Some(nonce),
+                    _ => None,
+                };
+                stale = binding_events::claude_history(channel, &tmux, nonce.as_deref()).ok();
+            }
+        }
+        if let Some(seam) = BEFORE_AUTHORITY.with_borrow_mut(Option::take) {
+            seam();
+        }
+        STALE_HISTORY.set(stale);
+    }
+
+    /// The history a mutation read before the authority, or what the check read under it.
+    pub(super) fn checked(
+        read: (Option<SourceId>, SourceHistory),
+    ) -> (Option<SourceId>, SourceHistory) {
+        match STALE_HISTORY.with_borrow_mut(Option::take) {
+            Some(stale) => stale,
+            None if source_verify::n2b_mutant("hist") => (read.0, SourceHistory::default()),
+            None => read,
+        }
+    }
+
+    impl Candidate<'_> {
+        /// The newer-transcript rule the log history replaced, for the mutation that brings it back.
+        pub(super) fn older_than_bound(&self, candidate: &str) -> bool {
+            let current = self.bound.session_id.as_deref();
+            let mtime = |path: &str| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            current.is_some_and(|c| c != self.command_session_id && c != self.payload_session_id)
+                && mtime(candidate) <= mtime(&self.bound.output_path)
+        }
     }
 }

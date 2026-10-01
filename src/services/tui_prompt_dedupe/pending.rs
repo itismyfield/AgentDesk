@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
-use std::time::SystemTime;
 
 use crate::services::claude_tui::hook_server::adoption_retry;
 use crate::services::claude_tui::source_verify::{
@@ -355,6 +354,7 @@ fn restored_hook(pending: &BindingEvent, path: Option<&str>) -> HookSignal {
         source: source.map(str::to_owned),
         transcript_path: path.map(str::to_owned),
         received_at: pending.evidence.received_at,
+        published_at: None,
     }
 }
 
@@ -494,32 +494,6 @@ pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding)
             if wait.transcript == Path::new(&binding.output_path)
                 && binding.session_id.as_deref() == Some(wait.session_id.as_str())
     )
-}
-
-/// The bound transcript's mtime for the newer-candidate check; `Some(None)` for a binding this
-/// incarnation's restore bound before its file exists, which any existing candidate follows.
-pub(crate) fn bound_transcript_mtime(
-    tmux_session: &str,
-    binding: &TuiRuntimeBinding,
-) -> Option<Option<SystemTime>> {
-    let this_incarnation = || {
-        let memo = outcomes()
-            .get(tmux_session)
-            .and_then(|((_, n, _), _)| n.clone());
-        let current = observe_spawn_nonce_marker(tmux_session);
-        matches!(current, SpawnNonceMarker::Known(n) if memo.as_deref() == Some(n.as_str()))
-    };
-    match std::fs::metadata(&binding.output_path).and_then(|m| m.modified()) {
-        Ok(mtime) => Some(Some(mtime)),
-        Err(e)
-            if e.kind() == io::ErrorKind::NotFound
-                && awaits_exact_path(tmux_session, binding)
-                && this_incarnation() =>
-        {
-            Some(None)
-        }
-        Err(_) => None,
-    }
 }
 
 /// Restores `tmux_session`'s durable Pending before the rehydrate pass judges its binding; `None`

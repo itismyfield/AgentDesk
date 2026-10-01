@@ -16,8 +16,8 @@ pub(crate) enum AdoptSkip {
     ChannelNotRestored,
     /// The command session names a pane whose runtime binding lapsed; the next pass registers it.
     RuntimeNotRestored,
-    MtimeUnreadable,
-    OlderThanBound,
+    /// A return to a session the pane left that the hook could not prove; nothing is adopted.
+    ResumeConflict,
     /// The hook names no transcript, so there is no candidate to check.
     PayloadPathMissing,
     /// The pane's binding event log could not be loaded; the hook is retried.

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::HookEventKind;
 use super::adoption_retry::{self, AdoptionHttp, DurableKind, NotDurableReason};
-use super::relay_receipts::{RelayReceiptLedger, RelayReceiptTicket};
+use super::relay_receipts::{RELAY_PUBLISHED_AT_HEADER, RelayReceiptLedger, RelayReceiptTicket};
 use crate::services::tui_prompt_dedupe::AdoptSkip;
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 
@@ -44,7 +44,7 @@ pub(crate) enum NotApplicableReason {
     PayloadNotUuid,
     NotClaudeTui,
     MalformedBindingPath,
-    OlderThanBound,
+    ResumeConflict,
     UnmappedCommandSession,
     PayloadPathMissing,
     SourceRejected,
@@ -55,7 +55,6 @@ pub(crate) enum NotApplicableReason {
 pub(crate) enum UnavailableReason {
     RestoreNotReady,
     PaneRegistrationFailed,
-    MtimeUnreadable,
     ChannelNotRestored,
     RuntimeNotRestored,
     HistoryUnreadable,
@@ -151,7 +150,14 @@ pub(crate) fn observe_binding_hook(
         .get(BINDING_HEADER)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| decode_binding_header(h).ok());
-    let hook = HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload);
+    let published_at = headers
+        .get(RELAY_PUBLISHED_AT_HEADER)
+        .and_then(|h| h.to_str().ok());
+    let published_at = published_at.and_then(|h| chrono::DateTime::parse_from_rfc3339(h).ok());
+    let hook = HookSignal {
+        published_at: published_at.map(|t| t.with_timezone(&chrono::Utc)),
+        ..HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload)
+    };
     match provider {
         "claude" => {}
         "codex" => {
@@ -167,6 +173,8 @@ pub(crate) fn observe_binding_hook(
     if pane_registration_failed(command, envelope.as_ref()) {
         return IngressOutcome::Unavailable(UnavailableReason::PaneRegistrationFailed);
     }
+    #[cfg(test)]
+    crate::services::tui_prompt_dedupe::before_authority(command);
     match adoption_retry::adopt_from_hook(command, payload_session, &hook) {
         AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
         AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
@@ -195,13 +203,12 @@ fn classify_skip(
             NotApplicable(NotApplicableReason::UnmappedCommandSession)
         }
         AdoptSkip::NoChannel => IngressOutcome::Proceed(ProceedReason::NoChannelLog),
-        AdoptSkip::MtimeUnreadable => Unavailable(UnavailableReason::MtimeUnreadable),
         AdoptSkip::ChannelNotRestored => Unavailable(UnavailableReason::ChannelNotRestored),
         AdoptSkip::RuntimeNotRestored => Unavailable(UnavailableReason::RuntimeNotRestored),
         AdoptSkip::PayloadNotUuid => NotApplicable(NotApplicableReason::PayloadNotUuid),
         AdoptSkip::NotClaudeTui => NotApplicable(NotApplicableReason::NotClaudeTui),
         AdoptSkip::MalformedBindingPath => NotApplicable(NotApplicableReason::MalformedBindingPath),
-        AdoptSkip::OlderThanBound => NotApplicable(NotApplicableReason::OlderThanBound),
+        AdoptSkip::ResumeConflict => NotApplicable(NotApplicableReason::ResumeConflict),
         AdoptSkip::PayloadPathMissing => NotApplicable(NotApplicableReason::PayloadPathMissing),
         AdoptSkip::SourceRejected(_) => NotApplicable(NotApplicableReason::SourceRejected),
         AdoptSkip::SourceAnomaly => NotApplicable(NotApplicableReason::SourceAnomaly),

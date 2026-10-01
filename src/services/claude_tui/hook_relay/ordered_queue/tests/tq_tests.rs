@@ -494,3 +494,6 @@ fn a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does() {
         }
     });
 }
+
+#[path = "session_start_retry_tests.rs"]
+mod session_start_retry;

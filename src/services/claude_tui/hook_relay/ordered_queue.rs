@@ -781,7 +781,7 @@ fn process_ordered_hook_relay_request(
     ) {
         Ok(()) => Ok(OrderedHookRelayProcessOutcome::Completed),
         Err(error) => {
-            if error.contains("HTTP 425") {
+            if super::transport_retry::retries(&request.provider, &request.event, &error) {
                 return Ok(OrderedHookRelayProcessOutcome::Retry);
             }
             record_request_failure(&request, &error)?;

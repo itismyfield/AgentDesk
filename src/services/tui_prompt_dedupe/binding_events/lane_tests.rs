@@ -517,9 +517,24 @@ fn binding_judgment_is_the_same_with_and_without_the_log() {
     )
     .unwrap();
     set_test_root(None);
-    let without = judgment_trace(lane.dir.path(), "p5-judgment-off", 7_040);
+    let mut without = judgment_trace(lane.dir.path(), "p5-judgment-off", 7_040);
     set_test_root(Some(lane.root.path()));
     let with = judgment_trace(lane.dir.path(), "p5-judgment-on", 7_041);
+    // Only the log holds the pane's history, so only the logged pane refuses the left B.
+    let late = without
+        .iter()
+        .position(|line| line.starts_with("late b"))
+        .unwrap();
+    assert!(
+        without[late].contains("Some(\"b0000000"),
+        "{}",
+        without[late]
+    );
+    without[late] = with[late].clone();
+    assert!(with[late].starts_with("late b: None"), "{}", with[late]);
+    let progress = late + 1;
+    assert!(without[progress].starts_with("progress: None -> (\"b0000000"));
+    without[progress] = with[progress].clone();
     assert_eq!(without, with);
     assert!(!lane.log(7_040).exists());
     let kinds: Vec<_> = events(7_041)
@@ -794,7 +809,8 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
         ("SessionStart", &b, Some("clear")),
         ("UserPromptSubmit", &b, None),
         ("Stop", &b, None),
-        ("SessionStart", &c, Some("clear")),
+        // A start cannot show it is newer than B's hooked move; C's prompt can.
+        ("UserPromptSubmit", &c, None),
     ] {
         assert_eq!(send(event, session, source), 425, "{event} {session}");
     }
@@ -856,8 +872,8 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
             ),
             (
                 BindingTarget::Source(src(&c_path, &c)),
-                BindingCause::Clear,
-                start
+                BindingCause::Unknown,
+                Some("user_prompt_submit".to_owned())
             ),
         ]
     );

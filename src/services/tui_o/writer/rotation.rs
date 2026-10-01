@@ -280,7 +280,8 @@ impl<B: BindingEvents> Sources<B> {
         self.flush(writer)
     }
 
-    /// Applies binding events past the checkpoint in seq order, stopping at an unresolved bind.
+    /// Applies binding events past the checkpoint in seq order, stopping at an unresolved bind that
+    /// no later hook superseded.
     pub fn follow<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
@@ -308,6 +309,21 @@ impl<B: BindingEvents> Sources<B> {
                 _ => None,
             })
             .collect();
+        let pending = events.iter().filter(|event| {
+            let target = match &event.record {
+                BindingRecord::Bound { new, .. } => Some(new),
+                _ => None,
+            };
+            matches!(target, Some(BindingTarget::Pending { .. }))
+        });
+        let superseded: HashSet<u64> = pending
+            .filter(|p| {
+                events
+                    .iter()
+                    .any(|later| super::adoption::supersedes(p, later))
+            })
+            .map(|p| p.seq)
+            .collect();
         let mut expected = checkpoint + 1;
         for event in &events {
             if event.seq != expected {
@@ -326,20 +342,20 @@ impl<B: BindingEvents> Sources<B> {
             } = &event.record
             {
                 let new = match (new, resolved.get(&event.seq)) {
-                    (BindingTarget::Source(source), _) | (_, Some(source)) => source.clone(),
+                    (BindingTarget::Source(source), _) | (_, Some(source)) => Some(source.clone()),
+                    // Nothing resolves a superseded Pending; the hook that superseded it binds.
+                    (BindingTarget::Pending { .. }, None) if superseded.contains(&event.seq) => {
+                        None
+                    }
                     (BindingTarget::Pending { .. }, None) => {
                         self.wait_resolution(writer, event);
                         return Ok(());
                     }
                 };
-                self.bind(
-                    writer,
-                    event,
-                    old.as_ref(),
-                    new,
-                    *cause,
-                    parent_hint.as_ref(),
-                )?;
+                if let Some(new) = new {
+                    let (old, parent) = (old.as_ref(), parent_hint.as_ref());
+                    self.bind(writer, event, old, new, *cause, parent)?;
+                }
             }
             let moved = writer.store().set_binding_checkpoint(event.seq);
             moved.map_err(halted("binding checkpoint"))?;

@@ -58,10 +58,34 @@ pub async fn legacy_started(legacy: &dyn LegacyView) -> bool {
     true
 }
 
+/// Whether `later` supersedes the Pending bind `pending`: the writer drops a waiting Pending once a
+/// hook on the same pane adopts another session, so that Pending is never resolved.
+pub(super) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
+    let BindingRecord::Bound {
+        old,
+        new: BindingTarget::Source(source),
+        evidence,
+        ..
+    } = &later.record
+    else {
+        return false;
+    };
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("o-supersede-off") {
+        return false;
+    }
+    let moved = old
+        .as_ref()
+        .is_none_or(|old| old.session_id != source.session_id);
+    let same_pane = later.tmux_session == pending.tmux_session;
+    let claude = later.provider == ShadowProvider::Claude;
+    later.seq > pending.seq && same_pane && claude && !evidence.hook_event.is_empty() && moved
+}
+
 /// The sources a binding log names: every bound one in seq order, and those only named as an old
-/// or parent source. A bind still pending refuses the log.
+/// or parent source. A bind still pending refuses the log; a superseded one does not.
 pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&SourceId>), String> {
-    let (mut bound, mut named, mut pending) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut bound, mut named, mut pending) = (Vec::new(), Vec::new(), Vec::<&BindingEvent>::new());
     for event in events {
         match &event.record {
             BindingRecord::Bound {
@@ -72,21 +96,24 @@ pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
             } => {
                 named.extend(old.iter().chain(parent_hint));
                 match new {
-                    BindingTarget::Source(source) => bound.push(source),
-                    BindingTarget::Pending { .. } => pending.push(event.seq),
+                    BindingTarget::Source(source) => {
+                        pending.retain(|waiting| !supersedes(waiting, event));
+                        bound.push(source);
+                    }
+                    BindingTarget::Pending { .. } => pending.push(event),
                 }
             }
             BindingRecord::Resolved {
                 resolves_seq,
                 source,
             } => {
-                pending.retain(|seq| seq != resolves_seq);
+                pending.retain(|waiting| waiting.seq != *resolves_seq);
                 bound.push(source);
             }
             BindingRecord::Rejected { .. } => {}
         }
     }
-    if let Some(seq) = pending.iter().min() {
+    if let Some(seq) = pending.iter().map(|waiting| waiting.seq).min() {
         return Err(format!("bind {seq} is still pending"));
     }
     if bound.is_empty() {
