@@ -454,7 +454,7 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
         status_panel_terminal_committed: output.status_panel_terminal_committed,
         bridge_should_emit_completion: output.bridge_should_emit_completion,
         current_msg_id: MessageId::new(DRIVER_CURRENT_MSG_ID),
-        status_panel_msg_id: Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+        status_panel_msg_id: Some(MessageId::new(output.inflight_state.status_message_id.unwrap_or(DRIVER_CURRENT_MSG_ID))),
         last_status_panel_text: "working".into(),
         completion_footer_terminal_text: output.completion_footer_terminal_text,
         busy_requeue_outcome: output.busy_requeue_outcome, spin_idx: 0, status_panel_generation: 0,
@@ -1280,4 +1280,65 @@ async fn only_a_foreign_custody_that_posts_ends_a_pending_adoption() {
         let seen = (driver.completed_publications(), check.adoption());
         assert_eq!(seen, expected, "acknowledged={acknowledged}");
     }
+}
+
+/// The real postlude, after its two-message completion edit on O's channel, moves the completed
+/// panel below a body O posts once the turn has closed.
+#[tokio::test]
+async fn the_postlude_moves_a_completed_o_panel_below_a_later_o_post() {
+    use crate::services::discord::status_panel_singleton_store as singleton;
+    use crate::services::tui_o::{cutover::test_override, writer::deliver};
+    use RuntimeHandoffKind::ClaudeTui;
+    const PANEL: u64 = 4_000_000;
+    const LATE_BODY: u64 = 4_500_000;
+    struct SeparatePanel;
+    impl Drop for SeparatePanel {
+        fn drop(&mut self) {
+            crate::services::discord::turn_bridge::single_message_footer::SEPARATE_PANEL_FOR_TESTS
+                .set(false);
+        }
+    }
+    crate::services::discord::turn_bridge::single_message_footer::SEPARATE_PANEL_FOR_TESTS
+        .set(true);
+    let _separate = SeparatePanel;
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let ui = &mut Arc::get_mut(&mut driver.shared).expect("fresh driver").ui;
+    (ui.status_panel_v2_enabled, ui.two_message_panel_enabled) = (true, true);
+    (
+        driver.inflight.runtime_kind,
+        driver.inflight.status_message_id,
+    ) = (Some(ClaudeTui), Some(PANEL));
+    inflight::save_inflight_state(&driver.inflight).expect("seed the two-message row");
+    let token = driver.shared.token_hash.clone();
+    let channel = DRIVER_CHANNEL_ID;
+    singleton::bind_if_owned(&ProviderKind::Claude, &token, channel, PANEL, None).unwrap();
+    let _mailbox = driver.shared.mailbox(ChannelId::new(channel));
+    let _o = test_override::force_channels(&[(channel, ClaudeTui)]);
+    let _posted = deliver::forget_posted_for_tests(channel);
+
+    let (ctx, state) = driver.parts();
+    let output = run(ctx, state).await;
+    assert!(output.terminal_delivery_committed);
+    run_postlude(&driver, output, false, false).await;
+    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
+    let _ = std::fs::remove_file(inflight::inflight_state_path(
+        &root,
+        &ProviderKind::Claude,
+        channel,
+    ));
+    deliver::note_posted_for_tests(channel, LATE_BODY);
+
+    let panel =
+        || singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while panel() == Some(PANEL) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let moved = panel().expect("a singleton panel");
+    assert!(
+        moved > LATE_BODY,
+        "panel {moved} stays above O's body {LATE_BODY}"
+    );
+    // Let the follow's window end while this test still holds the runtime root.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 }

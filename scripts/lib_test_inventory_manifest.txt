@@ -3305,6 +3305,7 @@ services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_s
 services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
 services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
 services::discord::health::snapshot::tests::an_expired_relay_verdict_is_recorded_without_degrading_the_snapshot
+services::discord::health::snapshot::tests::an_o_owned_channel_keeps_the_legacy_relay_verdict_off_health
 services::discord::health::snapshot::tests::an_unwitnessed_executor_never_confirms_the_pane_idle_witness
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
@@ -7416,6 +7417,11 @@ services::discord::turn_bridge::completion_postlude::channel_writeback::tests::n
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::sa2_suppressed_transcript_requires_attempt_and_plan
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_completed_o_panel_ends_below_the_last_of_many_late_o_posts
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_completed_o_panel_moves_below_a_body_o_posts_after_completion
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_failed_old_panel_delete_goes_to_the_orphan_drain
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_late_completion_of_a_moved_panel_sends_no_second_panel
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_legacy_completed_panel_is_never_moved
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
 services::discord::turn_bridge::context_window::tests::a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded
 services::discord::turn_bridge::context_window::tests::a_declined_done_records_nothing
@@ -7792,6 +7798,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::receipted_postloop_preserves_raw_proof_and_session_status_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::receipted_rowless_turn_never_patches_active_card_before_terminal_gate_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::unreceipted_rowless_turn_keeps_active_card_and_terminal_delivery_5521
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::the_postlude_moves_a_completed_o_panel_below_a_later_o_post
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::terminal_delivery_epilogue_routes_identity_mismatch_to_warn
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions
@@ -9816,7 +9823,6 @@ services::tui_o::writer::tests::actor::rotation::a_failing_binding_log_holds_cap
 services::tui_o::writer::tests::actor::rotation::a_fork_posts_only_what_follows_the_eight_rows_it_inherited
 services::tui_o::writer::tests::actor::rotation::a_gap_in_the_binding_log_stops_the_channel_at_the_last_applied_seq
 services::tui_o::writer::tests::actor::rotation::a_long_growing_old_source_and_a_fourth_reader_alarm_while_every_row_still_posts
-services::tui_o::writer::tests::actor::rotation::a_resume_whose_first_new_record_predates_the_bind_posts_nothing_until_resolved
 services::tui_o::writer::tests::actor::rotation::a_source_bound_back_waits_for_the_tail_of_the_source_it_replaces
 services::tui_o::writer::tests::actor::rotation::an_old_backlog_longer_than_one_read_is_posted_before_the_new_source
 services::tui_o::writer::tests::actor::rotation::an_old_tail_is_posted_before_the_new_source_and_a_proven_old_source_retires_once_drained_and_quiet
@@ -9824,6 +9830,15 @@ services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refu
 services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refuses_still_goes_before_the_new_source
 services::tui_o::writer::tests::actor::rotation::an_unknown_bind_holds_back_even_a_fresh_source
 services::tui_o::writer::tests::actor::rotation::each_old_source_retires_only_after_its_own_successor_records_something
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_decides_the_same_whether_or_not_the_writer_restarts_after_its_retired_parent_is_replaced
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_decides_the_same_whether_or_not_the_writer_restarts_while_its_parent_advances
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_is_owed_from_its_first_new_row_whatever_its_timestamps_say
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_that_cannot_be_matched_to_its_parent_posts_nothing_until_resolved
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_whose_parent_bytes_are_gone_posts_nothing_until_resolved
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_copied_after_the_fork_start_is_not_posted_again
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_the_channel_had_not_read_is_not_counted_as_inherited
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator
+services::tui_o::writer::tests::actor::rotation::fork_tests::a_row_a_pending_parent_also_holds_is_still_posted_after_the_fork_start
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured

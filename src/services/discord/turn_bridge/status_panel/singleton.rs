@@ -38,3 +38,20 @@ pub(super) fn commit_completed_binding(
         );
     }
 }
+
+/// A deleted two-message panel the channel's singleton has since replaced with a newer one
+/// (moved below O's posts); its completion already shows there, so no fallback is sent.
+pub(super) fn moved_on(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_message_id: MessageId,
+) -> bool {
+    shared.ui.two_message_panel_enabled
+        && crate::services::discord::status_panel_singleton_store::load(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+        )
+        .is_some_and(|binding| binding.panel_message_id > panel_message_id.get())
+}

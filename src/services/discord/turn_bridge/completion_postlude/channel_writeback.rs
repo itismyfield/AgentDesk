@@ -163,6 +163,39 @@ pub(in crate::services::discord::turn_bridge) fn provider_session_clear_key<'a>(
         .flatten()
 }
 
+/// Persist or clear provider session_id in DB so fresh-session transitions
+/// survive dcserver restarts and idle cleanup.
+pub(in crate::services::discord::turn_bridge) async fn persist_provider_session(
+    channel_effects_suppressed: bool,
+    clear_provider_session: bool,
+    adk_session_key: Option<&str>,
+    (session_id_to_persist, raw_provider_session_id): (Option<&str>, Option<&str>),
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: crate::services::discord::ChannelId,
+    api_port: u16,
+) {
+    use crate::services::discord::adk_session;
+    if let Some(session_key) = provider_session_clear_key(
+        channel_effects_suppressed,
+        clear_provider_session,
+        adk_session_key,
+    ) {
+        adk_session::clear_provider_session_id(session_key, api_port).await;
+    } else if let (Some(session_key), Some(persisted_sid)) =
+        (adk_session_key, session_id_to_persist)
+    {
+        adk_session::save_provider_session_id(
+            session_key,
+            persisted_sid,
+            raw_provider_session_id,
+            provider,
+            channel_id,
+            api_port,
+        )
+        .await;
+    }
+}
+
 /// #4658 F1: gate the voluntary tool_feedback reminder stash on channel
 /// ownership. `store_voluntary_feedback_reminder` writes a (provider,
 /// channel_id) KV that the NEXT live intake takes and injects into the model

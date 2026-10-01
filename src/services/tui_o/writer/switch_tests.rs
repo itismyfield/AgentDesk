@@ -190,8 +190,8 @@ async fn a_corrupt_binding_log_alarms_through_the_port_and_capture_waits_for_a_c
 #[tokio::test(start_paused = true)]
 async fn an_operator_resolution_is_applied_once_the_writer_restarts_and_only_from_its_record() {
     let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
-    let old = Utc::now() - TimeDelta::hours(1);
-    let body = [row("m0", "before the switch"), row_at("x1", "stale", old)].concat();
+    // No row of the bound source is the parent's, so its start waits for the operator.
+    let body = row_at("x1", "unrelated", Utc::now());
     let (b_path, b) = transcript(&a_path, "b.jsonl", "s2", &body);
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
     bindings.commit(rotate(2, &a, &b, BindingCause::Resume));
@@ -274,7 +274,7 @@ async fn an_operator_resolution_is_applied_once_the_writer_restarts_and_only_fro
 
 /// Spools what `source` holds past its cursor. `lag` restores the cursor file, as a crash between
 /// the frame and the cursor write leaves it.
-fn spool(store: &mut ChannelStore, runtime: &Path, source: &SourceId, lag: bool) {
+pub(super) fn spool(store: &mut ChannelStore, runtime: &Path, source: &SourceId, lag: bool) {
     let dir = runtime
         .join("o_store")
         .join(CHANNEL.to_string())
@@ -294,7 +294,12 @@ fn spool(store: &mut ChannelStore, runtime: &Path, source: &SourceId, lag: bool)
     }
 }
 
-fn link(source: &SourceId, seq: u64, parent: Option<&SourceId>, boundary: Boundary) -> SourceLink {
+pub(super) fn link(
+    source: &SourceId,
+    seq: u64,
+    parent: Option<&SourceId>,
+    boundary: Boundary,
+) -> SourceLink {
     SourceLink {
         source: source.clone(),
         seq,
