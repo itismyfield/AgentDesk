@@ -7407,8 +7407,10 @@ services::discord::turn_bridge::completion_postlude::channel_writeback::tests::n
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::sa2_suppressed_transcript_requires_attempt_and_plan
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_completed_o_panel_ends_below_the_last_of_many_late_o_posts
 services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_completed_o_panel_moves_below_a_body_o_posts_after_completion
 services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_failed_old_panel_delete_goes_to_the_orphan_drain
+services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_late_completion_of_a_moved_panel_sends_no_second_panel
 services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_legacy_completed_panel_is_never_moved
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
 services::discord::turn_bridge::context_window::tests::a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded
@@ -7786,6 +7788,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::receipted_postloop_preserves_raw_proof_and_session_status_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::receipted_rowless_turn_never_patches_active_card_before_terminal_gate_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::unreceipted_rowless_turn_keeps_active_card_and_terminal_delivery_5521
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::the_postlude_moves_a_completed_o_panel_below_a_later_o_post
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::terminal_delivery_epilogue_routes_identity_mismatch_to_warn
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions
