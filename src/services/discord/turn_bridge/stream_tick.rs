@@ -490,7 +490,7 @@ pub(super) async fn run_bridge_stream_tick(
         response_sent_offset = full_response.len();
         inflight_state.response_sent_offset = response_sent_offset;
     }
-    if o_body_cut == Ok(true) && single_message_panel_footer_mode && !done {
+    if o_body_cut == Ok(true) && single_message_panel_footer_mode {
         let frame = o_panel::status_frame(
             shared_owned.as_ref(),
             channel_id,
@@ -513,7 +513,9 @@ pub(super) async fn run_bridge_stream_tick(
         };
         let due = last_status_edit.elapsed() >= status_interval;
         let text = &mut last_edit_text;
-        if o_panel::refresh_o_status_panel(&shared_owned, &gateway, save, frame, due, text).await {
+        let timing = (due, done);
+        if o_panel::refresh_o_status_panel(&shared_owned, &gateway, save, frame, timing, text).await
+        {
             last_status_edit = tokio::time::Instant::now();
             state_dirty = true;
         }

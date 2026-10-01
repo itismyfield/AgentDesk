@@ -652,7 +652,7 @@ async fn a_restarted_writer_recovers_the_newest_post_from_its_ledger() {
         panic!("piece not posted");
     };
     drop(writer);
-    deliver::forget_posted_for_tests(CHANNEL);
+    let _restart = deliver::forget_posted_for_tests(CHANNEL);
     let _restarted = harness.writer();
     assert!(deliver::last_posted(CHANNEL) >= Some(posted));
 }

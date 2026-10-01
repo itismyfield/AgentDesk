@@ -427,10 +427,7 @@ async fn run_codex_idle_response_tail(
         .expect("spawn codex idle response tail reader thread");
 
     // On O's channel a tool call opens the stream: its live panel is the only place a tool shows.
-    let tool_opens = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-        channel_id.get(),
-        Some(&tmux_session_name),
-    ) == Ok(true);
+    let tool_opens = idle_tail_tool_opens(channel_id, &tmux_session_name);
     let buffered = tokio::task::spawn_blocking(move || {
         let mut prefix: Vec<StreamMessage> = Vec::new();
         let mut has_content = false;

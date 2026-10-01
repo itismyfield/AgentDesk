@@ -159,7 +159,8 @@ mod session_rotation_settle;
 use self::claude_idle_bridge::build_tui_direct_bridge_inflight_state;
 #[cfg(unix)]
 use self::claude_idle_bridge::{
-    buffer_idle_prefix, idle_stream_message_is_content, stream_tui_idle_response_through_bridge,
+    buffer_idle_prefix, idle_stream_message_is_content, idle_tail_tool_opens,
+    stream_tui_idle_response_through_bridge,
     tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(all(unix, test))]

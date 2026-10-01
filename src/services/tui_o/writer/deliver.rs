@@ -15,7 +15,7 @@ use super::pieces::{Derived, PieceWork};
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::ChannelStore;
-use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceOutcome};
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -47,13 +47,28 @@ pub(crate) fn note_posted_for_tests(channel: u64, msg_id: u64) {
     note_posted(channel, msg_id);
 }
 
-/// What a process restart does to the in-memory position.
+/// What a process restart does to the in-memory position; the guard keeps other restarts out.
 #[cfg(test)]
-pub(crate) fn forget_posted_for_tests(channel: u64) {
+pub(crate) fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
+    static RESTARTS: Mutex<()> = Mutex::new(());
+    let restart = RESTARTS.lock().unwrap_or_else(|poison| poison.into_inner());
     LAST_POSTED
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .remove(&channel);
+    restart
+}
+
+/// A restarted process learns O's newest post from the recovered ledger, not a later post.
+pub fn seed_last_posted(channel: u64, ledger: &LedgerState) {
+    let posted =
+        (0..ledger.next_serial()).filter_map(|serial| match ledger.piece(serial)?.outcome {
+            Some(PieceOutcome::Posted(msg_id)) => Some(msg_id),
+            _ => None,
+        });
+    if let Some(msg_id) = posted.max() {
+        note_posted(channel, msg_id);
+    }
 }
 
 fn note_posted(channel: u64, msg_id: u64) {
@@ -125,15 +140,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             paused,
         };
         let ledger = writer.store.ledger();
-        // A restarted process learns O's newest post from the recovered ledger, not a later post.
-        let posted =
-            (0..ledger.next_serial()).filter_map(|serial| match ledger.piece(serial)?.outcome {
-                Some(PieceOutcome::Posted(msg_id)) => Some(msg_id),
-                _ => None,
-            });
-        if let Some(msg_id) = posted.max() {
-            note_posted(channel, msg_id);
-        }
+        seed_last_posted(channel, ledger);
         let refused =
             (0..ledger.next_serial()).find_map(|serial| match ledger.piece(serial)?.outcome {
                 Some(PieceOutcome::Rejected(status)) => Some(status),

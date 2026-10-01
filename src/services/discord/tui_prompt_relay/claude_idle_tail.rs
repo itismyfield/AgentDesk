@@ -378,10 +378,7 @@ pub(super) async fn run_claude_idle_response_tail(
     // `has_boundary` includes an empty Done: its recovery guidance must use the
     // same source admission and terminal receipt as prose. We hand the live
     // `reader_rx` back to drain the remainder into the bridge.
-    let tool_opens = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-        channel_id.get(),
-        Some(&tmux_session_name),
-    ) == Ok(true);
+    let tool_opens = idle_tail_tool_opens(channel_id, &tmux_session_name);
     let buffered =
         tokio::task::spawn_blocking(move || buffer_idle_prefix(reader_rx, tool_opens)).await;
 
