@@ -10,6 +10,7 @@ use super::*;
 mod channel_episode_scope;
 mod channel_writeback;
 mod contracts;
+pub(super) mod o_panel_below;
 
 pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
@@ -166,6 +167,17 @@ pub(super) async fn run_completion_postlude(
             )
             .await;
         status_panel_completion_committed = committed;
+        if committed && !single_message_panel_footer_mode && completion_r0.permits_channel_effects()
+        {
+            let _ = o_panel_below::follow_o_posts_after_completion(
+                &shared_owned,
+                &gateway,
+                &provider,
+                channel_id,
+                &inflight_state,
+                &last_status_panel_text,
+            );
+        }
         terminal_projection_settled.release_completion_admission(
             &completion_guard,
             busy_requeue_outcome.take(),
