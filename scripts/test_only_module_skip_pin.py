@@ -286,6 +286,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/bounded_tmux_tests.rs",
         "src/services/tui_input/durability_tests.rs",
         "src/services/tui_o/writer/switch_tests.rs",
+        "src/services/tui_o/writer/retire_tests.rs",
         "src/services/tui_o/writer/host_tests.rs",
         "src/services/tui_o/writer/adoption_tests.rs",
         "src/services/tui_o/cutover/channel_gate/tests.rs",
