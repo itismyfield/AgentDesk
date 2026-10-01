@@ -3,14 +3,17 @@ use std::sync::Arc;
 use super::super::SharedData;
 use super::super::inflight::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
-    clear_inflight_state_if_matches_identity_generation, opt_channel_id, opt_message_id,
+    KeyedTeardown, clear_inflight_state_if_matches_identity_generation, opt_channel_id,
+    opt_message_id,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::host_liveness;
 use crate::services::platform::tmux::PaneLiveness;
 #[cfg(unix)]
 use crate::services::process::ProcessIdentity;
 use crate::services::process::ProcessIdentityProbe;
 use crate::services::provider::ProviderKind;
+use crate::services::provider::session_probe::SessionLiveness;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RuntimeActivityEvidence {
@@ -139,6 +142,8 @@ fn claude_e_process_cleanup_decision(
 }
 
 pub(super) async fn abandoned_tmux_cleanup_decision_for(
+    shared: &SharedData,
+    provider: &ProviderKind,
     state: &InflightTurnState,
 ) -> AbandonedTmuxCleanupDecision {
     let Some(session_name) = state.tmux_session_name.as_deref() else {
@@ -155,15 +160,34 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
     if session_name.is_empty() {
         return AbandonedTmuxCleanupDecision::PreserveRetry;
     }
-    let session_name = session_name.to_string();
+    let (name, row) = (session_name.to_string(), state.clone());
     let owner_decision = run_blocking_cleanup_probe(move || {
+        let liveness = host_liveness::observe_liveness(&name, Some(&row));
         abandoned_tmux_cleanup_decision(
             true,
-            crate::services::tmux_diagnostics::tmux_session_pane_liveness(&session_name),
-            runtime_activity_evidence(&session_name),
+            host_liveness::as_pane_liveness(liveness),
+            runtime_activity_evidence(&name),
         )
     })
     .await;
+    // A dead-pane verdict takes the host guard before any cleanup it would admit.
+    let (dead, caller) = (SessionLiveness::Missing, "placeholder_sweeper_abandon");
+    if owner_decision == AbandonedTmuxCleanupDecision::Kill {
+        let gate = host_liveness::tmux_verdict_gate(
+            shared,
+            provider,
+            state.channel_id,
+            session_name,
+            dead,
+            caller,
+        );
+        match gate.await {
+            // The last-resort finalizer: a turn-start row write is best effort, and
+            // watcher-reacquired turns never ran one.
+            KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => {}
+            KeyedTeardown::Kept => return AbandonedTmuxCleanupDecision::PreserveRetry,
+        }
+    }
     decision_for_user_identity(state.user_msg_id, owner_decision)
 }
 
@@ -315,7 +339,7 @@ pub(super) async fn finalize_abandoned_mailbox(
     let owner_decision = if evidence.terminal_delivered() {
         AbandonedTmuxCleanupDecision::PreserveRetry
     } else {
-        abandoned_tmux_cleanup_decision_for(state).await
+        abandoned_tmux_cleanup_decision_for(shared, provider, state).await
     };
     let plan = abandoned_cleanup_plan(state, evidence, owner_decision);
     if !plan.finish_mailbox {
@@ -518,6 +542,10 @@ mod tests {
     use crate::services::provider::{CancelToken, ProviderKind};
     use poise::serenity_prelude as serenity;
 
+    fn test_shared() -> std::sync::Arc<crate::services::discord::SharedData> {
+        crate::services::discord::make_shared_data_for_tests()
+    }
+
     fn sweep_state() -> InflightTurnState {
         InflightTurnState::new(
             ProviderKind::Claude,
@@ -581,7 +609,8 @@ mod tests {
         state.tmux_session_name = None;
 
         assert_eq!(
-            abandoned_tmux_cleanup_decision_for(&state).await,
+            abandoned_tmux_cleanup_decision_for(&test_shared(), &ProviderKind::Claude, &state)
+                .await,
             AbandonedTmuxCleanupDecision::PreserveRetry,
         );
     }
@@ -595,7 +624,8 @@ mod tests {
         state.claude_e_pid = Some(std::process::id());
 
         assert_eq!(
-            abandoned_tmux_cleanup_decision_for(&state).await,
+            abandoned_tmux_cleanup_decision_for(&test_shared(), &ProviderKind::Claude, &state)
+                .await,
             AbandonedTmuxCleanupDecision::PreserveRetry,
         );
     }
@@ -612,7 +642,8 @@ mod tests {
         state.claude_e_macos_lstart_hash = identity.persisted_macos_lstart_hash();
 
         assert_eq!(
-            abandoned_tmux_cleanup_decision_for(&state).await,
+            abandoned_tmux_cleanup_decision_for(&test_shared(), &ProviderKind::Claude, &state)
+                .await,
             AbandonedTmuxCleanupDecision::PreserveRetry,
         );
     }
@@ -857,18 +888,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888() {
+    async fn destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg() {
+        use crate::services::discord::host_teardown_gate::test_support::{
+            Stored, channel_key, seed, shared_on,
+        };
+        use crate::services::session_host::test_support::InjectedLivenessGuard;
+        use crate::services::session_host::{HostLiveness, HostSessionRef};
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
             root.path(),
         );
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let shared = shared_on(&pool).await;
         let provider = ProviderKind::Claude;
         let state = sweep_state();
+        // A found legacy row whose pane tmux confirms dead: the owner-death cleanup is admitted.
+        let name = state.tmux_session_name.clone().expect("tmux name");
+        let key = channel_key(&shared, &name);
+        seed(&pool, &key, &name, state.channel_id, Stored::Legacy).await;
+        let dead = HostLiveness::DeadOrAbsent;
+        let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(&name), dead);
         let channel_id = serenity::ChannelId::new(state.channel_id);
         let turn_id = state.effective_finalizer_turn_id();
         let key = TurnKey::new(channel_id, turn_id, shared.restart.current_generation)
@@ -930,6 +974,63 @@ mod tests {
         assert!(eligible.queue_is_eligible());
         assert_eq!(eligible.turn_id, Some(turn_id));
         assert!(events.try_recv().is_err(), "admission must publish once");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // The owner-death cleanup reads the stored rows before it finishes the mailbox or deletes
+    // the row: only a found legacy row, or no row with no other-host trace, loses its turn.
+    #[tokio::test]
+    async fn owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg() {
+        use crate::services::discord::host_teardown_gate::test_support::{
+            Stored, busy_turn, channel_key, seed, shared_on, turn_kept,
+        };
+        use crate::services::session_host::test_support::InjectedLivenessGuard;
+        use crate::services::session_host::{HostLiveness, HostSessionRef};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = shared_on(&pool).await;
+        let provider = ProviderKind::Claude;
+        let probe_error = (Stored::Legacy, HostLiveness::ProbeError);
+        let cases = Stored::ALL
+            .into_iter()
+            .map(|stored| (stored, HostLiveness::DeadOrAbsent))
+            .chain([probe_error]);
+        for (n, (stored, pane)) in cases.enumerate() {
+            let channel = serenity::ChannelId::new(1_479_671_301_387_090_000 + n as u64);
+            let name = provider.build_tmux_session_name(&format!("p4b1-abandon-{n}"));
+            seed(
+                &pool,
+                &channel_key(&shared, &name),
+                &name,
+                channel.get(),
+                stored,
+            )
+            .await;
+            let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(&name), pane);
+            let token = busy_turn(&shared, channel, &name).await;
+            let state =
+                crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
+                    .expect("seeded row");
+
+            let before = std::time::Instant::now();
+            let deleted = super::finalize_owner_dead_cleanup_if_same_turn(
+                &shared, &provider, &state, 0, before, false,
+            )
+            .await;
+            let admitted = pane == HostLiveness::DeadOrAbsent
+                && matches!(stored, Stored::Legacy | Stored::Missing);
+            let label = format!("{stored:?} {pane:?}");
+            assert_eq!(deleted, admitted, "{label}");
+            assert_eq!(
+                turn_kept(&shared, channel, &token).await,
+                !admitted,
+                "{label}"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
     }
 
     #[test]

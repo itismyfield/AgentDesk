@@ -1353,6 +1353,8 @@ fn herdr_items_have_no_production_caller() {
     const IDENTITY_GATE: &str = "src/services/discord/inflight/save_store/identity_gate.rs";
     const CLAUDE_LAUNCH: &str = "src/services/claude/tui_session_launch.rs";
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
+    // Liveness consumers' local host reading: marker and row locator, never a Herdr route.
+    const LIVENESS: &str = "src/services/discord/host_liveness.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1370,18 +1372,24 @@ fn herdr_items_have_no_production_caller() {
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
         (
             "HostKindMarker",
-            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE],
+            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, LIVENESS],
         ),
         (
             "read_host_kind_marker",
-            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER],
+            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER, LIVENESS],
         ),
         (
             "host_marker::",
-            &[GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, CLAUDE_LAUNCH],
+            &[
+                GUARD_ADAPTER,
+                CLEANUP_GATE,
+                RESOLVE,
+                CLAUDE_LAUNCH,
+                LIVENESS,
+            ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
-        (".host_locator", &[GUARD_ADAPTER, BINDING_CAS]),
+        (".host_locator", &[GUARD_ADAPTER, BINDING_CAS, LIVENESS]),
         ("host_locator: Some", &[]),
         (
             "host_locator:",
@@ -1474,6 +1482,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (GUARD_ADAPTER, 1),
                 ("src/services/discord/inflight.rs", 0),
                 ("src/services/discord/host_key_derivation.rs", 1),
+                ("src/services/discord/host_defer_gate.rs", 1),
             ],
         ),
         ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
@@ -1817,7 +1826,7 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
 #[test]
 fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const SWEEP: &str = "a spawn-time sweep; each site's reason is checked below";
-    const BEFORE_WRITER: &str = "runs before the turn's writer posts the sessions row";
+    const BEFORE_WRITER: &str = "behind the turn-key host check, before the writer posts the row";
     const UNKEYED: &str = "a turn with no session key keeps the main teardown";
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";

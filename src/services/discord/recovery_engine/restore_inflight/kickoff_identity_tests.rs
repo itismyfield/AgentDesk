@@ -259,3 +259,52 @@ fn ownerless_guard_precedes_recovery_marker_and_kickoff() {
     assert_eq!(helper.matches("UserId::new(NonZeroU64::new(").count(), 1);
     assert_eq!(helper.matches("MessageId::new(").count(), 0);
 }
+
+// An ownerless row is disposed only when tmux confirms its pane dead and the host guard admits
+// the stored rows; a failed probe or a refused host keeps the row and its attempt count.
+#[tokio::test]
+async fn ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg() {
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, channel_key, seed, shared_on,
+    };
+    use crate::services::session_host::test_support::InjectedLivenessGuard;
+    use crate::services::session_host::{HostLiveness, HostSessionRef};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = shared_on(&pool).await;
+    let http = Arc::new(serenity::Http::new("Bot test-token"));
+    let provider = ProviderKind::Claude;
+    let probe_error = (Stored::Legacy, HostLiveness::ProbeError);
+    let cases = Stored::ALL
+        .into_iter()
+        .map(|stored| (stored, HostLiveness::DeadOrAbsent))
+        .chain([probe_error]);
+    for (n, (stored, pane)) in cases.enumerate() {
+        let channel = 1_479_671_301_387_100_000 + n as u64;
+        let state = reacquired_row(channel);
+        let name = state.tmux_session_name.clone().expect("tmux name");
+        seed(&pool, &channel_key(&shared, &name), &name, channel, stored).await;
+        let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(&name), pane);
+        inflight::save_inflight_state(&state).expect("persist ownerless row");
+        let state = inflight::load_inflight_state(&provider, channel).expect("persisted row");
+
+        let admitted = pane == HostLiveness::DeadOrAbsent
+            && matches!(stored, Stored::Legacy | Stored::Missing);
+        let label = format!("{stored:?} {pane:?}");
+        let dead = ownerless_pane_dead_admitted(&shared, &provider, &state, &name).await;
+        assert_eq!(dead, admitted, "{label}");
+        if admitted {
+            continue;
+        }
+        // Refused rows return before any Discord call, so the dummy client is never used.
+        dispose_ownerless_row(&http, &shared, &provider, &state, &name, "/nonexistent").await;
+        let row = inflight::load_inflight_state(&provider, channel).expect("row kept");
+        assert_eq!(
+            row.recovery_relay_attempts, state.recovery_relay_attempts,
+            "{label}"
+        );
+    }
+    pool.close().await;
+    db.drop().await;
+}

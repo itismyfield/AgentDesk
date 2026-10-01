@@ -153,6 +153,8 @@ pub(crate) enum ResumeRebindError {
     TargetCwdMissing(String),
     /// Auto-selection is only wired for Claude transcripts.
     AutoUnsupportedProvider(String),
+    /// The host guard keeps the session (Herdr, unknown or conflicting host evidence).
+    HostUnsupported(String),
     Database(String),
     Filesystem(String),
 }
@@ -201,6 +203,12 @@ impl ResumeRebindError {
                     "error": format!(
                         "auto previous-session selection is only supported for Claude; provider={provider}. Pass an explicit session_id."
                     )
+                })),
+            ),
+            ResumeRebindError::HostUnsupported(reason) => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("/resume is not supported for this session host: {reason}")
                 })),
             ),
             ResumeRebindError::Database(error) | ResumeRebindError::Filesystem(error) => (
@@ -495,6 +503,18 @@ pub(crate) async fn perform_resume_rebind(
     // cwd would silently start a fresh session in the wrong place.
     if !std::path::Path::new(&target_cwd).is_dir() {
         return Err(ResumeRebindError::TargetCwdMissing(target_cwd));
+    }
+
+    // The host guard judges the stored rows before the first change below.
+    let host_refusal = crate::services::discord::host_defer_gate::resume_host_refusal(
+        pool,
+        provider.as_ref(),
+        channel_id,
+        session_key,
+        tmux_name,
+    );
+    if let Some(reason) = host_refusal.await {
+        return Err(ResumeRebindError::HostUnsupported(reason));
     }
 
     // P1-B — durable-first ordering: commit the DB rebind BEFORE tearing down
@@ -1469,5 +1489,152 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The row's resume columns and its hosted-record lookup, for before/after comparison.
+    async fn durable_row(pool: &PgPool, key: &str) -> (Option<String>, Option<String>, String) {
+        use crate::db::dispatched_sessions::hosted_execution as hosted;
+        let context = crate::db::dispatched_sessions::load_session_rebind_context_pg(pool, key);
+        let row = context.await.expect("load").expect("session row");
+        let lookup =
+            hosted::load_hosted_execution_pg(pool, hosted::HostedLookupKey::SessionKey(key));
+        (
+            row.cwd,
+            row.claude_session_id,
+            format!("{:?}", lookup.await),
+        )
+    }
+
+    // A resume of a session the host guard keeps changes nothing: no durable rebind,
+    // teardown, tmux call, binding clear or in-memory rebind. A legacy row keeps main.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resume_refuses_what_the_host_guard_keeps_before_any_change_pg() {
+        use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux};
+        use crate::services::discord::host_teardown_gate::test_support::{channel_key, runtime};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
+        let (shared, registry) = runtime(&pool).await;
+        let target_cwd = tempfile::tempdir().expect("target cwd");
+        let opts = ResumePreviousOptions {
+            session_id: Some("99999999-9999-9999-9999-999999999999".to_string()),
+            cwd: Some(target_cwd.path().to_str().expect("utf8").to_string()),
+        };
+        let channel_of = |n: usize| ChannelId::new(1_479_671_301_387_066_000 + n as u64);
+        let seeded = |n: usize, case: Case| {
+            let (pool, shared) = (pool.clone(), shared.clone());
+            async move {
+                let name = format!("AgentDesk-claude-p4c1-resume-{n}");
+                let key = channel_key(&shared, &name);
+                case.seed(&pool, &key, &name, channel_of(n).get()).await;
+                crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                    &name,
+                    runtime_binding("old-sid"),
+                );
+                (name, key)
+            }
+        };
+        let kept = Case::ALL
+            .into_iter()
+            .filter(|c| c.has_row() && !c.admitted());
+        for (n, case) in kept.enumerate() {
+            let (name, key) = seeded(n, case).await;
+            let before = durable_row(&pool, &key).await;
+            let claude = Some(ProviderKind::Claude);
+            let resumed = perform_resume_rebind(
+                &pool,
+                Some(&registry),
+                &key,
+                claude,
+                Some(channel_of(n)),
+                &name,
+                &opts,
+            )
+            .await;
+            assert!(
+                matches!(resumed, Err(ResumeRebindError::HostUnsupported(_))),
+                "{case:?}: {resumed:?}"
+            );
+            assert_eq!(
+                durable_row(&pool, &key).await,
+                before,
+                "{case:?}: durable row"
+            );
+            assert_eq!(
+                tmux.take_calls(),
+                Vec::<String>::new(),
+                "{case:?}: tmux untouched"
+            );
+            let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&name);
+            assert!(bound.is_some(), "{case:?}: runtime binding kept");
+            let mirrored =
+                crate::services::discord::resume_launch_state_for_tests(&shared, channel_of(n))
+                    .await;
+            assert_eq!(mirrored, None, "{case:?}: no in-memory rebind");
+        }
+
+        let legacy = Case::Stored(
+            crate::services::discord::host_teardown_gate::test_support::Stored::Legacy,
+        );
+        let (name, key) = seeded(20, legacy).await;
+        let before = durable_row(&pool, &key).await;
+        let resumed = perform_resume_rebind(
+            &pool,
+            Some(&registry),
+            &key,
+            None,
+            Some(channel_of(20)),
+            &name,
+            &opts,
+        )
+        .await;
+        assert!(
+            matches!(resumed, Err(ResumeRebindError::HostUnsupported(_))),
+            "{resumed:?}"
+        );
+        assert_eq!(
+            durable_row(&pool, &key).await,
+            before,
+            "unknown provider: no rebind"
+        );
+
+        let _probe = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
+            &name,
+            crate::services::platform::tmux::PaneLiveness::ProbeError,
+        );
+        let claude = Some(ProviderKind::Claude);
+        let outcome = perform_resume_rebind(
+            &pool,
+            Some(&registry),
+            &key,
+            claude,
+            Some(channel_of(20)),
+            &name,
+            &opts,
+        )
+        .await
+        .expect("a legacy row resumes");
+        assert_eq!(
+            outcome.runtime_binding_clear,
+            ResumeRuntimeBindingClearOutcome::RetainedLive {
+                tmux_session: name.clone()
+            },
+            "a failed pane probe is not death"
+        );
+        let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&name);
+        assert!(bound.is_some(), "the live binding survives an unknown pane");
+        let durable = durable_row(&pool, &key).await;
+        assert_eq!(
+            durable.1.as_deref(),
+            Some("99999999-9999-9999-9999-999999999999")
+        );
+        assert_eq!(durable.2, before.2, "the hosted record is untouched");
+        pool.close().await;
+        db.drop().await;
     }
 }

@@ -1209,11 +1209,29 @@ async fn drive_bridge_stream_tick(
     (response_sent_offset, full_response, inflight_state)
 }
 
-/// A delegated TUI turn on a direct gateway leaves the body to O through tick and terminal,
-/// while a headless gateway turn of the same kind keeps its whole body for Legacy delivery.
+/// A delegated TUI body is O's through tick and terminal on any gateway. Without a direct gateway
+/// the channel is alarmed only while this process's writer is not taking it; Legacy raises none.
 #[tokio::test]
-async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
-    for direct in [true, false] {
+async fn o_delegated_tui_body_is_cut_on_every_gateway_and_alarmed_only_without_a_writer() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
+    // Alarms are process-wide, so the cases run in this order in a process of their own.
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::o_delegated_tui_body_is_cut_on_every_gateway_and_alarmed_only_without_a_writer"
+    )) {
+        return;
+    }
+    let halted = format!("tui_o:halted:{DRIVER_CHANNEL_ID}");
+    let raised = || crate::services::tui_o::alarm::health_reasons().contains(&halted);
+    // (selected, direct, writer taking the channel)
+    for (selected, direct, taking) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+        (true, false, false),
+    ] {
+        let case = format!("selected={selected} direct={direct} taking={taking}");
         let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
         driver.gateway = Arc::new(DriverGateway {
             chain_locally: true,
@@ -1226,17 +1244,19 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
             yields_per_call: 0,
             check: driver.body_check.clone(),
         });
-        driver.inflight.runtime_kind =
-            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        driver.inflight.runtime_kind = Some(ClaudeTui);
         crate::services::discord::inflight::save_inflight_state(&driver.inflight)
             .expect("seed the TUI-kind row");
-        let _forced = crate::services::tui_o::cutover::test_override::force_channels(&[(
-            DRIVER_CHANNEL_ID,
-            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-        )]);
+        let channel = DRIVER_CHANNEL_ID + u64::from(!selected);
+        let _forced = test_override::force_channels(&[(channel, ClaudeTui)]);
+        let _writer = test_probe::answer_with(move |_| taking);
 
         let (offset, full_response, inflight) =
             drive_bridge_stream_tick(&driver, driver.inflight.clone()).await;
+        if !selected {
+            assert!(!raised(), "{case}: a Legacy channel raises no O alarm");
+            continue;
+        }
         // The last chunk lands after the final tick, so the terminal sees an unsent tail.
         const TAIL: &str = "\nADK tail streamed after the last tick";
         let (ctx, mut state) = driver.parts();
@@ -1262,34 +1282,22 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
             .count();
         assert_eq!(
             body_writes, 0,
-            "direct={direct}: no gateway body write; observed={observed:?}"
+            "{case}: no gateway body write; observed={observed:?}"
         );
-        if direct {
-            assert_eq!(
-                offset,
-                DRIVER_BODY.len(),
-                "the tick consumes the delegated body"
-            );
-            assert!(
-                output.terminal_delivery_committed,
-                "consumed turn commits without transport"
-            );
-        } else {
-            assert_eq!(offset, 0, "a headless turn keeps its body unconsumed");
-            assert_eq!(
-                (output.full_response, output.response_sent_offset),
-                (format!("{DRIVER_BODY}{TAIL}"), 0),
-                "a held headless gateway retains the whole original body"
-            );
-            assert!(
-                !observed.iter().any(|o| o.call == DriverCall::Delete),
-                "headless placeholder is not dropped by the O cut; observed={observed:?}"
-            );
-            assert!(
-                !output.terminal_delivery_committed && output.preserve_inflight_for_cleanup_retry,
-                "a selected TUI destination without a direct gateway is held for retry"
-            );
-        }
+        assert_eq!(
+            offset,
+            DRIVER_BODY.len(),
+            "{case}: the tick consumes O's body"
+        );
+        assert!(
+            output.terminal_delivery_committed && !output.preserve_inflight_for_cleanup_retry,
+            "{case}: the consumed turn commits without transport or a retry"
+        );
+        assert_eq!(
+            raised(),
+            !direct && !taking,
+            "{case}: only a body waiting for a writer that is not taking it is alarmed"
+        );
     }
 }
 

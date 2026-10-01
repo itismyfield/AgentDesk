@@ -19,11 +19,13 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use crate::services::discord::SharedData;
-use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::host_liveness;
+use crate::services::discord::inflight::{InflightTurnState, KeyedTeardown};
 use crate::services::discord::recovery_paths::restart::dispose_recovery_relay_outcome;
 use crate::services::discord::settings::BotChannelRoutingGuardFailure;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
+use crate::services::provider::session_probe::SessionLiveness;
 
 /// Route a restart-time routing-validation failure for an in-flight row.
 ///
@@ -75,6 +77,40 @@ fn routing_orphan_pane_alive(liveness: PaneLiveness) -> bool {
     !matches!(liveness, PaneLiveness::DeadOrAbsent)
 }
 
+/// The disposition's `tmux_alive`, or `None` when the row is left as stored: another host, or
+/// a tmux-confirmed dead pane whose stored rows the host guard keeps.
+async fn routing_orphan_tmux_alive(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    tmux_session_name: Option<&str>,
+) -> Option<bool> {
+    let Some(name) = tmux_session_name else {
+        return Some(false);
+    };
+    let liveness = host_liveness::observe_liveness(name, Some(state));
+    if liveness == SessionLiveness::Unknown {
+        return None;
+    }
+    if routing_orphan_pane_alive(host_liveness::as_pane_liveness(liveness)) {
+        return Some(true);
+    }
+    let caller = "recovery_routing_orphaned";
+    let gate = host_liveness::tmux_verdict_gate(
+        shared,
+        provider,
+        state.channel_id,
+        name,
+        liveness,
+        caller,
+    );
+    match gate.await {
+        // Watcher-reacquired rows never ran a turn-start row write, and that write is best effort.
+        KeyedTeardown::Cleared(_) | KeyedTeardown::RowMissing => Some(false),
+        KeyedTeardown::Kept => None,
+    }
+}
+
 /// Finalize a restart-time inflight row whose bot/channel routing CHANGED while
 /// dcserver was down (e.g. the channel was re-bound to a different provider).
 /// Such a row is genuinely orphaned — no same-provider sibling bot will adopt
@@ -106,11 +142,11 @@ async fn cleanup_routing_orphaned_inflight(
     // DEFINITIVE dead/absent pane (or no session name at all) permits the budget
     // force-clear path; a transient probe ERROR is treated as maybe-alive and
     // preserves the row (re-notify next boot) — never budget-clear a live pane.
-    let tmux_alive = tmux_session_name.map_or(false, |name| {
-        routing_orphan_pane_alive(
-            crate::services::tmux_diagnostics::tmux_session_pane_liveness(name),
-        )
-    });
+    let tmux_alive = routing_orphan_tmux_alive(shared, provider, state, tmux_session_name).await;
+    // A kept row is left whole: no restart report clear, notice or disposition.
+    let Some(tmux_alive) = tmux_alive else {
+        return;
+    };
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] 🧹 recovery: inflight routing changed for channel {} ({reason}) — finalizing orphaned turn instead of stranding it for the sweeper (#3869)",
@@ -138,6 +174,10 @@ async fn cleanup_routing_orphaned_inflight(
     )
     .await;
 }
+
+#[cfg(test)]
+#[path = "routing_orphan_tests.rs"]
+mod host_guard_tests;
 
 /// #3869 codex-rework regression: the orphaned-row cleanup must derive its
 /// DESTRUCTIVE `tmux_alive` disposition guard from the THREE-state pane probe.

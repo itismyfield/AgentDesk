@@ -1815,11 +1815,14 @@ pub(super) async fn handle_text_message(
     );
     #[cfg(unix)]
     reconcile_managed_tmux_runtime_kind_for_config(
+        shared,
         &provider,
         channel_id,
+        adk_session_key.as_deref(),
         tmux_session_name.as_deref(),
         prelaunch_runtime_kind,
-    );
+    )
+    .await;
 
     let model_for_turn =
         super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;

@@ -352,6 +352,7 @@ async fn run_placeholder_sweep_pass(
                 );
                 report.abandoned += 1;
             } else if sweep_reap_dead_watcher_rebind_origin(
+                shared,
                 provider,
                 &state,
                 age_secs,
@@ -570,7 +571,8 @@ async fn run_placeholder_sweep_pass(
                         // Fall through to the original abort-edit path.
                     }
                 }
-                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state).await;
+                let cleanup_decision =
+                    abandoned_tmux_cleanup_decision_for(shared, provider, &state).await;
                 if cleanup_decision == AbandonedTmuxCleanupDecision::PreserveRetry {
                     continue;
                 }
@@ -592,7 +594,7 @@ async fn run_placeholder_sweep_pass(
                 );
                 // Re-probe immediately before the edit so a revived session wins.
                 if !cleanup_decision.allows_discord_cleanup()
-                    || !abandoned_tmux_cleanup_decision_for(&state)
+                    || !abandoned_tmux_cleanup_decision_for(shared, provider, &state)
                         .await
                         .allows_discord_cleanup()
                     || !inflight_state_still_same_turn(provider, &state, age_secs)
@@ -782,7 +784,7 @@ async fn sweep_orphan_status_panel(
     // evidence keeps the Discord panel and inflight row for a later retry.
     // Panel-only/TUI-direct rows have no real user-message identity to finalize,
     // so only those terminal-marker rows can discard their stale marker.
-    if !abandoned_tmux_cleanup_decision_for(state)
+    if !abandoned_tmux_cleanup_decision_for(shared, provider, state)
         .await
         .allows_discord_cleanup()
     {
