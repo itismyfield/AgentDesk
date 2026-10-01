@@ -48,10 +48,17 @@ def _record(*receipts: dict, generation: int = 77, end: int = 20) -> dict:
     }
 
 
+def _o_prepared(serial: int, *, channel: int = 99) -> dict:
+    unit = {"channel_id": channel, "provider": "claude", "native_key": "msg_1:0", "kind": "body"}
+    return {"type": "prepared", "serial": serial, "unit_key": unit, "piece_index": 0,
+            "payload": "[E2E:E35:run:OK]", "anchor_id": 1, "epoch": 1}
+
+
 class RecordFixtures(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name) / "runtime"
+        self.o_store = Path(self.tmp.name) / "o_store"
         self.records = self.root / "discord_delivery_records" / "claude"
         self.records.mkdir(parents=True)
 
@@ -60,6 +67,14 @@ class RecordFixtures(unittest.TestCase):
 
     def write(self, record: dict, owner: str = "42") -> None:
         (self.records / f"{owner}.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def write_o_ledger(self, *entries: dict, channel: str = "99", init: bool = True) -> None:
+        store = self.o_store / channel
+        store.mkdir(parents=True, exist_ok=True)
+        if init:
+            (store / "init").write_text("{}", encoding="utf-8")
+        lines = [json.dumps({"at": "2026-10-01T09:45:25Z", "entry": entry}) for entry in entries]
+        (store / "ledger.jsonl").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
 
     def scan(
         self,
@@ -73,6 +88,28 @@ class RecordFixtures(unittest.TestCase):
         )
 
     def test_exact_response_receipt_and_covering_frontier_are_evaluated(self):
+        self.write(_record(_receipt(222), end=30))
+        self.assertEqual(self.scan()["status"], "evaluated")
+
+    def test_o_channel_receipt_is_the_o_ledger_posted_record_for_the_message(self):
+        self.write_o_ledger(_o_prepared(117), {"type": "posted", "serial": 117, "msg_id": 222})
+        result = self.scan()
+        self.assertEqual(result["status"], "evaluated", result)
+        self.assertEqual((result["output_owner"], result["serial"]), ("o", 117))
+
+    def test_o_channel_without_its_posted_record_fails_even_beside_a_legacy_receipt(self):
+        self.write(_record(_receipt(222), end=30))
+        self.write_o_ledger(_o_prepared(117), {"type": "posted", "serial": 117, "msg_id": 111})
+        result = self.scan()
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual((result["output_owner"], result["o_posted_records"]), ("o", 0))
+
+    def test_legacy_channel_beside_an_o_store_keeps_the_durable_receipt_verdict(self):
+        self.write_o_ledger(_o_prepared(117), {"type": "posted", "serial": 117, "msg_id": 222},
+                            channel="99", init=False)
+        self.write_o_ledger(channel="98")
+        result = self.scan()
+        self.assertEqual((result["status"], result["output_owner"]), ("failed", "legacy"), result)
         self.write(_record(_receipt(222), end=30))
         self.assertEqual(self.scan()["status"], "evaluated")
 

@@ -67,6 +67,16 @@ pub(super) fn relay_verdict_probe_operands(
     }
 }
 
+/// Channels whose TUI output O owns here. O posts their body, so no Legacy receipt covers it and
+/// the composed verdict must not set health; O's own `tui_o:*` alarms answer for them.
+pub(super) fn o_owned_output_channels() -> std::collections::BTreeSet<u64> {
+    crate::services::tui_o::cutover::boot_ownership()
+        .into_iter()
+        .filter(|(_, _, candidate)| candidate.as_ref().is_some_and(|c| c.peek().owned()))
+        .map(|(channel, _, _)| channel)
+        .collect()
+}
+
 /// The detail path's execution-owner witness (#5942).
 ///
 /// The two health paths intentionally do NOT share a probe — they ask
