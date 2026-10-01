@@ -808,3 +808,6 @@ async fn a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration() {
 
 #[path = "../../discord/tui_prompt_relay/rehydration_pending_tests.rs"]
 mod pending;
+
+#[path = "../../discord/tui_prompt_relay/headless_tests.rs"]
+mod headless;

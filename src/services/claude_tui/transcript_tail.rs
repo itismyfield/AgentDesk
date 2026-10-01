@@ -108,15 +108,16 @@ pub fn claude_project_dir_candidates_for_cwd(
 /// per-session transcript identity tracked at handoff, which the binding does
 /// not yet carry (session_id is registered as None by the Discord turn).
 /// Returns `None` when no project directory or no qualifying transcript exists.
+/// Headless SDK transcripts sharing the project dir are never candidates.
 pub fn latest_claude_transcript_for_cwd(
     cwd: &Path,
     modified_since: std::time::SystemTime,
     claude_home: Option<&Path>,
     exclude: &std::collections::HashSet<PathBuf>,
 ) -> Option<PathBuf> {
-    claude_transcripts_for_cwd_since(cwd, modified_since, claude_home, exclude)
+    claude_transcript_files_for_cwd_since(cwd, modified_since, claude_home, exclude)
         .into_iter()
-        .next()
+        .find(|path| !claude_transcript_is_headless_sdk(path))
 }
 
 /// #3212 (codex P1): like [`latest_claude_transcript_for_cwd`] but returns ALL
@@ -130,8 +131,21 @@ pub fn latest_claude_transcript_for_cwd(
 ///
 /// `modified_since` floors the result to transcripts at/after this session's
 /// launch (pass `UNIX_EPOCH` to disable); `exclude` drops transcripts already
-/// claimed by OTHER live sessions' bindings.
+/// claimed by OTHER live sessions' bindings. Headless SDK transcripts are dropped.
 pub fn claude_transcripts_for_cwd_since(
+    cwd: &Path,
+    modified_since: std::time::SystemTime,
+    claude_home: Option<&Path>,
+    exclude: &std::collections::HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut found =
+        claude_transcript_files_for_cwd_since(cwd, modified_since, claude_home, exclude);
+    found.retain(|path| !claude_transcript_is_headless_sdk(path));
+    found
+}
+
+/// Every qualifying `<uuid>.jsonl`, newest first, before the headless SDK filter.
+fn claude_transcript_files_for_cwd_since(
     cwd: &Path,
     modified_since: std::time::SystemTime,
     claude_home: Option<&Path>,
@@ -186,6 +200,38 @@ pub fn claude_transcripts_for_cwd_since(
     }
     found.sort_by(|(a, _), (b, _)| b.cmp(a));
     found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Prefix bytes read to find a transcript's recorded entrypoint; SDK prompts can precede it.
+const CLAUDE_ENTRYPOINT_PROBE_BYTES: u64 = 1024 * 1024;
+
+/// True when the first record carrying `entrypoint` names an SDK one (`sdk-cli`, ...): a
+/// headless `claude -p` session, never an interactive TUI. Unknown or unreadable is false.
+pub(crate) fn claude_transcript_is_headless_sdk(path: &Path) -> bool {
+    #[derive(serde::Deserialize)]
+    struct EntrypointProbe {
+        entrypoint: Option<String>,
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut reader =
+        std::io::BufReader::new(std::io::Read::take(file, CLAUDE_ENTRYPOINT_PROBE_BYTES));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) if line.last() != Some(&b'\n') => return false,
+            Ok(_) => {}
+        }
+        if let Ok(EntrypointProbe {
+            entrypoint: Some(entrypoint),
+        }) = serde_json::from_slice::<EntrypointProbe>(&line)
+        {
+            return entrypoint.starts_with("sdk-");
+        }
+    }
 }
 
 // #3034: test-only — see `TranscriptReplayOutcome` note. Pins the JSONL replay
@@ -448,6 +494,55 @@ mod tests {
                 &exclude_newer,
             ),
             Some(older.clone())
+        );
+    }
+
+    #[test]
+    fn headless_sdk_transcripts_are_never_tui_candidates() {
+        let cwd = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let project_dir = claude_project_dir_for_cwd(cwd.path(), Some(home.path())).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let cli = project_dir.join("11111111-1111-4111-8111-111111111111.jsonl");
+        let fresh = project_dir.join("22222222-2222-4222-8222-222222222222.jsonl");
+        let sdk = project_dir.join("33333333-3333-4333-8333-333333333333.jsonl");
+        std::fs::write(
+            &cli,
+            "{\"type\":\"mode\"}\n{\"type\":\"user\",\"entrypoint\":\"cli\"}\n",
+        )
+        .unwrap();
+        // A compaction successor that has not recorded its entrypoint yet.
+        std::fs::write(&fresh, "{\"type\":\"file-history-snapshot\"}\n").unwrap();
+        // `claude -p` writes its prompt before the first entrypoint-bearing record.
+        let prompt = "x".repeat(600 * 1024);
+        std::fs::write(
+            &sdk,
+            format!(
+                "{{\"type\":\"queue-operation\",\"content\":\"{prompt}\"}}\n\
+                 {{\"type\":\"user\",\"entrypoint\":\"sdk-cli\"}}\n"
+            ),
+        )
+        .unwrap();
+        let base =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for (offset, path) in [(0, &cli), (60, &fresh), (120, &sdk)] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(base + std::time::Duration::from_secs(offset))
+                .unwrap();
+        }
+
+        let no_exclude = std::collections::HashSet::new();
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        assert_eq!(
+            claude_transcripts_for_cwd_since(cwd.path(), epoch, Some(home.path()), &no_exclude),
+            vec![fresh.clone(), cli]
+        );
+        assert_eq!(
+            latest_claude_transcript_for_cwd(cwd.path(), epoch, Some(home.path()), &no_exclude),
+            Some(fresh)
         );
     }
 
