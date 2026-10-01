@@ -567,17 +567,24 @@ async fn a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_curso
 
 async fn undelivered_closed_turn() {
     let pair = Pair::new().await;
-    // A's turn reached the transcript but no Legacy delivery covered it yet.
+    // A's turn reached the transcript but no Legacy delivery covered it yet: its inflight row
+    // still stands, and the gateway reads that as Legacy's custody.
     let leg = &pair.legs[0];
     std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
     pair.read_legacy();
     rehydrated(&pair.legs[0]);
+    *pair.io.custody.lock().unwrap() = Some(|channel| {
+        crate::services::discord::inflight::inflight_state_file_exists(
+            &ProviderKind::Claude,
+            channel,
+        )
+    });
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let hosts = pair.host(&pair.io);
     settle().await;
     assert_eq!(adoption(A), Adoption::Released);
-    pair.released_for("past frontier 0 may post");
+    pair.released_for("Legacy retains delivery custody");
     // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
     finish(&pair.legs[0]).await;
     settle().await;

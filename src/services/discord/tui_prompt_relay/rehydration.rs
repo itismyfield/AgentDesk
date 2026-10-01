@@ -12,6 +12,7 @@
 //! `use self::rehydration::{...}` re-import.
 
 use super::super::host_defer_gate::mirror_evict_admitted as host_admits;
+use super::super::recovery_engine::host_reconcile::names_another_host;
 use super::launch_script::{claude_tui_launch_transcript, claude_tui_rehydrated_binding};
 use super::*;
 use std::collections::HashMap;
@@ -271,8 +272,8 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
     // authoritative registry — see the repair gate below.
     let authoritative_channel = claude_channel(tmux_session_name);
     let channel_id = match authoritative_channel.or(existing_channel) {
-        Some(channel_id) => channel_id,
-        None => return,
+        Some(channel_id) if !names_another_host(tmux_session_name) => channel_id,
+        _ => return,
     };
     if !claude_pane_live(tmux_session_name) {
         if !host_admits(shared, &ProviderKind::Claude, tmux_session_name) {
