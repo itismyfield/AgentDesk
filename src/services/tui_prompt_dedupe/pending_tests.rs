@@ -162,6 +162,15 @@ fn clear_at(transcript: &Path, secs: i64) -> HookSignal {
     }
 }
 
+/// A prompt whose relay publish time is `secs` past the same epoch as `clear_at`.
+fn prompt_at(transcript: &Path, secs: i64) -> HookSignal {
+    let payload = serde_json::json!({ "transcript_path": transcript });
+    HookSignal {
+        published_at: chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0),
+        ..HookSignal::from_payload("user_prompt_submit", &payload)
+    }
+}
+
 /// Launch A, then a /clear to B before B's transcript exists; the log ends in Pending{B}.
 fn launch_then_clear(lane: &Lane, channel: u64, tmux: &str, a_exists: bool) -> (String, String) {
     let (a, b) = (uuid(), uuid());
@@ -596,7 +605,7 @@ fn a_pending_refused_before_the_restart_stays_refused_until_it_resolves() {
     let pending = adopt_claude_continuation_session(&a, &b, &clear_at(&lane.path(&b), 10));
     assert!(pending.unwrap().is_none(), "B waits for its transcript");
     let c_path = lane.touch(&c);
-    let adopted = adopt_claude_continuation_session(&a, &c, &clear_at(&c_path, 20));
+    let adopted = adopt_claude_continuation_session(&a, &c, &prompt_at(&c_path, 20));
     assert!(
         adopted.unwrap().is_some(),
         "C is bound and supersedes the waiting B"
@@ -868,7 +877,7 @@ fn a_late_hook_refused_as_left_leaves_the_waiting_pending_queued() {
     let adopted = AdoptionHttp::Durable(DurableKind::Adopted);
     assert_eq!(adopt_from_hook(&a, &b, &clear_at(&b_path, 10)), adopted);
     assert_eq!(
-        adopt_from_hook(&a, &c, &clear_at(&lane.path(&c), 20)),
+        adopt_from_hook(&a, &c, &prompt_at(&lane.path(&c), 20)),
         adopted
     );
     assert!(clear_claude_session_rotation(tmux));

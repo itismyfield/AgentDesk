@@ -306,6 +306,9 @@ pub(crate) enum SourceRejection {
     IdentityUnavailable,
     /// The session is one the pane already left.
     Regression,
+    /// A start Claude may run after it moved on, so it cannot show it is newer than a hooked move;
+    /// a later hook of its session adopts it.
+    UnprovenStart,
 }
 
 /// Judges one hook against the bound session, its pin and the pane's history: a left session needs
@@ -361,7 +364,7 @@ pub(crate) fn verify_claude_source(
     if !awaited && stale {
         return Rejected(SourceRejection::Regression);
     }
-    // A start Claude may run after it moved on cannot prove it is newer than a hooked move: wait.
+    // A start Claude may run after it moved on cannot prove it is newer than a hooked move.
     let start = HookEventKind::from_path(&hook.event) == HookEventKind::SessionStart;
     let background = start
         && matches!(
@@ -374,7 +377,7 @@ pub(crate) fn verify_claude_source(
         SourceVerdict::Rotate(_)
             if !awaited && background && published.is_some() && !since.is_empty() =>
         {
-            SourceVerdict::Pending
+            Rejected(SourceRejection::UnprovenStart)
         }
         verdict => verdict,
     }

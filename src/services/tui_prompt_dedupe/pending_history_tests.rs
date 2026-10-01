@@ -861,12 +861,21 @@ fn a_background_start_published_late_does_not_take_the_pane_back() {
     let (x, y) = (uuid(), uuid());
     let pane = Pane::new(&lane, 7_728, "n2b-u10a");
     pane.chain(&[(&y, 20)]);
+    let unproven = AdoptionHttp::Skipped(AdoptSkip::SourceRejected(SourceRejection::UnprovenStart));
+    let late = pane.send(&x, start("clear", &pane.file(&x), 30));
+    assert_eq!(late, unproven, "[U10:clear]");
+    retry_deferred_claude_adoptions();
     assert_eq!(
-        pane.send(&x, start("clear", &pane.file(&x), 30)),
-        PENDING,
+        pane.bound(),
+        Some(y),
+        "[U10:clear] nothing is left to retry"
+    );
+    // X's own prompt is evidence the pane is on X.
+    assert_eq!(
+        pane.send(&x, prompt(&pane.path(&x), 40)),
+        ADOPTED,
         "[U10:clear]"
     );
-    assert_eq!(pane.bound(), Some(y), "[U10:clear]");
     // A relaunch resuming B, whose own start is queued after the pane already took D.
     let (b, d) = (uuid(), uuid());
     let pane = Pane::new(&lane, 7_729, "n2b-u10b");

@@ -809,7 +809,8 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
         ("SessionStart", &b, Some("clear")),
         ("UserPromptSubmit", &b, None),
         ("Stop", &b, None),
-        ("SessionStart", &c, Some("clear")),
+        // A start cannot show it is newer than B's hooked move; C's prompt can.
+        ("UserPromptSubmit", &c, None),
     ] {
         assert_eq!(send(event, session, source), 425, "{event} {session}");
     }
@@ -871,8 +872,8 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
             ),
             (
                 BindingTarget::Source(src(&c_path, &c)),
-                BindingCause::Clear,
-                start
+                BindingCause::Unknown,
+                Some("user_prompt_submit".to_owned())
             ),
         ]
     );

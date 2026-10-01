@@ -410,7 +410,8 @@ fn a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged() {
     filetime::set_file_mtime(&c_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
     let (front, r) = (
         ingress.payload(&b, Some("clear")),
-        ingress.payload(&c, Some("clear")),
+        // A start of C could not show it is newer than B's hooked move; C's prompt can.
+        ingress.payload(&c, None),
     );
 
     APPEND_FAULT.with(|slot| slot.set(Some("write")));
@@ -418,7 +419,7 @@ fn a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged() {
         ingress.claude_hook("SessionStart", &a, &front, Some(&uuid())),
         425
     );
-    let uri = format!("/hooks/claude/SessionStart?session_id={a}");
+    let uri = format!("/hooks/claude/UserPromptSubmit?session_id={a}");
     let (status, body) = ingress.send(&uri, &r, Some(&r_id));
     assert_eq!(
         (status, &body["reason"]),
@@ -433,7 +434,7 @@ fn a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged() {
         1,
         "front logged, rotation pending"
     );
-    let resend = ingress.claude_hook("SessionStart", &a, &r, Some(&r_id));
+    let resend = ingress.claude_hook("UserPromptSubmit", &a, &r, Some(&r_id));
     assert!(
         resend == 425 && session_lines(channel, &c).is_empty(),
         "status == 425 && no R record while the front's rotation is pending (got {resend})"
@@ -442,7 +443,7 @@ fn a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged() {
     assert!(clear_claude_session_rotation(tmux));
     retry_deferred_claude_adoptions();
     assert_eq!(
-        ingress.claude_hook("SessionStart", &a, &r, Some(&r_id)),
+        ingress.claude_hook("UserPromptSubmit", &a, &r, Some(&r_id)),
         202
     );
     let (b_seq, c_seq) = (session_lines(channel, &b)[0], session_lines(channel, &c)[0]);

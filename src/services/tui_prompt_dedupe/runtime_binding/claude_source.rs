@@ -286,6 +286,7 @@ fn refused(rejection: SourceRejection) -> Checked {
         SourceRejection::FirstRecordMismatch => "first_record_mismatch",
         SourceRejection::IdentityUnavailable => "identity_unavailable",
         SourceRejection::Regression => "regression",
+        SourceRejection::UnprovenStart => "unproven_start",
     };
     Checked::Refused(AdoptSkip::SourceRejected(rejection), reason)
 }

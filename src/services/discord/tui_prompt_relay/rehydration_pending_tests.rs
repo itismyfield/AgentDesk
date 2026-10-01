@@ -145,6 +145,11 @@ impl Pane {
         ingress.claude_hook("SessionStart", &self.a, &clear, Some(request))
     }
 
+    fn prompt_to(&self, ingress: &Ingress, c: &str) -> u16 {
+        let prompt = serde_json::json!({ "session_id": c, "transcript_path": self.path(c) });
+        ingress.claude_hook("UserPromptSubmit", &self.a, &prompt, Some(&uuid()))
+    }
+
     /// Writes C's transcript a minute newer than `bound`'s and lets the deferred poll adopt it.
     fn adopt_newer(&self, c: &str, bound: &str) {
         let bound = std::fs::metadata(self.path(bound))
@@ -399,13 +404,10 @@ fn a_file_less_restored_b_gives_way_to_the_next_session_with_a_file() {
         "{waiting:?}"
     );
 
-    // B never gets a file; the pane moves on to C, whose transcript exists before its hook lands.
+    // B never gets a file; the pane moves on to C, whose transcript exists before its prompt lands.
     let c = uuid();
     pane.touch(&c);
-    let clear = serde_json::json!({
-        "session_id": c, "source": "clear", "transcript_path": pane.path(&c),
-    });
-    let status = ingress.claude_hook("SessionStart", &pane.a, &clear, Some(&uuid()));
+    let status = pane.prompt_to(&ingress, &c);
     assert_eq!(status, 202, "C is not refused over B's missing file");
     pane.expect_bound(&c);
     pane.rehydrate();
@@ -572,14 +574,14 @@ fn a_pane_no_pass_mapped_still_acknowledges_a_file_less_hook_without_a_channel()
 }
 
 #[test]
-fn a_restored_b_whose_transcript_is_unreadable_still_refuses_the_next_session() {
+fn a_restored_b_whose_transcript_is_unreadable_gives_way_like_a_missing_one() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let ingress = Ingress::new();
     let _reset = Reset;
     let pane = Pane::new(&ingress, root.path(), 7_527, false);
     pane.restart();
-    // B's path exists but cannot be read; only a missing file counts as older than every candidate.
+    // The judgment reads the pane's history, not B's file, so an unreadable B decides nothing.
     std::os::unix::fs::symlink(pane.path(&pane.b), pane.path(&pane.b)).unwrap();
     let waiting = pane.rehydrate();
     assert!(
@@ -595,12 +597,8 @@ fn a_restored_b_whose_transcript_is_unreadable_still_refuses_the_next_session() 
 
     let c = uuid();
     pane.touch(&c);
-    let clear = serde_json::json!({
-        "session_id": c, "source": "clear", "transcript_path": pane.path(&c),
-    });
-    let status = ingress.claude_hook("SessionStart", &pane.a, &clear, Some(&uuid()));
-    assert_eq!(status, 425, "an unreadable B is not skipped as missing");
-    pane.expect_bound(&pane.b);
+    assert_eq!(pane.prompt_to(&ingress, &c), 202, "C's prompt is judged");
+    pane.expect_bound(&c);
 }
 
 #[test]

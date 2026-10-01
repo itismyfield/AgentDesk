@@ -747,6 +747,8 @@ impl ProducerPane {
             published_at: Some(self.base + TimeDelta::seconds(secs)),
             ..p5::HookSignal::from_payload(event, &payload)
         };
+        // Delivery drains each rotation before the next hook, as a settled pane does.
+        crate::services::tui_prompt_dedupe::clear_claude_session_rotation(self.tmux);
         adopt_from_hook(&self.a, session, &hook);
     }
 
@@ -773,8 +775,8 @@ fn session_row(session: &str) -> Vec<u8> {
     line
 }
 
-/// The log the real judgment writes for A → Pending B (clear) → C → resume B → D, read as O reads
-/// it: the superseded Pending B is passed by evidence in the log, never resolved or skipped blindly.
+/// The log the real judgment writes for A → Pending B (clear) → C → resume B → Pending D (clear)
+/// resolved, read as O reads it: the superseded Pending B is passed by evidence in the log.
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
@@ -809,8 +811,9 @@ async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
     pane.send(prompt, None, &c, &path(&c), 20);
     std::fs::write(path(&b), session_row(&b)).unwrap();
     pane.send("session_start", Some("resume"), &b, &path(&b), 30);
+    pane.send("session_start", Some("clear"), &d, &path(&d), 40);
     std::fs::write(path(&d), session_row(&d)).unwrap();
-    pane.send(prompt, None, &d, &path(&d), 40);
+    pane.send(prompt, None, &d, &path(&d), 41);
     append(&path(&d), &row("n1", "d out"));
     assert_eq!(pane.bound().as_deref(), Some(d.as_str()), "[O:binding_d]");
     let events = bindings.binding_events_since(CHANNEL, 0).unwrap();
@@ -824,10 +827,15 @@ async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
             }
         )
     };
-    assert_eq!(
+    let resolved = |e: &&BindingEvent| matches!(&e.record, BindingRecord::Resolved { .. });
+    let counts = (
         events.iter().filter(pending).count(),
-        1,
-        "[O:one_pending] {events:#?}"
+        events.iter().filter(resolved).count(),
+    );
+    assert_eq!(
+        counts,
+        (2, 1),
+        "[O:pendings] only D's is resolved {events:#?}"
     );
     polls(6).await;
     let store = harness.channel();
