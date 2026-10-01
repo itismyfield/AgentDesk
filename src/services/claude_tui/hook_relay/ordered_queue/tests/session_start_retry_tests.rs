@@ -125,12 +125,17 @@ impl Retry {
         std::fs::read_dir(dir).map_or(0, |d| d.count())
     }
 
-    async fn until(&self, label: &str, mut done: impl FnMut(&Self) -> bool) {
+    /// Waits up to 5s; the caller asserts the outcome so a mutant fails at its own assertion.
+    async fn settled(&self, mut done: impl FnMut(&Self) -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done(self) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(done(self), "timed out waiting for {label}");
+        done(self)
+    }
+
+    async fn until(&self, label: &str, done: impl FnMut(&Self) -> bool) {
+        assert!(self.settled(done).await, "timed out waiting for {label}");
     }
 }
 
@@ -247,8 +252,14 @@ fn a_session_start_whose_first_send_fails_is_retried_and_adopted() {
             tq.adopted(session).await;
         }
         tq.hook("SessionStart", &b, Some("resume"));
-        tq.adopted(&b).await;
+        let resumed = tq
+            .settled(|tq| tq.bound().as_deref() == Some(b.as_str()))
+            .await;
         let sends = tq.attempts("SessionStart");
+        assert!(
+            resumed,
+            "[H18:session_start_durable] not adopted after {sends:?}"
+        );
         assert_eq!(sends.len(), 2, "[H18:session_start_durable] {sends:?}");
         assert_eq!((sends[0].3, sends[1].3), (Fate::Drop, Fate::Forward));
         assert_eq!(sends[0].0, sends[1].0, "same request id");
@@ -301,10 +312,8 @@ fn only_a_claude_session_start_retries_a_transport_failure() {
         tq.worker("codex", &codex);
         let payload = json!({ "session_id": codex, "source": "startup" });
         tq.send("codex", "SessionStart", &codex, payload);
-        tq.until("three markers", |tq| {
-            tq.markers("claude") + tq.markers("codex") >= 3
-        })
-        .await;
+        tq.settled(|tq| tq.markers("claude") + tq.markers("codex") >= 3)
+            .await;
         tokio::time::sleep(Duration::from_millis(600)).await;
         for event in ["UserPromptSubmit", "PostToolUse", "SessionStart"] {
             assert_eq!(tq.attempts(event).len(), 1, "[H22:scope] {event} sent once");
