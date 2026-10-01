@@ -119,6 +119,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::rebind_reap::tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
+  --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests
   --skip services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
@@ -394,6 +395,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
+  services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::owned_row_kickoff_identity_matches_persisted_ids
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_apply_disposes_row_per_relay_outcome_without_anchor_or_queue_loss
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_guard_precedes_recovery_marker_and_kickoff

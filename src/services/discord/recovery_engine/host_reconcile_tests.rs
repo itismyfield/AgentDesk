@@ -227,11 +227,11 @@ fn herdr_restart_reconcile_follows_the_restore_table() {
 #[tokio::test]
 async fn herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg() {
     use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, wire};
-    use crate::services::discord::host_defer_gate::tests::{ScriptedTmux, postgres};
+    use crate::services::discord::host_defer_gate::tests::ScriptedTmux;
     use crate::services::provider::ProviderKind;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let tmux = ScriptedTmux::install();
-    let (db, pool) = postgres().await;
+    let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
     let seed = crate::services::discord::host_key_derivation::tests::seed_row;
     let key_of = |n: u64| {
         let name = format!("AgentDesk-claude-p7r-reconcile-{n}");
