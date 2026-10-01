@@ -257,7 +257,7 @@ async fn a_completed_o_panel_moves_below_a_body_o_posts_after_completion() {
         .await
         .expect("O's channel follows its panel");
     deliver::note_posted_for_tests(CHANNEL, LATE_BODY);
-    tokio::time::sleep(POLL * 3).await;
+    tokio::time::sleep(QUIET + POLL * 3).await;
     assert!(
         turn.calls().sent.is_empty(),
         "no move while the turn's row is open"
@@ -386,6 +386,7 @@ async fn a_late_completion_of_a_moved_panel_sends_no_second_panel() {
     )
     .await;
     assert!(committed);
-    assert_eq!(turn.calls().sent.len(), sent, "{:?}", turn.calls().sent);
+    let after = turn.calls().sent.clone();
+    assert_eq!(after.len(), sent, "{after:?}");
     assert_eq!(turn.panel(), moved);
 }
