@@ -720,9 +720,9 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
 /// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
 /// can defer the promotion BEFORE any user-visible teardown (turn-view
 /// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
-/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or no channel
-/// name or session without a legacy row) also defers. Everything else — no tmux pane, remote
-/// profile, non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
+/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or with no
+/// name or entry and no legacy row) also defers. Everything else — no tmux pane, remote profile,
+/// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
 /// dispatch path, whose existing post-claim busy branch owns the defer UX
 /// (queued-card render + 📬 re-attach). This probe must NEVER be load-bearing
 /// for message preservation; it only avoids churn.

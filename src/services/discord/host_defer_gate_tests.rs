@@ -288,8 +288,7 @@ impl Nameless {
     }
 }
 
-// With no channel name or no session in memory, the promote gate holds the queue front unless
-// the one channel row behind a registered bot is a legacy row with no host trace. No row
+// A nameless or absent memory session holds the promote unless a legacy row admits it; no row
 // promotes only for a channel no turn can key, with nothing in flight.
 #[tokio::test]
 async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
