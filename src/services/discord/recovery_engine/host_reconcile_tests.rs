@@ -256,34 +256,34 @@ async fn herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg() {
         pending.location = Some(location("pane-1"));
         pending
     };
-    let cases: Vec<(
+    type Case = (
         Option<HostedExecution>,
         fn(&HostedExecution) -> HerdrPaneReading,
-        HostReconcile,
-    )> = vec![
+    );
+    let cases: Vec<(Case, HostReconcile)> = vec![
         (
-            Some(bound()),
-            replaced,
+            (Some(bound()), replaced),
             HostReconcile::Herdr(Mismatch(HerdrMismatch::RootReplaced)),
         ),
         (
-            Some(bound()),
-            |_| HerdrPaneReading::Missing,
+            (Some(bound()), |_| HerdrPaneReading::Missing),
             HostReconcile::Missing,
         ),
         (
-            Some(bound()),
-            |_| HerdrPaneReading::Unreadable("timeout".into()),
+            (Some(bound()), |_| {
+                HerdrPaneReading::Unreadable("timeout".into())
+            }),
             HostReconcile::Herdr(Unknown(HerdrUnknown::ProbeFailed)),
         ),
         (
-            Some(pending_with_pane(&owner("100"))),
-            |_| HerdrPaneReading::Present(running(&bound())),
+            (Some(pending_with_pane(&owner("100"))), |_| {
+                HerdrPaneReading::Present(running(&bound()))
+            }),
             HostReconcile::Pending(Unknown(HerdrUnknown::NoStoredEvidence)),
         ),
-        (None, |_| HerdrPaneReading::Missing, HostReconcile::Legacy),
+        ((None, |_| HerdrPaneReading::Missing), HostReconcile::Legacy),
     ];
-    for (n, (stored, reading, verdict)) in cases.into_iter().enumerate() {
+    for (n, ((stored, reading), verdict)) in cases.into_iter().enumerate() {
         let channel = 1_479_671_301_387_069_000 + n as u64;
         let stored = stored.map(|mut stored| {
             stored.owner = owner(&channel.to_string());
