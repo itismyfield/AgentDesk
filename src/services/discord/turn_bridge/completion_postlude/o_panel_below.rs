@@ -15,7 +15,9 @@ const FOLLOW_WINDOW: Duration = if cfg!(test) {
     Duration::from_secs(30)
 };
 const POLL: Duration = Duration::from_millis(250);
-/// Each move is one POST and one DELETE; a turn never moves its panel more often than this.
+/// A move waits until O has posted nothing new for this long, so a split body moves it once.
+const QUIET: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 2_000 });
+/// Each move is one POST and one DELETE; the last one is kept for the window's final check.
 const MAX_MOVES: usize = 3;
 
 type Owner<'a> = (
@@ -64,52 +66,77 @@ async fn follow_posts(
     user_msg_id: u64,
     text: &str,
 ) {
-    let (channel, token) = (channel_id.get(), shared.token_hash.as_str());
-    let Some(mut panel) = singleton::load(provider, token, channel).map(|b| b.panel_message_id)
+    let channel = channel_id.get();
+    let Some(mut panel) = singleton::load(provider, &shared.token_hash, channel)
+        .map(|b| MessageId::new(b.panel_message_id))
     else {
         return;
     };
     let deadline = tokio::time::Instant::now() + FOLLOW_WINDOW;
-    let mut moves = 0;
-    while moves < MAX_MOVES && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(POLL).await;
+    let (mut moves, mut seen, mut quiet_since) = (0, None, tokio::time::Instant::now());
+    loop {
+        let last_check = tokio::time::Instant::now() >= deadline;
+        if !last_check {
+            tokio::time::sleep(POLL).await;
+        }
         let posted = crate::services::tui_o::writer::deliver::last_posted(channel);
-        if posted.is_none_or(|posted| posted <= panel) {
-            continue;
+        if posted != seen {
+            (seen, quiet_since) = (posted, tokio::time::Instant::now());
         }
-        // The turn's own row is still closing; a newer turn owns the next panel.
-        match inflight::load_inflight_state_read_only(provider, channel) {
-            Some(row) if row.user_msg_id == user_msg_id => continue,
-            Some(_) => return,
-            None => {}
-        }
-        if singleton::load(provider, token, channel).map(|b| b.panel_message_id) != Some(panel) {
-            return;
-        }
-        let Ok(next) = TurnGateway::send_message(gateway, channel_id, text).await else {
-            return;
-        };
-        orphans::enqueue_pending_bind(provider, token, channel, next.get(), None);
-        if let Err(error) =
-            singleton::move_completed_if_current(provider, token, channel, panel, next.get())
-        {
-            tracing::info!(channel, panel, %error, "completed O status panel stays put");
-            if gateway.delete_message(channel_id, next).await.is_ok() {
-                orphans::remove(provider, token, channel, next.get());
+        let settled = moves + 1 < MAX_MOVES && quiet_since.elapsed() >= QUIET;
+        if posted.is_some_and(|posted| posted > panel.get()) && (settled || last_check) {
+            let target = (shared, gateway, provider, channel_id);
+            match move_below(target, user_msg_id, panel, text).await {
+                Some(Ok(next)) => (panel, moves) = (next, moves + 1),
+                Some(Err(())) => return,
+                None => {}
             }
+        }
+        if last_check {
             return;
         }
-        orphans::remove(provider, token, channel, next.get());
-        if gateway
-            .delete_message(channel_id, MessageId::new(panel))
-            .await
-            .is_err()
-        {
-            orphans::enqueue(provider, token, channel, panel);
-        }
-        panel = next.get();
-        moves += 1;
     }
+}
+
+/// One move: None while this turn's row is still closing, `Err` once the panel is no longer ours.
+async fn move_below(
+    (shared, gateway, provider, channel_id): (
+        &SharedData,
+        &dyn TurnGateway,
+        &ProviderKind,
+        ChannelId,
+    ),
+    user_msg_id: u64,
+    panel: MessageId,
+    text: &str,
+) -> Option<Result<MessageId, ()>> {
+    let (channel, token) = (channel_id.get(), shared.token_hash.as_str());
+    match inflight::load_inflight_state_read_only(provider, channel) {
+        Some(row) if row.user_msg_id == user_msg_id => return None,
+        Some(_) => return Some(Err(())),
+        None => {}
+    }
+    if singleton::load(provider, token, channel).map(|b| b.panel_message_id) != Some(panel.get()) {
+        return Some(Err(()));
+    }
+    let Ok(next) = TurnGateway::send_message(gateway, channel_id, text).await else {
+        return Some(Err(()));
+    };
+    orphans::enqueue_pending_bind(provider, token, channel, next.get(), None);
+    if let Err(error) =
+        singleton::move_completed_if_current(provider, token, channel, panel.get(), next.get())
+    {
+        tracing::info!(channel, panel = panel.get(), %error, "completed O status panel stays put");
+        if gateway.delete_message(channel_id, next).await.is_ok() {
+            orphans::remove(provider, token, channel, next.get());
+        }
+        return Some(Err(()));
+    }
+    orphans::remove(provider, token, channel, next.get());
+    if gateway.delete_message(channel_id, panel).await.is_err() {
+        orphans::enqueue(provider, token, channel, panel.get());
+    }
+    Some(Ok(next))
 }
 
 #[cfg(test)]

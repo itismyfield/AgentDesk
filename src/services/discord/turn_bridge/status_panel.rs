@@ -250,6 +250,12 @@ async fn complete_status_panel_v2_on_surface<G: TurnGateway + ?Sized>(
             surface.wait(channel_id).await;
             match surface.edit(channel_id, id, &panel_text).await {
                 Ok(()) => false,
+                Err(error)
+                    if status_panel_message_missing_error(&error)
+                        && singleton::moved_on(shared, provider, channel_id, id) =>
+                {
+                    return true;
+                }
                 Err(error) if status_panel_message_missing_error(&error) => true,
                 Err(error) => {
                     tracing::warn!(%channel_id, %source, %error, "failed to finalize status-panel-v2 message");

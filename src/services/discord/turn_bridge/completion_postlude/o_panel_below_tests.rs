@@ -15,6 +15,8 @@ const SEND_BASE: u64 = 6_325_430;
 
 #[derive(Default)]
 struct Calls {
+    /// One id sequence for panel sends and O's posts, as Discord's snowflakes are.
+    next: u64,
     sent: Vec<(u64, String)>,
     edited: Vec<u64>,
     deleted: Vec<u64>,
@@ -33,7 +35,8 @@ impl TurnGateway for PanelGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         let mut calls = self.calls.lock().unwrap();
-        let id = SEND_BASE + calls.sent.len() as u64;
+        let id = calls.next;
+        calls.next += 1;
         calls.sent.push((id, content.to_string()));
         Box::pin(async move { Ok(MessageId::new(id)) })
     }
@@ -44,8 +47,16 @@ impl TurnGateway for PanelGateway {
         message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.calls.lock().unwrap().edited.push(message_id.get());
-        Box::pin(async { Ok(()) })
+        let mut calls = self.calls.lock().unwrap();
+        calls.edited.push(message_id.get());
+        let gone = !self.fail_delete && calls.deleted.contains(&message_id.get());
+        Box::pin(async move {
+            if gone {
+                Err("Unknown Message (10008)".into())
+            } else {
+                Ok(())
+            }
+        })
     }
 
     fn delete_message<'a>(
@@ -130,7 +141,10 @@ impl Turn {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         let ui = &mut Arc::get_mut(&mut shared).expect("fresh shared").ui;
         (ui.status_panel_v2_enabled, ui.two_message_panel_enabled) = (true, true);
-        let calls = Arc::new(Mutex::new(Calls::default()));
+        let calls = Arc::new(Mutex::new(Calls {
+            next: SEND_BASE,
+            ..Calls::default()
+        }));
         let gateway: Arc<dyn TurnGateway> = Arc::new(PanelGateway {
             calls: Arc::clone(&calls),
             fail_delete,
@@ -218,6 +232,15 @@ impl Turn {
             .map(|binding| binding.panel_message_id)
     }
 
+    /// O posts a body piece with the channel's next id.
+    fn o_posts(&self) -> u64 {
+        let mut calls = self.calls();
+        let id = calls.next;
+        calls.next += 1;
+        deliver::note_posted_for_tests(CHANNEL, id);
+        id
+    }
+
     fn calls(&self) -> std::sync::MutexGuard<'_, Calls> {
         self.calls.lock().unwrap()
     }
@@ -295,4 +318,74 @@ async fn a_failed_old_panel_delete_goes_to_the_orphan_drain() {
     assert_eq!(turn.panel(), moved);
     let pending = orphans::load_pending(&ProviderKind::Claude, &turn.shared.token_hash);
     assert_eq!(pending, vec![(CHANNEL, PANEL)]);
+}
+
+/// A long body O keeps posting after completion, in more pieces than the move budget, still ends
+/// with the completed panel below its last piece, within the per-turn move budget.
+#[tokio::test(start_paused = true)]
+async fn a_completed_o_panel_ends_below_the_last_of_many_late_o_posts() {
+    let turn = Turn::open(false);
+    let _o = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let follow = turn
+        .complete()
+        .await
+        .expect("O's channel follows its panel");
+    turn.close_row();
+    let mut last_body = 0;
+    for _ in 0..=MAX_MOVES {
+        last_body = turn.o_posts();
+        tokio::time::sleep(QUIET + POLL + POLL / 5).await;
+    }
+    follow.await.unwrap();
+
+    let calls = turn.calls();
+    let panel = turn.panel().expect("a singleton panel");
+    assert!(
+        panel > last_body,
+        "panel {panel} above O's last body {last_body}"
+    );
+    assert!(calls.sent.len() <= MAX_MOVES, "{:?}", calls.sent);
+    assert!(
+        calls
+            .deleted
+            .iter()
+            .all(|id| *id == PANEL || calls.sent.iter().any(|s| s.0 == *id))
+    );
+}
+
+/// A completion that still names a panel already moved below O's posts sends no second panel.
+#[tokio::test]
+async fn a_late_completion_of_a_moved_panel_sends_no_second_panel() {
+    let turn = Turn::open(false);
+    let _o = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let follow = turn
+        .complete()
+        .await
+        .expect("O's channel follows its panel");
+    turn.close_row();
+    turn.o_posts();
+    follow.await.unwrap();
+    let moved = turn.panel();
+    assert_ne!(moved, Some(PANEL));
+    let sent = turn.calls().sent.len();
+
+    let mut text = "working".to_string();
+    let committed = super::super::super::status_panel::complete_status_panel_v2(
+        turn.shared.as_ref(),
+        turn.gateway.as_ref(),
+        ChannelId::new(CHANNEL),
+        Some(MessageId::new(PANEL)),
+        &ProviderKind::Claude,
+        0,
+        &mut text,
+        false,
+        false,
+        "late_completion",
+        USER_MSG,
+        true,
+    )
+    .await;
+    assert!(committed);
+    assert_eq!(turn.calls().sent.len(), sent, "{:?}", turn.calls().sent);
+    assert_eq!(turn.panel(), moved);
 }
