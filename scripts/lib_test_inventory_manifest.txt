@@ -2597,6 +2597,7 @@ services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strip
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
+services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::agent_handoff::tests::channel_kind_defaults_to_cc
 services::discord::agent_handoff::tests::channel_kind_rejects_unknown_value
@@ -3524,6 +3525,7 @@ services::discord::idle_recap::tests::recap_unknown_provider_uses_conservative_f
 services::discord::idle_recap::tests::recap_uses_provider_registry_window_for_matching_latest_turn
 services::discord::idle_recap::tests::should_post_recap_skips_when_turn_active_posts_when_idle
 services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
+services::discord::idle_recap_interaction::host_guard_tests::recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg
 services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
 services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
 services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
@@ -5297,6 +5299,7 @@ services::discord::router::message_handler::control::command_boundary_tests::wra
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_are_classified_precisely
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
+services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_fresh_routine_label_becomes_the_session_key_basis
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_fresh_routine_without_a_label_keeps_the_canonical_channel_key
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_routine_label_yields_a_distinct_tmux_session_name

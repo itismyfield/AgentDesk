@@ -106,6 +106,7 @@ src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/tests.rs
+src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
@@ -277,6 +278,7 @@ services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
+services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
@@ -930,6 +932,7 @@ services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
+services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
@@ -948,6 +951,7 @@ services::discord::host_key_derivation::tests::derive_lookup_tries_every_registe
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
+services::discord::idle_recap_interaction::host_guard_tests::recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg
@@ -981,6 +985,7 @@ services::discord::router::intake_dispatch::tests::obligation_window_facade_rest
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
+services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg

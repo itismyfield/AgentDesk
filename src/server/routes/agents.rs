@@ -239,7 +239,19 @@ pub async fn agent_diag(
 
     let tmux_name = extract_tmux_name(&session.session_key);
     // A session the host check refuses is reported as such, never probed by its tmux name.
-    let unsupported = diag_host_unsupported(pool, &session, tmux_name.as_deref()).await;
+    let (provider, channel) = (
+        session.provider.as_deref(),
+        session.thread_channel_id.as_deref(),
+    );
+    let diag = crate::services::discord::admin_host_guard::row_unsupported;
+    let unsupported = diag(
+        pool,
+        provider,
+        channel,
+        &session.session_key,
+        tmux_name.as_deref(),
+    )
+    .await;
     let probed_name = tmux_name.as_deref().filter(|_| unsupported.is_none());
     let tui_prompt_readiness = unsupported.clone().or_else(|| {
         tui_prompt_readiness_json(
@@ -388,23 +400,6 @@ pub async fn agent_diag(
             "task_notification_kind": task_notification_kind,
         })),
     ))
-}
-
-/// The diagnostic shown in place of tmux observations when the session's host is not
-/// legacy tmux; `None` keeps main's tmux readings.
-async fn diag_host_unsupported(
-    pool: &sqlx::PgPool,
-    session: &crate::services::agents::query::AgentDiagSession,
-    tmux_name: Option<&str>,
-) -> Option<Value> {
-    let tmux_name = tmux_name?;
-    let provider = session.provider.as_deref().and_then(ProviderKind::from_str);
-    let channel = session.thread_channel_id.as_deref();
-    let channel = channel.and_then(|raw| raw.trim().parse::<u64>().ok());
-    let key = session.session_key.as_str();
-    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
-    let reason = refusal(pool, provider.as_ref(), channel, key, tmux_name).await?;
-    Some(crate::services::discord::admin_host_guard::unsupported_observation(tmux_name, &reason))
 }
 
 #[cfg(unix)]
@@ -964,6 +959,12 @@ pub async fn stop_agent_turn(
     }
 
     let session_key = session.session_key.clone();
+    // A session the host check refuses is neither stopped by its tmux name nor marked.
+    if let Some(reason) = session.host_unsupported {
+        let unsupported = "session_host_not_tmux";
+        let body = json!({"error": reason, "unsupported": unsupported, "session_key": session_key});
+        return (StatusCode::CONFLICT, Json(body));
+    }
     let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
     let lifecycle = stop_turn_preserving_queue(
         state.health_registry.as_deref(),

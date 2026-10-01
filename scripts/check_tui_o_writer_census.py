@@ -118,6 +118,7 @@ R_EVID = (
 # Keys are relative to PRIMITIVE_ROOT.
 EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "abandon_request_store.rs": {"edit_outbound_message": 1},
+    "admin_host_guard.rs": {".say": 1},
     "commands/config.rs": {".say": 12, "send_long_message*": 1},
     "commands/control.rs": {".say": 15, "send_long_message*": 1},
     "commands/diagnostics/mod.rs": {".say": 9, "send_long_message*": 7},
@@ -131,7 +132,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "commands/node.rs": {".say": 3},
     "commands/receipt.rs": {".say": 2, "send_long_message*": 1},
     "commands/recovery_ops.rs": {".say": 3, "send_long_message*": 1},
-    "commands/restart.rs": {".say": 4},
+    "commands/restart.rs": {".say": 5},
     "commands/session.rs": {".say": 8, "send_long_message*": 2},
     "commands/skill.rs": {".say": 10, "send_long_message*": 3},
     "commands/text_commands.rs": {".send_message": 2, "send_long_message*": 10},
@@ -226,6 +227,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
 # file (relative to PRIMITIVE_ROOT): (census rows, target[, gate file]).
 CENSUS: dict[str, tuple[str, ...]] = {
     "abandon_request_store.rs": ("1-D-notice", "KEEP_NONBODY"),
+    "admin_host_guard.rs": ("CMD", "KEEP_NONBODY"),
     "commands/config.rs": ("CMD", "KEEP_NONBODY"),
     "commands/control.rs": ("CMD", "KEEP_NONBODY"),
     "commands/diagnostics/mod.rs": ("CMD", "KEEP_NONBODY"),

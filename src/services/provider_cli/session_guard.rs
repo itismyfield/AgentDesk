@@ -211,7 +211,8 @@ fn artifact_active(
     Some(active)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod host_guard_tests {
     use super::*;
     use crate::services::provider_cli::io::save_launch_artifact;

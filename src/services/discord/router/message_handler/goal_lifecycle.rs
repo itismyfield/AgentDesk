@@ -167,7 +167,7 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
         .await
         .unwrap_or(true);
     if matches!(command, GoalLifecycleCommand::Clear) && !active_turn {
-        super::super::super::commands::reset_channel_provider_state(
+        let reset = super::super::super::commands::reset_channel_provider_state(
             http,
             shared,
             provider,
@@ -178,6 +178,9 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
             false,
         )
         .await;
+        if reset.report(http, channel_id, "/goal clear").await {
+            return;
+        }
         if let Some(session_id) = stale_session_id.as_deref() {
             let _ = super::super::super::internal_api::clear_stale_session_id(session_id).await;
         }
@@ -315,4 +318,112 @@ pub(super) async fn clear_codex_goal_start_provider_session(
     *session_id = None;
     *memento_context_loaded = false;
     *session_strategy_reason = "codex_goal_start_fresh_session";
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod host_guard_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child, process};
+    use crate::services::discord::host_defer_gate::tests::{
+        Case, Nameless, ScriptedTmux, map_channel, postgres, with_second_bot,
+    };
+    use crate::services::discord::host_teardown_gate::test_support::channel_key;
+
+    async fn session_id(shared: &SharedData, channel: ChannelId) -> bool {
+        let core = shared.core.lock().await;
+        core.sessions[&channel].session_id.is_some()
+    }
+
+    // `/goal clear` on a session the host guard keeps reports the refusal and stops before the
+    // stale-session clear, the provider-session clear and the kill; main's path otherwise.
+    #[tokio::test]
+    async fn goal_clear_reports_a_refusal_before_any_session_clear_pg() {
+        let test = "services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg";
+        if !api_child(test) {
+            return;
+        }
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let (shared, _registry) = with_second_bot(&pool, "p4c2-goal-bot").await;
+        let api = Recorder::start().await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let provider = ProviderKind::Claude;
+        let own = shared.token_hash.clone();
+        let named = Case::ALL.into_iter().map(|case| (Some(case), None));
+        let nameless = [Nameless::Hosted, Nameless::Legacy].map(|case| (None, Some(case)));
+        for (n, (case, nameless)) in named.chain(nameless).enumerate() {
+            let channel = ChannelId::new(1_479_671_302_387_067_000 + n as u64);
+            let name = provider.build_tmux_session_name(&format!("p4c2-goal-{n}"));
+            map_channel(&shared, channel, &format!("p4c2-goal-{n}")).await;
+            let mut core = shared.core.lock().await;
+            let session = core.sessions.get_mut(&channel).unwrap();
+            session.session_id = Some("sid".into());
+            if nameless.is_some() {
+                session.channel_name = None;
+            }
+            drop(core);
+            if let Some(case) = case {
+                case.seed(&pool, &channel_key(&shared, &name), &name, channel.get())
+                    .await;
+            }
+            if let Some(case) = nameless {
+                case.seed(&pool, &own, "p4c2-goal-bot", channel.get(), &name)
+                    .await;
+            }
+            let admitted = case.map_or(nameless == Some(Nameless::Legacy), Case::admitted);
+            let alive = process(&name, n as u32 + 65_000);
+            let stale = format!("p4c2-stale-{n}");
+            api.take();
+            tmux.take_calls();
+
+            let command = GoalLifecycleCommand::Clear;
+            let goal = consume_codex_goal_lifecycle_command;
+            goal(
+                &api.http,
+                &shared,
+                &provider,
+                channel,
+                command,
+                Some(stale.clone()),
+            )
+            .await;
+            let calls = api.take();
+            let refused = calls
+                .iter()
+                .any(|call| call.contains("/goal clear을(를) 적용하지 않았어요"));
+            let stale_cleared = calls
+                .iter()
+                .any(|call| call.contains("clear-stale-session-id") && call.contains(&stale));
+            let what = (case, nameless);
+            if admitted {
+                assert!(
+                    stale_cleared && !refused,
+                    "{what:?}: main clears: {calls:?}"
+                );
+                // A nameless channel names no session for main to kill.
+                let killed = !alive.load(Ordering::SeqCst);
+                assert_eq!(killed, case.is_some(), "{what:?}: main's kill");
+                crate::services::session_backend::remove_process_session(&name);
+                continue;
+            }
+            assert!(refused, "{what:?}: the refusal is reported: {calls:?}");
+            let session_api = calls.iter().filter(|call| call.contains("/api/dispatched"));
+            assert_eq!(
+                session_api.count(),
+                0,
+                "{what:?}: no session clear: {calls:?}"
+            );
+            let done = calls.iter().any(|call| call.contains("적용 완료"));
+            assert!(!done, "{what:?}: no success notice: {calls:?}");
+            assert!(alive.load(Ordering::SeqCst), "{what:?}: process kept");
+            assert!(session_id(&shared, channel).await, "{what:?}: session kept");
+            assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{what:?}: no tmux");
+            crate::services::session_backend::remove_process_session(&name);
+        }
+        db.drop().await;
+    }
 }

@@ -38,6 +38,8 @@ pub struct AgentTurnSession {
     pub effective_status: &'static str,
     pub effective_active_dispatch_id: Option<String>,
     pub is_working: bool,
+    /// Why the session may not be probed or captured by its tmux name, if it may not.
+    pub host_unsupported: Option<String>,
 }
 
 #[derive(Debug)]
@@ -62,6 +64,7 @@ struct AgentTurnSessionRow {
     created_at: Option<String>,
     thread_channel_id: Option<String>,
     runtime_channel_id: Option<String>,
+    host_unsupported: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,7 +94,13 @@ fn resolve_agent_turn_session_rows(rows: Vec<AgentTurnSessionRow>) -> Option<Age
     for row in rows {
         let session_key_ref =
             (!row.session_key.trim().is_empty()).then_some(row.session_key.as_str());
-        let effective = resolver.resolve(
+        // A session the host check refuses is read by its heartbeat, never a tmux probe.
+        let resolve = match row.host_unsupported {
+            Some(_) => SessionActivityResolver::resolve_db_only,
+            None => SessionActivityResolver::resolve,
+        };
+        let effective = resolve(
+            &mut resolver,
             session_key_ref,
             row.raw_status.as_deref(),
             row.active_dispatch_id.as_deref(),
@@ -107,6 +116,7 @@ fn resolve_agent_turn_session_rows(rows: Vec<AgentTurnSessionRow>) -> Option<Age
             effective_status: effective.status,
             effective_active_dispatch_id: effective.active_dispatch_id,
             is_working: effective.is_working,
+            host_unsupported: row.host_unsupported,
         };
         if latest.is_none() {
             latest = Some(candidate.clone());
@@ -147,7 +157,7 @@ pub async fn find_agent_turn_session_pg(
     .fetch_all(pool)
     .await?;
 
-    let rows = rows
+    let mut rows = rows
         .into_iter()
         .map(|row| {
             Ok(AgentTurnSessionRow {
@@ -163,9 +173,13 @@ pub async fn find_agent_turn_session_pg(
                 ),
                 thread_channel_id: row.try_get("thread_channel_id")?,
                 runtime_channel_id: row.try_get("runtime_channel_id")?,
+                host_unsupported: None,
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    for row in &mut rows {
+        row.host_unsupported = turn_host_refusal(pool, row).await;
+    }
 
     Ok(resolve_agent_turn_session_rows(rows))
 }
@@ -179,11 +193,10 @@ pub async fn load_agent_turn_status_pg(
     }
 
     let session = find_agent_turn_session_pg(pool, agent_id).await?;
-    Ok(build_agent_turn_status(pool, agent_id, session).await)
+    Ok(build_agent_turn_status(agent_id, session).await)
 }
 
 async fn build_agent_turn_status(
-    pool: &sqlx::PgPool,
     agent_id: &str,
     session: Option<AgentTurnSession>,
 ) -> serde_json::Value {
@@ -209,7 +222,7 @@ async fn build_agent_turn_status(
     };
 
     if !session.is_working {
-        return json!({
+        let mut status = json!({
             "agent_id": agent_id,
             "status": "idle",
             "started_at": serde_json::Value::Null,
@@ -227,6 +240,10 @@ async fn build_agent_turn_status(
             "tool_events": Vec::<TurnToolEvent>::new(),
             "tool_count": 0,
         });
+        if let Some(reason) = session.host_unsupported {
+            status["host_unsupported"] = json!(reason);
+        }
+        return status;
     }
 
     let tmux_name = extract_tmux_name(&session.session_key);
@@ -236,10 +253,7 @@ async fn build_agent_turn_status(
         .and_then(|snapshot| snapshot.started_at.clone())
         .or(session.created_at.clone());
     // A session the host check refuses is never captured by its tmux name.
-    let host_unsupported = match tmux_name.as_deref() {
-        Some(name) => turn_host_refusal(pool, &session, name).await,
-        None => None,
-    };
+    let host_unsupported = session.host_unsupported.clone();
     let captured_name = tmux_name.as_ref().filter(|_| host_unsupported.is_none());
     let (recent_output, recent_output_source) = if let Some(tmux_name) = captured_name {
         let tmux_name = tmux_name.clone();
@@ -286,28 +300,14 @@ async fn build_agent_turn_status(
     status
 }
 
-/// Why the working session may not be captured by its tmux name, if it may not.
-async fn turn_host_refusal(
-    pool: &sqlx::PgPool,
-    session: &AgentTurnSession,
-    tmux_name: &str,
-) -> Option<String> {
-    let provider = session.provider.as_deref();
-    let provider = provider.and_then(crate::services::provider::ProviderKind::from_str);
-    let channel = session
-        .runtime_channel_id
-        .as_deref()
-        .or(session.thread_channel_id.as_deref());
-    let channel = channel.and_then(|raw| raw.trim().parse::<u64>().ok());
-    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
-    refusal(
-        pool,
-        provider.as_ref(),
-        channel,
-        &session.session_key,
-        tmux_name,
-    )
-    .await
+/// Why the row's session may not be probed or captured by its tmux name, if it may not.
+async fn turn_host_refusal(pool: &sqlx::PgPool, session: &AgentTurnSessionRow) -> Option<String> {
+    let tmux_name = extract_tmux_name(&session.session_key)?;
+    let runtime = session.runtime_channel_id.as_deref();
+    let channel = runtime.or(session.thread_channel_id.as_deref());
+    let (provider, key) = (session.provider.as_deref(), &session.session_key);
+    let refusal = crate::services::discord::admin_host_guard::row_refusal;
+    refusal(pool, provider, channel, key, &tmux_name).await
 }
 
 pub async fn list_agent_turn_history_pg_json(
@@ -766,6 +766,7 @@ mod tests {
             created_at: Some("2026-05-06T03:40:00Z".to_string()),
             thread_channel_id: Some("thread-1".to_string()),
             runtime_channel_id: Some("thread-1".to_string()),
+            host_unsupported: None,
         }
     }
 

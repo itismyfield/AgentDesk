@@ -432,7 +432,8 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod host_guard_tests {
     use super::*;
     use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};

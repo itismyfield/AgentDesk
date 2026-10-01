@@ -1121,7 +1121,7 @@ pub(super) async fn handle_text_message(
     };
 
     if dispatch_reset_provider_state || dispatch_recreate_tmux {
-        super::super::super::commands::reset_channel_provider_state(
+        let reset = super::super::super::commands::reset_channel_provider_state(
             http,
             shared,
             &provider,
@@ -1136,6 +1136,7 @@ pub(super) async fn handle_text_message(
             dispatch_recreate_tmux,
         )
         .await;
+        reset.report(http, channel_id, "dispatch reset").await;
         session_id = None;
         memento_context_loaded = false;
         session_strategy_reason =

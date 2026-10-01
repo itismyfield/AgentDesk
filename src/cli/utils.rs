@@ -519,7 +519,8 @@ mod memento_hook_install_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod reset_tmux_host_tests {
     // `reset-tmux` leaves a listed session another host's marker claims untouched; an
     // unmarked AgentDesk session is killed as in main.

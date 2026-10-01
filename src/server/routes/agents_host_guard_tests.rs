@@ -5,7 +5,6 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use serde_json::Value;
 
 use super::AppState;
 use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
@@ -27,9 +26,15 @@ fn state(pool: sqlx::PgPool) -> AppState {
     }
 }
 
-/// Seeds `case` as a working turn of `agent` on a remote-named host, read by heartbeat.
-async fn seed_turn(pool: &sqlx::PgPool, case: Case, agent: &str, name: &str, channel: u64) -> i64 {
-    let key = format!("claude/p4c2/p4c2-remote:{name}");
+/// Seeds `case` as a working turn of `agent` on `host`, with a fresh heartbeat.
+async fn seed_turn(
+    pool: &sqlx::PgPool,
+    case: Case,
+    (agent, name): (&str, &str),
+    host: &str,
+    channel: u64,
+) -> i64 {
+    let key = format!("claude/p4c2/{host}:{name}");
     case.seed(pool, &key, name, channel).await;
     sqlx::query("INSERT INTO agents (id, name, provider) VALUES ($1, $1, 'claude')")
         .bind(agent)
@@ -54,8 +59,13 @@ fn naming<'a>(calls: &'a [String], name: &str) -> Vec<&'a String> {
     calls.iter().filter(|call| call.contains(name)).collect()
 }
 
-// Diag, session output and turn status show a non-legacy session as unsupported without a
-// tmux probe or capture by its name; a legacy row reads tmux as in main.
+async fn row_status(pool: &sqlx::PgPool, id: i64) -> String {
+    let status = sqlx::query_scalar("SELECT status FROM sessions WHERE id = $1").bind(id);
+    status.fetch_one(pool).await.expect("session status")
+}
+
+// Diag, output, turn status and stop show a non-legacy session, local or remote, as unsupported
+// with no tmux probe, capture or stop by its name; a legacy row reads and stops as in main.
 #[tokio::test]
 async fn diagnostics_routes_never_probe_a_non_legacy_session_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -63,61 +73,89 @@ async fn diagnostics_routes_never_probe_a_non_legacy_session_pg() {
     let (db, pool) = postgres().await;
     let state = state(pool.clone());
     let provider = crate::services::provider::ProviderKind::Claude;
-    for (n, case) in Case::ALL.into_iter().enumerate() {
-        if !case.has_row() {
-            continue;
+    let local = crate::services::platform::hostname_short();
+    let hosts = [local.as_str(), "p4c2-remote"];
+    for (h, host) in hosts.into_iter().enumerate() {
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            if !case.has_row() {
+                continue;
+            }
+            let legacy = case == Case::Stored(Stored::Legacy);
+            let what = (host, case);
+            let (agent, name) = (
+                format!("p4c2-agent-{h}-{n}"),
+                provider.build_tmux_session_name(&format!("p4c2-diag-{h}-{n}")),
+            );
+            let channel = 1_479_671_302_387_065_000 + (h * 10 + n) as u64;
+            let id = seed_turn(&pool, case, (&agent, &name), host, channel).await;
+            tmux.take_calls();
+
+            let diag = super::agent_diag(State(state.clone()), Path(agent.clone())).await;
+            let Ok((StatusCode::OK, Json(diag))) = diag else {
+                panic!("{what:?}: diag failed");
+            };
+            let observed = |field: &str| diag[field]["state"].as_str().map(str::to_string);
+            let unsupported = Some("host_unsupported".to_string());
+            let adoption = observed("tmux_relay_adoption") == unsupported;
+            assert_eq!(adoption, !legacy, "{what:?}: {diag}");
+            let readiness = observed("tui_prompt_readiness") == unsupported;
+            assert_eq!(readiness, !legacy, "{what:?}: {diag}");
+
+            let query =
+                Query(crate::services::dispatched_sessions::TmuxOutputQuery { lines: None });
+            let output = super::super::dispatched_sessions::tmux_output;
+            let (status, Json(output)) =
+                output(State(state.clone()), HeaderMap::new(), Path(id), query).await;
+            let expected = if legacy {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            };
+            assert_eq!(status, expected, "{what:?}: {output}");
+
+            let turn = super::agent_turn(State(state.clone()), Path(agent.clone())).await;
+            let Ok((StatusCode::OK, Json(turn))) = turn else {
+                panic!("{what:?}: turn status failed");
+            };
+            let turn_unsupported = turn["host_unsupported"].is_string();
+            assert_eq!(turn_unsupported, !legacy, "{what:?}: {turn}");
+
+            let calls = tmux.take_calls();
+            let named = naming(&calls, &name).is_empty();
+            assert_eq!(named, !legacy, "{what:?}: {calls:?}");
+
+            let (status, Json(stop)) =
+                super::stop_agent_turn(State(state.clone()), Path(agent.clone())).await;
+            let refused = stop["unsupported"].is_string();
+            assert_eq!(refused, !legacy, "{what:?}: {status} {stop}");
+            if !legacy {
+                assert_eq!(status, StatusCode::CONFLICT, "{what:?}: {stop}");
+                let row = row_status(&pool, id).await;
+                assert_eq!(row, "turn_active", "{what:?}: the row is not marked");
+                let calls = tmux.take_calls();
+                assert!(naming(&calls, &name).is_empty(), "{what:?}: {calls:?}");
+
+                // A stale heartbeat reads idle, still named unsupported rather than tmux-dead.
+                let stale =
+                    "UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '1 hour' WHERE id = $1";
+                sqlx::query(stale)
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .expect("stale");
+                let turn = super::agent_turn(State(state.clone()), Path(agent.clone())).await;
+                let Ok((StatusCode::OK, Json(turn))) = turn else {
+                    panic!("{what:?}: idle turn status failed");
+                };
+                let idle = (
+                    turn["status"].as_str(),
+                    turn["host_unsupported"].is_string(),
+                );
+                assert_eq!(idle, (Some("idle"), true), "{what:?}: {turn}");
+                let calls = tmux.take_calls();
+                assert!(naming(&calls, &name).is_empty(), "{what:?}: {calls:?}");
+            }
         }
-        let legacy = case == Case::Stored(Stored::Legacy);
-        let channel = 1_479_671_302_387_065_000 + n as u64;
-        let (agent, name) = (
-            format!("p4c2-agent-{n}"),
-            provider.build_tmux_session_name(&format!("p4c2-diag-{n}")),
-        );
-        let id = seed_turn(&pool, case, &agent, &name, channel).await;
-        tmux.take_calls();
-
-        let diag = super::agent_diag(State(state.clone()), Path(channel.to_string())).await;
-        let Ok((StatusCode::OK, Json(diag))) = diag else {
-            panic!("{case:?}: diag failed");
-        };
-        let observed = |field: &str| diag[field]["state"].as_str().map(str::to_string);
-        let unsupported = Some("host_unsupported".to_string());
-        assert_eq!(
-            observed("tmux_relay_adoption") == unsupported,
-            !legacy,
-            "{case:?}: {diag}"
-        );
-        assert_eq!(
-            observed("tui_prompt_readiness") == unsupported,
-            !legacy,
-            "{case:?}: {diag}"
-        );
-
-        let query = Query(crate::services::dispatched_sessions::TmuxOutputQuery { lines: None });
-        let output = super::super::dispatched_sessions::tmux_output;
-        let (status, Json(output)) =
-            output(State(state.clone()), HeaderMap::new(), Path(id), query).await;
-        let expected = if legacy {
-            StatusCode::OK
-        } else {
-            StatusCode::CONFLICT
-        };
-        assert_eq!(status, expected, "{case:?}: {output}");
-
-        let turn = crate::services::agents::turn::load_agent_turn_status_pg(&pool, &agent).await;
-        let turn: Value = turn.expect("turn status");
-        assert_eq!(
-            turn["host_unsupported"].is_string(),
-            !legacy,
-            "{case:?}: {turn}"
-        );
-
-        let calls = tmux.take_calls();
-        assert_eq!(
-            naming(&calls, &name).is_empty(),
-            !legacy,
-            "{case:?}: {calls:?}"
-        );
     }
     db.drop().await;
 }

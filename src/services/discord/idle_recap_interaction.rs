@@ -8,7 +8,9 @@
 use poise::serenity_prelude as serenity;
 use sqlx::PgPool;
 
-use super::{Data, Error, check_auth};
+use std::sync::Arc;
+
+use super::{Data, Error, SharedData, check_auth};
 use crate::services::discord::idle_recap::{
     IDLE_RECAP_CLEAR_BUTTON_PREFIX, IDLE_RECAP_COMPACT_BUTTON_PREFIX,
     IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX, IDLE_RECAP_SUGGEST_BUTTON_PREFIX, clear_recap_pointer,
@@ -158,36 +160,53 @@ pub(super) async fn handle_idle_recap_clear_interaction(
         return Ok(());
     };
 
-    let Some(pool) = data.shared.pg_pool.as_ref().cloned() else {
+    let acknowledge = || async {
         let _ = component
-            .create_response(
-                ctx,
-                serenity::CreateInteractionResponse::Message(
-                    serenity::CreateInteractionResponseMessage::new()
-                        .content("세션 정리 실패: DB 연결 없음.")
-                        .ephemeral(true),
-                ),
-            )
+            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
             .await;
-        return Ok(());
+    };
+    let (shared, provider) = (&data.shared, &data.provider);
+    let channel = component.channel_id;
+    let clear = clear_recap_card(
+        &ctx.http,
+        shared,
+        provider,
+        channel,
+        message_id,
+        acknowledge,
+    );
+    if let Some(reply) = clear.await? {
+        send_ephemeral(ctx, component, &reply).await;
+    }
+    Ok(())
+}
+
+/// The clear click after its authorisation, answered by `acknowledge` or by the reply it
+/// returns. A session the host check refuses keeps its card and its pointer.
+async fn clear_recap_card<Ack, AckFut>(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+    message_id: u64,
+    acknowledge: Ack,
+) -> Result<Option<String>, Error>
+where
+    Ack: FnOnce() -> AckFut,
+    AckFut: std::future::Future<Output = ()>,
+{
+    let Some(pool) = shared.pg_pool.as_ref().cloned() else {
+        return Ok(Some("세션 정리 실패: DB 연결 없음.".to_string()));
     };
 
-    let clear_target = match lookup_recap_clear_target(
-        &pool,
-        message_id,
-        component.channel_id.get(),
-        data.provider.as_str(),
-    )
-    .await
-    {
+    let target = lookup_recap_clear_target(&pool, message_id, channel.get(), provider.as_str());
+    let clear_target = match target.await {
         Ok(Some(target)) => target,
         Ok(None) => {
             // Card already cleared (compare-and-clear path won the race
             // with a fresh-cycle post) — silently acknowledge.
-            let _ = component
-                .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
-                .await;
-            return Ok(());
+            acknowledge().await;
+            return Ok(None);
         }
         Err(e) => {
             tracing::warn!(
@@ -195,31 +214,28 @@ pub(super) async fn handle_idle_recap_clear_interaction(
                 message_id = message_id,
                 "idle_recap clear: target lookup failed"
             );
-            let _ = component
-                .create_response(
-                    ctx,
-                    serenity::CreateInteractionResponse::Message(
-                        serenity::CreateInteractionResponseMessage::new()
-                            .content("세션 정리 실패. 잠시 후 다시 시도하세요.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return Ok(());
+            return Ok(Some("세션 정리 실패. 잠시 후 다시 시도하세요.".to_string()));
         }
     };
 
-    let _ = component
-        .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
-        .await;
+    let current =
+        clear_target.channel_matches && clear_target.provider_matches && clear_target.recap_current;
+    // Judged on the card's own session before its pointer is consumed or the card deleted.
+    let key = Some(clear_target.session_key.as_str());
+    let refusal = super::admin_host_guard::managed_reset_refusal;
+    if current && let Some(reason) = refusal(shared, provider, channel, true, false, key).await {
+        tracing::warn!(message_id, %reason, "idle_recap clear: host unsupported");
+        return Ok(Some(format!(
+            "세션 정리 거절: 이 세션의 호스트에서는 세션 정리를 지원하지 않습니다. ({reason})"
+        )));
+    }
 
-    if !clear_target.channel_matches
-        || !clear_target.provider_matches
-        || !clear_target.recap_current
-    {
+    acknowledge().await;
+
+    if !current {
         let _ = clear_recap_pointer(&pool, &clear_target.session_key, message_id).await;
-        delete_previous_card(&ctx.http, component.channel_id.get(), message_id).await;
-        return Ok(());
+        delete_previous_card(http, channel.get(), message_id).await;
+        return Ok(None);
     }
 
     // Compare-and-clear the recap pointer for this session, then delete
@@ -229,27 +245,26 @@ pub(super) async fn handle_idle_recap_clear_interaction(
     let pointer_cleared = clear_recap_pointer(&pool, &clear_target.session_key, message_id)
         .await
         .unwrap_or(false);
-    let channel_id = component.channel_id.get();
     if !pointer_cleared {
-        delete_previous_card(&ctx.http, channel_id, message_id).await;
-        return Ok(());
+        delete_previous_card(http, channel.get(), message_id).await;
+        return Ok(None);
     }
 
     // Reuse `/clear` semantics, not just the provider-session-id drop. TUI
     // providers keep live tmux/process state that must be reset too.
     crate::services::discord::commands::clear_channel_session_state_with_session_key(
-        &ctx.http,
-        &data.shared,
-        &data.provider,
-        component.channel_id,
+        http,
+        shared,
+        provider,
+        channel,
         "idle_recap_clear",
         crate::services::discord::commands::SoftClearNotifyMode::Enqueue,
         Some(&clear_target.session_key),
     )
     .await?;
-    delete_previous_card(&ctx.http, channel_id, message_id).await;
+    delete_previous_card(http, channel.get(), message_id).await;
 
-    Ok(())
+    Ok(None)
 }
 
 async fn handle_idle_recap_relay_diag_interaction(
@@ -1404,14 +1419,157 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod host_guard_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::services::discord::host_defer_gate::tests::{Case, postgres};
-    use crate::services::discord::host_teardown_gate::test_support::Stored;
+    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child, process};
+    use crate::services::discord::host_defer_gate::tests::{
+        Case, ScriptedTmux, map_channel, postgres,
+    };
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, channel_key, shared_on,
+    };
+
+    // A clear click on a session the host guard keeps answers with the refusal and keeps the
+    // card, its pointer, the session and its process; a legacy row clears as in main.
+    #[tokio::test]
+    async fn recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg() {
+        let test = "services::discord::idle_recap_interaction::host_guard_tests::recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg";
+        if !api_child(test) {
+            return;
+        }
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let api = Recorder::start().await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let provider = ProviderKind::Claude;
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            if !case.has_row() {
+                continue;
+            }
+            let channel = serenity::ChannelId::new(1_479_671_302_387_068_000 + n as u64);
+            let channel_name = format!("p4c2-recap-{n}");
+            let name = provider.build_tmux_session_name(&channel_name);
+            map_channel(&shared, channel, &channel_name).await;
+            let mut core = shared.core.lock().await;
+            core.sessions.get_mut(&channel).unwrap().session_id = Some("sid".into());
+            drop(core);
+            let key = channel_key(&shared, &name);
+            case.seed(&pool, &key, &name, channel.get()).await;
+            let message_id = 1_479_671_302_387_069_000 + n as u64;
+            sqlx::query(
+                "UPDATE sessions SET idle_recap_message_id = $2, idle_recap_channel_id = $3,
+                        idle_recap_posted_at = NOW() + INTERVAL '1 minute'
+                  WHERE session_key = $1",
+            )
+            .bind(&key)
+            .bind(message_id as i64)
+            .bind(channel.get() as i64)
+            .execute(&pool)
+            .await
+            .expect("recap card pointer");
+            let alive = process(&name, n as u32 + 66_000);
+            api.take();
+            tmux.take_calls();
+
+            let acks = AtomicUsize::new(0);
+            let acknowledge = || {
+                acks.fetch_add(1, Ordering::SeqCst);
+                async {}
+            };
+            let click = clear_recap_card(
+                &api.http,
+                &shared,
+                &provider,
+                channel,
+                message_id,
+                acknowledge,
+            );
+            let reply = click.await.expect("clear click");
+            let pointer: Option<i64> = sqlx::query_scalar(
+                "SELECT idle_recap_message_id FROM sessions WHERE session_key = $1",
+            )
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .expect("pointer");
+            let calls = api.take();
+            let acks = acks.load(Ordering::SeqCst);
+            if case == Case::Stored(Stored::Legacy) {
+                assert_eq!((&reply, acks, pointer), (&None, 1, None), "{calls:?}");
+                let card = message_id.to_string();
+                // The card delete starts with main's probe of the recorded message.
+                let probed = calls
+                    .iter()
+                    .any(|c| c.starts_with("GET") && c.contains(&card));
+                assert!(probed, "main deletes the card: {calls:?}");
+                let session_cleared = calls.iter().any(|c| c.contains("clear-session-id"));
+                assert!(session_cleared, "main clears the session: {calls:?}");
+                assert!(!alive.load(Ordering::SeqCst), "main kills");
+                continue;
+            }
+            let refused = reply
+                .as_deref()
+                .is_some_and(|r| r.contains("세션 정리 거절"));
+            assert!(refused, "{case:?}: {reply:?}");
+            let kept = (acks, pointer);
+            assert_eq!(kept, (0, Some(message_id as i64)), "{case:?}: pointer kept");
+            assert_eq!(
+                calls,
+                Vec::<String>::new(),
+                "{case:?}: no Discord or API call"
+            );
+            assert!(alive.load(Ordering::SeqCst), "{case:?}: process kept");
+            let core = shared.core.lock().await;
+            assert!(core.sessions[&channel].session_id.is_some(), "{case:?}");
+            drop(core);
+            assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{case:?}: no tmux");
+            crate::services::session_backend::remove_process_session(&name);
+        }
+
+        // A card whose own session is hosted is refused even when the channel's current
+        // session, under another name with no row, would clear as in main.
+        let channel = serenity::ChannelId::new(1_479_671_302_387_068_100);
+        let (card_name, current) = ("AgentDesk-claude-p4c2-recap-card", "p4c2-recap-current");
+        let key = channel_key(&shared, card_name);
+        let stored = Case::Stored(Stored::Hosted);
+        stored.seed(&pool, &key, card_name, channel.get() + 1).await;
+        map_channel(&shared, channel, current).await;
+        let message_id = 1_479_671_302_387_069_100_u64;
+        let card = "UPDATE sessions SET idle_recap_message_id = $2, idle_recap_channel_id = $3,
+                    idle_recap_posted_at = NOW() + INTERVAL '1 minute' WHERE session_key = $1";
+        let card = sqlx::query(card).bind(&key).bind(message_id as i64);
+        card.bind(channel.get() as i64)
+            .execute(&pool)
+            .await
+            .expect("card");
+        let current = process(&provider.build_tmux_session_name(current), 66_100);
+        let click = clear_recap_card(
+            &api.http,
+            &shared,
+            &provider,
+            channel,
+            message_id,
+            || async {},
+        );
+        let reply = click.await.expect("clear click");
+        assert!(
+            reply.is_some_and(|r| r.contains("세션 정리 거절")),
+            "the card's own key decides"
+        );
+        assert!(
+            current.load(Ordering::SeqCst),
+            "the channel's process is kept"
+        );
+        assert_eq!(api.take(), Vec::<String>::new(), "no Discord or API call");
+        db.drop().await;
+    }
 
     // Compact on a session whose host is not a found legacy row is refused before the claim
     // consumes the recap card; a legacy row claims and injects as in main.

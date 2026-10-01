@@ -1,3 +1,4 @@
+use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::provider::ProviderKind;
 
 use super::super::{
@@ -191,7 +192,7 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     // Refused before the in-flight turn is cancelled: the session is not a legacy tmux one.
     let refusal = super::super::admin_host_guard::managed_reset_refusal;
     let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-    if let Some(reason) = refusal(shared, provider, channel_id, true, true).await {
+    if let Some(reason) = refusal(shared, provider, channel_id, true, true, None).await {
         ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
             .await?;
         return Ok(());
@@ -218,7 +219,7 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     // Kill the managed tmux/process session without clearing session_id when the
     // provider can resume. The seed turn below immediately respawns the provider.
     let http = ctx.serenity_context().http.clone();
-    let tmux_name = super::control::reset_channel_provider_state(
+    let reset = super::control::reset_channel_provider_state(
         &http,
         &ctx.data().shared,
         &ctx.data().provider,
@@ -229,6 +230,14 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
         true,  // recreate (kill) the tmux session so the seed turn fully respawns provider
     )
     .await;
+    let tmux_name = match reset {
+        ManagedReset::Applied(tmux_name) => tmux_name,
+        ManagedReset::Refused(reason) => {
+            ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
+                .await?;
+            return Ok(());
+        }
+    };
 
     let seed_status = start_restart_seed_turn(&ctx).await;
     ctx.say(build_restart_response(
