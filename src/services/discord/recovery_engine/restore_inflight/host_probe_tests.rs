@@ -9,7 +9,9 @@ use crate::services::discord::host_teardown_gate::test_support::{
 };
 use crate::services::discord::recovery_engine::o_cut_recorder;
 use crate::services::discord::restart_report::{self, RestartReportContext};
-use crate::services::session_host::test_support::{InjectedLivenessGuard, InjectedPresenceGuard};
+use crate::services::session_host::test_support::{
+    InjectedLivenessGuard, InjectedPresenceGuard, inject_liveness,
+};
 use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,40 +238,48 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
 
     restore_inflight_turns(&discord.http, &shared, &provider).await;
 
-    for (_, name, after, pane, _) in &mut cases {
-        *pane = InjectedLivenessGuard::set(HostSessionRef::tmux(name), *after);
+    // The live bridge's own bookkeeping moves these; a handoff moves the rest.
+    let stored = |channel: ChannelId| {
+        let row = inflight::load_inflight_state(&provider, channel.get())?;
+        let mut row = serde_json::to_value(row).unwrap();
+        for volatile in ["current_msg_len", "save_generation", "updated_at"] {
+            row.as_object_mut().unwrap().remove(volatile);
+        }
+        Some(row)
+    };
+    let restored: Vec<_> = cases.iter().map(|case| stored(case.0)).collect();
+    assert!(
+        restored.iter().all(Option::is_some),
+        "restore keeps both rows"
+    );
+    // Swapped in place: replacing a guard would clear the new answer on the old one's drop.
+    for (_, name, after, ..) in &cases {
+        inject_liveness(HostSessionRef::tmux(name), Some(*after));
     }
     std::fs::write(tmux.path().join("dead"), "").unwrap();
     let _ = std::fs::remove_file(tmux.path().join("calls"));
-    let owner = |channel: ChannelId| {
-        inflight::load_inflight_state(&provider, channel.get())
-            .and_then(|row| row.watcher_owner_channel_id)
-    };
     let (channel, name, ..) = &cases[0];
     let polled = format!("list-panes -t ={name}:");
     let read_dead = || {
         let calls = std::fs::read_to_string(tmux.path().join("calls")).unwrap_or_default();
         calls.contains(&polled)
     };
+    let handed_off = || stored(cases[1].0) != restored[1];
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while (owner(cases[1].0).is_none() || !read_dead()) && std::time::Instant::now() < deadline {
+    while !(handed_off() && read_dead()) && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    assert!(
-        owner(cases[1].0).is_some(),
-        "a live pane is handed to a watcher"
-    );
+    assert!(handed_off(), "a live pane's handoff moves its row");
     assert!(read_dead(), "the reader read the unobserved pane dead");
     // Past the pane re-check's retries, which a handoff or a retry would follow.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let row = inflight::load_inflight_state(&provider, channel.get());
-    let row = row.expect("an unobserved pane keeps the row");
-    assert_eq!(row.watcher_owner_channel_id, None, "nothing is handed off");
+    assert_eq!(
+        stored(*channel),
+        restored[0],
+        "an unobserved pane keeps the row as stored"
+    );
     assert!(!shared.tmux_watchers.has_live_watcher_handle(name));
-    for (_, name, ..) in &cases {
-        crate::services::tmux_common::cleanup_session_temp_files(name);
-    }
     drop((cases, transcripts));
     pool.close().await;
     db.drop().await;
