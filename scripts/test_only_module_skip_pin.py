@@ -57,6 +57,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/execution_identity/herdr_observation_tests.rs",
         "src/services/discord/execution_identity/herdr_report_order_tests.rs",
         "src/services/discord/recovery_engine/host_reconcile_tests.rs",
+        "src/services/discord/tui_prompt_relay/herdr_source_tests.rs",
         "src/services/discord/tmux_output_stream/tests/compact_summary_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests/compact_summary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/compact_summary_tests.rs",

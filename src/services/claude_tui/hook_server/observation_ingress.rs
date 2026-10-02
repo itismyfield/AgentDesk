@@ -59,6 +59,7 @@ pub(crate) enum UnavailableReason {
     RuntimeNotRestored,
     HistoryUnreadable,
     SourceUnreadable,
+    HostNotAdmitted,
 }
 
 impl IngressOutcome {
@@ -214,6 +215,7 @@ fn classify_skip(
         AdoptSkip::SourceAnomaly => NotApplicable(NotApplicableReason::SourceAnomaly),
         AdoptSkip::HistoryUnreadable => Unavailable(UnavailableReason::HistoryUnreadable),
         AdoptSkip::SourceUnreadable => Unavailable(UnavailableReason::SourceUnreadable),
+        AdoptSkip::HostNotAdmitted => Unavailable(UnavailableReason::HostNotAdmitted),
     }
 }
 
