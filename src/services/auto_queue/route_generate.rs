@@ -457,6 +457,20 @@ pub async fn generate(
             .with_code(ErrorCode::AutoQueue));
         }
     };
+    // A generate that passed the check above at the same time may have committed a run since.
+    if let Err(error) = lock_run_creation_on_pg_tx(&mut tx).await {
+        return Err(AppError::internal(error).with_code(ErrorCode::AutoQueue));
+    }
+    match find_matching_active_run_id_pg(&mut *tx, body.repo.as_deref(), body.agent_id.as_deref())
+        .await
+    {
+        Ok(runs) => {
+            if let Some((run_id, status)) = runs.first() {
+                return Ok(existing_live_run_conflict_response(run_id, status));
+            }
+        }
+        Err(error) => return Err(AppError::internal(error).with_code(ErrorCode::AutoQueue)),
+    }
     if let Err(error) = sqlx::query(
         "INSERT INTO auto_queue_runs (
             id, repo, agent_id, review_mode, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count
@@ -931,6 +945,89 @@ mod dependency_hold_tests {
             queued_cards(&pool, &response).await,
             vec!["card-101".to_string()]
         );
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod concurrent_generate_tests {
+    use super::*;
+
+    fn spawn_generate(pool: &sqlx::PgPool) -> tokio::task::JoinHandle<u16> {
+        let state =
+            super::deploy_gate_request_rejection_tests::state_with_postgres(Some(pool.clone()));
+        tokio::spawn(async move {
+            let body: GenerateBody =
+                serde_json::from_value(json!({ "repo": "par/repo", "agent_id": "agent-par" }))
+                    .expect("generate body"); // agentdesk-audit: allow-unwrap — static test fixture
+            let (status, _) = generate(State(state), Json(body))
+                .await
+                .expect("generate answers"); // agentdesk-audit: allow-unwrap — test assertion
+            status.as_u16()
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_generates_at_once_create_one_run_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status) VALUES ('agent-par', 'Par', 'codex', 'idle')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, assigned_agent_id, github_issue_number)
+             VALUES ('card-201', 'par/repo', 'One', 'ready', 'agent-par', 201),
+                    ('card-202', 'par/repo', 'Two', 'ready', 'agent-par', 202)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed cards"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        // Both requests pass the first conflict check while run creation is held.
+        let mut holder = pool.begin().await.expect("begin lock holder"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run_create'))")
+            .execute(&mut *holder)
+            .await
+            .expect("hold run creation"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .expect("holder pid"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        let first = spawn_generate(&pool);
+        let second = spawn_generate(&pool);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(holder_pid)
+        .fetch_one(&pool)
+        .await
+        .expect("inspect blockers") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            < 2
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "both generates wait on the run-creation lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        holder.rollback().await.expect("release run creation"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let mut statuses = vec![
+            first.await.expect("first generate"), // agentdesk-audit: allow-unwrap — test assertion
+            second.await.expect("second generate"), // agentdesk-audit: allow-unwrap — test assertion
+        ];
+        statuses.sort_unstable();
+        assert_eq!(statuses, vec![200, 409]);
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
+            .fetch_one(&pool)
+            .await
+            .expect("count runs"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        assert_eq!(runs, 1);
         pool.close().await;
         pg_db.drop().await;
     }

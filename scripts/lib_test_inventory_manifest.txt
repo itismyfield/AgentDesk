@@ -1456,10 +1456,12 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests:
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::implementation_latest_dispatch_is_attachable_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_completion_does_not_finalize_pending_entry_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_latest_dispatch_is_not_attachable_pg
+services::auto_queue::route::campaign_handoff::minute_tick_wiring_tests::the_minute_tick_hands_off_campaigns_before_the_auto_queue_tick
 services::auto_queue::route::campaign_handoff::tests::postgres_activate_does_not_complete_a_run_the_handoff_is_filling_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_campaign_handoff_drops_nodes_when_a_newer_save_lands_first_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_campaign_handoff_skips_a_run_cancelled_while_it_waits_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_campaign_handoff_skips_a_run_completed_while_it_waits_pg
+services::auto_queue::route::campaign_handoff::tests::postgres_campaign_handoff_waits_behind_a_queue_generated_meanwhile_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_campaign_handoff_waits_while_the_agent_run_is_paused_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_campaign_hands_off_only_nodes_whose_dependencies_are_done_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_card_terminal_hook_hands_off_opted_in_campaigns_pg
@@ -1501,6 +1503,7 @@ services::auto_queue::route::planning::phase_gate_generate_validation_tests::neg
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::pr_confirm_and_legacy_default_remain_generation_compatible
 services::auto_queue::route::planning::record_entry_dispatch_failure_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::query::tests::reset_before_reuse_requires_reassignment_and_existing_thread_state
+services::auto_queue::route::route_generate::concurrent_generate_tests::two_generates_at_once_create_one_run_pg
 services::auto_queue::route::route_generate::dependency_hold_tests::a_card_waits_until_its_declared_prerequisite_is_done_pg
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::unavailable_deploy_gate_is_a_typed_client_error_before_database_access

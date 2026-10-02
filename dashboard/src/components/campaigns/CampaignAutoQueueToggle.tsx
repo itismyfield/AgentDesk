@@ -9,6 +9,7 @@ const WAITING_REASONS: Record<string, [string, string]> = {
   card_not_ready: ["카드가 다른 단계에 있음", "card is in another step"],
   not_enqueueable: ["준비 상태로 옮길 수 없음", "cannot move to ready"],
   run_paused: ["에이전트 자동큐 일시정지", "agent queue paused"],
+  queue_not_started: ["시작 전 자동큐가 있음", "agent queue not started yet"],
   already_in_run: ["이미 그 실행에 있었음", "already in that run"],
   campaign_changed: ["그 사이 캠페인이 다시 저장됨", "campaign saved again meanwhile"],
 };

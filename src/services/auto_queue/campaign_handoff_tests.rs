@@ -542,3 +542,51 @@ async fn postgres_minute_handoff_catches_cards_closed_by_github_sync_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+/// Generate commits an unstarted queue while the handoff waits to create a run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_campaign_handoff_waits_behind_a_queue_generated_meanwhile_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(8).await;
+    let engine = engine(&pool);
+    let campaign = seed(&pool).await;
+    let mut holder = pool.begin().await.expect("begin run-creation holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run_create'))")
+        .execute(&mut *holder)
+        .await
+        .expect("hold run creation");
+
+    let task = spawn_handoff(&pool, &engine, &campaign);
+    wait_for_lock_waiter(&pool, "%aq_run_create%").await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('preview', $1, 'agent-x', 'generated')",
+    )
+    .bind(REPO)
+    .execute(&mut *holder)
+    .await
+    .expect("generate a queue");
+    holder.commit().await.expect("commit generated queue");
+    let report = task.await.expect("handoff task");
+
+    assert!(
+        report.queued.is_empty(),
+        "no run starts beside an unstarted queue"
+    );
+    let a = report
+        .waiting
+        .iter()
+        .find(|w| w.node_id == "a")
+        .expect("a waits");
+    assert_eq!(
+        (a.reason, a.detail.as_deref()),
+        ("queue_not_started", Some("preview"))
+    );
+    let runs: Vec<String> = sqlx::query_scalar("SELECT id FROM auto_queue_runs")
+        .fetch_all(&pool)
+        .await
+        .expect("list runs");
+    assert_eq!(runs, ["preview"]);
+
+    pool.close().await;
+    fixture.drop().await;
+}

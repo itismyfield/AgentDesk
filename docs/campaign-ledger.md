@@ -110,7 +110,9 @@ Ready nodes that cannot be queued are listed in `waiting` with a reason:
 entry failed or was skipped or cancelled; reset the card or skip the node),
 `card_not_ready` (the card is in another workflow step), `not_enqueueable`,
 `run_paused` (that agent's queue is paused; the handoff never starts a second
-run beside it), or `already_in_run`.
+run beside it), `queue_not_started` (a generated or pending queue for that agent
+waits to be started; the node joins it once it runs), `campaign_changed` (the
+campaign was saved again meanwhile), or `already_in_run`.
 
 With `auto_queue: true` this happens after every save of an active campaign
 (the response carries `handoff`, or `handoff_error` when the save succeeded but
