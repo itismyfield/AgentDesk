@@ -11,6 +11,7 @@ import { makeLargeCampaign } from "./campaignTestFixtures";
 vi.mock("../../api/campaigns", () => ({
   getCampaigns: vi.fn(),
   updateCampaignNode: vi.fn(),
+  setCampaignAutoQueue: vi.fn(),
 }));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodeClick }: { nodes: Array<{ id: string; data: { group?: string } }>; onNodeClick?: (event: unknown, node: unknown) => void }) => (
@@ -38,6 +39,7 @@ const campaign: Campaign = {
   status: "active",
   round: 3,
   revision: 5,
+  auto_queue: false,
   created_at: "2026-09-20T00:00:00Z",
   updated_at: "2026-09-20T00:00:00Z",
   nodes: [

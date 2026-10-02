@@ -68,6 +68,7 @@ export const campaignSchema = z.looseObject({
   status: campaignStatusSchema,
   round: roundSchema,
   revision: z.number().int().positive(),
+  auto_queue: z.boolean().default(false),
   nodes: z.array(campaignNodeSchema).max(1000).default([]),
   created_at: timestampSchema,
   updated_at: timestampSchema,
@@ -98,13 +99,22 @@ const campaignListResponseSchema = z.looseObject({
   limit: z.number().int().positive().max(500),
   offset: z.number().int().nonnegative(),
 });
-const campaignResponseSchema = z.looseObject({ campaign: campaignSchema });
+const campaignHandoffSchema = z.looseObject({
+  queued: z.array(z.looseObject({ node_id: z.string(), card_id: z.string(), run_id: z.string() })).default([]),
+  waiting: z.array(z.looseObject({ node_id: z.string(), reason: z.string(), detail: z.string().nullable().optional() })).default([]),
+});
+const campaignSaveResponseSchema = z.looseObject({
+  campaign: campaignSchema,
+  handoff: campaignHandoffSchema.optional(),
+  handoff_error: z.string().optional(),
+});
 
 export type CampaignStatus = z.infer<typeof campaignStatusSchema>;
 export type CampaignNodeStatus = z.infer<typeof campaignNodeStatusSchema>;
 export type CampaignNode = z.infer<typeof campaignNodeSchema>;
 export type Campaign = z.infer<typeof campaignSchema>;
 export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
+export type CampaignHandoff = z.infer<typeof campaignHandoffSchema>;
 /** Campaign id, then node id. */
 export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
 
@@ -123,8 +133,9 @@ export async function getCampaigns(): Promise<{
   }
 }
 
-export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
-  const result = await request(
+// Omitting auto_queue keeps the stored value, so node edits never switch it.
+function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>) {
+  return request(
     `/api/campaigns/${encodeURIComponent(campaign.id)}`,
     {
       method: "PUT",
@@ -135,10 +146,21 @@ export async function updateCampaignNode(campaign: Campaign, updated: CampaignNo
         description: campaign.description,
         status: campaign.status,
         round: campaign.round,
-        nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)),
+        nodes: campaign.nodes,
+        ...patch,
       }),
     },
-    campaignResponseSchema,
+    campaignSaveResponseSchema,
   );
+}
+
+export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
+  const result = await saveCampaign(campaign, { nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)) });
   return result.campaign;
+}
+
+/** Turning it on also queues the tasks that are ready now; the server reports what it did. */
+export async function setCampaignAutoQueue(campaign: Campaign, enabled: boolean) {
+  const result = await saveCampaign(campaign, { auto_queue: enabled });
+  return { campaign: result.campaign, handoff: result.handoff ?? null, handoffError: result.handoff_error ?? null };
 }

@@ -3,6 +3,7 @@ import { getCampaigns, type Campaign, type CampaignLive, type CampaignNodeLive }
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
 import { WidgetState } from "../common/WidgetState";
+import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
 import { campaignProgress } from "./campaignModel";
 import { Badge, type Tr } from "./campaignPresentation";
 import CampaignExplorer from "./CampaignExplorer";
@@ -70,6 +71,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         <span className="campaign-summary-round">{tr("라운드", "Round")} {campaign.round}</span>
         <strong>{tr(`완료 ${progress.counts.completed}/${progress.total}`, `${progress.counts.completed}/${progress.total} done`)}</strong>
         {refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}
+        <CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} />
       </div>
       {campaign.description && <p className="campaign-description" title={campaign.description}>{campaign.description}</p>}
       <progress className="campaign-progress" max={100} value={progress.percent} aria-label={tr("작업 완료율", "Task completion")} />
