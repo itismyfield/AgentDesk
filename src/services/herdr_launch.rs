@@ -1,5 +1,5 @@
 //! Herdr launch preparation for one channel's canonical session row. No launch selects
-//! Herdr yet. The order is fixed: Pending commit, `.host_kind` marker, then one create call.
+//! Herdr yet. The order is fixed: Pending commit, `.host_kind` and nonce markers, then one create.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -120,7 +120,7 @@ pub(crate) enum HerdrLaunchError {
     Prepare(String),
     /// Pending did not commit; nothing was created.
     Pending(String),
-    /// Pending committed without its marker; nothing was created.
+    /// Pending committed without its markers; nothing was created.
     Marker(String),
     /// The create request never left; Pending stays for reconcile.
     NotSent(String),
@@ -205,6 +205,10 @@ pub(crate) async fn launch_herdr_session(
         Err(error) => return Err(HerdrLaunchError::Pending(format!("{error:?}"))),
     }
     record_herdr_host_marker(&owner.logical_key).map_err(HerdrLaunchError::Marker)?;
+    // Hooks and binding events name an execution by its spawn nonce marker, as on tmux.
+    #[cfg(unix)]
+    crate::services::discord::stamp_spawn_markers(&owner.logical_key, Some(&incarnation))
+        .map_err(|error| HerdrLaunchError::Marker(error.to_string()))?;
 
     // Read again right before create: the first reading may predate a reconnect or reload.
     let Some(restore_off_generation) = restore_off_generation(&host, &endpoint).await else {

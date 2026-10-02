@@ -339,6 +339,7 @@ jobs:
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/streaming_baseline_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/herdr_source_tests.rs'
               - 'src/services/discord/tui_prompt_relay/rehydration.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'

@@ -27,11 +27,14 @@ pub(crate) enum AdoptSkip {
     SourceAnomaly,
     /// The bound transcript's pinned file could not be read; the hook is retried.
     SourceUnreadable,
+    /// A Herdr pane whose execution the latest reconcile did not admit; the hook is retried.
+    HostNotAdmitted,
 }
 
 impl AdoptSkip {
     /// The pane a command session names and its binding. Only Claude TUI panes get a claude alias
     /// and explicit clears drop it with the binding, so a named pane without one only lapsed.
+    /// A withheld Herdr pane is not handed out, so its source stays where it is.
     pub(super) fn bound_pane<'s>(
         state: &'s TuiPromptDedupeState,
         command_key: &PromptKey,
@@ -41,6 +44,10 @@ impl AdoptSkip {
         let tmux_session_name = &state.tmux_by_provider_session.get(command_key)?.value;
         *skip = Some(Self::RuntimeNotRestored);
         let binding = state.runtime_by_tmux.get(tmux_session_name)?;
+        *skip = Some(Self::HostNotAdmitted);
+        if herdr_execution_withheld(tmux_session_name) {
+            return None;
+        }
         Some((tmux_session_name.clone(), binding))
     }
 
@@ -74,4 +81,64 @@ pub(crate) fn adopt_claude_continuation_explained(
         &mut skip,
     );
     failure.map_or(Ok((adopted, skip)), Err)
+}
+
+/// Herdr panes by logical key: the execution nonce the latest reconcile judged and whether it
+/// admitted it. A withheld pane keeps its binding and cursor; tmux panes are never listed.
+static HERDR_EXECUTIONS: LazyLock<Mutex<HashMap<String, (String, bool)>>> =
+    LazyLock::new(Default::default);
+// Until a Herdr pane is listed the hook path reads this flag and takes no lock.
+#[cfg(not(test))]
+static LISTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+thread_local! {
+    static LISTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static HERDR_HOLD_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn herdr_executions(
+    listing: bool,
+) -> std::sync::MutexGuard<'static, HashMap<String, (String, bool)>> {
+    #[cfg(not(test))]
+    LISTED.fetch_or(listing, std::sync::atomic::Ordering::AcqRel);
+    #[cfg(test)]
+    LISTED.set(LISTED.get() || listing);
+    HERDR_EXECUTIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// The reconcile admitted execution `nonce` on `logical`; it replaces any older execution.
+pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
+    herdr_executions(true).insert(logical.to_owned(), (nonce.to_owned(), true));
+}
+
+/// The reconcile refused execution `nonce` on `logical` (`None` when it could not name one); a
+/// refusal of another execution than the listed one leaves that one as it is.
+pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
+    let mut panes = herdr_executions(true);
+    match panes.get_mut(logical) {
+        Some((listed, _)) if nonce.is_some_and(|nonce| nonce != listed) => {}
+        Some((_, admitted)) => *admitted = false,
+        None => {
+            let nonce = nonce.unwrap_or_default().to_owned();
+            panes.insert(logical.to_owned(), (nonce, false));
+        }
+    }
+}
+
+/// Whether hooks must leave the pane on its current source; the lock is a leaf.
+fn herdr_execution_withheld(logical: &str) -> bool {
+    #[cfg(not(test))]
+    let listed = LISTED.load(std::sync::atomic::Ordering::Acquire);
+    #[cfg(test)]
+    let listed = LISTED.get();
+    if !listed {
+        return false;
+    }
+    #[cfg(test)]
+    HERDR_HOLD_LOOKUPS.set(HERDR_HOLD_LOOKUPS.get() + 1);
+    herdr_executions(false)
+        .get(logical)
+        .is_some_and(|(_, admitted)| !admitted)
 }

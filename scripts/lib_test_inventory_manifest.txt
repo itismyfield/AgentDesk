@@ -1711,6 +1711,7 @@ services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_stop_refused
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::a_resent_session_start_is_judged_once_while_its_receipt_lasts
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::a_session_start_retries_a_gateway_status_but_not_a_permanent_one
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::a_session_start_whose_first_send_fails_is_retried_and_adopted
+services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::an_old_session_start_redelivered_after_another_queue_moved_on_is_refused
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::only_a_claude_session_start_retries_a_transport_failure
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::the_reply_window_ends_with_the_callers_wait_even_when_enqueue_was_slow
@@ -1772,6 +1773,7 @@ services::claude_tui::hook_server::codex_ingress_tests::codex_stale_marker_and_r
 services::claude_tui::hook_server::codex_ingress_tests::codex_successive_clear_hooks_cannot_rebind_a_retired_session
 services::claude_tui::hook_server::codex_ingress_tests::codex_tail_with_hooks_on_is_held_when_the_hook_history_is_unreadable
 services::claude_tui::hook_server::observation_ingress::tests::a_codex_session_switch_is_not_adopted_as_claude
+services::claude_tui::hook_server::observation_ingress::tests::a_herdr_hold_follows_only_the_execution_it_names
 services::claude_tui::hook_server::observation_ingress::tests::a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged
 services::claude_tui::hook_server::observation_ingress::tests::a_legacy_command_alias_is_kept_until_its_mapping_is_ready
 services::claude_tui::hook_server::observation_ingress::tests::a_legacy_hook_that_cannot_be_logged_is_refused_and_counted
@@ -1781,6 +1783,7 @@ services::claude_tui::hook_server::observation_ingress::tests::a_pending_write_f
 services::claude_tui::hook_server::observation_ingress::tests::a_poll_over_a_front_that_cannot_be_logged_returns
 services::claude_tui::hook_server::observation_ingress::tests::a_refused_hook_has_no_effect_until_its_resend_is_acknowledged
 services::claude_tui::hook_server::observation_ingress::tests::a_repeat_hook_of_a_recorded_source_waiting_for_its_rotation_is_acknowledged
+services::claude_tui::hook_server::observation_ingress::tests::a_tmux_pane_switch_never_looks_up_the_herdr_hold
 services::claude_tui::hook_server::observation_ingress::tests::an_unmapped_hook_is_refused_until_the_first_discovery_pass_finishes
 services::claude_tui::hook_server::observation_ingress::tests::discovery_grace_uses_the_production_sixty_second_boundary
 services::claude_tui::hook_server::relay_receipts::tests::ledger_retention_covers_every_deliverable_request
@@ -6980,6 +6983,10 @@ services::discord::tui_prompt_relay::claude_idle_runtime::tests::timestamp_conti
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::transcript_binding_refresh_requires_recent_activity
 services::discord::tui_prompt_relay::claude_idle_tail::host_tests::a_session_marked_for_another_host_never_reads_a_live_pane
 services::discord::tui_prompt_relay::claude_idle_tail::host_tests::the_idle_tail_reads_a_session_dead_only_through_its_tmux_host
+services::discord::tui_prompt_relay::herdr_source::tests::a_refused_restart_attach_withholds_hook_switches_until_a_match_pg
+services::discord::tui_prompt_relay::herdr_source::tests::herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source_pg
+services::discord::tui_prompt_relay::herdr_source::tests::herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_pg
+services::discord::tui_prompt_relay::herdr_source::tests::the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::claude_idle_scans_thread_the_row_prompt_id
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_latest_matching_prompt_uses_last_complete_match
 services::discord::tui_prompt_relay::idle_transcript_scan::tests::codex_idle_rollout_scan_finds_user_prompt_and_stops_at_prompt_end

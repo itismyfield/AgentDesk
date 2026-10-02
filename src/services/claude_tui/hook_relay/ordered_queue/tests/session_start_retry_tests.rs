@@ -528,3 +528,65 @@ fn a_resent_session_start_is_judged_once_while_its_receipt_lasts() {
         );
     });
 }
+
+// A withheld Herdr pane's switch goes out through the real relay queue, is refused by the
+// receiver and resent as the same request until the pane is admitted, whatever tmux offers.
+#[test]
+fn a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted() {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::tui_prompt_dedupe::{admit_herdr_execution, withhold_herdr_execution};
+    use std::os::unix::fs::PermissionsExt;
+    for condition in ["tmux", "exit-127 tmux", "no tmux server"] {
+        let _locks = TqLocks::take();
+        let scratch = tempfile::tempdir().unwrap();
+        let calls = scratch.path().join("tmux.calls");
+        let mut env = Vec::new();
+        match condition {
+            "exit-127 tmux" => {
+                let stub = format!("#!/bin/sh\necho \"$@\" >> {}\nexit 127\n", calls.display());
+                let fake = scratch.path().join("tmux");
+                std::fs::write(&fake, stub).unwrap();
+                std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let path = format!(
+                    "{}:{}",
+                    scratch.path().display(),
+                    std::env::var("PATH").unwrap()
+                );
+                env.push(Guard::set_value_after_shared_test_env_lock(
+                    "PATH",
+                    path.as_ref(),
+                ));
+            }
+            "no tmux server" => {
+                let sockets = scratch.path().join("sockets");
+                std::fs::create_dir_all(&sockets).unwrap();
+                env.push(Guard::set_path_after_shared_test_env_lock(
+                    "TMUX_TMPDIR",
+                    &sockets,
+                ));
+                env.push(Guard::capture_after_shared_test_env_lock("TMUX"));
+                unsafe { std::env::remove_var("TMUX") };
+            }
+            _ => {}
+        }
+        current_thread().block_on(async {
+            let rule: Rule = Arc::new(|_, _, _| Fate::Forward);
+            let tq = Retry::new(7_545, "herdr-p7s-relay", rule).await;
+            withhold_herdr_execution(&tq.tmux, Some("n1"));
+            let b = uuid::Uuid::new_v4().to_string();
+            tq.transcript(&b);
+            tq.hook("UserPromptSubmit", &b, None);
+            let resent = |tq: &Retry| tq.attempts("UserPromptSubmit").len() >= 3;
+            tq.until(&format!("{condition}: resends"), resent).await;
+            assert_eq!(tq.bound().as_deref(), Some(tq.a.as_str()), "{condition}");
+
+            admit_herdr_execution(&tq.tmux, "n1");
+            tq.adopted(&b).await;
+            let attempts = tq.attempts("UserPromptSubmit");
+            let ids: std::collections::HashSet<_> = attempts.iter().map(|a| &a.0).collect();
+            assert_eq!(ids.len(), 1, "{condition}: one request resent unchanged");
+        });
+        assert!(!calls.exists(), "{condition}: tmux was run");
+        drop(env);
+    }
+}
