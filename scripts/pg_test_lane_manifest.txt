@@ -736,6 +736,7 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_re
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
+server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg

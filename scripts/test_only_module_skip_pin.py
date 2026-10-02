@@ -315,6 +315,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/synthetic_start/claim_entry_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+        "src/services/discord/turn_bridge/tmux_runtime/judged_stop_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
     }
 )

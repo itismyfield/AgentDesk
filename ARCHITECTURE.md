@@ -798,6 +798,7 @@ src/
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
+│   │   │   │   ├── stop_judgement.rs
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── relay_auto_heal/
@@ -1515,6 +1516,8 @@ src/
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── interrupt_policy.rs
+│   │   │   │   ├── judged_stop.rs
+│   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
