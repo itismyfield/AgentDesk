@@ -240,6 +240,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     else {
         return;
     };
+    let host = HostSnapshot::read(&shared, &watcher_provider, channel_id, &tmux_session_name).await;
     let watcher_thread_channel_id =
         crate::services::discord::adk_session::parse_thread_channel_id_from_name(
             &watcher_channel_name,
@@ -315,6 +316,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         output_path: &output_path,
         watcher_thread_channel_id,
         watcher_instance_id,
+        host: &host,
     };
     let poll_controls = PollWatcherControls {
         cancel: &cancel,
@@ -702,6 +704,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_provider: &watcher_provider,
                 tmux_session_name: &tmux_session_name,
                 output_path: &output_path,
+                host: &host,
             };
             let terminal_preflight_locals = TerminalPreflightLocals {
                 current_offset,
@@ -755,6 +758,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_provider: &watcher_provider,
                 tmux_session_name: &tmux_session_name,
                 output_path: &output_path,
+                host: &host,
             };
             let terminal_preflight_suppression_locals = TerminalPreflightSuppressionLocals {
                 current_offset,
@@ -1739,12 +1743,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &mut last_status_panel_text,
                         task_notification_kind,
                         Some(tmux_session_name.clone()),
-                        |tmux_session_name| async move {
-                            crate::services::discord::tmux::sniff_background_agent_pending_for_completion(
-                                tmux_session_name.as_deref(),
-                            )
-                            .await
-                        },
+                        |name| host_gate::background_agent_pending(&host, name),
                         status_panel_completion_user_msg_id,
                         turn_is_external_input_for_session,
                         turn_is_non_managed_tui_mirror,
@@ -2408,6 +2407,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             output_path: &output_path,
             relay_coord: &relay_coord,
             turn_delivered: &turn_delivered,
+            host: &host,
         };
         let terminal_commit_epilogue_locals = TerminalCommitEpilogueLocals {
             terminal_output_committed,
@@ -2456,12 +2456,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             session_bound_relay_owns_terminal_delivery,
         );
         let tmux_alive_for_missing_inflight =
-            if inflight_missing_for_fallback && resolved_did.is_none() && terminal_output_committed
-            {
-                probe_tmux_session_liveness(&tmux_session_name).await
-            } else {
-                true
-            };
+            !(inflight_missing_for_fallback && resolved_did.is_none() && terminal_output_committed)
+                || host_gate::marker_alive(&shared, &tmux_session_name, channel_id, &host).await;
         let recent_turn_stop =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
         let placeholder_cleanup_committed = placeholder_msg_id.is_some_and(|msg_id| {
@@ -2564,6 +2560,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         cancel,
         watcher_turn_identity,
         watcher_instance_id,
+        host,
     })
     .await;
 }

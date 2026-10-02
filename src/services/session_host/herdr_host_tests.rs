@@ -1416,6 +1416,8 @@ fn herdr_items_have_no_production_caller() {
         (RECONCILE, 1),
         // Dormant source attach: takes the caller's reader, never constructs or routes to a host.
         ("src/services/discord/tui_prompt_relay/herdr_source.rs", 0),
+        // Watcher host snapshot: reads the marker beside the admission map and row, never a host.
+        (WATCH_HOST, 1),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -1449,6 +1451,7 @@ fn herdr_items_have_no_production_caller() {
     // A Claude turn's own marker check before it probes, kills or launches by name.
     const CLAUDE_TURN_GATE: &str = "src/services/claude/host_gate.rs";
     const RECONCILE: &str = "src/services/discord/recovery_engine/host_reconcile.rs";
+    const WATCH_HOST: &str = "src/services/discord/watchers/lifecycle/watch_host.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1474,6 +1477,7 @@ fn herdr_items_have_no_production_caller() {
                 LIVENESS,
                 CLAUDE_TURN_GATE,
                 RECONCILE,
+                WATCH_HOST,
             ],
         ),
         (
@@ -1486,6 +1490,7 @@ fn herdr_items_have_no_production_caller() {
                 LIVENESS,
                 CLAUDE_TURN_GATE,
                 RECONCILE,
+                WATCH_HOST,
             ],
         ),
         (
@@ -1498,6 +1503,7 @@ fn herdr_items_have_no_production_caller() {
                 LIVENESS,
                 CLAUDE_TURN_GATE,
                 RECONCILE,
+                WATCH_HOST,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),

@@ -395,7 +395,11 @@ mod tests {
 /// (the cheap `inflight_missing` prefix is true) — mirroring the existing lazy
 /// SSH-direct / external-lease computations in the post-terminal guard, which
 /// are themselves gated on `turn_result_relayed && post_terminal_inflight_missing`.
-pub(super) fn watcher_pane_actively_streaming(tmux_session_name: &str) -> bool {
+pub(super) fn watcher_pane_actively_streaming(name: &str, host: &HostSnapshot) -> bool {
+    host.tmux_only(name, || pane_streaming(name)) == Some(true)
+}
+
+fn pane_streaming(tmux_session_name: &str) -> bool {
     let Some(pane) = crate::services::platform::tmux::capture_pane(tmux_session_name, -160) else {
         // Capture failed (pane gone / tmux error): not a positive streaming
         // signal — fall back to the existing suppression behavior.
@@ -420,9 +424,10 @@ pub(super) fn watcher_pane_actively_streaming(tmux_session_name: &str) -> bool {
 pub(super) fn watcher_pane_live_turn_in_progress(
     tmux_session_name: &str,
     output_path: &str,
-) -> bool {
-    watcher_pane_actively_streaming(tmux_session_name)
-        && watcher_output_progressed_recently(output_path)
+    host: &HostSnapshot,
+) -> Option<bool> {
+    host.tmux_only(tmux_session_name, || pane_streaming(tmux_session_name))
+        .map(|streaming| streaming && watcher_output_progressed_recently(output_path))
 }
 
 /// Maximum age of the session JSONL's last write for the turn to count as

@@ -10,6 +10,7 @@ pub(super) struct TerminalPreflightContext<'a> {
     pub(super) watcher_provider: &'a ProviderKind,
     pub(super) tmux_session_name: &'a String,
     pub(super) output_path: &'a String,
+    pub(super) host: &'a HostSnapshot,
 }
 
 pub(super) struct TerminalPreflightLocals<'a> {
@@ -622,6 +623,7 @@ pub(super) async fn run_terminal_preflight_prepare(
                 &output_path,
                 data_start_offset,
                 turn_identity_for_panel.as_ref(),
+                context.host,
             ));
     let terminal_panel_reclaim_committed =
         if terminal_orphan_context && state.status_panel_msg_id.is_some() {

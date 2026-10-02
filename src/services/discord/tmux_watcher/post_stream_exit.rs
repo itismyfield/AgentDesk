@@ -18,6 +18,7 @@ pub(super) struct PostStreamExitContext {
     pub(super) watcher_turn_identity:
         Option<crate::services::discord::inflight::InflightTurnIdentity>,
     pub(super) watcher_instance_id: u64,
+    pub(super) host: Arc<HostSnapshot>,
 }
 
 pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
@@ -28,6 +29,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         cancel,
         watcher_turn_identity,
         watcher_instance_id,
+        host,
     } = ctx;
 
     // Cleanup: release this watcher's registry slot.
@@ -120,11 +122,13 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let provider_for_inflight = provider.clone();
             let channel_id_inflight = channel_id;
             let watcher_identity_for_inflight = watcher_turn_identity.clone();
+            let host = host.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 if !host_gate::tmux_pane_dead(
                     &provider_for_inflight,
                     channel_id_inflight,
                     &sess_for_inflight,
+                    &host,
                 ) {
                     // Pane resurrected (e.g. start_claude respawn race) or not
                     // confirmed dead — do not touch its inflight.
@@ -146,8 +150,9 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         {
             let sess = tmux_session_name.clone();
             let provider = provider.clone();
+            let host = host.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                if host_gate::tmux_dead_pane_present(&provider, channel_id, &sess) {
+                if host_gate::tmux_dead_pane_present(&provider, channel_id, &sess, &host) {
                     // Check if this is a unified-thread session before killing
                     if let Some((_, ch_name)) =
                         crate::services::provider::parse_provider_and_channel_from_tmux_name(&sess)
@@ -202,7 +207,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
                     // session here. Revalidate the dead-pane condition right
                     // before the kill so we only tear down the same
                     // dead-paned session we capture-paned.
-                    if host_gate::tmux_dead_pane_present(&provider, channel_id, &sess) {
+                    if host_gate::tmux_dead_pane_present(&provider, channel_id, &sess, &host) {
                         crate::services::platform::tmux::kill_session(
                             &sess,
                             "watcher cleanup: dead session after turn",

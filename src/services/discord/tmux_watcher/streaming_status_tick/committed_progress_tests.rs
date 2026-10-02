@@ -316,7 +316,7 @@ async fn run_tick_body(
     let ctx = StreamingStatusTickContext {
         http: &rec.http, shared, channel_id: fx.channel, watcher_provider: &fx.provider,
         tmux_session_name: &fx.tmux, output_path: &fx.output_path,
-        turn_delivered: &delivered_flag,
+        turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy),
     };
     let turn = StreamingStatusTickTurn {
         data_start_offset: 0, current_offset: full.len() as u64, full_response: &full,

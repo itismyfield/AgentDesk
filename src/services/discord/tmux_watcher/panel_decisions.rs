@@ -233,15 +233,20 @@ pub(super) fn watcher_external_input_turn_abandoned(
     output_path: &str,
     data_start_offset: u64,
     expected_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    host: &HostSnapshot,
 ) -> bool {
     match crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()) {
         // #3107: absence alone isn't abandonment — a live turn can momentarily
         // lose its inflight row while the pane keeps producing. Probe the pane
         // lazily (only here) to tell a live turn from a real orphan.
-        None => watcher_inflight_absence_is_abandonment(watcher_pane_live_turn_in_progress(
-            tmux_session_name,
-            output_path,
-        )),
+        None => match watcher_pane_live_turn_in_progress(tmux_session_name, output_path, host) {
+            Some(live) => watcher_inflight_absence_is_abandonment(live),
+            // An unknown pane is abandoned only by the turn's own stop tombstone.
+            None => {
+                recent_turn_stop_for_watcher_range(channel_id, tmux_session_name, data_start_offset)
+                    .is_some()
+            }
+        },
         Some(state) => {
             let replaced = expected_identity.is_some_and(|expected| {
                 *expected

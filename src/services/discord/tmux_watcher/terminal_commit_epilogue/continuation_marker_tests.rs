@@ -36,6 +36,7 @@ async fn stop(
         output_path: &a.output_path,
         relay_coord: &Arc::new(TmuxRelayCoord::new(channel_id)),
         turn_delivered: &a.turn_delivered,
+        host: &HostSnapshot::new(WatchHost::Legacy),
     };
     run_terminal_commit_epilogue(
         &context,
@@ -359,6 +360,7 @@ async fn exercise_zero_id_cleanup(name: &str, newer: bool) {
             output_path: &a.output_path,
             relay_coord: &Arc::new(TmuxRelayCoord::new(channel)),
             turn_delivered: &a.turn_delivered,
+            host: &HostSnapshot::new(WatchHost::Legacy),
         };
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(20),
