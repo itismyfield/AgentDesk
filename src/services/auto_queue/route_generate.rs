@@ -1,19 +1,43 @@
 use super::*;
 
-fn unresolved_external_dependency_label(issue_number: i64, status: Option<&str>) -> Option<String> {
-    (status != Some("done")).then(|| format!("#{issue_number}:{}", status.unwrap_or("missing")))
+/// (thread_group, priority_rank, batch_phase) per card in order. A requested
+/// `thread_group` keeps its lane; other cards get new lanes after the requested ones.
+fn assign_lanes(
+    issue_numbers: impl Iterator<Item = Option<i64>>,
+    requested: &HashMap<i64, (usize, i64, Option<i64>, Option<String>)>,
+) -> Vec<(i64, i64, i64)> {
+    let mut next_lane = requested
+        .values()
+        .filter_map(|(_, _, lane, _)| *lane)
+        .max()
+        .map_or(0, |max| max + 1);
+    let mut lane_lengths: HashMap<i64, i64> = HashMap::new();
+    issue_numbers
+        .map(|issue_number| {
+            let meta = issue_number.and_then(|number| requested.get(&number));
+            let lane = meta.and_then(|(_, _, lane, _)| *lane).unwrap_or_else(|| {
+                let lane = next_lane;
+                next_lane += 1;
+                lane
+            });
+            let rank = lane_lengths.entry(lane).or_insert(0);
+            *rank += 1;
+            (lane, *rank - 1, meta.map_or(0, |(_, phase, _, _)| *phase))
+        })
+        .collect()
 }
 
 /// POST /api/queue/generate
 ///
-/// Creates a queue run from ready cards, ordered by priority.
+/// Creates a queue run from ready cards. Auto-queue does not plan: cards keep
+/// the order given (`entries`, else priority then age), a requested
+/// `thread_group` keeps its lane, and every other card gets a lane of its own.
 ///
 /// This endpoint is single-call complete. Do NOT chain /redispatch, /retry,
 /// or /transition after it for the same card — that creates duplicate
 /// dispatches (see #1442 incident). The response surfaces structured skip
-/// breakdowns (`skipped_due_to_active_dispatch`, `skipped_due_to_dependency`,
-/// `skipped_due_to_filter`) so callers can make follow-up decisions without
-/// guessing.
+/// breakdowns (`skipped_due_to_active_dispatch`, `skipped_due_to_filter`) so
+/// callers can make follow-up decisions without guessing.
 pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
@@ -92,7 +116,7 @@ pub async fn generate(
                     .collect()
             })
             .unwrap_or_default();
-    let mut cards: Vec<GenerateCandidate> = {
+    let mut cards = {
         let conflicting_live_runs = match find_matching_active_run_id_pg(
             pool,
             body.repo.as_deref(),
@@ -125,7 +149,7 @@ pub async fn generate(
             }
         }
 
-        match state
+        state
             .auto_queue_service()
             .prepare_generate_cards_with_pg(
                 pool,
@@ -135,21 +159,7 @@ pub async fn generate(
                     issue_numbers: requested_issue_numbers.clone(),
                 },
             )
-            .await
-        {
-            Ok(cards) => cards
-                .into_iter()
-                .map(|card| GenerateCandidate {
-                    card_id: card.card_id,
-                    agent_id: card.agent_id,
-                    priority: card.priority,
-                    description: card.description,
-                    metadata: card.metadata,
-                    github_issue_number: card.github_issue_number,
-                })
-                .collect(),
-            Err(error) => return Err(error),
-        }
+            .await?
     };
 
     if !requested_entry_meta.is_empty() {
@@ -314,200 +324,34 @@ pub async fn generate(
                 "hint": "Move cards to a dispatchable state before generating a queue.",
                 "counts": counts_map,
                 "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
-                "skipped_due_to_dependency": Vec::<serde_json::Value>::new(),
                 "skipped_due_to_filter": skip_breakdown.filter,
             })),
         ));
     }
 
-    let issue_to_idx: HashMap<i64, usize> = cards
+    let planned = assign_lanes(
+        cards.iter().map(|card| card.github_issue_number),
+        &requested_entry_meta,
+    );
+    let thread_group_count = planned
         .iter()
-        .enumerate()
-        .filter_map(|(idx, card)| {
-            card.github_issue_number
-                .map(|issue_number| (issue_number, idx))
-        })
-        .collect();
-    let mut filtered_cards = Vec::with_capacity(cards.len());
-    let mut excluded_count = 0usize;
-    let mut skipped_due_to_dependency: Vec<serde_json::Value> = Vec::new();
-    let mut dependency_status_cache: HashMap<i64, Option<String>> = HashMap::new();
-    for card in &cards {
-        let dep_parse = extract_dependency_parse_result(card);
-        crate::auto_queue_log!(
-            info,
-            "generate.dependency_parse",
-            AutoQueueLogContext::new()
-                .card(card.card_id.as_str())
-                .agent(card.agent_id.as_str()),
-            "issue_number={} parsed_dependencies={:?} signals={:?}",
-            card.github_issue_number
-                .map(|issue_number| format!("#{issue_number}"))
-                .unwrap_or_else(|| "<none>".to_string()),
-            dep_parse.numbers,
-            dep_parse.signals
-        );
-
-        let mut unresolved_external_dependencies = Vec::new();
-        for dep_num in &dep_parse.numbers {
-            if issue_to_idx.contains_key(dep_num) {
-                continue;
-            }
-
-            let unresolved_dependency = if let Some(status) = dependency_status_cache.get(dep_num) {
-                unresolved_external_dependency_label(*dep_num, status.as_deref())
-            } else {
-                let status = sqlx::query_scalar::<_, String>(
-                    "SELECT status
-                         FROM kanban_cards
-                         WHERE github_issue_number::BIGINT = $1
-                         ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC
-                         LIMIT 1",
-                )
-                .bind(*dep_num)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-                let unresolved_dependency =
-                    unresolved_external_dependency_label(*dep_num, status.as_deref());
-                dependency_status_cache.insert(*dep_num, status);
-                unresolved_dependency
-            };
-
-            if let Some(unresolved_dependency) = unresolved_dependency {
-                unresolved_external_dependencies.push(unresolved_dependency);
-            }
-        }
-
-        if unresolved_external_dependencies.is_empty() {
-            filtered_cards.push(card.clone());
-        } else {
-            crate::auto_queue_log!(
-                info,
-                "generate.exclude_unresolved_dependencies",
-                AutoQueueLogContext::new()
-                    .card(card.card_id.as_str())
-                    .agent(card.agent_id.as_str()),
-                "issue_number={} unresolved_external_dependencies={:?}",
-                card.github_issue_number
-                    .map(|issue_number| format!("#{issue_number}"))
-                    .unwrap_or_else(|| "<none>".to_string()),
-                unresolved_external_dependencies
-            );
-            excluded_count += 1;
-            if let Some(issue_number) = card.github_issue_number {
-                skipped_due_to_dependency.push(json!({
-                    "issue_number": issue_number,
-                    "unresolved_deps": unresolved_external_dependencies,
-                }));
-            }
-        }
-    }
-
-    if filtered_cards.is_empty() {
-        return Ok((
-            StatusCode::OK,
-            Json(json!({
-                "run": null,
-                "entries": [],
-                "message": format!("No cards available ({}개 외부 의존성 미충족으로 제외)", excluded_count),
-                "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
-                "skipped_due_to_dependency": skipped_due_to_dependency,
-                "skipped_due_to_filter": skip_breakdown.filter,
-            })),
-        ));
-    }
-
-    let plan = build_group_plan(&filtered_cards);
-    let mut grouped_entries = plan.entries;
-    let mut thread_group_count = plan.thread_group_count.max(1);
-    let mut recommended_parallel_threads = plan.recommended_parallel_threads.max(1);
-    let dependency_edges = plan.dependency_edges;
-    let similarity_edges = plan.similarity_edges;
-    let path_backed_card_count = plan.path_backed_card_count;
-    let mut max_concurrent = body
+        .map(|(lane, _, _)| *lane)
+        .collect::<HashSet<_>>()
+        .len() as i64;
+    let max_concurrent = body
         .max_concurrent_threads
-        .unwrap_or(recommended_parallel_threads)
+        .unwrap_or_else(|| thread_group_count.clamp(1, 4))
         .clamp(1, 10)
         .min(thread_group_count.max(1));
-
-    // Apply explicit batch_phase/thread_group overrides from API entries.
-    if !requested_entry_meta.is_empty() {
-        let mut has_explicit_groups = false;
-        for planned in &mut grouped_entries {
-            let card = &filtered_cards[planned.card_idx];
-            if let Some(issue_number) = card.github_issue_number {
-                if let Some((_, batch_phase, thread_group, _)) =
-                    requested_entry_meta.get(&issue_number)
-                {
-                    planned.batch_phase = *batch_phase;
-                    if let Some(tg) = thread_group {
-                        planned.thread_group = *tg;
-                        has_explicit_groups = true;
-                    }
-                }
-            }
-        }
-        if has_explicit_groups {
-            thread_group_count = grouped_entries
-                .iter()
-                .map(|e| e.thread_group)
-                .collect::<std::collections::HashSet<_>>()
-                .len() as i64;
-            recommended_parallel_threads = thread_group_count.clamp(1, 4);
-            if let Some(requested_max) = body.max_concurrent_threads {
-                max_concurrent = requested_max.clamp(1, 10).min(thread_group_count.max(1));
-            } else {
-                max_concurrent = recommended_parallel_threads;
-            }
-        }
-    }
-
-    let batch_phase_count = grouped_entries
-        .iter()
-        .map(|entry| entry.batch_phase)
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let ai_rationale = if path_backed_card_count == 0 && dependency_edges == 0 {
-        format!(
-            "스마트 플래너: 의존성/파일 경로 신호가 약해 {}개 독립 그룹, {}개 페이즈로 계획. {}개 카드 큐잉, 추천 병렬 {}개, 적용 {}개",
-            thread_group_count,
-            batch_phase_count,
-            filtered_cards.len(),
-            recommended_parallel_threads,
-            max_concurrent
-        )
-    } else if path_backed_card_count == 0 {
-        format!(
-            "스마트 플래너: 파일 경로 신호 없이 의존성 {}건으로 {}개 그룹, {}개 페이즈 계획. {}개 카드 큐잉, {}개 외부 의존성 미충족 제외, 추천 병렬 {}개, 적용 {}개",
-            dependency_edges,
-            thread_group_count,
-            batch_phase_count,
-            filtered_cards.len(),
-            excluded_count,
-            recommended_parallel_threads,
-            max_concurrent
-        )
-    } else {
-        format!(
-            "스마트 플래너: 파일 경로 유사도 {}건 + 의존성 {}건으로 {}개 그룹, {}개 페이즈 계획. 파일 경로 추출 카드 {}개, {}개 카드 큐잉, {}개 외부 의존성 미충족 제외, 추천 병렬 {}개, 적용 {}개",
-            similarity_edges,
-            dependency_edges,
-            thread_group_count,
-            batch_phase_count,
-            path_backed_card_count,
-            filtered_cards.len(),
-            excluded_count,
-            recommended_parallel_threads,
-            max_concurrent
-        )
-    };
+    let ai_rationale = format!(
+        "{}개 카드, 레인 {}개, 동시 {}개",
+        cards.len(),
+        thread_group_count,
+        max_concurrent
+    );
 
     // Create run + entries atomically so partial inserts cannot masquerade as success.
     let run_id = uuid::Uuid::new_v4().to_string();
-    let ai_model_str = "smart-planner".to_string();
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(error) => {
@@ -521,14 +365,13 @@ pub async fn generate(
         "INSERT INTO auto_queue_runs (
             id, repo, agent_id, review_mode, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count
          ) VALUES (
-            $1, $2, $3, $4, 'generated', $5, $6, FALSE, $7, $8
+            $1, $2, $3, $4, 'generated', 'generate', $5, FALSE, $6, $7
          )",
     )
     .bind(&run_id)
     .bind(body.repo.as_deref())
     .bind(body.agent_id.as_deref())
     .bind(review_mode)
-    .bind(&ai_model_str)
     .bind(&ai_rationale)
     .bind(max_concurrent)
     .bind(thread_group_count)
@@ -539,8 +382,7 @@ pub async fn generate(
     }
 
     let mut entry_ids = Vec::new();
-    for planned in &grouped_entries {
-        let card = &filtered_cards[planned.card_idx];
+    for (card, (thread_group, priority_rank, batch_phase)) in cards.iter().zip(planned) {
         let entry_id = uuid::Uuid::new_v4().to_string();
         let agent = if card.agent_id.is_empty() {
             body.agent_id.as_deref().unwrap_or("")
@@ -553,19 +395,18 @@ pub async fn generate(
             .and_then(|(_, _, _, kind)| kind.clone());
         if let Err(error) = sqlx::query(
             "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason, batch_phase, phase_gate_kind
+                id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase, phase_gate_kind
              ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9
+                $1, $2, $3, $4, $5, $6, $7, $8
              )",
         )
         .bind(&entry_id)
         .bind(&run_id)
         .bind(&card.card_id)
         .bind(agent)
-        .bind(planned.priority_rank)
-        .bind(planned.thread_group)
-        .bind(&planned.reason)
-        .bind(planned.batch_phase)
+        .bind(priority_rank)
+        .bind(thread_group)
+        .bind(batch_phase)
         .bind(phase_gate_kind.as_deref())
         .execute(&mut *tx)
         .await
@@ -604,7 +445,6 @@ pub async fn generate(
             "run": run,
             "entries": entries,
             "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
-            "skipped_due_to_dependency": skipped_due_to_dependency,
             "skipped_due_to_filter": skip_breakdown.filter,
         })),
     ))
@@ -753,6 +593,22 @@ pub(crate) async fn active_dispatch_id_for_card_pg(
 }
 
 #[cfg(test)]
+mod lane_assignment_tests {
+    use super::*;
+
+    #[test]
+    fn requested_lanes_are_kept_and_other_cards_get_their_own() {
+        let requested = HashMap::from([
+            (1, (0, 0, Some(2), None)),
+            (2, (1, 1, Some(2), None)),
+            (3, (2, 1, None, None)),
+        ]);
+        let lanes = assign_lanes([Some(1), Some(2), Some(3), None].into_iter(), &requested);
+        assert_eq!(lanes, vec![(2, 0, 0), (2, 1, 1), (3, 0, 1), (4, 0, 0)]);
+    }
+}
+
+#[cfg(test)]
 mod empty_generate_status_count_tests {
     use super::empty_generate_status_counts;
     use std::collections::HashMap;
@@ -774,19 +630,6 @@ mod empty_generate_status_count_tests {
 #[cfg(test)]
 mod deploy_gate_request_rejection_tests {
     use super::*;
-
-    #[test]
-    fn dependency_label_preserves_done_pending_and_missing_semantics() {
-        assert_eq!(unresolved_external_dependency_label(41, Some("done")), None);
-        assert_eq!(
-            unresolved_external_dependency_label(42, Some("in_progress")),
-            Some("#42:in_progress".to_string())
-        );
-        assert_eq!(
-            unresolved_external_dependency_label(43, None),
-            Some("#43:missing".to_string())
-        );
-    }
 
     fn body(kind: &str) -> GenerateBody {
         GenerateBody {

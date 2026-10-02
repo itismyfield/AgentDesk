@@ -130,31 +130,6 @@ pub struct CancelQuery {
     pub run_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct GenerateCandidate {
-    pub(super) card_id: String,
-    pub(super) agent_id: String,
-    pub(super) priority: String,
-    pub(super) description: Option<String>,
-    pub(super) metadata: Option<String>,
-    pub(super) github_issue_number: Option<i64>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct PlannedEntry {
-    pub(super) card_idx: usize,
-    pub(super) thread_group: i64,
-    pub(super) priority_rank: i64,
-    pub(super) batch_phase: i64,
-    pub(super) reason: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct DependencyParseResult {
-    pub(super) numbers: Vec<i64>,
-    pub(super) signals: Vec<String>,
-}
-
 pub(super) const AUTO_QUEUE_REVIEW_MODE_ENABLED: &str = "enabled";
 pub(super) const AUTO_QUEUE_REVIEW_MODE_DISABLED: &str = "disabled";
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "19c08d3af0102d3c1a8b979a8f6a0f78c92b1018",
+  "measured_at_sha": "63726c6d621c10e9291e6e783d7ae496d89f0061",
   "records": [
     {
       "root": "migrations/postgres",
@@ -4041,7 +4041,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:b78248ad333859ffe326e9af579015228f555db10a7f9d88abd39e41599d8d49"
+      "fingerprint": "sha256:b1c18bfbea7129d62e02dc1da2754ee7b5ba8a487bcb59a371d04ac25a388cc2"
     },
     {
       "root": "src",
@@ -4050,7 +4050,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:e8ed3e8650abd9cde64e577c992c4a9e2cca754d2fdb42d85583315eae17d35a"
+      "fingerprint": "sha256:b78248ad333859ffe326e9af579015228f555db10a7f9d88abd39e41599d8d49"
     },
     {
       "root": "src",
@@ -23292,7 +23292,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:e5a7d3f84144d5e8a93c57df3c3d5a995b6706bdf18b2a3429a2e06abc08ab5a"
+      "fingerprint": "sha256:2711a15dcd622fd8d7815ee0dbab5ff5184d3c9a8a63c6182ceb62469392d863"
     },
     {
       "root": "src",
@@ -23301,7 +23301,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:ef8b1c7a8496499699f1a85c54b43859fd0cb8ce75257b9e1c94bf01ad81cd53"
+      "fingerprint": "sha256:caec4db97ca12305a2e3455cd751cab1da46927ee83d2f3c05854cfcb5de3070"
     },
     {
       "root": "src",
@@ -23356,15 +23356,6 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e3e2214984f90004b107415d7aa0675cc8cd7b7b9e5c6832e025defdcf8038d8"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/auto_queue/route_generate.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:f0a2f8bbbe71e09d14ca473cf2b0fa911adeb1361f0860f4da4560bbf06c70c7"
     },
     {
       "root": "src",

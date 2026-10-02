@@ -30,9 +30,6 @@ pub struct BacklogCardRecord {
 pub struct GenerateCandidateRecord {
     pub card_id: String,
     pub agent_id: String,
-    pub priority: String,
-    pub description: Option<String>,
-    pub metadata: Option<String>,
     pub github_issue_number: Option<i64>,
 }
 
@@ -415,9 +412,6 @@ pub async fn list_generate_candidates_pg(
     let rows = sqlx::query(
         "SELECT kc.id,
                 kc.assigned_agent_id,
-                kc.priority,
-                kc.description,
-                kc.metadata::TEXT AS metadata,
                 kc.github_issue_number::BIGINT AS github_issue_number
          FROM kanban_cards kc
          WHERE kc.status = ANY($1::TEXT[])
@@ -448,11 +442,6 @@ pub async fn list_generate_candidates_pg(
                 agent_id: row
                     .try_get::<Option<String>, _>("assigned_agent_id")?
                     .unwrap_or_default(),
-                priority: row
-                    .try_get::<Option<String>, _>("priority")?
-                    .unwrap_or_else(|| "medium".to_string()),
-                description: row.try_get("description")?,
-                metadata: row.try_get("metadata")?,
                 github_issue_number: row.try_get("github_issue_number")?,
             })
         })

@@ -734,7 +734,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/generate",
             "auto-queue",
-            "Generate auto-queue entries. Single-call complete: do NOT chain /redispatch, /retry, or /transition for the same card after it (#1442). Inspect skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter in the response to see structured skip reasons. See /api/docs/card-lifecycle-ops for the full decision tree (#1443).",
+            "Generate auto-queue entries. Single-call complete: do NOT chain /redispatch, /retry, or /transition for the same card after it (#1442). Cards keep the order given (entries, else priority then age); auto-queue does not infer dependencies, so callers order work with batch_phase and thread_group. Inspect skipped_due_to_active_dispatch / skipped_due_to_filter in the response to see structured skip reasons. See /api/docs/card-lifecycle-ops for the full decision tree (#1443).",
         )
         .with_params([
             (
@@ -767,7 +767,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 body_param(
                     "object[]",
                     false,
-                    "Explicit entries with issue_number, batch_phase, and optional thread_group",
+                    "Explicit entries with issue_number, batch_phase, and optional thread_group; an entry without thread_group gets a lane of its own",
                 ),
             ),
             (
@@ -785,8 +785,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "max_concurrent_threads",
-                body_param("number", false, "Upper bound for simultaneously active groups")
-                    .with_default(1),
+                body_param(
+                    "number",
+                    false,
+                    "Upper bound for simultaneously active lanes; defaults to the lane count, at most 4",
+                ),
             ),
             (
                 "review_mode",
@@ -812,7 +815,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "run": {"id": "run-1", "status": "generated", "review_mode": "disabled", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false},
                 "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}],
                 "skipped_due_to_active_dispatch": [{"issue_number": 405, "existing_dispatch_id": "dispatch-already-running"}],
-                "skipped_due_to_dependency": [{"issue_number": 407, "unresolved_deps": ["#410:in_progress"]}],
                 "skipped_due_to_filter": []
             }),
         )

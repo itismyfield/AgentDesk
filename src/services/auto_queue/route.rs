@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::Row as SqlxRow;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -107,7 +107,7 @@ use phase_gate::*;
 use planning::*;
 use query::*;
 use route_types::{
-    AUTO_QUEUE_REVIEW_MODE_DISABLED, AUTO_QUEUE_REVIEW_MODE_ENABLED, DependencyParseResult,
-    GenerateCandidate, PlannedEntry, RESET_GLOBAL_CONFIRMATION_TOKEN,
+    AUTO_QUEUE_REVIEW_MODE_DISABLED, AUTO_QUEUE_REVIEW_MODE_ENABLED,
+    RESET_GLOBAL_CONFIRMATION_TOKEN,
 };
 use view::*;
