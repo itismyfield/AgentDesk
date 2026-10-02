@@ -2041,7 +2041,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c030eb40eeee50872e1a888af49dec8c1cc2f0aa3693029e8966f97d35884b67
+          expected=ea55b7de31cac3e8047fa32039e5617621ac20e44d9cd9e09d2e53334b06d5a9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2160,7 +2160,10 @@ jobs:
       matrix:
         shard: [0, 1, 2]
     steps:
+      # Depth 2 keeps HEAD^1, the base side the wiring digest compares against.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # Filter mutation setup and execution; a missing output still runs the gate.
       - name: Detect relay-authority mutation sources
@@ -2180,20 +2183,28 @@ jobs:
               - 'src/services/discord/relay_recovery.rs'
               - 'src/services/discord/relay_recovery/tests.rs'
               - 'scripts/run_relay_authority_mutations.sh'
-              - '.github/workflows/ci-pr.yml'
+              - 'scripts/relay_mutation_wiring_digest.py'
+
+      # ci-pr.yml counts only when the relay jobs' resolved YAML changed; doubt reports true.
+      # PyYAML is installed only if missing, and a failed install leaves the digest to report true.
+      - name: Detect relay-authority mutation wiring
+        id: mutation_wiring
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --disable-pip-version-check --break-system-packages pyyaml || echo "::warning::PyYAML unavailable; the wiring digest reports true"
+          python3 scripts/relay_mutation_wiring_digest.py
 
       - name: Install Rust toolchain
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache Cargo dependencies
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
@@ -2202,7 +2213,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Fetch Cargo dependencies
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -2212,7 +2223,7 @@ jobs:
         run: cargo fetch --locked
 
       - name: Require relay-authority mutations to be killed
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -2222,7 +2233,7 @@ jobs:
         run: bash scripts/run_relay_authority_mutations.sh
 
       - name: sccache stats
-        if: always() && steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: always() && (steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false')
         run: sccache --show-stats || true
 
   # Pin the result helper and gate before mirroring both independent runners.
@@ -2256,7 +2267,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c030eb40eeee50872e1a888af49dec8c1cc2f0aa3693029e8966f97d35884b67
+          expected=ea55b7de31cac3e8047fa32039e5617621ac20e44d9cd9e09d2e53334b06d5a9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -526,3 +526,56 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
+
+  # Unfiltered backstop for the PR mutation gate: every row on main, so a judge weakened
+  # from a file outside the PR path filter fails here within a day.
+  relay_authority_mutations_full:
+    name: Relay authority mutations full (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RELAY_AUTHORITY_MUTATION_SHARD_INDEX: ${{ matrix.shard }}
+      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "3"
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # See `full_macos` for rationale.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Fetch Cargo dependencies
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: cargo fetch --locked
+
+      - name: Require relay-authority mutations to be killed
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 45
+        run: bash scripts/run_relay_authority_mutations.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

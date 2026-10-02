@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "c030eb40eeee50872e1a888af49dec8c1cc2f0aa3693029e8966f97d35884b67"
+    "ea55b7de31cac3e8047fa32039e5617621ac20e44d9cd9e09d2e53334b06d5a9"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -895,6 +895,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
             self.assertEqual(runner["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
             self.assertEqual(runner["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
             setup.append([step for step in runner["steps"] if "uses" in step and step.get("id") != "mutation_paths"])
+        # The mutation job alone keeps HEAD^1 for its wiring digest; the rest of setup is shared.
+        self.assertEqual(setup[1][0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
+        setup[1][0] = {"uses": "actions/checkout@v4"}
         self.assertEqual(
             setup[0],
             [{key: value for key, value in step.items() if key != "if"} for step in setup[1]],
@@ -929,7 +932,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertRegex(
             job_block(workflow, "relay_authority_mutations"),
             r"(?m)^      - name: Require relay-authority mutations to be killed\n"
-            r"        if: steps\.mutation_paths\.outputs\.mutation_sources != 'false'\n"
+            r"        if: steps\.mutation_paths\.outputs\.mutation_sources != 'false'"
+            r" \|\| steps\.mutation_wiring\.outputs\.wiring_changed != 'false'\n"
             r"        env:\n"
             r"          BASH_ENV: /dev/null\n"
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
@@ -940,11 +944,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
 
     def assert_mutation_dependency_preparation(self, job: dict) -> None:
-        condition = "steps.mutation_paths.outputs.mutation_sources != 'false'"
+        condition = (
+            "steps.mutation_paths.outputs.mutation_sources != 'false'"
+            " || steps.mutation_wiring.outputs.wiring_changed != 'false'"
+        )
         self.assertNotIn("if", job)
         self.assertNotIn("continue-on-error", job)
         steps = job["steps"]
-        self.assertEqual(steps[0], {"uses": "actions/checkout@v4"})
+        self.assertEqual(steps[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
         path_filter = steps[1]
         self.assertEqual(path_filter.get("id"), "mutation_paths")
         self.assertEqual(path_filter.get("uses"), "dorny/paths-filter@v3")

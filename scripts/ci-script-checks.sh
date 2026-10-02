@@ -423,6 +423,10 @@ if run_check guards "Relay-authority fixed mutation gate (#5071)"; then
 "$PYTHON" -m unittest tests.test_relay_authority_mutations
 fi
 
+if run_check guards "Relay-authority mutation wiring digest (#5997)"; then
+"$PYTHON" -m unittest tests.test_relay_mutation_wiring_digest
+fi
+
 if run_check guards "Relay recovery targeted-lane wiring contract (#4423)"; then
 "$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring
 fi
