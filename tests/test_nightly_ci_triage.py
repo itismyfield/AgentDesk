@@ -47,6 +47,12 @@ if a[0] == "api":
         kind = "comments"  # Unlike the CLI, REST resolves a decimal spelling of the number.
         values = next(i for i in s["issues"]
             if isinstance(i, dict) and number_of(i) == float(re_match[1]))["comments"]
+    elif re.fullmatch(f"/repos/{repo}/actions/runs/200/attempts/[0-9]+/jobs\\?per_page=100", endpoint):
+        if s.get("fail_read") == "jobs": finish(code=1)
+        # Paginated object pages, as the jobs API returns them.
+        jobs = s.get("jobs", [])
+        finish("\n".join(json.dumps({"total_count": len(jobs), "jobs": jobs[i:i+2]})
+            for i in range(0, len(jobs), 2)) or '{"total_count":0,"jobs":[]}')
     else: raise AssertionError(a)
     if s.get("fail_read") == kind: finish("[]", 1)
     if s.get("bad_json") == kind: finish("not-json")
@@ -143,6 +149,26 @@ class NightlyTriage(unittest.TestCase):
                 self.assertEqual(self.run_entry(sync=True), ["label", "label", "create", "sync"])
                 self.assertIn(marker(), self.load()["issues"][0]["body"].splitlines())
                 self.assertEqual(self.run_entry(sync=True), [])
+
+    def test_record_names_failed_jobs_and_a_jobs_read_failure_still_records(self):
+        ok = {"name": "CLI smoke", "conclusion": "success", "steps": []}
+        failed = [{"name": "Multinode regression lane", "conclusion": "failure", "steps": [
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Rust multinode invariants", "conclusion": "failure"}]},
+            {"name": "High-risk recovery full", "conclusion": "cancelled", "steps": []}]
+        self.save({"issues": [], "calls": [], "writes": [], "jobs": [ok, *failed, ok]})
+        self.assertEqual(self.run_entry(), ["label", "label", "create"])
+        lines = self.load()["issues"][0]["body"].splitlines()
+        self.assertEqual(lines[lines.index("- Failed jobs:") + 1:][:2], [
+            "  - Multinode regression lane: failure (step: Rust multinode invariants)",
+            "  - High-risk recovery full: cancelled"])
+        self.assertNotIn("CLI smoke", "\n".join(lines))
+        state = self.load(); state["fail_read"] = "jobs"; self.save(state)
+        self.payload["workflow_run"]["run_attempt"] = 2
+        self.assertEqual(self.run_entry(), ["comment"])
+        comment = self.load()["issues"][0]["comments"][-1]["body"]
+        self.assertIn(marker(200, 2), comment)
+        self.assertIn("- Failed jobs: unavailable (see the run)", comment.splitlines())
 
     def test_new_run_and_upstream_attempt_are_distinct_from_triage_attempt(self):
         self.run_entry()
