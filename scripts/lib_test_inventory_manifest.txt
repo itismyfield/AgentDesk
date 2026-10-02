@@ -9910,6 +9910,7 @@ services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_w
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound
 services::tui_o::writer::tests::actor::host_start::only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned
 services::tui_o::writer::tests::actor::host_start::reclaim::a_current_prompt_after_a_late_clear_reclaims_the_pane
+services::tui_o::writer::tests::actor::host_start::reclaim::a_first_pin_on_an_incomplete_history_does_not_reclaim_the_pane
 services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_prompt_after_a_late_clear_reclaims_the_pane
 services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
