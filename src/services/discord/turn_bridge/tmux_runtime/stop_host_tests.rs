@@ -23,7 +23,7 @@ use crate::services::session_host::{
 
 /// How the PATH-first tmux answers after logging a call.
 #[derive(Clone, Copy, Debug)]
-enum Server {
+pub(in super::super) enum Server {
     /// Every session exists with a live pane showing a busy Claude turn.
     Live,
     /// The binary cannot run: exit 127.
@@ -32,11 +32,11 @@ enum Server {
     NoSocket,
 }
 
-const SERVERS: [Server; 3] = [Server::Live, Server::Missing, Server::NoSocket];
+pub(in super::super) const SERVERS: [Server; 3] = [Server::Live, Server::Missing, Server::NoSocket];
 
 /// What the `.host_kind` marker holds; `Unreadable` is a directory in its place.
 #[derive(Clone, Copy, Debug)]
-enum Mark {
+pub(in super::super) enum Mark {
     Absent,
     Herdr,
     Process,
@@ -44,9 +44,10 @@ enum Mark {
     Unreadable,
 }
 
-const NOT_TMUX: [Mark; 4] = [Mark::Herdr, Mark::Process, Mark::Zellij, Mark::Unreadable];
+pub(in super::super) const NOT_TMUX: [Mark; 4] =
+    [Mark::Herdr, Mark::Process, Mark::Zellij, Mark::Unreadable];
 
-fn mark(name: &str, mark: Mark) {
+pub(in super::super) fn mark(name: &str, mark: Mark) {
     let path = crate::services::tmux_common::session_temp_path(name, "host_kind");
     std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(&path);
@@ -62,7 +63,7 @@ fn mark(name: &str, mark: Mark) {
 
 /// A runtime root, a logging PATH-first tmux and a live `codex` it reports as every pane's
 /// process. Fields drop in order: PATH is restored before the env and SIGINT locks are released.
-struct Fixture {
+pub(in super::super) struct Fixture {
     _env: crate::config::TestEnvVarGuard,
     dir: tempfile::TempDir,
     codex: std::process::Child,
@@ -71,7 +72,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(in super::super) fn new() -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let lock = super::super::tests::SIGINT_TEST_LOCK.lock();
         let sigint = lock.unwrap_or_else(|error| error.into_inner());
@@ -86,7 +87,9 @@ impl Fixture {
              missing) exit 127 ;;\n\
              nosocket) echo \"no server running on $d/socket\" >&2; exit 1 ;;\nesac\n\
              case \"$1\" in\ndisplay-message) cat \"$d/pane_pid\"; exit 0 ;;\n\
-             capture-pane) echo '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;\nesac\nexit 0"
+             capture-pane) r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
+             [ -n \"$r\" ] && case \"$*\" in *\"-t $r -S\"*) echo 'Ready for input (type message + Enter)'; exit 0 ;; esac\n\
+             echo '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;\nesac\nexit 0"
         )
         .expect("tmux body");
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -126,7 +129,7 @@ impl Fixture {
         fixture
     }
 
-    fn serve(&self, server: Server) {
+    pub(in super::super) fn serve(&self, server: Server) {
         let mode = match server {
             Server::Live => "live",
             Server::Missing => "missing",
@@ -135,12 +138,17 @@ impl Fixture {
         std::fs::write(self.dir.path().join("mode"), mode).unwrap();
     }
 
-    fn pid(&self) -> u32 {
+    /// Makes the pane of `session` read as a Claude prompt ready for input; every other stays busy.
+    pub(in super::super) fn ready(&self, session: &str) {
+        std::fs::write(self.dir.path().join("ready"), session).unwrap();
+    }
+
+    pub(in super::super) fn pid(&self) -> u32 {
         self.codex.id()
     }
 
     /// The logged tmux calls, oldest first, and clears the log.
-    fn take_calls(&self) -> Vec<String> {
+    pub(in super::super) fn take_calls(&self) -> Vec<String> {
         let log = self.dir.path().join("calls");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         let _ = std::fs::remove_file(log);
@@ -161,7 +169,7 @@ impl Drop for Fixture {
     }
 }
 
-fn run<F: std::future::Future>(future: F) -> F::Output {
+pub(in super::super) fn run<F: std::future::Future>(future: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -169,7 +177,7 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
     runtime.block_on(future)
 }
 
-fn bound_token(provider: &ProviderKind, name: &str) -> Arc<CancelToken> {
+pub(in super::super) fn bound_token(provider: &ProviderKind, name: &str) -> Arc<CancelToken> {
     let token = Arc::new(CancelToken::new());
     if matches!(provider, ProviderKind::Claude) {
         token.bind_claude_tmux_session(name);
@@ -479,8 +487,8 @@ fn zombie_release_never_reads_another_hosts_session_as_idle() {
     assert!(idle(&ProviderKind::Claude, &token));
 }
 
-// The runtime cancel skips no interrupt by reading another host's pane: with no inflight row
-// and no structured state, a non-tmux session gets no capture or any other tmux call.
+// The runtime cancel reads no pane of another host and keeps its turn: a non-tmux session gets
+// no capture or any other tmux call and is not cancelled; a legacy session is stopped as in main.
 #[test]
 fn runtime_cancel_reads_no_pane_of_another_host() {
     let fx = Fixture::new();
@@ -490,7 +498,7 @@ fn runtime_cancel_reads_no_pane_of_another_host() {
         registry
             .register("claude".to_string(), shared.clone())
             .await;
-        for (n, host) in NOT_TMUX.into_iter().enumerate() {
+        for (n, host) in NOT_TMUX.into_iter().chain([Mark::Absent]).enumerate() {
             let channel = ChannelId::new(5_340_100 + n as u64);
             let name = format!("AgentDesk-claude-p6ao-runtime-{n}");
             mark(&name, host);
@@ -506,22 +514,27 @@ fn runtime_cancel_reads_no_pane_of_another_host() {
             let stop = crate::services::discord::health::stop_provider_channel_runtime_with_policy;
             let policy = TmuxCleanupPolicy::PreserveSession;
             let result = stop(&registry, "claude", channel, "p6ao", policy).await;
-            assert!(result.is_some(), "{host:?}");
-            assert!(token.cancelled.load(Ordering::SeqCst), "{host:?}");
-            assert_eq!(fx.take_calls(), Vec::<String>::new(), "{host:?}");
+            let kept = crate::services::discord::health::InflightDisposition::PreservedByHostGuard;
+            let legacy = matches!(host, Mark::Absent);
+            assert_eq!(result.unwrap().inflight == kept, !legacy, "{host:?}");
+            assert_eq!(token.cancelled.load(Ordering::SeqCst), legacy, "{host:?}");
+            let calls = fx.take_calls();
+            let interrupted = calls.iter().any(|call| call.starts_with("send-keys"));
+            assert_eq!(interrupted, legacy, "{host:?} {calls:?}");
+            assert_eq!(calls.is_empty(), !legacy, "{host:?} {calls:?}");
         }
     });
 }
 
 /// A Herdr host recording each operation, answering with the scripted capture and key result.
-struct FakeHerdr {
+pub(in super::super) struct FakeHerdr {
     ops: Mutex<Vec<String>>,
     capture: Result<String, HostError>,
     keys: Result<HostMutation, HostError>,
 }
 
 impl FakeHerdr {
-    fn new(keys: Result<HostMutation, HostError>) -> Arc<Self> {
+    pub(in super::super) fn new(keys: Result<HostMutation, HostError>) -> Arc<Self> {
         Arc::new(Self {
             ops: Mutex::default(),
             capture: Ok("· Actioning… (4m 7s · esc to interrupt)".to_string()),
@@ -593,7 +606,7 @@ impl MutationGate for Gate {
     }
 }
 
-fn herdr_target(
+pub(in super::super) fn herdr_target(
     provider: &ProviderKind,
     session: &str,
     host: Arc<FakeHerdr>,
@@ -612,7 +625,10 @@ fn herdr_target(
 }
 
 /// A Claude turn bound to `session` whose transcript shows it generating.
-fn generating_turn(fx: &Fixture, session: &str) -> (Arc<CancelToken>, std::path::PathBuf) {
+pub(in super::super) fn generating_turn(
+    fx: &Fixture,
+    session: &str,
+) -> (Arc<CancelToken>, std::path::PathBuf) {
     let transcript = fx.dir.path().join(format!("{session}.jsonl"));
     let user = serde_json::json!({"type": "user", "message": {"role": "user", "content": "go"}});
     let assistant = serde_json::json!({"type": "assistant", "message": {"content": []}});
