@@ -210,9 +210,8 @@ async fn auth_login_routes_refuse_a_target_another_host_claims() {
     assert_ne!(error.status(), StatusCode::CONFLICT, "{error:?}");
 }
 
-// A dispatch cancel and an agent stop whose runtime turn runs on another host change nothing:
-// a conflict, the turn still running, its session row and dispatch unmarked; a legacy turn's
-// stop marks its row as in main.
+// A dispatch cancel and an agent stop of a runtime turn on another host answer a conflict and
+// change no turn, session row or dispatch; a legacy turn's stop marks its row as in main.
 #[tokio::test]
 async fn stop_routes_keep_a_runtime_turn_on_another_host_pg() {
     use crate::services::discord::host_teardown_gate::test_support::{nameless_turn, runtime};

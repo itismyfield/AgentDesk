@@ -123,9 +123,8 @@ fn a_preserve_stop_keeps_a_turn_on_another_host_before_any_write() {
     });
 }
 
-// A user stop is judged before any write: another host's turn is left as it is, its inflight
-// row unsaved; an admitted unbound turn is bound to, and tombstoned under, its row's name
-// without saving that row, for Claude and for Codex, whose stop offset reads the Codex row.
+// A user stop leaves another host's turn and row untouched; an admitted unbound turn is bound
+// to and tombstoned under its row's name without saving the row, for Claude and for Codex.
 #[test]
 fn a_command_stop_judges_before_any_write_and_binds_what_it_judged() {
     let fx = Fixture::new();
@@ -296,9 +295,8 @@ fn owner_exits_after_cancel(
     });
 }
 
-// A Herdr stop leaves the turn's row to its source owner: a turn that outlives the wait keeps
-// its mailbox, counter and row with no fallback, and one whose mailbox frees in time keeps its
-// row, at the recovery stop and at the preserve-stop entry, which reports the turn kept.
+// A Herdr stop leaves the turn and its row to the source owner, past the wait or after it, at
+// the recovery stop and at the preserve-stop entry, which reports the turn kept.
 #[test]
 fn a_host_owned_stop_keeps_the_turn_row_for_its_owner() {
     let fx = Fixture::new();
