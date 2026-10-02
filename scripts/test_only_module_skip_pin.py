@@ -345,6 +345,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/stale_resume_retry_e2e.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs",
         "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",
         "src/services/observability/events/test_capture.rs",
         "src/services/observability/test_support.rs",
