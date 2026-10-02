@@ -29,14 +29,6 @@ export interface AutoQueueAgentStats {
   failed: number;
 }
 
-export interface AutoQueueRequestProgress {
-  startedAt: number;
-  baselineEntryIds: Set<string>;
-  pendingGroups: Set<string>;
-  satisfiedGroups: Set<string>;
-  errors: { groupKey: string; message: string }[];
-}
-
 /**
  * The exact slice of the panel context consumed by
  * `createAutoQueuePhaseRenderers`. Every member here must be produced by
@@ -82,7 +74,6 @@ export interface AutoQueuePanelCtx extends AutoQueuePhaseRendererCtx {
   phaseSections: Array<[number, DispatchQueueEntry[]]>;
   primaryAction: AutoQueuePrimaryAction;
   readyEntries: ReadyAutoQueueEntry[];
-  requestProgress: AutoQueueRequestProgress | null;
   run: AutoQueueRun | null;
   selectedRepo: string;
   setExpanded: Dispatch<SetStateAction<boolean>>;

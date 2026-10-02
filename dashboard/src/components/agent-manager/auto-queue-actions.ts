@@ -10,16 +10,16 @@ export interface ReadyAutoQueueEntry {
   issueNumber: number;
 }
 
-export interface RequestGenerateGroup {
+export interface GenerateGroup {
   repo: string;
   agentId: string;
   issueNumbers: number[];
 }
 
-export function buildRequestGenerateGroups(
+export function buildGenerateGroups(
   readyEntries: ReadyAutoQueueEntry[],
   fallbackRepo: string | null | undefined,
-): RequestGenerateGroup[] {
+): GenerateGroup[] {
   const byRepoAgent = new Map<string, { repo: string; agentId: string; issues: Set<number> }>();
   for (const entry of readyEntries) {
     const repo = (entry.repo || fallbackRepo || "").trim();

@@ -113,16 +113,19 @@ export interface AutoQueueHistoryResponse {
   runs: AutoQueueHistoryRun[];
 }
 
-export async function generateAutoQueue(
-  repo?: string | null,
-  agentId?: string | null,
-): Promise<{
-  run: AutoQueueRun;
+export async function generateAutoQueue(input: {
+  repo: string;
+  agentId: string;
+  issueNumbers: number[];
+}): Promise<{
+  run: AutoQueueRun | null;
   entries: DispatchQueueEntry[];
+  message?: string;
 }> {
-  const body: Record<string, unknown> = {
-    repo: repo ?? null,
-    agent_id: agentId ?? null,
+  const body = {
+    repo: input.repo,
+    agent_id: input.agentId,
+    issue_numbers: input.issueNumbers,
   };
   return request("/api/queue/generate", {
     method: "POST",
@@ -308,44 +311,6 @@ export interface PhaseGateCatalog {
 
 export async function getPhaseGateCatalog(): Promise<PhaseGateCatalog> {
   return request("/api/queue/phase-gates/catalog");
-}
-
-// ── Auto-queue request-generate (#2126) ──
-
-export interface RequestGenerateAutoQueueBody {
-  repo: string;
-  agentId: string;
-  issueNumbers: number[];
-  allowedGateKinds?: string[];
-  force?: boolean;
-}
-
-export interface RequestGenerateAutoQueueResponse {
-  request_id: string;
-  target: string;
-  channel_id?: string | null;
-  dispatched_at: string;
-  instruction_preview?: string;
-}
-
-export async function requestGenerateAutoQueue(
-  input: RequestGenerateAutoQueueBody,
-): Promise<RequestGenerateAutoQueueResponse> {
-  const body: Record<string, unknown> = {
-    repo: input.repo,
-    agent_id: input.agentId,
-    issue_numbers: input.issueNumbers,
-  };
-  if (input.allowedGateKinds && input.allowedGateKinds.length > 0) {
-    body.allowed_gate_kinds = input.allowedGateKinds;
-  }
-  if (typeof input.force === "boolean") {
-    body.force = input.force;
-  }
-  return request("/api/queue/request-generate", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 }
 
 // ── Pipeline Config Hierarchy (#135) ──
