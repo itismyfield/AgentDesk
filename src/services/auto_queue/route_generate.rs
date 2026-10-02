@@ -69,10 +69,23 @@ fn collect_references(text: &str, out: &mut std::collections::BTreeSet<Prerequis
 }
 
 /// Lines under a `의존성` heading, the section the issue-creation API writes.
+/// Fenced code blocks are skipped, so examples in them are not read.
 fn dependency_section_lines(description: &str) -> impl Iterator<Item = &str> {
     let mut inside = false;
+    let mut fence: Option<&str> = None;
     description.lines().filter(move |line| {
         let trimmed = line.trim();
+        if let Some(marker) = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m)) {
+            match fence {
+                None => fence = Some(marker),
+                Some(open) if open == marker => fence = None,
+                Some(_) => {}
+            }
+            return false;
+        }
+        if fence.is_some() {
+            return false;
+        }
         let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
         if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
             inside = trimmed[hashes..].trim() == "의존성";
@@ -838,6 +851,15 @@ mod lane_assignment_tests {
             declared_dependencies(Some("depends on #7"), Some("depends on #7"), None).is_empty()
         );
         assert!(declared_dependencies(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn examples_in_code_fences_are_not_read() {
+        let body = "## 배경\n```md\n## 의존성\n- #999\n```\n\n## 의존성\n- #100\n~~~\n- #998\n```\n- #997\n~~~\n- #101";
+        assert_eq!(
+            declared_dependencies(None, Some(body), None),
+            vec![own(100), own(101)]
+        );
     }
 }
 
