@@ -1574,8 +1574,8 @@ mod tests {
     ///
     /// #5400: this MUST be the crate-wide
     /// [`crate::config::shared_test_env_lock`] and not a module-private mutex.
-    /// `resolve_provider_binary_redacts_claude_paths_in_attempts` REPLACES the
-    /// process-global `PATH` with a temp dir holding only a `claude` stub, and
+    /// `resolve_provider_binary_redacts_claude_paths_in_attempts` prepends a temp
+    /// dir holding a `claude` stub to the process-global `PATH`, and
     /// `PATH` is process-global state that reaches far past this module: on
     /// non-Windows [`git_binary`] resolves to the bare name `git`, so every
     /// `Command::new(git_binary())` in the crate performs its lookup against
