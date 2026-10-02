@@ -1574,8 +1574,8 @@ mod tests {
     ///
     /// #5400: this MUST be the crate-wide
     /// [`crate::config::shared_test_env_lock`] and not a module-private mutex.
-    /// `resolve_provider_binary_redacts_claude_paths_in_attempts` REPLACES the
-    /// process-global `PATH` with a temp dir holding only a `claude` stub, and
+    /// `resolve_provider_binary_redacts_claude_paths_in_attempts` prepends a temp
+    /// dir holding a `claude` stub to the process-global `PATH`, and
     /// `PATH` is process-global state that reaches far past this module: on
     /// non-Windows [`git_binary`] resolves to the bare name `git`, so every
     /// `Command::new(git_binary())` in the crate performs its lookup against
@@ -1599,8 +1599,8 @@ mod tests {
         crate::config::test_env_lock::acquire_shared_test_env_lock()
     }
 
-    /// Scoped guard that sets an env var to a value and restores the previous
-    /// value (or unsets it) on drop.
+    /// Scoped guard that unsets an env var and restores the previous value on
+    /// drop.
     #[cfg(unix)]
     struct ScopedEnv {
         key: &'static str,
@@ -1609,12 +1609,6 @@ mod tests {
 
     #[cfg(unix)]
     impl ScopedEnv {
-        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
         fn unset(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
             unsafe { std::env::remove_var(key) };
@@ -1839,14 +1833,13 @@ mod tests {
             );
         }
 
-        // Phase 2: PATH discovery (env_override unset, PATH points at a temp bin
-        // holding a `claude` executable). Extra candidates from the login-shell /
-        // fallback dirs may also appear; the invariant is that NONE of the
-        // returned attempts retains a raw path.
+        // Phase 2: PATH discovery of a `claude` in a temp bin put first on PATH. Other
+        // candidates may appear too; NONE of the returned attempts may retain a raw path.
         let path_bin = temp.path().join("pathbin");
         write_executable_stub(&path_bin.join("claude"));
         let _no_override = ScopedEnv::unset("AGENTDESK_CLAUDE_PATH");
-        let _path = ScopedEnv::set("PATH", &path_bin);
+        let _path =
+            crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&path_bin);
 
         let resolution = resolve_provider_binary("claude");
         assert!(!resolution.attempts.is_empty());
