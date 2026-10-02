@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getCampaign, setCampaignAutoQueue, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
+import CampaignsPanel from "./CampaignsPanel";
 import { makeLargeCampaign } from "./campaignTestFixtures";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
@@ -126,25 +127,34 @@ it("leaves the unknown state once a newer campaign arrives from elsewhere", asyn
   expect(button().textContent).toBe("Auto-run on");
 });
 
-it("leaves the unknown state after a read that started later, even at the same revision", async () => {
-  const campaign = makeLargeCampaign();
-  vi.mocked(setCampaignAutoQueue).mockRejectedValue(new Error("Request timeout: /api/campaigns/x"));
-  vi.mocked(getCampaign).mockRejectedValueOnce(new Error("offline"));
-  const render = (checkedAt: number) =>
-    root.render(<CampaignAutoQueueToggle campaign={{ ...campaign }} tr={(_, en) => en} onSaved={vi.fn()} checkedAt={checkedAt} />);
-  await act(async () => render(Date.now() - 60_000));
-  await act(async () => button().click());
-  const failedAt = Date.now();
-  expect(button().getAttribute("aria-pressed")).toBe("mixed");
+it("stays unknown through a poll that began before the failure and settles on the next one", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const campaign = { ...makeLargeCampaign(), nodes: [], status: "active" as const };
+  const pending: Array<(body: unknown) => void> = [];
+  const fetchMock = vi.fn<typeof fetch>(() => new Promise((resolve) => pending.push((body) =>
+    resolve(new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })))));
+  vi.stubGlobal("fetch", fetchMock);
+  const page = { campaigns: [campaign], live: {}, limit: 100, offset: 0 };
+  try {
+    await act(async () => root.render(<CampaignsPanel language="en" />));
+    await act(async () => pending[0](page));
+    await act(async () => { vi.advanceTimersByTime(15_000); }); // poll still in flight below
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
-  await act(async () => render(failedAt - 1));
-  expect(button().getAttribute("aria-pressed")).toBe("mixed");
-  await act(async () => render(failedAt + 1));
-  expect(button().textContent).toBe("Auto-run off");
-  expect(button().getAttribute("aria-pressed")).toBe("false");
-  expect(statusText()).toBeUndefined();
+    vi.mocked(setCampaignAutoQueue).mockRejectedValue(new Error("Request timeout: /api/campaigns/x"));
+    vi.mocked(getCampaign).mockRejectedValueOnce(new Error("offline"));
+    const toggle = () => container.querySelector<HTMLButtonElement>(".campaign-auto-queue")!;
+    await act(async () => toggle().click());
+    expect(toggle().getAttribute("aria-pressed")).toBe("mixed");
 
-  vi.mocked(setCampaignAutoQueue).mockResolvedValueOnce({ campaign: { ...campaign, auto_queue: true, revision: campaign.revision + 1 }, handoff: null, handoffError: null });
-  await act(async () => button().click());
-  expect(setCampaignAutoQueue).toHaveBeenCalledTimes(2);
+    await act(async () => { vi.advanceTimersByTime(15_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // its own request, not the one in flight
+    await act(async () => pending[1](page));
+    expect(toggle().getAttribute("aria-pressed")).toBe("mixed");
+    await act(async () => pending[2](page));
+    expect(toggle().textContent).toBe("Auto-run off");
+    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+  } finally {
+    vi.useRealTimers(); vi.unstubAllGlobals();
+  }
 });

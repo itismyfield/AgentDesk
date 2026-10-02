@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { getCampaign, isRejectedSave, setCampaignAutoQueue, type Campaign, type CampaignHandoff } from "../../api/campaigns";
+import { campaignReadMark, getCampaign, isRejectedSave, setCampaignAutoQueue, type Campaign, type CampaignHandoff } from "../../api/campaigns";
 import type { Tr } from "./campaignPresentation";
 
 const WAITING_REASONS: Record<string, [string, string]> = {
@@ -24,16 +24,16 @@ export function handoffSummary(handoff: CampaignHandoff, tr: Tr): string {
   return waiting ? `${queued} ${tr("못 넘긴 작업", "Held back")}: ${waiting}` : queued;
 }
 
-export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedAt = null }: {
+export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedRead = null }: {
   campaign: Campaign; tr: Tr; onSaved: (updated: Campaign) => void;
-  /** When the newest successful read of this campaign started. */
-  checkedAt?: number | null;
+  /** Number of the newest campaign read applied to `campaign` (see campaignReadMark). */
+  checkedRead?: number | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   // Set when a save's outcome could not be read; a newer revision or a read started later settles it.
-  const [unknownSince, setUnknownSince] = useState<{ at: number; revision: number } | null>(null);
-  const unknown = unknownSince !== null && unknownSince.revision === campaign.revision && !(checkedAt !== null && checkedAt > unknownSince.at);
+  const [unknownSince, setUnknownSince] = useState<{ read: number; revision: number } | null>(null);
+  const unknown = unknownSince !== null && unknownSince.revision === campaign.revision && !(checkedRead !== null && checkedRead > unknownSince.read);
   const stateNow = (value: Campaign) =>
     value.auto_queue ? tr("지금 서버에는 자동 진행이 켜져 있습니다.", "The server has auto-run on now.") : tr("지금 서버에는 자동 진행이 꺼져 있습니다.", "The server has auto-run off now.");
   const readBack = async () => {
@@ -62,7 +62,7 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checked
           ? `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("넘긴 작업은 노드 상태에서 확인하세요.", "Check the nodes for what was sent.")}`
           : `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("보낸 요청이 나중에 반영될 수 있습니다.", "The request may still apply later.")}`);
       } catch {
-        setUnknownSince({ at: Date.now(), revision: campaign.revision });
+        setUnknownSince({ read: campaignReadMark(), revision: campaign.revision });
         setMessage(tr(`저장 결과를 확인하지 못했습니다 (${reason}). 자동 진행 상태 확인을 눌러 다시 읽으세요.`, `Could not confirm the save (${reason}). Press Check auto-run to read it again.`));
       }
     } finally { setBusy(false); }

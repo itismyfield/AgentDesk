@@ -119,23 +119,32 @@ export type CampaignHandoff = z.infer<typeof campaignHandoffSchema>;
 /** Campaign id, then node id. */
 export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
 
+let readsStarted = 0;
+/** Number of campaign reads started so far; a read numbered above it starts later. */
+export function campaignReadMark(): number {
+  return readsStarted;
+}
+
+// Reads never join a GET already in flight, so a read's number says when its data was fetched.
 export async function getCampaigns(): Promise<{
   campaigns: Campaign[];
   live: CampaignLive;
+  read: number;
 }> {
+  const read = ++readsStarted;
   const campaigns = new Map<string, Campaign>();
   const live: CampaignLive = {};
   const limit = 100;
   for (let offset = 0; ; offset += limit) {
-    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}`, { suppressErrorToast: true }, campaignListResponseSchema);
+    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}`, { suppressErrorToast: true, shareInflight: false }, campaignListResponseSchema);
     for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
     Object.assign(live, result.live);
-    if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live };
+    if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live, read };
   }
 }
 
 export async function getCampaign(id: string): Promise<Campaign> {
-  const result = await request(`/api/campaigns/${encodeURIComponent(id)}`, { suppressErrorToast: true }, campaignGetResponseSchema);
+  const result = await request(`/api/campaigns/${encodeURIComponent(id)}`, { suppressErrorToast: true, shareInflight: false }, campaignGetResponseSchema);
   return result.campaign;
 }
 
