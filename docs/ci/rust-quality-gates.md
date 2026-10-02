@@ -36,8 +36,10 @@ production-only, test-aware, or repo-wide before adding hard gates.
 CI no longer runs it: on every `main` push `ci-main.yml` `full_non_pg` runs the
 same adjudicated whole-library sweep as the PR `library_sweep` (non-PG `--lib`
 minus `scripts/ci/non-pg-test-filter.sh`, with its own PostgreSQL), and the
-`lint` job runs fmt, clippy, and the policy JS tests. The nightly macOS and
-Windows lanes run their `--all-targets` non-Postgres sweeps.
+`lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
+recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
+compile-fail doctests. The nightly macOS and Windows lanes run their
+`--all-targets` non-Postgres sweeps.
 
 A broader sweep was attempted with:
 

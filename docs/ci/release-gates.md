@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy) | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
+| **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
 | **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
 
@@ -283,7 +283,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
 | Full tests | `full_non_pg`의 `Library sweep (selection-set gated)` step (PR `library_sweep`과 같은 명령) | 아래 Full tests (PR) 행과 같다 |
-| Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint` | 동일 |
+| Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
 | Full tests (PR) | `library_sweep`의 `Library sweep (selection-set gated)` step | 도달 가능한 PostgreSQL과 `AGENTDESK_REQUIRE_PG=1` 아래에서 `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` (⚠️ 레인 이름과 달리 PG가 필요하다 — 위 §PR 측 library sweep 참조) |
 | PostgreSQL tests | `postgres`의 `just test-postgres` step: `just test-postgres` | workflow와 같은 PostgreSQL 환경에서 `just test-postgres` |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |

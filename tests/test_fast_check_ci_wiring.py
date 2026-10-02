@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "1a9f70066d413247ef7f2e8e253ab4d9e213ec28e29a2e1e9811a0ff2262fc51"
+    "d972dbd5bcf7b502618a28d900aff37262f1f08e0d860511801522a39fbeac9d"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -828,12 +828,32 @@ class FastCheckCiWiringTests(unittest.TestCase):
             named(pr_jobs["library_sweep"], sweep_step),
         )
         self.assertEqual(len(named(main_jobs["full_non_pg"], sweep_step)), 1)
+        # Every non-`--lib` line of `test-non-pg` still runs on main: the sweep
+        # covers the lib, so `--all-targets` lines run on the non-lib targets
+        # under the canonical non-PG filter that ci-main must source.
+        recipe = just_recipe_commands(justfile, "test-non-pg")
+        non_lib = [
+            command.replace(" --all-targets", " --bins --test '*'").replace(
+                "-- --skip _pg --skip pg_ --skip postgres",
+                '-- "${NON_PG_SKIP_ARGS[@]}"',
+            )
+            for command in recipe
+            if "cargo test --lib " not in command
+        ]
+        self.assertIn("cargo test --doc ClaudeBinary", non_lib)
         self.assertEqual(
-            [step.get("run") for step in main_jobs["lint"]["steps"] if "run" in step],
+            [
+                line.strip()
+                for step in main_jobs["lint"]["steps"]
+                for line in str(step.get("run", "")).splitlines()
+                if line.strip()
+            ],
             [
                 "npm run test:policies",
                 "just fmt-check",
                 "just lint",
+                "source scripts/ci/non-pg-test-filter.sh",
+                *non_lib,
                 "sccache --show-stats || true",
             ],
         )
