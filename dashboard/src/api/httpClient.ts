@@ -84,6 +84,8 @@ export interface RequestOptions extends RequestInit {
   timeoutMs?: number;
   maxRetries?: number;
   suppressErrorToast?: boolean;
+  /** false sends a new GET even while the same URL is already in flight. */
+  shareInflight?: boolean;
 }
 
 function composeRequestSignal(
@@ -162,7 +164,7 @@ export async function request<T>(
   const auth = credentialScope();
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
-  const shouldDedupe = isGet && !opts?.signal;
+  const shouldDedupe = isGet && !opts?.signal && opts?.shareInflight !== false;
   const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const maxRetries = opts?.maxRetries ?? MAX_RETRIES;
 
@@ -190,6 +192,7 @@ export async function request<T>(
           signal: _signal,
           maxRetries: _maxRetries,
           suppressErrorToast: _suppressErrorToast,
+          shareInflight: _shareInflight,
           ...fetchOpts
         } = opts ?? {};
         const headers = new Headers(fetchOpts.headers);

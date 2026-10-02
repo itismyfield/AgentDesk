@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { readCachedGet } from "./httpClient";
-import { campaignNodeLiveSchema, campaignSchema, getCampaigns, updateCampaignNode } from "./campaigns";
+import { campaignNodeLiveSchema, campaignSchema, getCampaigns, setCampaignAutoQueue, updateCampaignNode } from "./campaigns";
 
 const timestamp = "2026-09-20T00:00:00Z";
 const campaignPayload = {
@@ -109,6 +109,23 @@ it("saves against the edited revision while preserving sibling tasks and nullabl
   expect(body.nodes[0].evidence_records).toEqual(campaign.nodes[0].evidence_records);
   expect(body.nodes[0].next_action).toBe("Inspect CI");
   expect(result.nodes[0].evidence_records[0].command).toBeNull();
+});
+
+it("leaves auto_queue out of node saves and sends it only from the auto-run switch", async () => {
+  fetchMock.mockResolvedValue(response({ campaign }));
+  await updateCampaignNode(campaign, { ...campaign.nodes[0], next_action: "Inspect CI" });
+  expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).not.toHaveProperty("auto_queue");
+  expect(campaign.auto_queue).toBe(false);
+
+  fetchMock.mockResolvedValue(response({ campaign: { ...campaignPayload, auto_queue: true, revision: 8 },
+    handoff: { queued: [{ node_id: "deploy", card_id: "card-9", run_id: "run-3" }], waiting: [] } }));
+  const result = await setCampaignAutoQueue(campaign, true);
+  const body = JSON.parse(fetchMock.mock.calls[1][1]?.body as string);
+  expect(body).toMatchObject({ expected_revision: 7, auto_queue: true });
+  expect(body.nodes).toEqual(campaign.nodes);
+  expect(result.campaign.auto_queue).toBe(true);
+  expect(result.handoff?.queued[0].node_id).toBe("deploy");
+  expect(result.handoffError).toBeNull();
 });
 
 it("applies serde defaults for absent arrays and optional text while retaining additive fields", () => {
