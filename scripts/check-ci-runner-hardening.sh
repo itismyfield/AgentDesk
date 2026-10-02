@@ -1417,6 +1417,62 @@ RUBY
 }
 validate_main_full_sweep
 
+# Main's PG lane is two matrix shards; each must run unconditionally so the run
+# is green only when both shards pass every PG test step.
+validate_main_pg_shards() {
+  if ! ruby - "$main_workflow" <<'RUBY'
+require "yaml"
+main_path = ARGV.fetch(0)
+job = YAML.load_file(main_path).dig("jobs", "postgres")
+unless job.is_a?(Hash)
+  warn "#{main_path}: job postgres is missing"
+  exit 1
+end
+errors = []
+errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
+errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+%w[if needs continue-on-error].each { |key| errors << "job postgres must not set #{key}" if job.key?(key) }
+errors << "job postgres strategy must be exactly fail-fast false over shard [0, 1]" unless job["strategy"] == { "fail-fast" => false, "matrix" => { "shard" => [0, 1] } }
+env = job["env"] || {}
+errors << "job postgres env must set PG_INCLUDE_SHARD from matrix.shard" unless env["PG_INCLUDE_SHARD"] == "${{ matrix.shard }}"
+errors << "job postgres env must set AGENTDESK_REQUIRE_PG=1" unless env["AGENTDESK_REQUIRE_PG"] == "1"
+diagnostics = {
+  "PostgreSQL lane resource diagnostics" => "${{ inputs.resource_diagnostics == true }}",
+  "Show PostgreSQL lane resource diagnostics" => "always() && inputs.resource_diagnostics == true",
+}
+cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
+# A step is a test step by what it runs, so a diagnostics name cannot lend it a condition.
+runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test)/) }
+start_run = "./scripts/ci/postgres-service.sh start"
+steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
+steps.each do |step|
+  label = "job postgres step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
+  errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
+  next unless step.key?("if")
+  allowed = if runs_tests.(step) || step["run"] == start_run then nil
+            elsif diagnostics.key?(step["name"]) then diagnostics[step["name"]]
+            elsif cleanup.(step) then "always()"
+            end
+  errors << "#{label} may not set if: #{step["if"].inspect}" unless step["if"] == allowed
+end
+index = ->(pred) { steps.index(&pred) }
+start = index.(->(step) { step["run"] == start_run })
+tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
+stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
+test_step = tests.length == 1 ? steps[tests[0]] : {}
+errors << "job postgres must run tests in exactly one step, \"just test-postgres-shard\": just test-postgres-shard" unless test_step["name"] == "just test-postgres-shard" && test_step["run"].to_s.strip == "just test-postgres-shard"
+errors << "job postgres test step must keep timeout-minutes: 40" unless test_step["timeout-minutes"] == 40
+errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
+errors << "job postgres must start PostgreSQL, run the test step, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
+errors.each { |message| warn "#{main_path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must run both PostgreSQL shards unconditionally"
+  fi
+}
+validate_main_pg_shards
+
 # The main-only Windows warm job must save the cache keys the PR Windows jobs
 # restore: same workflow/job env, setup steps, rust-cache inputs and compile.
 validate_main_windows_cache_warm() {
