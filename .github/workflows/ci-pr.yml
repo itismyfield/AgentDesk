@@ -278,6 +278,7 @@ jobs:
               - 'src/services/auto_queue/cancel_run.rs'
               - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
               - 'src/services/auto_queue/command.rs'
+              - 'src/services/auto_queue/dispatch_query.rs'
               - 'src/services/auto_queue/fsm.rs'
               - 'src/services/auto_queue/phase_gate.rs'
               - 'src/services/auto_queue/planning.rs'
