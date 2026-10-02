@@ -494,6 +494,9 @@ pub enum RebindError {
         tmux_session: String,
         runtime_kind: RuntimeHandoffKind,
     },
+    /// The pane is a Herdr execution no reconcile admitted: the row was written but no
+    /// watcher was claimed, spawned or reused for it. 409.
+    WatcherWithheld { tmux_session: String },
     /// `tmux_session` not provided and no in-memory session supplies a
     /// channel_name — cannot derive the canonical tmux session name. 400.
     ChannelNameMissing,
@@ -541,6 +544,10 @@ impl std::fmt::Display for RebindError {
                 f,
                 "watcher rebind unavailable for {} tmux session {tmux_session}",
                 runtime_kind.as_str()
+            ),
+            Self::WatcherWithheld { tmux_session } => write!(
+                f,
+                "host not admitted: Herdr execution {tmux_session} has no reconcile admission; no watcher was claimed"
             ),
             Self::ChannelNameMissing => write!(
                 f,

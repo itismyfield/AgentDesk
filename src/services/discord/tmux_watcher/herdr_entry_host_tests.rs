@@ -13,6 +13,7 @@ const T0: &str = "ADK-P8-3 T0 delivered before the watcher attached";
 const S1: &str = "ADK-P8-3 S1 streamed while the row exists";
 const S2: &str = "ADK-P8-3 S2 streamed when the row lapses";
 const PANEL: &str = "ADK-P8-3 status panel";
+const PLACEHOLDER: &str = "⠋ ADK-P8-4 placeholder";
 const BASE: u64 = 90;
 /// The separate status-panel-v2 path, whose orphan cleanup deletes the panel message.
 const PANEL_V2: [(&str, &str); 2] = [
@@ -53,9 +54,9 @@ fn park_check_at(site: &'static str) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
     (paused_rx, resume_tx)
 }
 
-/// At the parked check: the row lapses, the pane reads idle to tmux, and a launch puts the
-/// session on Herdr; on its own tmux snapshot the check would now drop the panel.
-fn lapse_onto_herdr_while_parked(h: &Harness, paused: &mpsc::Receiver<()>) {
+/// At the parked check: the row lapses, the pane reads `pane` to tmux, and a launch puts the
+/// session on Herdr; on its own tmux snapshot an idle pane drops the panel, a busy one re-acquires.
+fn lapse_onto_herdr_while_parked(h: &Harness, paused: &mpsc::Receiver<()>, pane: &str) {
     paused
         .recv_timeout(Duration::from_secs(30))
         .expect("abandonment check parked");
@@ -63,7 +64,7 @@ fn lapse_onto_herdr_while_parked(h: &Harness, paused: &mpsc::Receiver<()>) {
     let row =
         crate::services::discord::inflight::inflight_state_path(&root, &CLAUDE, h.channel.get());
     std::fs::remove_file(row).unwrap();
-    h.pane("idle");
+    h.pane(pane);
     h.take_tmux_calls();
     std::fs::write(session_temp_path(&h.tmux, "host_kind"), "herdr").unwrap();
     crate::services::tui_prompt_dedupe::install_herdr_execution(&h.tmux, "p8-entry");
@@ -86,7 +87,7 @@ async fn a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_pa
     h.until("panel turn streaming on its row", streamed).await;
     let (paused, resume) = park_check_at("streaming_status_tick");
     h.append(said(S2).as_bytes());
-    lapse_onto_herdr_while_parked(&h, &paused);
+    lapse_onto_herdr_while_parked(&h, &paused, "idle");
     let skipped_before = Harness::logged("pane capture skipped").len();
     resume.send(()).unwrap();
     let skipped = || Harness::logged("pane capture skipped").len() > skipped_before;
@@ -106,8 +107,66 @@ async fn a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_pa
     h.exited("watcher exit").await;
 }
 
+/// A tool call with no assistant text, so the turn's placeholder still reads as a placeholder.
+fn tool_only() -> String {
+    let line = serde_json::json!({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "tool_use", "id": "p8-4-tool", "name": "Bash",
+            "input": {"command": "ls"}}]}});
+    format!("{line}\n")
+}
+
+// A status tick on a turn with no text yet, restored with its placeholder, parked at its
+// abandonment check while the row lapses onto Herdr: the panel and the placeholder both stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr() {
+    let test = "a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr";
+    if !isolated_in("herdr_entry_host_tests", test, &PANEL_V2) {
+        return;
+    }
+    let seed_text = turn("T0", T0);
+    let mut h = Harness::new(BASE + 3, &seed_text).await;
+    let f = seed_text.len() as u64;
+    h.commit(0, f);
+    let send =
+        |text| crate::services::discord::http::send_channel_message(&h.http, h.channel, text);
+    let panel = send(PANEL).await.unwrap().id;
+    let placeholder = send(PLACEHOLDER).await.unwrap().id;
+    let mut row = h.row_at(f);
+    row.turn_source = TurnSource::ExternalInput;
+    row.set_relay_owner_kind(RelayOwnerKind::Watcher);
+    row.status_message_id = Some(panel.get());
+    row.current_msg_id = placeholder.get();
+    h.save(&row);
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&row, &h.tmux, false);
+    assert!(restored.is_some(), "the row restores its placeholder");
+    let (paused, resume) = park_check_at("streaming_status_tick");
+    h.spawn_restoring(f, restored);
+    h.append(format!("{}{}", user("T1"), tool_only()).as_bytes());
+    lapse_onto_herdr_while_parked(&h, &paused, "idle");
+    let skipped_before = Harness::logged("pane capture skipped").len();
+    resume.send(()).unwrap();
+    let skipped = || Harness::logged("pane capture skipped").len() > skipped_before;
+    let dropped = |h: &Harness| !panel_kept(h, panel) || !panel_kept(h, placeholder);
+    h.until("resumed check", |h| skipped() || dropped(h)).await;
+    h.settle().await;
+    assert!(
+        panel_kept(&h, placeholder),
+        "no placeholder cleanup without the turn's stop tombstone"
+    );
+    assert!(panel_kept(&h, panel), "no panel cleanup either");
+    assert!(
+        h.row().is_none(),
+        "no row re-acquired from a pane tmux cannot see"
+    );
+    assert_eq!(h.take_tmux_calls(), Vec::<String>::new());
+    h.cancel();
+    h.exited("watcher exit").await;
+}
+
 // The terminal preflight parked at its abandonment check while the row lapses and a launch
-// moves the session to Herdr re-reads the host on resume: no capture and no orphan cleanup.
+// moves the session to Herdr re-reads the host on resume: no capture, no orphan cleanup and,
+// whatever the pane would read, no row re-acquired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel() {
     let test = "a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel";
@@ -120,18 +179,28 @@ async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping
     if !isolated_in("herdr_entry_host_tests", test, &slow_ticks) {
         return;
     }
-    let (paused, resume) = park_check_at("terminal_preflight");
-    let (mut h, panel) = panel_turn(BASE + 1, &turn("T1", S1)).await;
-    lapse_onto_herdr_while_parked(&h, &paused);
-    resume.send(()).unwrap();
-    h.drained("terminal frame").await;
-    assert!(
-        panel_kept(&h, panel),
-        "no orphan cleanup without the turn's stop tombstone"
+    // Per pane: (panel kept with no stop tombstone, no row re-acquired, tmux calls).
+    let mut seen = Vec::new();
+    for (case, pane) in [(BASE + 1, "idle"), (BASE + 4, "busy")] {
+        let (paused, resume) = park_check_at("terminal_preflight");
+        let (mut h, panel) = panel_turn(case, &turn("T1", S1)).await;
+        lapse_onto_herdr_while_parked(&h, &paused, pane);
+        resume.send(()).unwrap();
+        h.drained("terminal frame").await;
+        seen.push((
+            pane,
+            panel_kept(&h, panel),
+            h.row().is_none(),
+            h.take_tmux_calls(),
+        ));
+        h.cancel();
+        h.exited("watcher exit").await;
+    }
+    let none = Vec::<String>::new;
+    assert_eq!(
+        seen,
+        [("idle", true, true, none()), ("busy", true, true, none())]
     );
-    assert_eq!(h.take_tmux_calls(), Vec::<String>::new());
-    h.cancel();
-    h.exited("watcher exit").await;
 }
 
 // A terminal committed with no inflight row on a session only its sessions row puts on Herdr
@@ -164,9 +233,15 @@ async fn the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead
     };
     assert_eq!(fallbacks(), 0);
     h.append(turn("T1", S1).as_bytes());
-    h.drained("terminal frame").await;
-    assert!(h.row().is_none(), "the terminal ran with no inflight row");
+    // Either the fallback kept the session alive or it ended the watcher as dead.
+    let decided = |h: &Harness| fallbacks() > 0 || h.watcher_finished();
+    h.until("missing-inflight fallback", decided).await;
+    assert!(
+        !h.watcher_finished(),
+        "the fallback did not end the watcher"
+    );
     assert_eq!(fallbacks(), 1, "the fallback read the session alive");
+    assert!(h.row().is_none(), "the terminal ran with no inflight row");
     let seen = crate::services::discord::tmux_watcher_now_ms();
     h.until("still polling", |h| h.heartbeat() > seen).await;
     assert!(

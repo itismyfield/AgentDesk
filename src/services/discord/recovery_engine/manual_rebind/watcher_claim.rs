@@ -2,7 +2,7 @@ use super::*;
 
 /// Claim under the single-watcher policy. Normal recovery reuses a live
 /// same-session watcher; a proven crossed Codex turn forces a fresh generation.
-/// A withheld Herdr pane spawns and replaces nothing.
+/// `Err` is a withheld Herdr pane: nothing spawned, replaced or reused.
 pub(super) fn claim_rebind_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
@@ -11,7 +11,7 @@ pub(super) fn claim_rebind_watcher(
     crossed_codex_turn: bool,
     thread_parent: Option<super::tmux::ThreadFollowUpParent>,
     host: super::tmux::WatchHost,
-) -> (bool, bool) {
+) -> Result<(bool, bool), super::tmux::WatchWithheld> {
     let claim = if crossed_codex_turn {
         super::tmux::claim_or_replace_watcher_for_host(
             watchers,
@@ -33,7 +33,5 @@ pub(super) fn claim_rebind_watcher(
             host,
         )
     };
-    claim.map_or((false, false), |claim| {
-        (claim.should_spawn(), claim.replaced_existing())
-    })
+    claim.map(|claim| (claim.should_spawn(), claim.replaced_existing()))
 }
