@@ -902,32 +902,30 @@ async fn promote_run_and_clear_inactive_slots(
 /// and short-circuits the activate request. Both the "stale empty run
 /// completed" OK response and any DB failure are returned as
 /// `Err(ActivateResponse)`; `Ok(())` means the run has entries to dispatch.
-async fn complete_run_if_empty(
+/// Count and completion share the run token, so an entry appended under it is seen.
+pub(super) async fn complete_run_if_empty(
     pool: &sqlx::PgPool,
     run_id: &str,
     run_log_ctx: &AutoQueueLogContext<'_>,
 ) -> Result<(), ActivateResponse> {
-    let entry_count = match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1",
-    )
-    .bind(run_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(count) => count,
-        Err(error) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("count postgres auto-queue entries for {run_id}: {error}")}),
-                ),
-            ));
+    let completed = async {
+        let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+        crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(
+            &mut tx,
+            &[run_id.to_string()],
+        )
+        .await?;
+        let entry_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM auto_queue_entries WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("count postgres auto-queue entries for {run_id}: {error}"))?;
+        if entry_count > 0 {
+            return Ok(false);
         }
-    };
-    if entry_count == 0 {
-        if let Err(error) = sqlx::query(
+        sqlx::query(
             // #2048 F18: only auto-complete runs that are still active /
             // promotable. A caller passing a cancelled/completed run_id
             // should not flip its status — only the explicit cancel/complete
@@ -939,30 +937,35 @@ async fn complete_run_if_empty(
                AND status IN ('active', 'paused', 'generated', 'pending')",
         )
         .bind(run_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
-        {
+        .map_err(|error| format!("complete stale postgres auto-queue run {run_id}: {error}"))?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+        Ok::<bool, String>(true)
+    }
+    .await;
+    match completed {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(error) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("complete stale postgres auto-queue run {run_id}: {error}")}),
-                ),
+                Json(json!({ "error": error })),
             ));
         }
-        crate::auto_queue_log!(
-            info,
-            "activate_stale_empty_run_completed_pg",
-            run_log_ctx.clone(),
-            "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
-        );
-        return Err((
-            StatusCode::OK,
-            Json(
-                json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
-            ),
-        ));
     }
-    Ok(())
+    crate::auto_queue_log!(
+        info,
+        "activate_stale_empty_run_completed_pg",
+        run_log_ctx.clone(),
+        "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
+    );
+    Err((
+        StatusCode::OK,
+        Json(
+            json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
+        ),
+    ))
 }
 
 /// Loads the run's `max_concurrent_threads` capacity and ensures slot-pool

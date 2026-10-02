@@ -29,6 +29,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("status", body_param("string", true, "planned|active|paused|completed|cancelled")),
             ("round", body_param("integer", true, "Positive campaign round.")),
             ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/group/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker, optional summary/benefit. Optional group is trimmed; blank/omitted/null stays unclassified, independent of stage/status. See docs/campaign-ledger.md.")),
+            ("auto_queue", body_param("boolean", false, "Hand ready nodes to auto-queue automatically while the campaign is active; default false. The response then carries `handoff`.")),
         ])
         .with_example(
             json!({"body": {"id": "release-a", "title": "Release A", "status": "planned", "round": 1, "nodes": []}}),
@@ -59,6 +60,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("status", body_param("string", true, "planned|active|paused|completed|cancelled")),
             ("round", body_param("integer", true, "Positive campaign round.")),
             ("nodes", body_param("array", false, "Complete replacement DAG, including durable evidence, next actions and optional group labels. Group changes share revision CAS/history; blank/omitted/null means unclassified.")),
+            ("auto_queue", body_param("boolean", false, "Turn automatic handoff on or off; omitted keeps the stored value. While on and active, pending nodes whose dependencies are done (completed/skipped, or pending/running with a terminal card) join their card agent's live auto-queue run or a new `campaign` run, after every save and every terminal card. The response carries `handoff` {queued, waiting with reasons} or `handoff_error`; see docs/campaign-ledger.md.")),
         ])
         .with_example(json!({"path": {"id": "release-a"}, "body": {"expected_revision": 1, "title": "Release A", "status": "paused", "round": 1, "nodes": []}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "paused", "round": 1, "revision": 2, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:01:00Z"}}))
         .with_error_example(409, json!({"body": {"expected_revision": 1, "title": "Release A", "status": "paused", "round": 1}}), json!({"error": "campaign revision conflict; reload before retrying", "code": "conflict", "context": {}}))
