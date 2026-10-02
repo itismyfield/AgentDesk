@@ -16,6 +16,7 @@ mod catch_up_pagination_e2e;
 mod discord_mock;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
+mod queue_recovery_e2e;
 mod registered_bootstrap_e2e;
 mod stale_resume_retry_e2e;
 #[cfg(unix)]
@@ -103,6 +104,9 @@ pub(super) enum ProviderStub {
 
 /// One line per provider launch the stand-in served, `--version` probes aside.
 const PROVIDER_STARTS_FILE: &str = "claude-stub-starts";
+/// Each launch's arguments and stdin, preceded by [`PROVIDER_INPUT_SEPARATOR`].
+const PROVIDER_INPUTS_FILE: &str = "claude-stub-inputs";
+const PROVIDER_INPUT_SEPARATOR: &str = "=== claude-stub launch ===";
 
 fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -116,9 +120,12 @@ fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
     };
     let starts = root.join(PROVIDER_STARTS_FILE);
     let starts = starts.display();
+    let inputs = root.join(PROVIDER_INPUTS_FILE);
+    let inputs = inputs.display();
     let script = format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.0.0 (stub)'; exit 0; fi\n\
-         echo start >> '{starts}'\ncat >/dev/null\n{stale}\
+         echo start >> '{starts}'\n\
+         {{ echo '{PROVIDER_INPUT_SEPARATOR}'; printf '%s\\n' \"$*\"; cat; echo; }} >> '{inputs}'\n{stale}\
          echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{SESSION_UUID}\"}}'\n\
          echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"{SESSION_UUID}\"}}'\n"
     );
@@ -378,6 +385,17 @@ impl RelayE2eHarness {
     pub(super) fn provider_starts(&self) -> usize {
         let starts = self.root.path().join(PROVIDER_STARTS_FILE);
         std::fs::read_to_string(starts).map_or(0, |starts| starts.lines().count())
+    }
+
+    /// What each provider launch received (arguments, then stdin), in launch order.
+    pub(super) fn provider_inputs(&self) -> Vec<String> {
+        let inputs = self.root.path().join(PROVIDER_INPUTS_FILE);
+        let inputs = std::fs::read_to_string(inputs).unwrap_or_default();
+        inputs
+            .split(PROVIDER_INPUT_SEPARATOR)
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Placeholder POSTs seen by the mock: the harness' dispatch witness.
