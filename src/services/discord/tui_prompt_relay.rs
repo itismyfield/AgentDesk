@@ -79,7 +79,6 @@ pub(in crate::services::discord) use self::anchor_completion::{
 };
 use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
 use self::bridge_gateway::TuiDirectBridgeGateway;
-
 #[cfg(unix)]
 pub(in crate::services::discord) mod herdr_source;
 #[cfg(unix)]

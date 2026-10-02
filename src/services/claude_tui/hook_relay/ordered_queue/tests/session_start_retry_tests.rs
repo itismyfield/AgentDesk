@@ -537,7 +537,11 @@ fn a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted() {
     use crate::services::tui_prompt_dedupe::{admit_herdr_execution, withhold_herdr_execution};
     use std::os::unix::fs::PermissionsExt;
     for condition in ["tmux", "exit-127 tmux", "no tmux server"] {
-        let _locks = TqLocks::take();
+        // `TqLocks::take`'s locks, taken here since this test writes PATH and TMUX under them.
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let _state = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _rotations = lock_claude_session_rotations_for_tests();
         let scratch = tempfile::tempdir().unwrap();
         let calls = scratch.path().join("tmux.calls");
         let mut env = Vec::new();
