@@ -513,9 +513,8 @@ fn register_legacy_pid(
 /// In that case the wrong order leaves the provider running and the user
 /// sees stop "fail".
 ///
-/// All user-initiated stop paths (⏳ reaction removal, `/stop`, `!stop`,
-/// `/clear`, watchdog timeouts) MUST call this helper instead of pairing
-/// the two primitives by hand.
+/// Every user-initiated stop (⏳ reaction removal, `/stop`, `!stop`, `/clear`, watchdog timeouts)
+/// runs this sequence, here or through a judged `ChannelStop`, never by pairing the primitives.
 pub(in crate::services::discord) async fn stop_active_turn(
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
