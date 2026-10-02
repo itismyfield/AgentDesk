@@ -734,7 +734,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/generate",
             "auto-queue",
-            "Generate auto-queue entries. Single-call complete: do NOT chain /redispatch, /retry, or /transition for the same card after it (#1442). Cards keep the order given (entries, else priority then age); a card whose metadata depends_on / dependencies lists an issue of its own repo that is not done is held back (skipped_due_to_dependency), and nothing else is inferred, so callers order work with batch_phase and thread_group. Inspect skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter in the response to see structured skip reasons. See /api/docs/card-lifecycle-ops for the full decision tree (#1443).",
+            "Generate auto-queue entries. Single-call complete: do NOT chain /redispatch, /retry, or /transition for the same card after it (#1442). Cards keep the order given (entries, else priority then age); a card is held back (skipped_due_to_dependency) until the issues it declares are done: metadata depends_on / dependencies and the `## 의존성` section of its issue body (#N in the card's own repo, owner/repo#N or an issue URL in that repo). The rest of the body is not read and nothing else is inferred, so callers order work with batch_phase and thread_group. Inspect skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter in the response to see structured skip reasons. See /api/docs/card-lifecycle-ops for the full decision tree (#1443).",
         )
         .with_params([
             (
