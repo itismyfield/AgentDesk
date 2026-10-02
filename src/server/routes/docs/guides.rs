@@ -169,7 +169,7 @@ pub(super) fn card_lifecycle_ops_body() -> Value {
                     {
                         "field": "skipped_due_to_dependency",
                         "source": "/queue/generate (NOT /dispatch-next)",
-                        "notes": "Array of {issue_number, unresolved_deps[]} entries skipped because issues listed in the card's metadata depends_on / dependencies were not yet done. Issue bodies are not read."
+                        "notes": "Array of {issue_number, unresolved_deps[]} entries skipped because issues listed in the card's metadata depends_on / dependencies were not yet done in the card's own repo (a card with no repo waits). Issue bodies are not read."
                     },
                     {
                         "field": "skipped_due_to_filter",

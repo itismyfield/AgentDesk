@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "398ecb87fb45dbad5bd90cd40ef57740214cdeff",
+  "measured_at_sha": "2e31ad4d0c8000f86023e8c74466c8774ecd170b",
   "records": [
     {
       "root": "migrations/postgres",
@@ -23301,7 +23301,16 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:5baf3211a9eef7bab85d61f75a841b99757162099c9b2ee3c4110208e4242c5e"
+      "fingerprint": "sha256:55a320787a384af7b5fb103c4c935a2488c3e63d0d7d58c99d2988ac76d6d081"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/route_generate.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a5b787a420af92a0fd13b45fa85fe79c34ef48c68304d0c888507f46885de830"
     },
     {
       "root": "src",
@@ -23328,6 +23337,15 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
+      "fingerprint": "sha256:abee16c2ea2658c4973e274e5d7d775529d37188b8518066b0ea49cce5dcfdf6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/route_generate.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
       "fingerprint": "sha256:debb59422b895157b487a11d8c5b3fd70cc5a84114758fc0751a301bb6ddb4ac"
     },
     {
@@ -23346,15 +23364,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:569db34c0d7ce6ea1fbfca3a836a4d0cef0dd5cb56b8a89ebb20efb2a915b213"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/auto_queue/route_generate.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:886acc3019c1074a40bdf72537549d184e6c4fe6556865cddf1b8d1bbb8a385c"
     },
     {
@@ -23364,7 +23373,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:c719ff20f973a8dc12fc9df0ddff0163c9606868389f8909d6d6716a719c4bd4"
+      "fingerprint": "sha256:b3e72f32db675321093ba29312d20c5c61b2ca893d8e82e25841ad846d44c7d6"
     },
     {
       "root": "src",

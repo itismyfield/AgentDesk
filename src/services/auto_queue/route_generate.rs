@@ -318,46 +318,51 @@ pub async fn generate(
         }
     }
 
-    // The issue-creation API writes `depends_on`; a card waits until those issues are done.
+    // A card waits until the issues its metadata names are done in its own repo;
+    // a card without a repo matches none, so it waits.
     let mut dependency_skips: Vec<serde_json::Value> = Vec::new();
     {
-        let mut status_cache: HashMap<i64, Option<String>> = HashMap::new();
         let mut retained = Vec::with_capacity(cards.len());
         for card in cards.into_iter() {
-            let mut unresolved = Vec::new();
-            for dependency in
-                declared_dependencies(card.metadata.as_deref(), card.github_issue_number)
-            {
-                let status = match status_cache.get(&dependency) {
-                    Some(status) => status.clone(),
-                    None => {
-                        let status = sqlx::query_scalar::<_, String>(
-                            "SELECT status FROM kanban_cards
-                             WHERE github_issue_number::BIGINT = $1 AND ($2::TEXT IS NULL OR repo_id = $2)
-                             ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC
-                             LIMIT 1",
-                        )
-                        .bind(dependency)
-                        .bind(body.repo.as_deref())
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|error| {
-                            AppError::internal(format!(
-                                "dependency lookup failed for #{dependency}: {error}"
-                            ))
-                            .with_code(ErrorCode::AutoQueue)
-                        })?;
-                        status_cache.insert(dependency, status.clone());
-                        status
-                    }
-                };
-                if status.as_deref() != Some("done") {
-                    unresolved.push(format!(
-                        "#{dependency}:{}",
-                        status.as_deref().unwrap_or("missing")
-                    ));
-                }
-            }
+            let dependencies =
+                declared_dependencies(card.metadata.as_deref(), card.github_issue_number);
+            let statuses: HashMap<i64, Option<String>> = if dependencies.is_empty() {
+                HashMap::new()
+            } else {
+                sqlx::query_as::<_, (i64, Option<String>)>(
+                    "SELECT dep.issue, (
+                         SELECT prerequisite.status FROM kanban_cards prerequisite
+                          WHERE prerequisite.repo_id = card.repo_id
+                            AND prerequisite.github_issue_number::BIGINT = dep.issue
+                          ORDER BY prerequisite.updated_at DESC NULLS LAST,
+                                   prerequisite.created_at DESC, prerequisite.id DESC
+                          LIMIT 1)
+                     FROM kanban_cards card CROSS JOIN UNNEST($2::BIGINT[]) AS dep(issue)
+                     WHERE card.id = $1",
+                )
+                .bind(&card.card_id)
+                .bind(&dependencies)
+                .fetch_all(pool)
+                .await
+                .map_err(|error| {
+                    AppError::internal(format!(
+                        "dependency lookup failed for card {}: {error}",
+                        card.card_id
+                    ))
+                    .with_code(ErrorCode::AutoQueue)
+                })?
+                .into_iter()
+                .collect()
+            };
+            let unresolved: Vec<String> = dependencies
+                .iter()
+                .filter_map(|dependency| {
+                    let status = statuses.get(dependency).cloned().flatten();
+                    (status.as_deref() != Some("done")).then(|| {
+                        format!("#{dependency}:{}", status.as_deref().unwrap_or("missing"))
+                    })
+                })
+                .collect();
             if unresolved.is_empty() {
                 retained.push(card);
             } else if let Some(issue_number) = card.github_issue_number {
@@ -846,6 +851,26 @@ mod deploy_gate_request_rejection_tests {
 mod dependency_hold_tests {
     use super::*;
 
+    async fn generate_json(pool: &sqlx::PgPool, body: serde_json::Value) -> serde_json::Value {
+        let body: GenerateBody = serde_json::from_value(body).expect("generate body"); // agentdesk-audit: allow-unwrap — static test fixture
+        let state =
+            super::deploy_gate_request_rejection_tests::state_with_postgres(Some(pool.clone()));
+        let (_, Json(response)) = generate(State(state), Json(body))
+            .await
+            .expect("generate succeeds"); // agentdesk-audit: allow-unwrap — test assertion
+        response
+    }
+
+    async fn queued_cards(pool: &sqlx::PgPool, response: &serde_json::Value) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT kanban_card_id FROM auto_queue_entries WHERE run_id = $1 ORDER BY kanban_card_id",
+        )
+        .bind(response["run"]["id"].as_str())
+        .fetch_all(pool)
+        .await
+        .expect("list entries") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+    }
+
     #[tokio::test]
     async fn a_card_waits_until_its_declared_prerequisite_is_done_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -856,37 +881,57 @@ mod dependency_hold_tests {
         .execute(&pool)
         .await
         .expect("seed agent"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        // other/repo#100 is done and newer, but #101 depends on dep/repo#100.
         sqlx::query(
-            "INSERT INTO kanban_cards (id, repo_id, title, status, assigned_agent_id, github_issue_number, metadata)
-             VALUES ('card-100', 'dep/repo', 'Prerequisite', 'in_progress', 'agent-dep', 100, NULL),
-                    ('card-101', 'dep/repo', 'Dependent', 'ready', 'agent-dep', 101, '{\"depends_on\":[100]}'::jsonb),
-                    ('card-102', 'dep/repo', 'Free', 'ready', 'agent-dep', 102, NULL)",
+            "INSERT INTO kanban_cards (id, repo_id, title, status, assigned_agent_id, github_issue_number, metadata, updated_at)
+             VALUES ('card-100', 'dep/repo', 'Prerequisite', 'in_progress', 'agent-dep', 100, NULL, NOW() - INTERVAL '1 hour'),
+                    ('card-b100', 'other/repo', 'Same number', 'done', 'agent-dep', 100, NULL, NOW()),
+                    ('card-101', 'dep/repo', 'Dependent', 'ready', 'agent-dep', 101, '{\"depends_on\":[100]}'::jsonb, NOW()),
+                    ('card-102', 'dep/repo', 'Free', 'ready', 'agent-dep', 102, NULL, NOW()),
+                    ('card-103', 'dep/repo', 'After free', 'ready', 'agent-dep', 103, '{\"depends_on\":[102]}'::jsonb, NOW())",
         )
         .execute(&pool)
         .await
         .expect("seed cards"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let body: GenerateBody = serde_json::from_value(json!({
-            "repo": "dep/repo",
-            "agent_id": "agent-dep",
-        }))
-        .expect("generate body"); // agentdesk-audit: allow-unwrap — static test fixture
-        let state =
-            super::deploy_gate_request_rejection_tests::state_with_postgres(Some(pool.clone()));
-        let (_, Json(response)) = generate(State(state), Json(body))
-            .await
-            .expect("generate succeeds"); // agentdesk-audit: allow-unwrap — test assertion
-
-        assert_eq!(
-            response["skipped_due_to_dependency"],
-            json!([{ "issue_number": 101, "unresolved_deps": ["#100:in_progress"] }])
-        );
-        let queued: Vec<String> = sqlx::query_scalar(
-            "SELECT kanban_card_id FROM auto_queue_entries ORDER BY kanban_card_id",
+        // No repo, issues named directly, prerequisite #102 in the same request.
+        let response = generate_json(
+            &pool,
+            json!({ "agent_id": "agent-dep", "issue_numbers": [101, 102, 103] }),
         )
-        .fetch_all(&pool)
-        .await
-        .expect("list entries"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        assert_eq!(queued, vec!["card-102".to_string()]);
+        .await;
+        let mut skipped = response["skipped_due_to_dependency"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        skipped.sort_by_key(|entry| entry["issue_number"].as_i64());
+        assert_eq!(
+            skipped,
+            vec![
+                json!({ "issue_number": 101, "unresolved_deps": ["#100:in_progress"] }),
+                json!({ "issue_number": 103, "unresolved_deps": ["#102:ready"] }),
+            ]
+        );
+        assert_eq!(
+            queued_cards(&pool, &response).await,
+            vec!["card-102".to_string()]
+        );
+
+        sqlx::query("UPDATE kanban_cards SET status = 'done' WHERE id = 'card-100'")
+            .execute(&pool)
+            .await
+            .expect("finish prerequisite"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        let response = generate_json(
+            &pool,
+            json!({ "agent_id": "agent-dep", "issue_numbers": [101], "force": true }),
+        )
+        .await;
+        assert_eq!(response["skipped_due_to_dependency"], json!([]));
+        assert_eq!(
+            queued_cards(&pool, &response).await,
+            vec!["card-101".to_string()]
+        );
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
