@@ -365,12 +365,15 @@ pub(crate) fn verify_claude_source(
         return Rejected(SourceRejection::Regression);
     }
     // A start Claude may run after it moved on cannot prove it is newer than a hooked move.
+    // An in-session resume holds Claude's next input until its hooks end, so its start is a move.
     let start = HookEventKind::from_path(&hook.event) == HookEventKind::SessionStart;
-    let background = start
-        && matches!(
-            hook.start_source.as_deref(),
-            Some("startup" | "clear" | "resume")
-        );
+    let background = start && matches!(hook.start_source.as_deref(), Some("startup" | "clear"));
+    #[cfg(test)]
+    let background = match hook.start_source.as_deref() {
+        Some("resume") => background || (start && n2b_mutant("r5-resume-background")),
+        Some("clear") => background && !n2b_mutant("r5-clear-proven"),
+        _ => background,
+    };
     #[cfg(test)]
     let background = background && !n2b_mutant("u10-off");
     match judged(None, hook, seen, false) {
