@@ -102,36 +102,6 @@ pub(crate) async fn bind_pending_voice_announcement_by_key_durable(
     value.map(decode_voice_announcement_value).transpose()
 }
 
-/// Atomic consume variant for workers that receive a forwarded readable
-/// announcement before the posting process successfully binds `message_id`.
-#[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
-pub(crate) async fn take_pending_voice_announcement_by_key_durable(
-    pool: &PgPool,
-    pending_key: &str,
-    target_channel_id: ChannelId,
-    message_id: MessageId,
-) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
-    let value: Option<serde_json::Value> = sqlx::query_scalar(
-        "UPDATE voice_transcript_announcement_meta
-         SET message_id = $3,
-             bound_at = COALESCE(bound_at, NOW()),
-             consumed_at = NOW()
-         WHERE pending_key = $1
-           AND target_channel_id = $2
-           AND message_id IS NULL
-           AND consumed_at IS NULL
-           AND created_at > NOW() - make_interval(secs => $4)
-         RETURNING announcement",
-    )
-    .bind(pending_key)
-    .bind(target_channel_id.get().to_string())
-    .bind(message_id.get().to_string())
-    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
-    .fetch_optional(pool)
-    .await?;
-    value.map(decode_voice_announcement_value).transpose()
-}
-
 pub(crate) async fn cancel_voice_announcement_reservation_durable(
     pool: &PgPool,
     pending_key: &str,
@@ -184,7 +154,7 @@ pub(crate) async fn load_consumed_voice_announcement_durable(
     value.map(decode_voice_announcement_value).transpose()
 }
 
-#[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+#[cfg(test)]
 pub(crate) async fn take_voice_announcement_durable(
     pool: &PgPool,
     message_id: MessageId,
@@ -253,7 +223,7 @@ fn is_durable_pending_message_id(message_id: &str) -> bool {
 /// `ON CONFLICT … DO UPDATE` deliberately refuses to update rows that were
 /// already consumed. A late publish/persist retry must not resurrect a
 /// handoff after terminal delivery has claimed it (#2392).
-#[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+#[cfg(test)]
 pub(crate) async fn persist_handoff_durable(
     pool: &PgPool,
     message_id: MessageId,
@@ -551,9 +521,7 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
     Ok(count)
 }
 
-/// Delete durable rows whose effective TTL has elapsed. The live deadline is
-/// stored in `expires_at` (migration 0064), which is refreshed by
-/// `refresh_handoff_ttl_durable` when the watchdog deadline is extended.
+/// Delete durable rows whose `expires_at` (migration 0064) has passed.
 /// Wired into the leader-only maintenance scheduler.
 pub(crate) async fn gc_expired_voice_background_handoff_meta_pg(
     pool: &PgPool,
@@ -566,29 +534,4 @@ pub(crate) async fn gc_expired_voice_background_handoff_meta_pg(
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
-}
-
-/// Refresh the durable TTL for a handoff row by resetting `expires_at` to
-/// `NOW() + DURABLE_HANDOFF_META_TTL_SECS` (#2352).
-///
-/// Called after a successful watchdog deadline extension so long-running
-/// background turns do not lose their PG routing marker when the GC runs.
-/// Idempotent: no-op when the row is already consumed or absent.
-///
-/// Returns `true` when a live row was found and updated.
-pub(crate) async fn refresh_handoff_ttl_durable(
-    pool: &PgPool,
-    message_id: MessageId,
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE voice_background_handoff_meta
-         SET expires_at = NOW() + make_interval(secs => $1)
-         WHERE message_id = $2
-           AND consumed_at IS NULL",
-    )
-    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
-    .bind(message_id.get().to_string())
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
 }

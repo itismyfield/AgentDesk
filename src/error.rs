@@ -90,8 +90,7 @@ impl AppError {
         self.status
     }
 
-    // Accessor parallel to `status`/`message`/`context`; no current reader.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn code(&self) -> ErrorCode {
         self.code
     }

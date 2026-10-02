@@ -128,9 +128,11 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests
   --skip services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
+  --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::tests
+  --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
@@ -537,6 +539,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
+  services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::post_commit_failure_emits_result_and_quality_observability
@@ -649,10 +652,6 @@ NON_PG_FILTER_REPLAY=(
   voice::announce_meta::tests::handoff_store_round_trips_typed_metadata
   voice::announce_meta::tests::pending_handoff_reservation_binds_to_message_id
   voice::announce_meta::tests::pending_handoff_reservation_can_win_before_message_bind
-  voice::announce_meta::tests::refresh_handoff_deadline_extends_ttl_when_entry_has_short_remaining
-  voice::announce_meta::tests::refresh_handoff_deadline_preserves_meta_content
-  voice::announce_meta::tests::refresh_handoff_deadline_returns_false_when_absent
-  voice::announce_meta::tests::refresh_handoff_deadline_returns_false_when_ttl_already_at_max
   voice::announce_meta::tests::store_distinguishes_accepted_replay_entries
   voice::announce_meta::tests::store_is_one_shot
   voice::turn_link::tests::advisory_lock_key_is_stable
