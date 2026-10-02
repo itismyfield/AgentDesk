@@ -233,6 +233,12 @@ pub(crate) mod test_override {
         force_snapshot(unadopted(channels).foreign(home))
     }
 
+    /// This thread's forced channels for another thread, over the same candidate locks.
+    pub(crate) fn shared_channels() -> impl FnOnce() -> ChannelsGuard + Send + 'static {
+        let snapshot = CHANNELS.with(|cell| cell.borrow().clone());
+        move || force_snapshot(snapshot.expect("channels are forced on this thread"))
+    }
+
     fn force_snapshot(snapshot: BootChannels) -> ChannelsGuard {
         ChannelsGuard {
             _forced: force_on(),
