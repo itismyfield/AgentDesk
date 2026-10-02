@@ -52,7 +52,7 @@ use crate::services::discord::session_identity::{SessionIdentity, tmux_name_from
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
-    TurnLifecycleTarget, force_kill_turn_without_cancel_event,
+    ForceKillRow, TurnLifecycleTarget, force_kill_turn_without_cancel_event,
     stop_turn_preserving_queue_without_cancel_event,
 };
 use poise::serenity_prelude::ChannelId;
@@ -577,9 +577,16 @@ impl QueueService {
         let queue_capture =
             crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;
         let lifecycle = if force {
+            let row = self.pg_pool.as_ref().zip(session_key.as_deref());
+            let row = row.map(|(pool, session_key)| ForceKillRow {
+                pool,
+                session_key,
+                stored_provider: provider_name.as_deref(),
+            });
             force_kill_turn_without_cancel_event(
                 health_registry.map(Arc::as_ref),
                 &target,
+                row,
                 "queue-api cancel_turn (force)",
                 "queue_api_cancel_turn",
             )
@@ -592,6 +599,12 @@ impl QueueService {
             )
             .await
         };
+        // A refused kill changed nothing: no cancel event, dispatch or session update follows.
+        if lifecycle.host_guard_kept() {
+            return Err(ServiceError::conflict("session host is not legacy tmux")
+                .with_context("channel_id", channel_id)
+                .with_context("session_key", session_key.as_deref()));
+        }
         let finalizer = crate::services::turn_cancel_finalizer::finalize_turn_cancel(
             crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
                 crate::services::turn_cancel_finalizer::TurnCancelCorrelation {

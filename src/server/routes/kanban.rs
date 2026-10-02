@@ -18,8 +18,9 @@ pub use crate::server::dto::kanban::{
     ForceTransitionBody, ListCardsQuery, PmDecisionBody, RedispatchCardBody, ReopenBody,
     RereviewBody, RetryCardBody, UpdateCardBody,
 };
+use crate::services::discord::host_teardown_gate::row_host_refusal;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
+use crate::services::turn_lifecycle::{ForceKillRow, TurnLifecycleTarget, force_kill_turn_for_row};
 
 // ── Query / Body types ─────────────────────────────────────────
 
@@ -133,19 +134,26 @@ fn is_allowed_manual_transition(from: &str, to: &str) -> bool {
     (from == "backlog" && to == "ready") || (from != to && to == "backlog")
 }
 
+fn target_tmux_name(target: &kanban_db::ActiveTurnTarget) -> &str {
+    let key = target.session_key.as_str();
+    key.split(':').last().unwrap_or(key)
+}
+
 async fn cancel_turn_targets(
     state: &AppState,
+    pool: &sqlx::PgPool,
     targets: &[kanban_db::ActiveTurnTarget],
     reason: &str,
 ) {
     for target in targets {
-        let tmux_name = target
-            .session_key
-            .split(':')
-            .last()
-            .unwrap_or(&target.session_key)
-            .to_string();
-        let lifecycle = force_kill_turn(
+        let tmux_name = target_tmux_name(target).to_string();
+        let (session_key, stored_provider) = (&target.session_key, target.provider.as_deref());
+        let row = ForceKillRow {
+            pool,
+            session_key,
+            stored_provider,
+        };
+        let lifecycle = force_kill_turn_for_row(
             state.health_registry.as_deref(),
             &TurnLifecycleTarget {
                 provider: target.provider.as_deref().and_then(ProviderKind::from_str),
@@ -156,6 +164,7 @@ async fn cancel_turn_targets(
                     .map(ChannelId::new),
                 tmux_name: tmux_name.clone(),
             },
+            row,
             reason,
             "kanban_backlog_revert",
         )
@@ -180,6 +189,21 @@ pub(crate) async fn transition_card_to_backlog_with_cleanup(
         anyhow::anyhow!("transition_card_to_backlog_with_cleanup requires postgres pool (#1239)")
     })?;
     let turn_targets = kanban_db::load_active_turn_targets_for_card_pg(pool, card_id).await?;
+    // The revert idles and detaches every live session of the card, so one session whose
+    // host is not confirmed legacy tmux refuses the whole revert before anything changes.
+    let mut refusals = Vec::new();
+    for target in &turn_targets {
+        let (key, provider) = (&target.session_key, target.provider.as_deref());
+        let (channel, name) = (
+            target.thread_channel_id.as_deref(),
+            target_tmux_name(target),
+        );
+        let caller = "kanban_backlog_revert";
+        refusals.extend(row_host_refusal(pool, provider, channel, key, name, caller).await);
+    }
+    if !refusals.is_empty() {
+        anyhow::bail!("backlog revert refused: {}", refusals.join("; "));
+    }
     let turn_target_session_keys: Vec<String> = turn_targets
         .iter()
         .map(|target| target.session_key.clone())
@@ -196,7 +220,7 @@ pub(crate) async fn transition_card_to_backlog_with_cleanup(
     )
     .await
     .map(|(result, _)| result)?;
-    cancel_turn_targets(state, &turn_targets, "kanban backlog revert").await;
+    cancel_turn_targets(state, pool, &turn_targets, "kanban backlog revert").await;
     Ok(result)
 }
 

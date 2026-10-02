@@ -560,9 +560,15 @@ mod cancel_queue_preserve_pg_tests {
             let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
             let db = TestPostgresDb::create().await;
             let pool = db.connect_and_migrate().await;
-            let shared = make_shared_data_for_tests();
             let channel = ChannelId::new(6038750 + i as u64);
             seed_cancel_target(&pool, channel.get()).await;
+            // A forced cancel through the runtime is kept unless its host guard can read the
+            // sessions table, so the forced rows' runtime runs on the test pool.
+            let shared = if row == "purge-empty" || row == "rollback" {
+                crate::services::discord::host_teardown_gate::test_support::shared_on(&pool).await
+            } else {
+                make_shared_data_for_tests()
+            };
             let (mailboxes, token) = shared.queue_fixture_parts();
             let handle = mailboxes.handle(channel);
             let provider = ProviderKind::Claude;

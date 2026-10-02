@@ -156,3 +156,31 @@ pub(crate) async fn turn_kept(
 pub(crate) fn stop_recorded(channel_id: ChannelId) -> bool {
     crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id).is_some()
 }
+
+/// A busy mailbox turn on `channel_id` whose token holds no tmux binding and which stores no
+/// inflight row: the shape of a process-backend turn.
+pub(crate) async fn nameless_turn(shared: &SharedData, channel_id: ChannelId) -> Arc<CancelToken> {
+    let token = Arc::new(CancelToken::new());
+    let user_msg = MessageId::new(channel_id.get() + 1);
+    let start = crate::services::discord::mailbox_try_start_turn;
+    assert!(start(shared, channel_id, token.clone(), UserId::new(7), user_msg).await);
+    token
+}
+
+/// Whether the seeded turn still owns `channel_id`'s mailbox.
+pub(crate) async fn mailbox_turn_active(shared: &SharedData, channel_id: ChannelId) -> bool {
+    let snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+    snapshot.active_user_message_id == Some(MessageId::new(channel_id.get() + 1))
+}
+
+/// Rewrites the channel's inflight row as an older build stored it, with no finalizer id, so
+/// the normal inflight load backfills and saves it again. Returns the file path.
+pub(crate) fn inflight_needing_backfill(channel_id: ChannelId) -> std::path::PathBuf {
+    let root = inflight::inflight_runtime_root().expect("inflight root");
+    let path = inflight::inflight_state_path(&root, &ProviderKind::Claude, channel_id.get());
+    let raw = std::fs::read_to_string(&path).expect("seeded inflight row");
+    let mut raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    raw.as_object_mut().unwrap().remove("finalizer_turn_id");
+    std::fs::write(&path, raw.to_string()).unwrap();
+    path
+}
