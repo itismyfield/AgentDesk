@@ -733,6 +733,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
   services::auto_queue::route::command::reset_run_scope_pg_tests
   services::auto_queue::route::command::tests
+  services::auto_queue::route::dispatch_query::generate_conflict_tests
   services::auto_queue::route::fsm::tests
   services::auto_queue::route::phase_gate::tests
   services::auto_queue::route::planning::record_entry_dispatch_failure_tests
