@@ -17,11 +17,10 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
-import { buildRequestGenerateGroups, resetAutoQueueForSelection } from "./auto-queue-actions";
-import type { AutoQueueRequestProgress } from "./auto-queue-panel-ctx";
+import { buildGenerateGroups, describeGenerateSkips, resetAutoQueueForSelection } from "./auto-queue-actions";
 import AutoQueuePanelView from "./AutoQueuePanelView";
 import { useSortableReorder } from "./AutoQueueSortableRows";
-import { deriveGateKindByPhase, formatRequestGroupKey, isCompletedEntry, requestGroupKey, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
+import { deriveGateKindByPhase, isCompletedEntry, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
 import type { ReadyAutoQueueEntry } from "./auto-queue-actions";
 
 interface Props {
@@ -32,15 +31,11 @@ interface Props {
   selectedAgentId?: string | null;
   /**
    * #2128: ready 카드(requested 컬럼) 중 assignee와 GH 이슈 번호가 있는 항목들.
-   * "큐 생성" 버튼이 이 목록을 (agentId)로 group by 해서 agent별 별도 요청을 보냄.
+   * "큐 생성" 버튼이 이 목록을 (repo, agentId)로 묶어 묶음마다 큐를 하나씩 만든다.
    */
   readyEntries?: ReadyAutoQueueEntry[];
 }
 
-type RequestProgress = AutoQueueRequestProgress;
-
-const REQUEST_GENERATE_TIMEOUT_MS = 5 * 60 * 1000;
-const REQUEST_GENERATE_POLL_MS = 30 * 1000;
 export default function AutoQueuePanel({
   tr,
   locale,
@@ -56,11 +51,12 @@ export default function AutoQueuePanel({
   const [error, setError] = useState<string | null>(null);
   const [noReadyCards, setNoReadyCards] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("thread");
-  const [requestProgress, setRequestProgress] = useState<RequestProgress | null>(null);
-  const requestTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
   const suppressedRunIdRef = useRef<string | null>(null);
+  // Only the newest status read is applied, and work started for another repo or agent is dropped.
+  const statusSeqRef = useRef(0);
+  const scopeSeqRef = useRef(0);
 
   const resetPanelState = useCallback(() => {
     setStatus(createEmptyAutoQueueStatus());
@@ -72,8 +68,10 @@ export default function AutoQueuePanel({
   }, []);
 
   const fetchStatus = useCallback(async () => {
+    const seq = ++statusSeqRef.current;
     try {
-      const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId);
+      const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId, { fresh: true });
+      if (seq !== statusSeqRef.current) return;
       const normalized = normalizeAutoQueueStatus(s, suppressedRunIdRef.current);
       if (shouldClearSuppressedAutoQueueRun(s, suppressedRunIdRef.current)) {
         suppressedRunIdRef.current = null;
@@ -87,6 +85,8 @@ export default function AutoQueuePanel({
   }, [selectedRepo, selectedAgentId]);
 
   useEffect(() => {
+    scopeSeqRef.current += 1;
+    setGenerating(false);
     void fetchStatus();
     const timer = setInterval(() => void fetchStatus(), 30_000);
     return () => clearInterval(timer);
@@ -97,22 +97,10 @@ export default function AutoQueuePanel({
     return agent ? localeName(locale, agent) : agentId.slice(0, 8);
   };
 
-  // #2128: 결정론 smart-planner 대신 ready 카드를 (repo × agent)로 그룹핑해서 각
-  // agent에게 /api/queue/request-generate로 위임. agent가 자체 판단으로 /generate
-  // 호출하면 dashboard는 5분 polling으로 새 entries 감지.
-  const stopRequestPolling = () => {
-    if (requestTimerRef.current) {
-      clearInterval(requestTimerRef.current);
-      requestTimerRef.current = null;
-    }
-  };
-
-  useEffect(() => () => stopRequestPolling(), []);
-
+  // 준비된 카드를 (repo, agent)별로 묶어 묶음마다 /api/queue/generate로 큐를 만든다.
   const handleGenerate = async () => {
-    if (!selectedRepo) return;
-    if (generating || requestProgress) return;
-    const groups = buildRequestGenerateGroups(readyEntries, selectedRepo);
+    if (!selectedRepo || generating) return;
+    const groups = buildGenerateGroups(readyEntries, selectedRepo);
     if (groups.length === 0) {
       setError(
         tr(
@@ -129,118 +117,39 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = null;
 
-    const baselineEntryIds = new Set(
-      (status?.entries ?? []).map((entry) => entry.id),
-    );
-
-    const pendingGroups = new Set<string>();
-    const errors: { groupKey: string; message: string }[] = [];
-    await Promise.all(
-      groups.map(async ({ repo, agentId, issueNumbers }) => {
-        const groupKey = requestGroupKey(repo, agentId);
-        try {
-          await api.requestGenerateAutoQueue({
-            repo,
-            agentId,
-            issueNumbers,
-          });
-          pendingGroups.add(groupKey);
-        } catch (e) {
-          errors.push({
-            groupKey,
-            message: e instanceof Error ? e.message : String(e),
-          });
-        }
-      }),
-    );
-
-    setGenerating(false);
-
-    if (pendingGroups.size === 0) {
-      setError(
-        tr(
-          `큐 생성 요청이 모두 거부됐습니다 (${errors.length}건).`,
-          `All queue requests rejected (${errors.length}).`,
-        ),
-      );
-      return;
+    const scope = scopeSeqRef.current;
+    const failures: string[] = [];
+    const partial: string[] = [];
+    for (const { repo, agentId, issueNumbers } of groups) {
+      const label = getAgentLabel(agentId);
+      try {
+        const result = await api.generateAutoQueue({ repo, agentId, issueNumbers });
+        const skipped = describeGenerateSkips(result, tr);
+        if (!result.run) failures.push(`${label}: ${result.message ?? "-"}${skipped ? ` (${skipped})` : ""}`);
+        else if (skipped) partial.push(`${label}: ${skipped}`);
+      } catch (e) {
+        // The server refuses a second unstarted queue in one scope, so a retry cannot duplicate one.
+        const reason =
+          e instanceof api.ApiRequestError && e.status === 409
+            ? tr("이미 큐가 있습니다. 다시 만들려면 먼저 초기화하세요", "a queue already exists; reset it to generate again")
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        failures.push(`${label}: ${reason}`);
+      }
     }
-    if (errors.length > 0) {
-      const failed = errors
-        .map((error) => `${formatRequestGroupKey(error.groupKey)}: ${error.message}`)
-        .join(", ");
-      setError(
-        tr(
-          `일부 큐 생성 요청이 실패했습니다: ${failed}`,
-          `Some queue requests failed: ${failed}`,
-        ),
-      );
+    if (scope !== scopeSeqRef.current) return;
+    const messages: string[] = [];
+    if (failures.length > 0) {
+      messages.push(tr(`큐를 만들지 못했습니다: ${failures.join(", ")}`, `Queue not created: ${failures.join(", ")}`));
     }
-
-    setRequestProgress({
-      startedAt: Date.now(),
-      baselineEntryIds,
-      pendingGroups,
-      satisfiedGroups: new Set<string>(),
-      errors,
-    });
+    if (partial.length > 0) {
+      messages.push(tr(`큐에 넣지 않은 카드: ${partial.join(", ")}`, `Cards left out: ${partial.join(", ")}`));
+    }
+    if (messages.length > 0) setError(messages.join(" · "));
+    await fetchStatus();
+    if (scope === scopeSeqRef.current) setGenerating(false);
   };
-
-  // request-generate polling: 30초마다 status 새로고침. 새 entry로 잡힌 agent는
-  // satisfied로 이동. 모두 만족하거나 5분 경과 시 종료.
-  useEffect(() => {
-    if (!requestProgress) {
-      stopRequestPolling();
-      return;
-    }
-    void fetchStatus();
-    requestTimerRef.current = setInterval(() => void fetchStatus(), REQUEST_GENERATE_POLL_MS);
-    return () => stopRequestPolling();
-  }, [requestProgress?.startedAt]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!requestProgress) return;
-    const newlyAppearedGroups = new Set<string>();
-    for (const entry of status?.entries ?? []) {
-      if (requestProgress.baselineEntryIds.has(entry.id)) continue;
-      if (!entry.agent_id) continue;
-      const repo = entry.github_repo || selectedRepo || "";
-      newlyAppearedGroups.add(requestGroupKey(repo, entry.agent_id));
-    }
-
-    let changed = false;
-    const nextPending = new Set(requestProgress.pendingGroups);
-    const nextSatisfied = new Set(requestProgress.satisfiedGroups);
-    for (const groupKey of requestProgress.pendingGroups) {
-      if (newlyAppearedGroups.has(groupKey)) {
-        nextPending.delete(groupKey);
-        nextSatisfied.add(groupKey);
-        changed = true;
-      }
-    }
-
-    const elapsed = Date.now() - requestProgress.startedAt;
-    const timedOut = elapsed >= REQUEST_GENERATE_TIMEOUT_MS;
-
-    if (nextPending.size === 0 || timedOut) {
-      stopRequestPolling();
-      if (timedOut && nextPending.size > 0) {
-        const missing = [...nextPending].map(formatRequestGroupKey).join(", ");
-        setError(
-          tr(
-            `5분 안에 응답하지 않은 에이전트: ${missing}`,
-            `Agents did not respond within 5 min: ${missing}`,
-          ),
-        );
-      }
-      setRequestProgress(null);
-      return;
-    }
-
-    if (changed) {
-      setRequestProgress({ ...requestProgress, pendingGroups: nextPending, satisfiedGroups: nextSatisfied });
-    }
-  }, [selectedRepo, status, requestProgress, tr]);
 
   const handleReset = async () => {
     setError(null);
@@ -463,7 +372,6 @@ export default function AutoQueuePanel({
         phaseSections,
         primaryAction,
         readyEntries,
-        requestProgress,
         run,
         selectedRepo,
         setExpanded,

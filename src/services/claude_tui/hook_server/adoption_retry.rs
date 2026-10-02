@@ -8,7 +8,7 @@ use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use crate::services::tui_prompt_dedupe::{
     AdoptSkip, adopt_claude_continuation_explained, claude_session_rotation_for_tmux,
-    resolve_tmux_session_name,
+    reclaim_with_current_prompt, resolve_tmux_session_name,
 };
 
 /// What the hook that asked for an adoption may be told, judged by its own binding evidence only.
@@ -160,6 +160,19 @@ pub(crate) fn adopt_from_hook(
             false => AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
         }
     })
+}
+
+/// A prompt of the pane's own launch session, which adoption never sees: under the pane authority it
+/// may supersede a waiting Pending it outlived, and then that Pending's queued retry is dropped.
+pub(crate) fn reclaim_from_prompt(session_id: &str, hook: &HookSignal) {
+    let tmux = resolve_tmux_session_name("claude", session_id.trim()).unwrap_or_default();
+    with_tmux_source_authority(&tmux, |_| {
+        if reclaim_with_current_prompt(session_id, hook)
+            && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != session_id)
+        {
+            pop_front(&tmux);
+        }
+    });
 }
 
 /// `(recorded, at front)` of the queued entry of `payload_session_id`, if the pane queues one.

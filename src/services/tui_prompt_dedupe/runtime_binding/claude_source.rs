@@ -86,8 +86,8 @@ impl Record {
 
 /// What the check decided for a candidate.
 enum Checked {
-    /// The bound source itself, its pinned file read again.
-    Bound,
+    /// The bound source itself, its pinned file read again; its pin when it has one.
+    Bound(Option<SourceId>),
     /// A verified source: the bound one on its first check, a corrected path, or a new session.
     Verified(SourceId),
     /// Named correctly but without a verified transcript yet; it waits as a Pending.
@@ -150,25 +150,33 @@ impl Candidate<'_> {
             return false;
         }
         *skip = Some(AdoptSkip::HistoryUnreadable);
-        let source = match self.check() {
+        let (checked, reclaimable) = match self.check() {
             Err(error) => {
                 tracing::warn!(tmux, %error, "binding event log unreadable; hook retried");
                 return false;
             }
-            Ok(Checked::Bound) => {
+            Ok(judged) => judged,
+        };
+        let source = match checked {
+            Checked::Bound(pin) => {
                 *skip = unlogged;
+                #[cfg(test)]
+                let reclaimable = reclaimable && !source_verify::n2b_mutant("r5-reclaim-bound-off");
+                if let (true, Some(pin), Some(p)) = (reclaimable, pin, proposal) {
+                    self.log_reclaim(p, &pin);
+                }
                 return true;
             }
-            Ok(Checked::Verified(source)) => source,
-            Ok(Checked::Waiting) => {
+            Checked::Verified(source) => source,
+            Checked::Waiting => {
                 *skip = unlogged;
                 return wait(failure);
             }
-            Ok(Checked::Recheck) => {
+            Checked::Recheck => {
                 *skip = Some(AdoptSkip::SourceUnreadable);
                 return false;
             }
-            Ok(Checked::Refused(refusal, reason)) => {
+            Checked::Refused(refusal, reason) => {
                 *skip = Some(refusal);
                 let published_at = self.hook.published_at.map(|t| t.to_rfc3339());
                 match (reject(reason), refusal) {
@@ -233,13 +241,65 @@ impl Candidate<'_> {
                 false
             }
             Some(Ok(Committed::Stale)) => wait(failure),
+            Some(Ok(_)) => {
+                // A re-pin after the pin is what reclaims, so only the gate above can supersede.
+                if let (true, Some(p)) = (reclaimable, proposal) {
+                    self.log_reclaim(p, &source);
+                }
+                true
+            }
             _ => true,
         }
     }
 
+    /// Logs the bound source again only while the prompt outlived the pane's waiting Pending; a
+    /// failure leaves that Pending waiting as before.
+    fn log_reclaim(&self, proposal: &Proposal, source: &SourceId) -> bool {
+        match binding_events::record_reclaim(proposal, source) {
+            Ok(appended) => appended,
+            Err(error) => {
+                tracing::warn!(tmux = self.tmux_session, %error, "Claude prompt reclaim not logged");
+                false
+            }
+        }
+    }
+
+    /// Supersedes the pane's waiting Pending when this prompt of the bound session outlived it,
+    /// pinning that source first if it has no pin; the binding is not touched.
+    pub(super) fn reclaim(&self) -> bool {
+        let (Some(proposal), Ok((checked, true))) = (self.proposal.as_ref(), self.check()) else {
+            return false;
+        };
+        match checked {
+            Checked::Bound(Some(source)) => self.log_reclaim(proposal, &source),
+            Checked::Verified(source) => {
+                let pinned = binding_events::codex::source_file_matches(&source)
+                    && binding_events::record_verified(proposal, &source)
+                        .is_ok_and(|c| matches!(c, Committed::Appended | Committed::Unchanged));
+                pinned && self.log_reclaim(proposal, &source)
+            }
+            _ => false,
+        }
+    }
+
+    /// A prompt on a complete history whose waiting Pending names another session may reclaim.
+    fn reclaimable(&self, history: &SourceHistory) -> bool {
+        use crate::services::claude_tui::hook_server::HookEventKind;
+        let prompt = HookEventKind::from_path(&self.hook.event) == HookEventKind::UserPromptSubmit;
+        #[cfg(test)]
+        let prompt = prompt || source_verify::n2b_mutant("r5-reclaim-any-event");
+        let complete = history.complete;
+        #[cfg(test)]
+        let complete = complete || source_verify::n2b_mutant("r5-reclaim-incomplete");
+        let waiting =
+            (history.awaiting.as_ref()).is_some_and(|w| w.session != self.payload_session_id);
+        prompt && complete && waiting
+    }
+
     /// Judges the candidate against the pane's bound source and the history its log holds for this
-    /// execution; `Err` when the log cannot be loaded. A pane without a channel has no history.
-    fn check(&self) -> io::Result<Checked> {
+    /// execution, and whether it may reclaim; `Err` when the log cannot be loaded. A pane without a
+    /// channel has no history.
+    fn check(&self) -> io::Result<(Checked, bool)> {
         let (bound, payload) = (self.bound, self.payload_session_id);
         let candidate = self.hook.transcript_path.as_deref().unwrap_or_default();
         let bound_session = bound.session_id.clone().unwrap_or_default();
@@ -271,8 +331,9 @@ impl Candidate<'_> {
             pin.as_ref(),
             &history,
         );
-        Ok(match verdict {
-            SourceVerdict::Current => Checked::Bound,
+        let reclaimable = self.reclaimable(&history);
+        let checked = match verdict {
+            SourceVerdict::Current => Checked::Bound(pin),
             SourceVerdict::Confirm(source) | SourceVerdict::Rotate(source) => {
                 match source.source_id() {
                     Some(id) => Checked::Verified(id),
@@ -286,8 +347,75 @@ impl Candidate<'_> {
             }
             SourceVerdict::Rejected(rejection) => refused(rejection),
             SourceVerdict::Anomaly => Checked::Refused(AdoptSkip::SourceAnomaly, "source_anomaly"),
-        })
+        };
+        Ok((checked, reclaimable))
     }
+}
+
+/// Lets a prompt of the session a pane is bound to, named by the pane's own launch command,
+/// supersede the Pending it outlived; the binding and its hook routing stay as they are.
+pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -> bool {
+    #[cfg(test)]
+    if source_verify::n2b_mutant("r5-reclaim-inner-off") {
+        return false;
+    }
+    let session_id = session_id.trim();
+    let payload_path = hook.transcript_path.as_deref().map(str::trim);
+    let Some(payload_path) = payload_path
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+    else {
+        return false;
+    };
+    let opened = source_verify::observe_transcript(&payload_path);
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let mut skip = None;
+    let key = PromptKey::new("claude", session_id);
+    let Some((tmux, binding)) = AdoptSkip::bound_pane(&state, &key, &mut skip) else {
+        return false;
+    };
+    let bound = binding.value.clone();
+    let claude = bound.runtime_kind == RuntimeHandoffKind::ClaudeTui;
+    let output = PathBuf::from(&bound.output_path);
+    let (true, Some(true), Some(root)) = (
+        claude,
+        bound.session_id.as_deref().map(|bound| bound == session_id),
+        output.parent().and_then(Path::parent),
+    ) else {
+        return false;
+    };
+    let candidate = source_verify::normalize_payload_path(root, &payload_path);
+    let candidate = candidate.display().to_string();
+    let hook = &HookSignal {
+        transcript_path: Some(candidate.clone()),
+        ..hook.clone()
+    };
+    let channel_id = state.channel_by_tmux.get(&tmux).map(|e| e.value);
+    let Some(channel_id) = channel_id.filter(|id| *id != 0) else {
+        return false;
+    };
+    let proposal = Proposal {
+        channel_id,
+        provider: "claude",
+        tmux_session: &tmux,
+        session_id: Some(session_id),
+        path: &candidate,
+        replaced: Some((&bound.output_path, bound.session_id.as_deref())),
+        cause: CauseSource::Hook(hook.cause()),
+        hook: Some(hook),
+    };
+    let candidate = Candidate {
+        proposal: Some(proposal),
+        tmux_session: &tmux,
+        bound: &bound,
+        root,
+        command_session_id: session_id,
+        payload_session_id: session_id,
+        hook,
+        opened: &opened,
+    };
+    candidate.reclaim()
 }
 
 fn refused(rejection: SourceRejection) -> Checked {

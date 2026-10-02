@@ -1,9 +1,12 @@
 //! The Claude sessions one pane moved through in the execution its records name. Only
 //! `Writer::apply` folds it, so a reloaded writer and the live one hold the same history.
 
+use std::io;
+
 use chrono::{DateTime, Utc};
 
-use super::{BindingEvent, BindingTarget};
+use super::{BindingEvent, BindingTarget, Logged, Writer, lock_logs, log_path, read_log};
+use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::claude_tui::source_verify::{Left, SourceHistory, Visit};
 
 /// Left sessions kept per execution; past it the history is marked incomplete instead.
@@ -19,18 +22,73 @@ pub(super) enum Step {
     Confirm,
     /// The Resolved of the Pending the writer waits on.
     Resolve,
+    /// A prompt of the pane's own session published after the waiting Pending, which it supersedes.
+    Reclaim,
     /// A record no hook produced: a registration, restore or stat.
     Observe,
     Await,
     Audit,
 }
 
-/// `waiting` is the seq of the Pending the writer waits on for the record's pane.
-pub(super) fn step(record: &BindingEvent, waiting: Option<u64>) -> Step {
+/// The Pending the writer waits on for a pane, and the publish time of the hook behind it.
+#[derive(Clone, Copy)]
+pub(super) struct Waiting<'a> {
+    pub seq: u64,
+    pub session: &'a str,
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+impl<'a> Waiting<'a> {
+    pub(super) fn of(pending: &'a BindingEvent, published_at: Option<DateTime<Utc>>) -> Self {
+        let session = match &pending.new {
+            BindingTarget::Pending {
+                payload_session_id, ..
+            } => payload_session_id.as_str(),
+            _ => "",
+        };
+        Self {
+            seq: pending.seq,
+            session,
+            published_at,
+        }
+    }
+}
+
+/// Whether a prompt naming `session` outlived the waiting Pending of another session: a prompt is
+/// published only while Claude holds its session, so the waiting one was left before it.
+pub(super) fn reclaims(
+    provider: &str,
+    event: Option<&str>,
+    session: &str,
+    published_at: Option<DateTime<Utc>>,
+    waiting: Option<Waiting>,
+) -> bool {
+    let prompt = event == Some(HookEventKind::UserPromptSubmit.as_str());
+    #[cfg(test)]
+    let prompt = prompt || (event.is_some() && super::n2b_mutant("r5-reclaim-any-event"));
+    let Some(waiting) = waiting else {
+        return false;
+    };
+    let later = matches!((published_at, waiting.published_at), (Some(t), Some(since)) if t > since);
+    #[cfg(test)]
+    let later = later || super::n2b_mutant("r5-reclaim-time-off");
+    provider == "claude" && prompt && waiting.session != session && later
+}
+
+/// `published_at` is the record's hook publish time; `waiting` the pane's Pending, if any;
+/// `repinned` whether the record re-pins the source the pane already held verified.
+pub(super) fn step(
+    record: &BindingEvent,
+    published_at: Option<DateTime<Utc>>,
+    waiting: Option<Waiting>,
+    repinned: bool,
+) -> Step {
     let source = match &record.new {
         BindingTarget::Pending { .. } => return Step::Await,
         BindingTarget::Rejected { .. } => return Step::Audit,
-        BindingTarget::Resolved { pending_seq, .. } if waiting == Some(*pending_seq) => {
+        BindingTarget::Resolved { pending_seq, .. }
+            if waiting.is_some_and(|w| w.seq == *pending_seq) =>
+        {
             return Step::Resolve;
         }
         BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => source,
@@ -45,8 +103,47 @@ pub(super) fn step(record: &BindingEvent, waiting: Option<u64>) -> Step {
     match (hooked, moved) {
         (false, _) => Step::Observe,
         (true, true) => Step::Switch,
-        (true, false) => Step::Confirm,
+        // A first pin is written whether or not the reclaim gate held, so only a re-pin reclaims.
+        (true, false) => {
+            let event = record.evidence.hook_event.as_deref();
+            let session = source.session_id.as_str();
+            #[cfg(test)]
+            let repinned = repinned || super::n2b_mutant("r5-reclaim-first-pin");
+            match repinned && reclaims(&record.provider, event, session, published_at, waiting) {
+                true => Step::Reclaim,
+                false => Step::Confirm,
+            }
+        }
     }
+}
+
+/// `binding_events_since` with whether each record superseded its pane's waiting Pending as a
+/// prompt reclaim, judged by replaying the log through the writer's own fold.
+pub(crate) fn binding_events_judged_since(
+    channel_id: u64,
+    after_seq: u64,
+) -> io::Result<Vec<(BindingEvent, bool)>> {
+    let Some(path) = log_path(channel_id)? else {
+        return Ok(Vec::new());
+    };
+    // Holding the lock keeps a record that is being rolled back out of every read.
+    let _logs = lock_logs();
+    let read = read_log::<Logged>(&path)?;
+    if read.lines != read.records.len() as u64 {
+        let unreadable = read.lines - read.records.len() as u64;
+        return Err(io::Error::other(format!(
+            "{unreadable} unreadable binding event line(s) in {}",
+            path.display()
+        )));
+    }
+    let mut replay = Writer::default();
+    let records = read.records.into_iter().map(|line| {
+        let reclaimed = replay.apply(&line.event, line.verified, line.published_at);
+        (line.event, reclaimed)
+    });
+    Ok(records
+        .filter(|(record, _)| record.seq > after_seq)
+        .collect())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -146,13 +243,30 @@ impl ClaudeFold {
         };
         match step {
             Step::Switch | Step::Resolve if hooked => self.adopt(session, pin, at, at),
-            Step::Confirm if self.current_is(session) => {
-                let current = self.history.current.as_mut().expect("current checked");
-                current.pin = pin;
-                current.since.get_or_insert(at);
+            Step::Confirm => self.confirm(session, pin, at),
+            Step::Reclaim => {
+                #[cfg(test)]
+                let leaves = !super::n2b_mutant("r5-reclaim-fold-off");
+                #[cfg(not(test))]
+                let leaves = true;
+                if let Some(waiting) = leaves.then(|| self.history.awaiting.take()).flatten() {
+                    self.leave(waiting.session, None, at);
+                    self.awaiting_seq = None;
+                }
+                self.confirm(session, pin, at);
             }
-            Step::Confirm => self.history.current = Some(visit(session, pin, Some(at), at)),
             _ => self.observe(session, pin, at),
+        }
+    }
+
+    /// A hook naming the session the pane already has: it pins it and dates the visit if undated.
+    fn confirm(&mut self, session: &str, pin: Option<super::SourceId>, at: DateTime<Utc>) {
+        if self.current_is(session) {
+            let current = self.history.current.as_mut().expect("current checked");
+            current.pin = pin;
+            current.since.get_or_insert(at);
+        } else {
+            self.history.current = Some(visit(session, pin, Some(at), at));
         }
     }
 

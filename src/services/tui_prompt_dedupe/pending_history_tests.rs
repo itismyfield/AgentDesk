@@ -940,3 +940,95 @@ fn a_background_start_published_late_does_not_take_the_pane_back() {
     );
     assert_eq!(pane.bound(), Some(d), "[U10:resume]");
 }
+
+/// A hook through the receiver naming `session`'s transcript, the pane's rotation drained first.
+fn http(
+    pane: &Pane,
+    event: &str,
+    session: &str,
+    source: Option<&str>,
+    secs: i64,
+) -> IngressOutcome {
+    clear_claude_session_rotation(pane.tmux);
+    let payload = serde_json::json!({ "source": source, "transcript_path": pane.path(session) });
+    ingress(pane, event, session, payload, secs)
+}
+
+fn awaiting(pane: &Pane) -> Option<String> {
+    pane.history().awaiting.map(|w| w.session)
+}
+
+#[test]
+fn a_prompt_published_before_the_clear_does_not_reclaim() {
+    let lane = Lane::new();
+    // A pane on a session it adopted, and a pane on its launch session.
+    for (channel, tmux, adopted) in [(8_101, "r5-order-a", true), (8_102, "r5-order-b", false)] {
+        let pane = Pane::new(&lane, channel, tmux);
+        let s = match adopted {
+            true => uuid(),
+            false => pane.a.clone(),
+        };
+        if adopted {
+            pane.chain(&[(&s, 10)]);
+        }
+        let x = uuid();
+        let clear = http(&pane, "SessionStart", &x, Some("clear"), 40);
+        assert!(matches!(
+            clear,
+            IngressOutcome::Durable(DurableKind::Pending)
+        ));
+        // The prompt was published before the /clear started, only delivered after it.
+        http(&pane, "UserPromptSubmit", &s, None, 35);
+        assert_eq!(
+            awaiting(&pane),
+            Some(x.clone()),
+            "[R5:reclaim_order] {tmux}"
+        );
+        pane.file(&x);
+        http(&pane, "UserPromptSubmit", &x, None, 50);
+        let resolved = format!("resolved:{x}");
+        assert_eq!(
+            pane.kinds().last(),
+            Some(&resolved),
+            "[R5:reclaim_order] {tmux}"
+        );
+    }
+}
+
+#[test]
+fn only_a_prompt_reclaims_and_only_on_a_complete_history() {
+    let lane = Lane::new();
+    let (b, x) = (uuid(), uuid());
+    let pane = Pane::new(&lane, 8_103, "r5-ups-only");
+    pane.chain(&[(&b, 10)]);
+    http(&pane, "SessionStart", &x, Some("clear"), 40);
+    http(&pane, "Stop", &b, None, 45);
+    assert_eq!(awaiting(&pane), Some(x.clone()), "[R5:ups_only]");
+    assert_eq!(
+        pane.kinds().last(),
+        Some(&format!("pending:{x}")),
+        "[R5:ups_only]"
+    );
+
+    let x = uuid();
+    let pane = Pane::new(&lane, 8_104, "r5-incomplete");
+    http(&pane, "SessionStart", &x, Some("clear"), 40);
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(lane.log(pane.channel))
+        .unwrap();
+    std::io::Write::write_all(&mut log, b"{torn but terminated\n").unwrap();
+    forget_channel_for_tests(pane.channel);
+    assert!(!pane.history().complete);
+    let lines = || {
+        fs::read_to_string(lane.log(pane.channel))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    let before = lines();
+    let a = pane.a.clone();
+    http(&pane, "UserPromptSubmit", &a, None, 45);
+    assert_eq!(awaiting(&pane), Some(x.clone()), "[R5:incomplete]");
+    assert_eq!(lines(), before, "[R5:incomplete] nothing is logged");
+}

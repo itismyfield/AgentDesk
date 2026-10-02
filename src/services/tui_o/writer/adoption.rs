@@ -157,28 +157,42 @@ impl ReadVersion {
     }
 }
 
-/// Whether `later` supersedes the Pending bind `pending`: the writer drops a waiting Pending once a
-/// hook on the same pane adopts another session, so that Pending is never resolved.
+/// Whether `later` supersedes `pending` as the writer drops it, never to resolve it: a hook on the
+/// pane adopting another session, a later Pending, or a prompt of its own session it outlived.
 pub(super) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
+    #[cfg(test)]
+    use crate::services::claude_tui::source_verify::n2b_mutant;
+    let same_pane = later.tmux_session == pending.tmux_session;
+    #[cfg(test)]
+    let same_pane = same_pane || n2b_mutant("r5-overwrite-any-pane");
+    let claude = later.provider == ShadowProvider::Claude;
     let BindingRecord::Bound {
-        old,
-        new: BindingTarget::Source(source),
-        evidence,
-        ..
+        old, new, evidence, ..
     } = &later.record
     else {
         return false;
     };
+    if later.seq <= pending.seq || !same_pane || !claude {
+        return false;
+    }
+    let source = match new {
+        #[cfg(test)]
+        BindingTarget::Pending { .. } if n2b_mutant("r5-overwrite-off") => return false,
+        BindingTarget::Pending { .. } => return true,
+        BindingTarget::Source(source) => source,
+    };
     #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("o-supersede-off") {
+    if n2b_mutant("o-supersede-off") {
         return false;
     }
     let moved = old
         .as_ref()
         .is_none_or(|old| old.session_id != source.session_id);
-    let same_pane = later.tmux_session == pending.tmux_session;
-    let claude = later.provider == ShadowProvider::Claude;
-    later.seq > pending.seq && same_pane && claude && !evidence.hook_event.is_empty() && moved
+    // The writer's own fold judged the prompt reclaim; O follows that one judgment.
+    let reclaims = evidence.reclaims;
+    #[cfg(test)]
+    let reclaims = reclaims && !n2b_mutant("r5-reclaim-o-off");
+    !evidence.hook_event.is_empty() && (moved || reclaims)
 }
 
 /// The sources a binding log names: every bound one in seq order, and those only named as an old
@@ -199,7 +213,10 @@ pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
                         pending.retain(|waiting| !supersedes(waiting, event));
                         bound.push(source);
                     }
-                    BindingTarget::Pending { .. } => pending.push(event),
+                    BindingTarget::Pending { .. } => {
+                        pending.retain(|waiting| !supersedes(waiting, event));
+                        pending.push(event);
+                    }
                 }
             }
             BindingRecord::Resolved {
