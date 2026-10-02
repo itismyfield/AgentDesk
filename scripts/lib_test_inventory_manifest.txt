@@ -1029,6 +1029,7 @@ server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_a
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::auth_login_routes_refuse_a_target_another_host_claims
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
+server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
 server::routes::agents::tmux_relay_adoption_state_tests::absent_and_probe_error_states_are_distinct
 server::routes::agents::tmux_relay_adoption_state_tests::live_tmux_with_matching_watcher_is_adopted
 server::routes::agents::tmux_relay_adoption_state_tests::live_tmux_without_matching_watcher_is_reported_as_not_adopted
@@ -7854,6 +7855,7 @@ services::discord::turn_bridge::terminal_delivery::tests::work_dispatch_completi
 services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests::capped_requeue_failure_preserves_inflight_without_false_queue_claim_4888
 services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_admitted_latch_does_not_narrow_the_exclusion_lease_5264
 services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_terminal_range_end_is_latch_only_5264
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::a_stopped_turn_on_another_host_keeps_its_inflight_row
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::a_terminal_that_loses_its_delivery_lease_leaves_a_pending_adoption
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::a_watcher_owned_turn_end_deletes_the_o_panel_only_on_o_channels
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191
@@ -7945,6 +7947,13 @@ services::discord::turn_bridge::tmux_runtime::interrupt_policy::sigint_target_mi
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::sigint_target_missing_tests::active_claude_without_pid_is_a_missed_interrupt
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::sigint_target_missing_tests::idle_claude_without_pid_is_not_missed
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::sigint_target_missing_tests::wrapped_providers_are_not_sigint_only
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_command_stop_binds_its_verdict_when_the_marker_changes_after_it
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_command_stop_judges_before_any_write_and_binds_what_it_judged
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_host_owned_stop_keeps_the_turn_row_for_its_owner
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_judged_cancel_leaves_a_turn_that_replaced_the_judged_one
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_name_only_preserve_stop_keeps_a_turn_on_another_host
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_preserve_stop_keeps_a_turn_on_another_host_before_any_write
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_observes_child_termination
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_times_out_when_child_keeps_running

@@ -1500,6 +1500,40 @@ async fn o_delegated_cancelled_partial_body_is_not_replaced() {
     }
 }
 
+/// A /stop whose turn runs on a host that is not legacy tmux leaves the turn's inflight row for
+/// cleanup retry, as its owner still settles it; a process turn's stop does not.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stopped_turn_on_another_host_keeps_its_inflight_row() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    for refused in [false, true] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        driver.inflight.runtime_kind = Some(ClaudeTui);
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+            .expect("seed the TUI-kind row");
+        let listed = vec![(driver.inflight.channel_id, ClaudeTui)];
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&listed);
+        let (mut ctx, state) = driver.parts();
+        ctx.cancelled = true;
+        let name = "AgentDesk-claude-p6asb-epilogue";
+        let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, "herdr").unwrap();
+        if refused {
+            state.cancel_token.bind_claude_tmux_session(name);
+        }
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("terminal outcome delivery must not hang");
+        let _ = std::fs::remove_file(&marker);
+        assert_eq!(
+            output.preserve_inflight_for_cleanup_retry, refused,
+            "refused={refused}"
+        );
+    }
+}
+
 /// A terminal or /stop with no answer to publish (empty, whitespace or TUI chrome only) leaves a
 /// pending adoption; one that publishes the body ends it first, and Legacy shows that body once.
 #[tokio::test]

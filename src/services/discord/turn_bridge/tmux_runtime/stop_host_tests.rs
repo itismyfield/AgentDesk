@@ -519,8 +519,8 @@ fn runtime_cancel_reads_no_pane_of_another_host() {
             assert_eq!(result.unwrap().inflight == kept, !legacy, "{host:?}");
             assert_eq!(token.cancelled.load(Ordering::SeqCst), legacy, "{host:?}");
             let calls = fx.take_calls();
-            let interrupted = calls.iter().any(|call| call.starts_with("send-keys"));
-            assert_eq!(interrupted, legacy, "{host:?} {calls:?}");
+            let reached = calls.iter().any(|call| call.contains(&name));
+            assert_eq!(reached, legacy, "{host:?} {calls:?}");
             assert_eq!(calls.is_empty(), !legacy, "{host:?} {calls:?}");
         }
     });
