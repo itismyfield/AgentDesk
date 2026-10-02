@@ -141,6 +141,7 @@ export async function generateAutoQueue(input: {
   return request("/api/queue/generate", {
     method: "POST",
     body: JSON.stringify(body),
+    timeoutMs: 60_000,
   });
 }
 
@@ -168,12 +169,15 @@ export async function activateAutoQueue(
 export async function getAutoQueueStatus(
   repo?: string | null,
   agentId?: string | null,
+  opts?: { fresh?: boolean },
 ): Promise<AutoQueueStatus> {
   const params = new URLSearchParams();
   if (repo) params.set("repo", repo);
   if (agentId) params.set("agent_id", agentId);
   const qs = params.toString();
-  return request(`/api/queue/status${qs ? `?${qs}` : ""}`);
+  // A signal opts out of sharing an in-flight GET that started earlier.
+  const fresh = opts?.fresh ? { signal: new AbortController().signal } : undefined;
+  return request(`/api/queue/status${qs ? `?${qs}` : ""}`, fresh);
 }
 
 export async function getAutoQueueHistory(
