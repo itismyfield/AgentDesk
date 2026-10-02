@@ -2,7 +2,8 @@
 
 Campaigns use the existing server and its configured canonical PostgreSQL pool.
 All nodes and dependency edges are one atomic revision. There is no local JSON
-copy, session-bound owner, automatic task execution, or restart replay. After a
+copy, session-bound owner, or restart replay, and nothing runs unless a campaign
+opts into the auto-queue handoff below. After a
 clear, compaction, quota stop, provider switch or server restart, load the same
 campaign ID before doing more work. A `running` node is a saved checkpoint, not
 proof that its old process remains alive: inspect its session and evidence before
@@ -48,7 +49,9 @@ meaning. `live` is computed on every read and never written back, so it can
 disagree with a node's saved `status`.
 
 Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
-`nodes`, `created_at`, `updated_at`. Status is `planned`, `active`, `paused`,
+`auto_queue`, `nodes`, `created_at`, `updated_at`. `auto_queue` defaults to false;
+a POST or PUT that omits it keeps the stored value, so older writers cannot turn
+it off by accident. Status is `planned`, `active`, `paused`,
 `completed`, or `cancelled`. Round is a positive integer; revision starts at 1.
 
 Node fields: `id`, `title`, `status`, `stage`, `group`, `round`, `assignee`, `session_id`,
@@ -86,6 +89,34 @@ Duplicate node IDs, duplicate/missing dependencies, self edges and cycles return
 400 before writes. A completed campaign must contain nodes, all completed or
 skipped. The API validates structure, not the truth of a claimed test result;
 callers must verify their evidence before marking work complete.
+
+## Auto-queue handoff
+
+The campaign decides which nodes may start; auto-queue only runs them. A node is
+ready when it is saved as `pending` and every dependency is saved as `completed`
+or `skipped`, or is saved as `pending` or `running` while its issue card has
+reached a terminal pipeline state (a dependency saved as `blocked` or `failed`
+holds its dependents even when its card finished). A ready
+node whose issue card is not finished and has no live auto-queue entry or
+dispatch joins the auto-queue run of the card's assigned agent: the newest
+active run for that repo and agent, in a new lane of its current phase, or a new
+run labelled `campaign` with phase gates off (up to four lanes at once). Backlog
+cards are moved to ready first, as `/api/queue/generate` does. Auto-queue's
+minute tick dispatches the new entries. The ledger is never written: the node's
+card and `live` show its progress, and a person still saves the node's status.
+
+Ready nodes that cannot be queued are listed in `waiting` with a reason:
+`no_issue_card`, `no_assigned_agent`, `previous_attempt_stopped` (its last queue
+entry failed or was skipped or cancelled; reset the card or skip the node),
+`card_not_ready` (the card is in another workflow step), `not_enqueueable`,
+`run_paused` (that agent's queue is paused; the handoff never starts a second
+run beside it), or `already_in_run`.
+
+With `auto_queue: true` this happens after every save of an active campaign
+(the response carries `handoff`, or `handoff_error` when the save succeeded but
+the handoff failed) and whenever any card reaches a terminal state. Saving the
+campaign again retries waiting nodes. Pausing the campaign stops further
+handoffs; entries already queued keep running in auto-queue.
 
 ## Dashboard navigation
 

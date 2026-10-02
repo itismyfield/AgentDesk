@@ -97,6 +97,21 @@ fn campaign_checkpoint_keeps_unchanged_node_time_and_resume_context() {
     );
 }
 
+/// Writers that predate the flag must not switch a campaign's automatic handoff off.
+#[test]
+fn campaign_checkpoint_keeps_auto_queue_when_a_writer_omits_it() {
+    let mut opted_in = input();
+    opted_in.auto_queue = Some(true);
+    let first = checkpoint("campaign".into(), opted_in, None);
+    assert!(first.auto_queue);
+    let second = checkpoint("campaign".into(), input(), Some(&first));
+    assert!(second.auto_queue, "an omitted flag keeps the stored value");
+    let mut opted_out = input();
+    opted_out.auto_queue = Some(false);
+    assert!(!checkpoint("campaign".into(), opted_out, Some(&second)).auto_queue);
+    assert!(!checkpoint("fresh".into(), input(), None).auto_queue);
+}
+
 #[tokio::test]
 async fn postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg() {
     let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;

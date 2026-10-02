@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "cb9a04c974fe995df2d850b5f2ebee3d5fd751b2",
+  "measured_at_sha": "f1c3848c70fb3b97159684fcd4d4b4a3b0a3fc78",
   "records": [
     {
       "root": "migrations/postgres",
@@ -6040,6 +6040,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:22255417d159e776f2f5321ce3bf4b4acd8ef52822ca100c7ded487dea95f4ba"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:41167117d7f9e6a0b6e008ea5d2efa2b856071d676f5bcf9ed77b969d61b9070"
     },
     {
       "root": "src",
@@ -20710,6 +20719,150 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:f78a0d051c9ca469f38e9dc8f573e1d6954ddf11d8c24a26fc390ef354947fe0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:39af554d4b354b464d27feac5e1cf302a654b3eddc8080218439cd17688bdf5d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d68778f201947f8c49400f606ee9ffe48c20422319647be838ffeb9cf0caaa38"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ed464ff37d6d365db969d0073bb5c122bd3b02227eda3bacb8907ea27d590624"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f5b1ff275d1b7dfe99bbd406dd750e1d13abe709c5ed7e7e756a75e85b45e05e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1f5741c5e366a7cd8952111eecd170981207607c850cf2030e71ce1a8df50301"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:32b9fb59d7047556cc6b32231eb0d3b03a4fef88b35b7c67572d1f3c1f242ba4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:56dcce8c3d4e23ce21686d52ddf8eaa1b282bdec08862a01d146db13ee1fb869"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:57728d4e7416c7d1ae42861a66c35c8f41c2eeb599c24786721e7853ce025891"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0a5807bf5bba0d0e54698cdfd1d2b58756f6ad97307b12379c59f663bef189b8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:59eaab3b643e589f04872dc60834093cd3a740fe95624b9c80cc7b62ef809faf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:781d62907b86e014d92c73129f581d559900d84a1742eecd6a4a674872fe9f98"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b229ebbbb8827cee6591ce573efc7f0c25336e74522f2813df91cb3a561b0bd7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bf15f01b6fe19bbea3aeb2008c89d0021502e89c831414b029cf047ecf361a2e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d5fd5ec9b284ab0b4719dac81d8467778e9133885551f41a416cb95ece853f86"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1f2712103452bed2e927a46c1fa27666981cf8f38ad6cab7a435d0749f5b59ca"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/campaign_handoff_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d8ce8df1c0fd458930b017b811ecde50abc12110ab210192f29f113e7e5a1dcd"
     },
     {
       "root": "src",
