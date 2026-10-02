@@ -26,6 +26,7 @@ use crate::services::tui_o::shadow::capture::file_identity;
 
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
+use claude_fold::Waiting;
 pub(crate) mod codex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +214,8 @@ struct PaneState {
     current: Option<SourceId>,
     verified: bool,
     pending: Option<BindingEvent>,
+    /// The waiting Pending's publish time; only a prompt published after it reclaims the pane.
+    pending_published: Option<DateTime<Utc>>,
     /// `(session, reason)` of the latest refusal, so only a repeat of the same judgment is dropped.
     rejected: Option<(String, String)>,
     nonce: Option<String>,
@@ -226,6 +229,8 @@ enum Plan<'a> {
     ForcePending,
     Verified(&'a SourceId),
     Rejected(&'a str),
+    /// The bound source again, logged only when it reclaims the pane from a waiting Pending.
+    Reclaim(&'a SourceId),
 }
 
 struct Writer {
@@ -311,12 +316,21 @@ pub(crate) fn binding_events_since(
     channel_id: u64,
     after_seq: u64,
 ) -> io::Result<Vec<BindingEvent>> {
+    let events = binding_events_published_since(channel_id, after_seq)?;
+    Ok(events.into_iter().map(|(event, _)| event).collect())
+}
+
+/// `binding_events_since` with each record's hook publish time beside it.
+pub(crate) fn binding_events_published_since(
+    channel_id: u64,
+    after_seq: u64,
+) -> io::Result<Vec<(BindingEvent, Option<DateTime<Utc>>)>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(Vec::new());
     };
     // Holding the lock keeps a record that is being rolled back out of every read.
     let _logs = lock_logs();
-    let read = read_log::<BindingEvent>(&path)?;
+    let read = read_log::<Logged>(&path)?;
     if read.lines != read.records.len() as u64 {
         let unreadable = read.lines - read.records.len() as u64;
         return Err(io::Error::other(format!(
@@ -324,8 +338,13 @@ pub(crate) fn binding_events_since(
             path.display()
         )));
     }
-    let records = read.records.into_iter();
-    Ok(records.filter(|record| record.seq > after_seq).collect())
+    let records = read
+        .records
+        .into_iter()
+        .map(|line| (line.event, line.published_at));
+    Ok(records
+        .filter(|(record, _)| record.seq > after_seq)
+        .collect())
 }
 
 /// Why a strict read refused a log; `line` counts complete non-empty lines from 1.
@@ -467,6 +486,12 @@ pub(crate) fn judge_moved(proposal: &Proposal) -> io::Result<Committed> {
         Committed::Unchanged => Committed::Stale,
         committed => committed,
     })
+}
+
+/// Logs the bound `source` again when the prompt behind `proposal` outlived the pane's waiting
+/// Pending, which the record then supersedes; `true` when it was appended.
+pub(crate) fn record_reclaim(proposal: &Proposal, source: &SourceId) -> io::Result<bool> {
+    commit(proposal, Plan::Reclaim(source)).map(|committed| committed == Committed::Appended)
 }
 
 /// Audits a candidate the binding judgment refused; `true` when this judgment was newly logged.
@@ -655,14 +680,15 @@ impl Writer {
             pane.nonce = record.execution_nonce.clone();
         }
         if record.provider == "claude" {
-            let step = claude_fold::step(record, pane.pending.as_ref().map(|p| p.seq));
+            let waiting = (pane.pending.as_ref()).map(|p| Waiting::of(p, pane.pending_published));
+            let step = claude_fold::step(record, published_at, waiting);
             #[cfg(test)]
             let kept = n2b_mutant("supersede-off");
             #[cfg(not(test))]
             let kept = false;
-            // A hook that moved the pane to another session supersedes the Pending it waited on.
-            if step == claude_fold::Step::Switch && !kept {
-                pane.pending = None;
+            // A hook that moved the pane, or a prompt of its own session it outlived, supersedes it.
+            if (step == claude_fold::Step::Switch && !kept) || step == claude_fold::Step::Reclaim {
+                (pane.pending, pane.pending_published) = (None, None);
             }
             pane.claude
                 .apply(record, verified, published_at, step, tainted);
@@ -675,7 +701,7 @@ impl Writer {
             BindingTarget::Pending {
                 payload_session_id, ..
             } => {
-                pane.pending = Some(record.clone());
+                (pane.pending, pane.pending_published) = (Some(record.clone()), published_at);
                 // The refused session is a candidate again, so its next refusal must reach the log.
                 if pane
                     .rejected
@@ -692,7 +718,7 @@ impl Writer {
                 pane.current = Some(source.clone());
                 pane.verified = verified;
                 if pane.pending.as_ref().is_some_and(|p| p.seq == *pending_seq) {
-                    pane.pending = None;
+                    (pane.pending, pane.pending_published) = (None, None);
                 }
             }
             BindingTarget::Rejected {
@@ -716,13 +742,34 @@ impl Writer {
         judge_pin(pin, session.unwrap_or_default(), Path::new(p.path), seen)
     }
 
+    /// Whether `p`'s prompt outlived the Pending its pane waits on.
+    fn reclaims(&self, p: &Proposal) -> bool {
+        let pane = self.panes.get(p.tmux_session);
+        let waiting =
+            pane.and_then(|pane| Some(Waiting::of(pane.pending.as_ref()?, pane.pending_published)));
+        let (event, published_at) = (
+            p.hook.map(|h| h.event.as_str()),
+            p.hook.and_then(|h| h.published_at),
+        );
+        let session = p.session().unwrap_or_default();
+        claude_fold::reclaims(p.provider, event, session, published_at, waiting)
+    }
+
     fn plan(&mut self, p: &Proposal, mode: Plan) -> Planned {
+        let reclaim = matches!(mode, Plan::Reclaim(_));
+        if reclaim && !self.reclaims(p) {
+            return Planned::Keep(Committed::Unchanged);
+        }
+        let mode = match mode {
+            Plan::Reclaim(source) => Plan::Verified(source),
+            mode => mode,
+        };
         let stat =
             matches!(mode, Plan::Stat).then(|| fs::metadata(p.path).map(|m| file_identity(&m)));
         // Only a stat reads the file; a Pending judgment has none and a verified one brings its own.
         let file = match mode {
             Plan::Stat => stat.as_ref().and_then(|stat| stat.as_ref().ok().copied()),
-            Plan::Verified(source) => Some((source.dev, source.ino)),
+            Plan::Verified(source) | Plan::Reclaim(source) => Some((source.dev, source.ino)),
             Plan::ForcePending | Plan::Rejected(_) => None,
         };
         let seen = match (mode, stat) {
@@ -780,6 +827,7 @@ impl Writer {
             .as_ref()
             .is_some_and(|current| same_source(current, session, p.path, file))
             && !unsettled
+            && !reclaim
         {
             return Planned::Keep(Committed::Unchanged);
         } else {

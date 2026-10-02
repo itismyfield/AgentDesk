@@ -1088,3 +1088,7 @@ async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logge
 
 #[path = "deferred_tests.rs"]
 mod deferred;
+
+#[cfg(unix)]
+#[path = "reclaim_tests.rs"]
+mod reclaim;

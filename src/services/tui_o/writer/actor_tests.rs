@@ -99,6 +99,7 @@ fn bound(
     let evidence = BindingEvidence {
         hook_event: HookEventKind::SessionStart.as_str().into(),
         received_at: Utc::now(),
+        published_at: None,
     };
     let record = BindingRecord::Bound {
         old: old.cloned(),
