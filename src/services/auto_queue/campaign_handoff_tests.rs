@@ -239,3 +239,176 @@ async fn postgres_card_terminal_hook_hands_off_opted_in_campaigns_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+async fn wait_for_lock_waiter(pool: &sqlx::PgPool, query_like: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                            WHERE datname = current_database() AND wait_event_type = 'Lock'
+                              AND query LIKE $1)",
+        )
+        .bind(query_like)
+        .fetch_one(pool)
+        .await
+        .expect("inspect lock waits");
+        if waiting {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "handoff never waited on {query_like}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn spawn_handoff(
+    pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    campaign: &Campaign,
+) -> tokio::task::JoinHandle<HandoffReport> {
+    let (pool, engine, campaign) = (pool.clone(), engine.clone(), campaign.clone());
+    tokio::spawn(async move { handoff(&pool, &engine, &campaign).await })
+}
+
+/// Completion or cancel holds the run token while the handoff picks that run.
+async fn run_finishing_mid_handoff_gets_no_entry(final_status: &str) {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(8).await;
+    let engine = engine(&pool);
+    let campaign = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('live', $1, 'agent-x', 'active')",
+    )
+    .bind(REPO)
+    .execute(&pool)
+    .await
+    .expect("seed live run");
+    let mut holder = pool.begin().await.expect("begin run-token holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'live'))")
+        .execute(&mut *holder)
+        .await
+        .expect("hold run token");
+
+    let task = spawn_handoff(&pool, &engine, &campaign);
+    wait_for_lock_waiter(&pool, "%aq_run:%").await;
+    sqlx::query("UPDATE auto_queue_runs SET status = $1, completed_at = NOW() WHERE id = 'live'")
+        .bind(final_status)
+        .execute(&mut *holder)
+        .await
+        .expect("finish live run");
+    holder.commit().await.expect("commit finished run");
+    let report = task.await.expect("handoff task");
+
+    assert_eq!(queued_nodes(&report), ["a"]);
+    let (run_id, _, _) = entry_for(&pool, "card-1").await.expect("a queued");
+    assert_ne!(run_id, "live", "no entry lands in a {final_status} run");
+    let run_status: String = sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("new run");
+    assert_eq!(run_status, "active");
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_campaign_handoff_skips_a_run_completed_while_it_waits_pg() {
+    run_finishing_mid_handoff_gets_no_entry("completed").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_campaign_handoff_skips_a_run_cancelled_while_it_waits_pg() {
+    run_finishing_mid_handoff_gets_no_entry("cancelled").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_campaign_handoff_drops_nodes_when_a_newer_save_lands_first_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(8).await;
+    let engine = engine(&pool);
+    let campaign = seed(&pool).await;
+    let mut holder = pool.begin().await.expect("begin handoff-lock holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('campaign-handoff'))")
+        .execute(&mut *holder)
+        .await
+        .expect("hold handoff lock");
+
+    let task = spawn_handoff(&pool, &engine, &campaign);
+    wait_for_lock_waiter(&pool, "%campaign-handoff%").await;
+    let mut paused = serde_json::to_value(&campaign).expect("encode");
+    paused["status"] = serde_json::json!("paused");
+    let paused: CampaignInput = serde_json::from_value(paused).expect("decode");
+    campaigns::replace(&pool, &campaign.id, campaign.revision, paused)
+        .await
+        .expect("pause while the handoff waits");
+    holder.commit().await.expect("release handoff lock");
+    let report = task.await.expect("handoff task");
+
+    assert!(
+        report.queued.is_empty(),
+        "a pause saved first holds back new work"
+    );
+    assert!(
+        report
+            .waiting
+            .iter()
+            .any(|w| w.node_id == "a" && w.reason == "campaign_changed")
+    );
+    assert!(entry_for(&pool, "card-1").await.is_none());
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_minute_handoff_catches_cards_closed_by_github_sync_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(8).await;
+    let engine = engine(&pool);
+    let campaign = seed(&pool).await;
+    let mut input: CampaignInput =
+        serde_json::from_value(serde_json::to_value(&campaign).expect("encode")).expect("decode");
+    input.auto_queue = Some(true);
+    campaigns::replace(&pool, &campaign.id, campaign.revision, input)
+        .await
+        .expect("opt in");
+    sqlx::query("UPDATE kanban_cards SET status = 'in_progress' WHERE id = 'card-1'")
+        .execute(&pool)
+        .await
+        .expect("a is being worked on");
+
+    let gh_issue = |number: i64, state: &str| crate::github::sync::GhIssue {
+        number,
+        state: state.to_owned(),
+        title: format!("issue {number}"),
+        labels: Vec::new(),
+        body: None,
+        url: Some(issue(number)),
+        closed_at: None,
+        closed_by_pull_requests_references: Vec::new(),
+    };
+    let issues = [
+        gh_issue(1, "CLOSED"),
+        gh_issue(2, "OPEN"),
+        gh_issue(4, "OPEN"),
+    ];
+    let synced = crate::github::sync::sync_github_issues_for_repo_pg(&pool, REPO, &issues)
+        .await
+        .expect("github sync");
+    assert_eq!(synced.closed_count, 1, "closing #1 finishes a's card");
+
+    hand_off_auto_campaigns_pg(&pool, &engine)
+        .await
+        .expect("minute handoff");
+    assert!(
+        entry_for(&pool, "card-2").await.is_some(),
+        "b is queued although no transition hook saw a finish"
+    );
+
+    pool.close().await;
+    fixture.drop().await;
+}

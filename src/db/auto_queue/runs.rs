@@ -249,9 +249,9 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// Blocking participants take `aq_run:<run_id>` before row locks: cancel and
 /// terminalize, force-pause, phase-gate attachment (including its attachment-
 /// free branch), consultation attachment, explicit completion, dispatched-
-/// entry choke points, done-entry reactivation, retry attachment, and the
-/// run-scoped reset `reset_run_scoped_with_pg` (#4880). Retry
-/// already takes the d1 retry token first and then the run token before its
+/// entry choke points, done-entry reactivation, retry attachment, campaign
+/// handoff append, and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
+/// Retry already takes the d1 retry token first and then the run token before its
 /// failed-sync and replacement attachment. Later cards/entries/runs/slots
 /// ordering is serialized by that first run token for these participants.
 /// `maybe_finalize_run_if_ready_pg` is the exception: callers may already hold

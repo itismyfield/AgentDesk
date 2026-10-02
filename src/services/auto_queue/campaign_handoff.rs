@@ -226,19 +226,13 @@ pub(crate) async fn hand_off_ready_nodes_pg(
     Ok(report)
 }
 
-/// Appends to the agent's live run like generate would find it, or starts one.
+/// One transaction per (repo, agent) group, so a handoff never holds two run tokens at once.
 async fn enqueue_candidates(
     pool: &sqlx::PgPool,
     campaign: &Campaign,
     candidates: &[Candidate<'_>],
     report: &mut HandoffReport,
 ) -> Result<(), String> {
-    let db = |error: sqlx::Error| format!("campaign handoff: {error}");
-    let mut tx = pool.begin().await.map_err(db)?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('campaign-handoff'))")
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
     let mut groups: BTreeMap<(String, String), Vec<&Candidate>> = BTreeMap::new();
     for candidate in candidates {
         let repo = candidate.card.repo_id.clone().unwrap_or_default();
@@ -248,121 +242,189 @@ async fn enqueue_candidates(
             .push(candidate);
     }
     for ((repo, agent), members) in groups {
-        let live: Option<(String, String)> = sqlx::query_as(
-            "SELECT id, status FROM auto_queue_runs
+        enqueue_group(pool, campaign, &repo, &agent, &members, report).await?;
+    }
+    Ok(())
+}
+
+enum PickedRun {
+    Active(String),
+    Paused(String),
+}
+
+/// The agent's live run like generate would find it, or a new one.
+async fn pick_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    campaign: &Campaign,
+    repo: &str,
+    agent: &str,
+) -> Result<PickedRun, String> {
+    let db = |error: sqlx::Error| format!("campaign handoff: {error}");
+    loop {
+        let live: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM auto_queue_runs
              WHERE status IN ('active', 'paused')
                AND (repo = $1 OR repo IS NULL OR repo = '')
                AND (agent_id = $2 OR agent_id IS NULL OR agent_id = '')
              ORDER BY created_at DESC, id DESC LIMIT 1",
         )
-        .bind(&repo)
-        .bind(&agent)
-        .fetch_optional(&mut *tx)
+        .bind(repo)
+        .bind(agent)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(db)?;
-        let run_id = match live {
-            Some((run_id, status)) if status == "paused" => {
-                for member in members {
-                    report.wait(member.node_id, "run_paused", Some(run_id.clone()));
-                }
-                continue;
-            }
-            Some((run_id, _)) => run_id,
-            None => {
-                let run_id = uuid::Uuid::new_v4().to_string();
-                sqlx::query(
-                    "INSERT INTO auto_queue_runs (id, repo, agent_id, review_mode, status,
-                         ai_model, ai_rationale, unified_thread, max_concurrent_threads)
-                     VALUES ($1, NULLIF($2, ''), $3, $4, 'active', $5, $6, FALSE, 1)",
-                )
-                .bind(&run_id)
-                .bind(&repo)
-                .bind(&agent)
-                .bind(AUTO_QUEUE_REVIEW_MODE_DISABLED)
-                .bind(CAMPAIGN_AI_MODEL)
-                .bind(format!("campaign {}: {}", campaign.id, campaign.title))
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
-                run_id
-            }
-        };
-        let (mut next_group, phase): (i64, i64) = sqlx::query_as(
-            "SELECT (COALESCE(MAX(COALESCE(thread_group, 0)), -1) + 1)::BIGINT,
-                    COALESCE(MIN(batch_phase) FILTER (WHERE status IN ('pending', 'dispatched')),
-                             MAX(batch_phase), 0)::BIGINT
-             FROM auto_queue_entries WHERE run_id = $1",
-        )
-        .bind(&run_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db)?;
-        for member in members {
-            let busy: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM auto_queue_entries WHERE kanban_card_id = $1
-                                  AND status IN ('pending', 'dispatched'))
-                     OR EXISTS (SELECT 1 FROM task_dispatches WHERE kanban_card_id = $1
-                                  AND status IN ('pending', 'dispatched'))",
+        let Some(run_id) = live else {
+            let run_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, review_mode, status,
+                     ai_model, ai_rationale, unified_thread, max_concurrent_threads)
+                 VALUES ($1, NULLIF($2, ''), $3, $4, 'active', $5, $6, FALSE, 1)",
             )
-            .bind(&member.card.card_id)
-            .fetch_one(&mut *tx)
+            .bind(&run_id)
+            .bind(repo)
+            .bind(agent)
+            .bind(AUTO_QUEUE_REVIEW_MODE_DISABLED)
+            .bind(CAMPAIGN_AI_MODEL)
+            .bind(format!("campaign {}: {}", campaign.id, campaign.title))
+            .execute(&mut **tx)
             .await
             .map_err(db)?;
-            if busy {
-                continue;
-            }
-            let inserted = sqlx::query(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id,
-                     priority_rank, thread_group, batch_phase, reason)
-                 VALUES ($1, $2, $3, $4, 0, $5, $6, $7)
-                 ON CONFLICT (run_id, kanban_card_id) WHERE status NOT IN ('skipped', 'cancelled')
-                 DO NOTHING",
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(&run_id)
-            .bind(&member.card.card_id)
-            .bind(&agent)
-            .bind(next_group)
-            .bind(phase)
-            .bind(format!("campaign {} node {}", campaign.id, member.node_id))
-            .execute(&mut *tx)
-            .await
-            .map_err(db)?
-            .rows_affected();
-            if inserted == 0 {
-                report.wait(member.node_id, "already_in_run", Some(run_id.clone()));
-                continue;
-            }
-            next_group += 1;
-            report.queued.push(QueuedNode {
-                node_id: member.node_id.to_owned(),
-                card_id: member.card.card_id.clone(),
-                run_id: run_id.clone(),
-            });
-        }
-        sqlx::query(
-            "UPDATE auto_queue_runs SET
-                 thread_group_count = (SELECT GREATEST(COUNT(DISTINCT COALESCE(thread_group, 0)), 1)
-                                       FROM auto_queue_entries WHERE run_id = $1),
-                 max_concurrent_threads = CASE WHEN ai_model = $2 THEN GREATEST(
-                     COALESCE(max_concurrent_threads, 1),
-                     LEAST((SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
-                            FROM auto_queue_entries
-                            WHERE run_id = $1 AND status IN ('pending', 'dispatched')), $3))
-                 ELSE max_concurrent_threads END
-             WHERE id = $1",
+            return Ok(PickedRun::Active(run_id));
+        };
+        // Completion and cancel read the run's entries under this token.
+        crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(
+            tx,
+            std::slice::from_ref(&run_id),
         )
-        .bind(&run_id)
-        .bind(CAMPAIGN_AI_MODEL)
-        .bind(CAMPAIGN_RUN_MAX_CONCURRENT)
+        .await?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(db)?
+                .flatten();
+        match status.as_deref() {
+            Some("active") => return Ok(PickedRun::Active(run_id)),
+            Some("paused") => return Ok(PickedRun::Paused(run_id)),
+            // It finished while this waited for the token; look again.
+            _ => {}
+        }
+    }
+}
+
+async fn enqueue_group(
+    pool: &sqlx::PgPool,
+    campaign: &Campaign,
+    repo: &str,
+    agent: &str,
+    members: &[&Candidate<'_>],
+    report: &mut HandoffReport,
+) -> Result<(), String> {
+    let db = |error: sqlx::Error| format!("campaign handoff: {error}");
+    let mut tx = pool.begin().await.map_err(db)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('campaign-handoff'))")
         .execute(&mut *tx)
         .await
         .map_err(db)?;
+    // A save that committed first wins; a later save waits until these entries commit.
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM campaigns WHERE id = $1 FOR SHARE")
+            .bind(&campaign.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db)?;
+    if revision != Some(campaign.revision) {
+        for member in members {
+            report.wait(member.node_id, "campaign_changed", None);
+        }
+        return Ok(());
     }
+    let run_id = match pick_run(&mut tx, campaign, repo, agent).await? {
+        PickedRun::Active(run_id) => run_id,
+        PickedRun::Paused(run_id) => {
+            for member in members {
+                report.wait(member.node_id, "run_paused", Some(run_id.clone()));
+            }
+            return Ok(());
+        }
+    };
+    let (mut next_group, phase): (i64, i64) = sqlx::query_as(
+        "SELECT (COALESCE(MAX(COALESCE(thread_group, 0)), -1) + 1)::BIGINT,
+                COALESCE(MIN(batch_phase) FILTER (WHERE status IN ('pending', 'dispatched')),
+                         MAX(batch_phase), 0)::BIGINT
+         FROM auto_queue_entries WHERE run_id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db)?;
+    for member in members {
+        let busy: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM auto_queue_entries WHERE kanban_card_id = $1
+                              AND status IN ('pending', 'dispatched'))
+                 OR EXISTS (SELECT 1 FROM task_dispatches WHERE kanban_card_id = $1
+                              AND status IN ('pending', 'dispatched'))",
+        )
+        .bind(&member.card.card_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db)?;
+        if busy {
+            continue;
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id,
+                 priority_rank, thread_group, batch_phase, reason)
+             VALUES ($1, $2, $3, $4, 0, $5, $6, $7)
+             ON CONFLICT (run_id, kanban_card_id) WHERE status NOT IN ('skipped', 'cancelled')
+             DO NOTHING",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&run_id)
+        .bind(&member.card.card_id)
+        .bind(agent)
+        .bind(next_group)
+        .bind(phase)
+        .bind(format!("campaign {} node {}", campaign.id, member.node_id))
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?
+        .rows_affected();
+        if inserted == 0 {
+            report.wait(member.node_id, "already_in_run", Some(run_id.clone()));
+            continue;
+        }
+        next_group += 1;
+        report.queued.push(QueuedNode {
+            node_id: member.node_id.to_owned(),
+            card_id: member.card.card_id.clone(),
+            run_id: run_id.clone(),
+        });
+    }
+    sqlx::query(
+        "UPDATE auto_queue_runs SET
+             thread_group_count = (SELECT GREATEST(COUNT(DISTINCT COALESCE(thread_group, 0)), 1)
+                                   FROM auto_queue_entries WHERE run_id = $1),
+             max_concurrent_threads = CASE WHEN ai_model = $2 THEN GREATEST(
+                 COALESCE(max_concurrent_threads, 1),
+                 LEAST((SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
+                        FROM auto_queue_entries
+                        WHERE run_id = $1 AND status IN ('pending', 'dispatched')), $3))
+             ELSE max_concurrent_threads END
+         WHERE id = $1 AND status = 'active'",
+    )
+    .bind(&run_id)
+    .bind(CAMPAIGN_AI_MODEL)
+    .bind(CAMPAIGN_RUN_MAX_CONCURRENT)
+    .execute(&mut *tx)
+    .await
+    .map_err(db)?;
     tx.commit().await.map_err(db)
 }
 
-/// Card-terminal follow-up: every opted-in active campaign hands off what became ready.
+/// Every opted-in active campaign hands off what became ready; run by the card-terminal
+/// hook and each minute, which catches cards finished outside the hook (GitHub sync).
 pub(crate) async fn hand_off_auto_campaigns_pg(
     pool: &sqlx::PgPool,
     engine: &PolicyEngine,
