@@ -43,34 +43,9 @@ fn default_port() -> u16 {
     22
 }
 
-/// Disabled stub — always returns `Err`.
-///
-/// A real implementation must replace this module under the #2193 contract:
-/// ssh-agent auth, strict host allow-list, no password/key-file credentials,
-/// direct SSH only, and cancel-path coverage.
-pub async fn ssh_connect_and_auth(_profile: &RemoteProfile) -> Result<SshConnectionStub, String> {
-    Err("Remote SSH is disabled by policy (#2193); see docs/codex-remote-ssh-policy.md".to_string())
-}
-
-/// Placeholder type returned by ssh_connect_and_auth stub.
-#[derive(Debug)]
-pub struct SshConnectionStub;
-
 #[cfg(test)]
 mod tests {
-    use super::{RemoteAuth, RemoteProfile, ssh_connect_and_auth};
-
-    fn profile_with_auth(auth: RemoteAuth) -> RemoteProfile {
-        RemoteProfile {
-            name: "legacy-profile".to_string(),
-            host: "mac-mini.local".to_string(),
-            port: 22,
-            user: "operator".to_string(),
-            auth,
-            default_path: "/tmp".to_string(),
-            claude_path: None,
-        }
-    }
+    use super::{RemoteAuth, RemoteProfile};
 
     #[test]
     fn password_and_keyfile_auth_parse_for_compatibility_only() {
@@ -100,27 +75,5 @@ mod tests {
         )
         .expect("legacy key-file profile should still parse");
         assert!(matches!(key_file.auth, RemoteAuth::KeyFile { .. }));
-    }
-
-    #[tokio::test]
-    async fn ssh_connect_stub_refuses_before_auth_for_all_legacy_variants() {
-        for auth in [
-            RemoteAuth::Password {
-                password: "secret".to_string(),
-            },
-            RemoteAuth::KeyFile {
-                path: "/Users/operator/.ssh/id_ed25519".to_string(),
-                passphrase: Some("secret".to_string()),
-            },
-        ] {
-            let err = ssh_connect_and_auth(&profile_with_auth(auth))
-                .await
-                .expect_err("stub must refuse before any auth attempt");
-            assert!(
-                err.contains("disabled by policy"),
-                "unexpected error: {err}"
-            );
-            assert!(err.contains("#2193"), "error must cite ADR issue: {err}");
-        }
     }
 }

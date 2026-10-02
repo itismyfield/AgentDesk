@@ -184,6 +184,7 @@ pub struct RoutineScriptLoader {
 }
 
 impl RoutineScriptLoader {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
         Ok(Self::with_state(Arc::new(SharedRoutineLoaderState::new())))
     }
@@ -233,9 +234,7 @@ impl RoutineScriptLoader {
         Ok(script_ref)
     }
 
-    // Backward-compatible single-directory shim for callers that have not
-    // migrated to `load_dirs`.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn load_dir(&self, root: &Path) -> Result<usize> {
         self.load_dirs(&[root.to_path_buf()])
     }
@@ -664,6 +663,7 @@ pub fn unregistered_routine_script_refs(
         .collect()
 }
 
+#[cfg(test)]
 pub fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
