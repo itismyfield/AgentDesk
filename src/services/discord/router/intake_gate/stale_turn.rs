@@ -139,17 +139,19 @@ pub(super) async fn thread_guard_should_force_clean_stale_thread(
     thread_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> bool {
+    if !stale_turn_release_admitted(shared, provider, thread_id).await {
+        return false;
+    }
     let Some(proof) =
         classify_channel_stale_active_turn_proof(shared, provider, thread_id, now_unix_secs).await
     else {
         return false;
     };
     stale_turn_axis_b_warrants(provider, &proof)
-        && stale_turn_release_admitted(shared, provider, thread_id).await
 }
 
-/// Whether the stale turn's session is a confirmed legacy one; `false` logs why, and both
-/// callers read it as a turn still active: the intake queues, the queue guard keeps it.
+/// Whether the turn's session is confirmed legacy, judged before the classification whose
+/// inflight load may rewrite the row; on `false`, logged, the intake queues and the guard keeps.
 async fn stale_turn_release_admitted(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -159,7 +161,7 @@ async fn stale_turn_release_admitted(
     let Some(reason) = refusal(shared, provider, channel_id).await else {
         return true;
     };
-    tracing::warn!(channel_id = channel_id.get(), %reason, "stale turn kept");
+    tracing::warn!(channel_id = channel_id.get(), %reason, "stale turn release refused");
     false
 }
 
@@ -244,6 +246,9 @@ async fn release_queue_blocked_stale_active_turn(
     channel_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> bool {
+    if !stale_turn_release_admitted(shared, provider, channel_id).await {
+        return false;
+    }
     let Some(proof) =
         classify_channel_stale_active_turn_proof(shared, provider, channel_id, now_unix_secs).await
     else {
@@ -253,9 +258,7 @@ async fn release_queue_blocked_stale_active_turn(
         return false;
     }
 
-    if !stale_turn_axis_b_warrants(provider, &proof)
-        || !stale_turn_release_admitted(shared, provider, channel_id).await
-    {
+    if !stale_turn_axis_b_warrants(provider, &proof) {
         return false;
     }
     let ts = chrono::Local::now().format("%H:%M:%S");

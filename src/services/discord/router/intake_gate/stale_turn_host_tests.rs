@@ -17,7 +17,8 @@ use crate::services::provider::cancel_token_cleanup::authority::TmuxBinding;
 /// inflight row's name reaches it.
 const KEY_ONLY_LEGACY: usize = Host::ALL.len();
 
-/// A turn on `channel` bound to `name`, if any, whose inflight row naming it went stale.
+/// A turn on `channel` bound to `name`, if any, whose inflight row naming it went stale and
+/// predates the finalizer id, so a writing load would backfill it.
 async fn stale_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -52,12 +53,23 @@ async fn stale_turn(
     row.updated_at = stale.format("%Y-%m-%d %H:%M:%S").to_string();
     row.started_at = row.updated_at.clone();
     row.turn_nonce = token.turn_nonce().map(str::to_string);
-    let root = crate::services::discord::inflight::inflight_runtime_root().expect("runtime root");
-    let dir = root.join(provider.as_str());
-    std::fs::create_dir_all(&dir).unwrap();
-    let json = serde_json::to_string_pretty(&row).unwrap();
-    std::fs::write(dir.join(format!("{}.json", channel.get())), json).unwrap();
+    let mut wire = serde_json::to_value(&row).unwrap();
+    wire.as_object_mut().unwrap().remove("finalizer_turn_id");
+    let path = inflight_path(provider, channel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_vec_pretty(&wire).unwrap()).unwrap();
     token
+}
+
+fn inflight_path(provider: &ProviderKind, channel: ChannelId) -> std::path::PathBuf {
+    let root = crate::services::discord::inflight::inflight_runtime_root().expect("runtime root");
+    root.join(provider.as_str())
+        .join(format!("{}.json", channel.get()))
+}
+
+/// The turn's inflight row as stored, byte for byte.
+fn inflight_bytes(channel: ChannelId) -> Vec<u8> {
+    std::fs::read(inflight_path(&ProviderKind::Claude, channel)).expect("inflight row")
 }
 
 /// Whether the turn still owns its mailbox, uncancelled, with its row and counter.
@@ -67,7 +79,7 @@ async fn turn_kept(shared: &Arc<SharedData>, channel: ChannelId, token: &Arc<Can
         .cancel_token
         .as_ref()
         .is_some_and(|t| Arc::ptr_eq(t, token));
-    let row = crate::services::discord::inflight::load_inflight_state(
+    let row = crate::services::discord::inflight::load_inflight_state_read_only(
         &ProviderKind::Claude,
         channel.get(),
     );
@@ -138,6 +150,7 @@ async fn queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg() {
         let cases = seeded_cases(&pool, &shared, 1_479_671_342_000_000_000, mode, m).await;
         for (label, channel, name, admitted, up) in cases {
             let token = stale_turn(&shared, &provider, channel, Some(&name)).await;
+            let bytes = inflight_bytes(channel);
             tmux.take_writes();
 
             let active =
@@ -151,6 +164,9 @@ async fn queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg() {
                 continue;
             }
             assert!(active, "{label}: a kept turn reads active");
+            if !admitted {
+                assert_eq!(inflight_bytes(channel), bytes, "{label}: row not rewritten");
+            }
             assert!(turn_kept(&shared, channel, &token).await, "{label}");
             assert_eq!(tmux.take_writes(), Vec::<String>::new(), "{label}");
         }
@@ -172,6 +188,7 @@ async fn thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg() {
         let cases = seeded_cases(&pool, &shared, 1_479_671_343_000_000_000, mode, m).await;
         for (label, channel, name, admitted, _) in cases {
             let token = stale_turn(&shared, &provider, channel, Some(&name)).await;
+            let bytes = inflight_bytes(channel);
             tmux.take_writes();
             let now = chrono::Utc::now().timestamp();
 
@@ -182,6 +199,9 @@ async fn thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg() {
             // A stale turn on a live tmux session with no watcher reads desynced, so main
             // cleans it whatever tmux answers.
             assert_eq!(clean, admitted, "{label}");
+            if !admitted {
+                assert_eq!(inflight_bytes(channel), bytes, "{label}: row not rewritten");
+            }
             assert!(turn_kept(&shared, channel, &token).await, "{label}");
             assert_eq!(tmux.take_writes(), Vec::<String>::new(), "{label}");
         }
