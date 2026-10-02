@@ -1,7 +1,9 @@
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
+use crate::services::discord::host_teardown_gate::{
+    ChannelTeardown, channel_teardown, nameless_teardown_kept, row_gate,
+};
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
@@ -84,6 +86,11 @@ pub(crate) struct TurnLifecycleStopResult {
 }
 
 impl TurnLifecycleStopResult {
+    /// The host guard refused the force-kill: nothing was stopped, cleared or killed.
+    pub(crate) fn host_guard_kept(&self) -> bool {
+        self.lifecycle_path == HOST_GUARD_KEPT_PATH
+    }
+
     pub(crate) fn queue_depth_if_observed(&self) -> Option<usize> {
         self.queue_depth
             .filter(|_| self.queue_depth_after.is_some())
@@ -115,6 +122,7 @@ async fn stop_turn_preserving_queue_with_cancel_event(
     stop_turn_with_policy(
         health_registry,
         target,
+        None,
         reason,
         crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
             restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
@@ -133,6 +141,7 @@ pub(crate) async fn force_kill_turn(
     force_kill_turn_with_cancel_event(
         health_registry,
         target,
+        None,
         reason,
         termination_reason_code,
         true,
@@ -140,15 +149,38 @@ pub(crate) async fn force_kill_turn(
     .await
 }
 
+/// The sessions row a force-kill caller read its target from, with its raw provider.
+#[derive(Clone, Copy)]
+pub(crate) struct ForceKillRow<'a> {
+    pub pool: &'a sqlx::PgPool,
+    pub session_key: &'a str,
+    pub stored_provider: Option<&'a str>,
+}
+
+/// [`force_kill_turn`] for a caller holding its target's row: with no runtime to key the
+/// session, that row alone decides whether the host guard admits the kill.
+pub(crate) async fn force_kill_turn_for_row(
+    health_registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    row: ForceKillRow<'_>,
+    reason: &str,
+    termination_reason_code: &'static str,
+) -> TurnLifecycleStopResult {
+    let code = termination_reason_code;
+    force_kill_turn_with_cancel_event(health_registry, target, Some(row), reason, code, true).await
+}
+
 pub(crate) async fn force_kill_turn_without_cancel_event(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
+    row: Option<ForceKillRow<'_>>,
     reason: &str,
     termination_reason_code: &'static str,
 ) -> TurnLifecycleStopResult {
     force_kill_turn_with_cancel_event(
         health_registry,
         target,
+        row,
         reason,
         termination_reason_code,
         false,
@@ -159,6 +191,7 @@ pub(crate) async fn force_kill_turn_without_cancel_event(
 async fn force_kill_turn_with_cancel_event(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
+    row: Option<ForceKillRow<'_>>,
     reason: &str,
     termination_reason_code: &'static str,
     emit_cancel_observability: bool,
@@ -166,6 +199,7 @@ async fn force_kill_turn_with_cancel_event(
     stop_turn_with_policy(
         health_registry,
         target,
+        row,
         reason,
         crate::services::discord::TmuxCleanupPolicy::CleanupSession {
             termination_reason_code: Some(termination_reason_code),
@@ -178,6 +212,7 @@ async fn force_kill_turn_with_cancel_event(
 async fn stop_turn_with_policy(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
+    row: Option<ForceKillRow<'_>>,
     reason: &str,
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
     emit_cancel_observability: bool,
@@ -195,11 +230,12 @@ async fn stop_turn_with_policy(
     let host = force_kill_host_gate(
         health_registry,
         target,
+        row,
         &probe_session_owned,
         cleanup_policy,
     );
     let host = host.await;
-    if matches!(host, Some(ChannelTeardown::Kept)) {
+    if matches!(host, ForceKillHost::Gate(ChannelTeardown::Kept)) {
         return kept_by_host_guard(tmux_session_observed);
     }
     if let Some(channel_id) = target.channel_id {
@@ -319,7 +355,7 @@ async fn stop_turn_with_policy(
         // stale jsonl/FIFO/owner markers after forced termination (#892).
         if killed_now {
             match &host {
-                Some(ChannelTeardown::Cleared(session)) => {
+                ForceKillHost::Gate(ChannelTeardown::Cleared(session)) => {
                     crate::services::tmux_common::cleanup_cleared_session_temp_files(session)
                 }
                 _ => crate::services::tmux_common::cleanup_session_temp_files(kill_target),
@@ -711,21 +747,58 @@ pub(crate) mod policy_observability_tests {
     }
 }
 
-/// The host guard for a force-kill whose session the registry can key; `None` when the
-/// policy keeps tmux or no provider, channel or name is known, which keeps main's path.
+/// What the host guard lets a stop do before it touches anything.
+#[must_use]
+enum ForceKillHost {
+    /// The policy keeps tmux: not a kill.
+    NotKill,
+    /// A keyed channel holding no tmux name that the nameless gate admits.
+    Nameless,
+    Gate(ChannelTeardown),
+}
+
+/// The host guard for a force-kill: the registry's key when it can build one, else the
+/// caller's own row; with neither, or a nameless channel the nameless gate keeps, it keeps.
 async fn force_kill_host_gate(
     registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
+    row: Option<ForceKillRow<'_>>,
     tmux_name: &str,
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
-) -> Option<ChannelTeardown> {
-    if !cleanup_policy.should_cleanup_tmux() || tmux_name.is_empty() {
-        return None;
+) -> ForceKillHost {
+    if !cleanup_policy.should_cleanup_tmux() {
+        return ForceKillHost::NotKill;
     }
-    let (registry, provider) = (registry?, target.provider.as_ref()?);
-    let channel = target.channel_id?;
     let caller = "turn_lifecycle_force_kill";
-    Some(channel_teardown(registry, provider, channel, tmux_name, None, caller).await)
+    match (registry, target.provider.as_ref(), target.channel_id) {
+        (Some(registry), Some(provider), Some(channel)) if tmux_name.is_empty() => {
+            if nameless_teardown_kept(registry, provider, channel, caller).await {
+                ForceKillHost::Gate(ChannelTeardown::Kept)
+            } else {
+                ForceKillHost::Nameless
+            }
+        }
+        (Some(registry), Some(provider), Some(channel)) => {
+            let gate = channel_teardown(registry, provider, channel, tmux_name, None, caller);
+            ForceKillHost::Gate(gate.await)
+        }
+        _ => match row.filter(|_| !tmux_name.is_empty()) {
+            Some(row) => {
+                let (provider, key) = (row.stored_provider, row.session_key);
+                let channel = target.channel_id.map_or(0, ChannelId::get);
+                let gate = row_gate(row.pool, provider, channel, key, tmux_name, caller);
+                ForceKillHost::Gate(gate.await.0)
+            }
+            None => {
+                tracing::warn!(
+                    caller,
+                    tmux_name,
+                    "host guard kept a force-kill holding no key"
+                );
+                ForceKillHost::Gate(ChannelTeardown::Kept)
+            }
+        },
+    }
 }
 
 /// A force-kill the host guard refused: nothing was stopped, cleared or killed.

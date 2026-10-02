@@ -383,3 +383,439 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// Where `tmux` resolves: a live isolated server holding a same-name session, a missing
+/// binary (exit 127), or a real binary with no server socket.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TmuxCondition {
+    LiveServer,
+    MissingBinary,
+    NoServerSocket,
+}
+use TmuxCondition::{LiveServer, MissingBinary, NoServerSocket};
+
+/// Every stored host state other than a confirmed legacy tmux row.
+const NON_LEGACY: [&str; 8] = [
+    "pending",
+    "bound",
+    "retired",
+    "unknown",
+    "json-null",
+    "herdr",
+    "marker-dir",
+    "zellij",
+];
+
+/// A recording `tmux` on PATH and a private `TMUX_TMPDIR`, so no test touches a real server.
+struct TmuxEnv {
+    live: bool,
+    real: std::path::PathBuf,
+    sockets: tempfile::TempDir,
+    probe: tempfile::TempDir,
+    _guards: Vec<crate::config::TestEnvVarGuard>,
+}
+
+impl TmuxEnv {
+    fn install(condition: TmuxCondition) -> Self {
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("tmux"))
+            .find(|path| path.is_file())
+            .expect("the live and socketless conditions need a real tmux binary");
+        let sockets = tempfile::TempDir::new().expect("tmux socket dir");
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let attached = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("TMUX");
+        let mut guards = vec![set("TMUX_TMPDIR", sockets.path()), attached];
+        unsafe { std::env::remove_var("TMUX") };
+        let tail = match condition {
+            MissingBinary => "exit 127".to_string(),
+            _ => format!("exec '{}' \"$@\"", real.display()),
+        };
+        let record = "[ \"$1\" = -u ] && shift\necho \"$*\" >> \"$(dirname \"$0\")/calls\"";
+        let (probe, path) = install_tmux_probe(&format!("{record}\n{tail}"));
+        guards.push(path);
+        let live = condition == LiveServer;
+        Self {
+            live,
+            real,
+            sockets,
+            probe,
+            _guards: guards,
+        }
+    }
+
+    fn real_tmux(&self, args: &[&str]) -> bool {
+        let mut command = std::process::Command::new(&self.real);
+        command
+            .args(args)
+            .env("TMUX_TMPDIR", self.sockets.path())
+            .env_remove("TMUX");
+        let status = command.stderr(std::process::Stdio::null()).status();
+        status.is_ok_and(|status| status.success())
+    }
+
+    fn start(&self, name: &str) {
+        let args = ["new-session", "-d", "-s", name, "sleep 600"];
+        assert!(
+            !self.live || self.real_tmux(&args),
+            "start live tmux {name}"
+        );
+    }
+
+    fn alive(&self, name: &str) -> bool {
+        self.real_tmux(&["has-session", "-t", &format!("={name}:")])
+    }
+
+    fn take_calls(&self) -> Vec<String> {
+        let path = self.probe.path().join("calls");
+        let calls = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(path);
+        calls.lines().map(str::to_string).collect()
+    }
+}
+
+impl Drop for TmuxEnv {
+    fn drop(&mut self) {
+        let _ = self.real_tmux(&["kill-server"]);
+    }
+}
+
+/// Runs one statement, binding every argument as nullable text.
+async fn exec(pool: &sqlx::PgPool, sql: &str, args: &[Option<&str>]) {
+    let query = args
+        .iter()
+        .fold(sqlx::query(sql), |query, arg| query.bind(*arg));
+    query.execute(pool).await.unwrap();
+}
+
+/// Every column of the named rows, so "unchanged" means no write of any kind.
+async fn snapshot(pool: &sqlx::PgPool, table: &str, column: &str, ids: &[&str]) -> String {
+    let query = format!("SELECT jsonb_agg(to_jsonb(t) ORDER BY t.{column})::text FROM {table} t");
+    let query = format!("{query} WHERE t.{column} = ANY($1)");
+    let row = sqlx::query_scalar::<_, Option<String>>(&query).bind(ids);
+    row.fetch_one(pool).await.unwrap().unwrap_or_default()
+}
+
+/// One column of one row, read through [`snapshot`].
+async fn field(pool: &sqlx::PgPool, table: &str, id: &str, column: &str) -> serde_json::Value {
+    let id_column = if table == "sessions" {
+        "session_key"
+    } else {
+        "id"
+    };
+    let rows = snapshot(pool, table, id_column, &[id]).await;
+    serde_json::from_str::<serde_json::Value>(&rows).unwrap()[0][column].clone()
+}
+
+/// Seeds one row attached to `dispatch`. `legacy-null` is a legacy row with no stored
+/// provider or identity; every other state carries the identity its hosted record names.
+async fn seed_host_row(
+    pool: &sqlx::PgPool,
+    host: &str,
+    name: &str,
+    ch: &str,
+    dispatch: &str,
+) -> String {
+    use crate::db::dispatched_sessions::hosted_execution::HostedState::*;
+    use crate::db::dispatched_sessions::hosted_execution::tests::*;
+    let owner = owner(ch);
+    let raw = match host {
+        "pending" => Some(wire(&record(&owner, "n1", Pending))),
+        "bound" => Some(wire(&record(&owner, "n1", Bound))),
+        "retired" => Some(wire(&record(&owner, "n1", Retired))),
+        "unknown" => Some(future_schema(&owner)),
+        "json-null" => Some(serde_json::Value::Null),
+        _ => None,
+    };
+    let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
+    match host {
+        "herdr" | "zellij" => std::fs::write(marker, host).unwrap(),
+        "marker-dir" => std::fs::create_dir_all(marker).unwrap(),
+        _ => {}
+    }
+    let keyed = (host != "legacy-null").then_some(());
+    let key = format!("{}:{name}", crate::services::platform::hostname_short());
+    let raw = raw.map(|raw| raw.to_string());
+    let sql = "INSERT INTO sessions (session_key, provider, status, last_heartbeat, identity_kind,
+                                     discord_token_hash, channel_id, thread_channel_id,
+                                     active_dispatch_id, claude_session_id, hosted_execution)
+               VALUES ($1, $2, 'turn_active', NOW(), $3, $4, $5, $6, $7, 'selector', $8::jsonb)";
+    let identity = [keyed.map(|_| "claude"), keyed.map(|_| "discord_channel")];
+    let args = [
+        Some(key.as_str()),
+        identity[0],
+        identity[1],
+        keyed.map(|_| TOKEN),
+    ];
+    let args = [
+        &args[..],
+        &[keyed.map(|_| ch), Some(ch), Some(dispatch), raw.as_deref()],
+    ];
+    exec(pool, sql, &args.concat()).await;
+    key
+}
+
+async fn seed_dispatch(pool: &sqlx::PgPool, dispatch: &str, card: Option<&str>) {
+    let sql = "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title)
+               VALUES ($1, $2, 'implementation', 'dispatched', 'host guard')";
+    exec(pool, sql, &[Some(dispatch), card]).await;
+}
+
+/// Runs one force-kill entry the way its operator surface does: the force-kill route or the
+/// queue's forced turn cancel, both with no runtime registry.
+async fn force_kill_entry(
+    state: &AppState,
+    entry: &str,
+    key: &str,
+    ch: &str,
+) -> (StatusCode, String) {
+    if entry == "route" {
+        let reason = "operator cleanup";
+        let kill = super::force_kill_session_impl_with_reason(state, key, false, reason);
+        let (status, Json(body)) = kill.await;
+        return (status, body.to_string());
+    }
+    let forward = crate::services::session_forwarding::ForwardCallerContext::from(state);
+    let headers = axum::http::HeaderMap::new();
+    let cancel = state.queue_service();
+    match cancel.cancel_turn(None, ch, true, &headers, &forward).await {
+        Ok(body) => (StatusCode::OK, body.to_string()),
+        Err(error) => (error.status(), error.message().to_string()),
+    }
+}
+
+/// Force-kill with no runtime registry: only a confirmed legacy row reaches tmux or changes
+/// the session and its dispatch; every other host is a conflict with nothing touched.
+#[tokio::test(flavor = "current_thread")]
+async fn force_kill_without_runtime_keys_refuses_unconfirmed_hosts_pg() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _root_guard = set("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let state = test_state(pool.clone());
+    let conditions = [LiveServer, MissingBinary, NoServerSocket];
+    for (round, condition) in conditions.into_iter().enumerate() {
+        let tmux = TmuxEnv::install(condition);
+        for (entry, settled) in [("route", "failed"), ("queue", "cancelled")] {
+            let at = |n: &str| format!("{entry}-{round}-{n}");
+            let name = |n: &str| format!("AgentDesk-claude-{}", at(n));
+            let offset = 6_510_000 + round * 1_000 + if entry == "route" { 0 } else { 500 };
+            let channel = |index: usize| (offset + index).to_string();
+            // Positive control: a legacy row with no stored provider is still killed and settled.
+            let (legacy, ch, dispatch) = (name("legacy"), channel(99), at("legacy"));
+            seed_dispatch(&pool, &dispatch, None).await;
+            tmux.start(&legacy);
+            let key = seed_host_row(&pool, "legacy-null", &legacy, &ch, &dispatch).await;
+            let (status, body) = force_kill_entry(&state, entry, &key, &ch).await;
+            assert_eq!(status, StatusCode::OK, "{condition:?} {entry}: {body}");
+            let session = field(&pool, "sessions", &key, "status").await;
+            let dispatch = field(&pool, "task_dispatches", &dispatch, "status").await;
+            assert_eq!(
+                [session, dispatch],
+                ["disconnected", settled],
+                "{condition:?} {entry}"
+            );
+            assert!(
+                !tmux.alive(&legacy),
+                "{condition:?} {entry}: legacy tmux is killed"
+            );
+            let _ = tmux.take_calls();
+
+            for (index, host) in NON_LEGACY.into_iter().enumerate() {
+                let (ch, dispatch) = (channel(index), at(host));
+                seed_dispatch(&pool, &dispatch, None).await;
+                tmux.start(&name(host));
+                let key = seed_host_row(&pool, host, &name(host), &ch, &dispatch).await;
+                let rows = || async {
+                    let session = snapshot(&pool, "sessions", "session_key", &[&key]).await;
+                    (
+                        session,
+                        snapshot(&pool, "task_dispatches", "id", &[&dispatch]).await,
+                    )
+                };
+                let before = rows().await;
+                let (status, body) = force_kill_entry(&state, entry, &key, &ch).await;
+                let refused = status == StatusCode::CONFLICT
+                    && body.contains("session host is not legacy tmux");
+                assert!(refused, "{condition:?} {entry} {host}: {status} {body}");
+                assert_eq!(
+                    rows().await,
+                    before,
+                    "{condition:?} {entry} {host}: nothing changes"
+                );
+                assert!(
+                    !tmux.live || tmux.alive(&name(host)),
+                    "{entry} {host}: tmux survives"
+                );
+            }
+            assert_eq!(
+                tmux.take_calls(),
+                [""; 0],
+                "{condition:?} {entry}: no tmux call"
+            );
+        }
+
+        // A row-keyed kill whose row is gone is not legacy evidence either.
+        let missing = format!("AgentDesk-claude-missing-{round}");
+        tmux.start(&missing);
+        let key = format!("{}:{missing}", crate::services::platform::hostname_short());
+        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
+            provider: Some(crate::services::provider::ProviderKind::Claude),
+            channel_id: None,
+            tmux_name: missing.clone(),
+        };
+        let (pool, session_key, stored_provider) = (&pool, key.as_str(), Some("claude"));
+        let row = crate::services::turn_lifecycle::ForceKillRow {
+            pool,
+            session_key,
+            stored_provider,
+        };
+        let kill = crate::services::turn_lifecycle::force_kill_turn_for_row;
+        let lifecycle = kill(None, &target, row, "operator cleanup", "force_kill_api").await;
+        assert!(
+            lifecycle.host_guard_kept(),
+            "{condition:?}: a missing row is kept"
+        );
+        assert!(
+            !tmux.live || tmux.alive(&missing),
+            "the session of a missing row survives"
+        );
+        assert_eq!(tmux.take_calls(), [""; 0], "{condition:?}: no tmux call");
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// Seeds a card with one live dispatch, its auto-queue entry, and one session per host
+/// state attached to that dispatch. Returns the session keys and tmux names.
+async fn seed_card(
+    pool: &sqlx::PgPool,
+    tmux: &TmuxEnv,
+    card: &str,
+    hosts: &[&str],
+    channel: usize,
+) -> (Vec<String>, Vec<String>) {
+    let dispatch = format!("{card}-d");
+    let sql = "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id)
+               VALUES ($1, 'host guard revert', 'in_progress', $1 || '-d')";
+    exec(pool, sql, &[Some(card)]).await;
+    seed_dispatch(pool, &dispatch, Some(card)).await;
+    let sql =
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+               VALUES ($1 || '-e', 'k1-run', $1, 'k1-agent', 'dispatched', $1 || '-d')";
+    exec(pool, sql, &[Some(card)]).await;
+    let (mut keys, mut names) = (Vec::new(), Vec::new());
+    for (index, host) in hosts.iter().enumerate() {
+        let name = format!("AgentDesk-claude-{card}-{index}");
+        tmux.start(&name);
+        let ch = (channel + index).to_string();
+        keys.push(seed_host_row(pool, host, &name, &ch, &dispatch).await);
+        names.push(name);
+    }
+    (keys, names)
+}
+
+/// The backlog revert idles and detaches every live session of a card inside its transition,
+/// so one session whose host is not confirmed legacy tmux refuses the whole revert first.
+#[tokio::test(flavor = "current_thread")]
+async fn backlog_revert_refuses_the_card_when_any_session_host_is_unconfirmed_pg() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _root_guard = set("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let sql = "INSERT INTO agents (id, name, provider, discord_channel_id)
+               VALUES ('k1-agent', 'K1', 'claude', '6539999')";
+    exec(&pool, sql, &[]).await;
+    let sql = "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+               VALUES ('k1-run', 'repo', 'k1-agent', 'active')";
+    exec(&pool, sql, &[]).await;
+    let mut config = crate::config::Config::default();
+    config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.hot_reload = false;
+    let mut state = test_state(pool.clone());
+    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.config = Arc::new(config);
+    let revert = |card: String| {
+        let (state, source) = (state.clone(), "test:host-guard");
+        async move {
+            let revert = crate::server::routes::kanban::transition_card_to_backlog_with_cleanup;
+            revert(&state, &card, source).await
+        }
+    };
+    let card_rows = |card: String, keys: Vec<String>| {
+        let pool = pool.clone();
+        async move {
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            let (dispatch, entry) = (format!("{card}-d"), format!("{card}-e"));
+            [
+                snapshot(&pool, "kanban_cards", "id", &[&card]).await,
+                snapshot(&pool, "task_dispatches", "id", &[&dispatch]).await,
+                snapshot(&pool, "auto_queue_entries", "id", &[&entry]).await,
+                snapshot(&pool, "sessions", "session_key", &keys).await,
+            ]
+        }
+    };
+    let conditions = [LiveServer, MissingBinary, NoServerSocket];
+    for (round, condition) in conditions.into_iter().enumerate() {
+        let tmux = TmuxEnv::install(condition);
+        // Positive control: a card whose only session is legacy with no stored provider reverts.
+        let card = format!("k1-{round}-legacy");
+        let channel = 6_539_000 + round;
+        let (keys, names) = seed_card(&pool, &tmux, &card, &["legacy-null"], channel).await;
+        revert(card.clone())
+            .await
+            .expect("a legacy-only card reverts");
+        let settled = [
+            field(&pool, "sessions", &keys[0], "status").await,
+            field(&pool, "sessions", &keys[0], "active_dispatch_id").await,
+            field(&pool, "task_dispatches", &format!("{card}-d"), "status").await,
+            field(&pool, "auto_queue_entries", &format!("{card}-e"), "status").await,
+        ];
+        let skipped = crate::db::auto_queue::ENTRY_STATUS_SKIPPED;
+        let expected = [Some("disconnected"), None, Some("cancelled"), Some(skipped)];
+        assert_eq!(
+            settled,
+            expected.map(serde_json::Value::from),
+            "{condition:?}"
+        );
+        assert!(
+            !tmux.alive(&names[0]),
+            "{condition:?}: legacy tmux is killed"
+        );
+        let _ = tmux.take_calls();
+
+        let mut cases: Vec<Vec<&str>> = NON_LEGACY.iter().map(|h| vec!["legacy-null", h]).collect();
+        cases.push(vec!["bound"]);
+        for (index, hosts) in cases.iter().enumerate() {
+            let card = format!("k1-{round}-{index}");
+            let channel = 6_530_000 + round * 1_000 + index * 10;
+            let (keys, names) = seed_card(&pool, &tmux, &card, hosts, channel).await;
+            let before = card_rows(card.clone(), keys.clone()).await;
+            let error = revert(card.clone())
+                .await
+                .expect_err("an unconfirmed host refuses it");
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("backlog revert refused"),
+                "{condition:?} {hosts:?}: {error}"
+            );
+            let after = card_rows(card, keys).await;
+            assert_eq!(
+                after, before,
+                "{condition:?} {hosts:?}: nothing of the card changes"
+            );
+            let alive = names.iter().all(|name| tmux.alive(name));
+            assert!(!tmux.live || alive, "{hosts:?}: every tmux survives");
+        }
+        assert_eq!(
+            tmux.take_calls(),
+            [""; 0],
+            "{condition:?}: a refusal reaches no tmux"
+        );
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}

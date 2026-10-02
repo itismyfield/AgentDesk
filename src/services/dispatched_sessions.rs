@@ -10,7 +10,7 @@ use crate::db::session_status::{
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
+use crate::services::turn_lifecycle::{ForceKillRow, TurnLifecycleTarget, force_kill_turn_for_row};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -720,7 +720,12 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
 
     let termination_reason_code = classify_session_termination_reason(reason);
 
-    let lifecycle = force_kill_turn(
+    let row = ForceKillRow {
+        pool,
+        session_key,
+        stored_provider: session_provider.as_deref(),
+    };
+    let lifecycle = force_kill_turn_for_row(
         state.health_registry.as_deref(),
         &TurnLifecycleTarget {
             provider: provider_info
@@ -733,10 +738,17 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
                 .map(poise::serenity_prelude::ChannelId::new),
             tmux_name: tmux_name.clone(),
         },
+        row,
         reason,
         termination_reason_code,
     )
     .await;
+    // A refused kill changed nothing, so the session and its dispatch stay as they are.
+    if lifecycle.host_guard_kept() {
+        let (error, unsupported) = ("session host is not legacy tmux", "session_host_not_tmux");
+        let body = json!({"error": error, "unsupported": unsupported, "session_key": session_key});
+        return (StatusCode::CONFLICT, Json(body));
+    }
 
     // 1. Kill tmux session (or confirm the runtime path already stopped it).
     let tmux_killed = lifecycle.tmux_killed;

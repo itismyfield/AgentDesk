@@ -735,6 +735,8 @@ server::routes::auto_queue_lifecycle_pg_tests::tests::stale_manual_rebind_cannot
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip_pg
 server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
 server::routes::campaigns::tests::postgres_ledger_round_trips_a_document_past_the_axum_default_limit_pg
+server::routes::dispatched_sessions::tests::backlog_revert_refuses_the_card_when_any_session_host_is_unconfirmed_pg
+server::routes::dispatched_sessions::tests::force_kill_without_runtime_keys_refuses_unconfirmed_hosts_pg
 server::routes::dispatched_sessions::tests::idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
 server::routes::dispatched_sessions::tests::kill_tmux_route_checks_the_host_before_any_probe_or_write_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
