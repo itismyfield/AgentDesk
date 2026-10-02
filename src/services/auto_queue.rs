@@ -163,6 +163,7 @@ pub struct StatusInput {
 pub struct GenerateCandidate {
     pub card_id: String,
     pub agent_id: String,
+    pub description: Option<String>,
     pub metadata: Option<String>,
     pub github_issue_number: Option<i64>,
 }
@@ -678,6 +679,7 @@ impl From<GenerateCandidateRecord> for GenerateCandidate {
         Self {
             card_id: record.card_id,
             agent_id: record.agent_id,
+            description: record.description,
             metadata: record.metadata,
             github_issue_number: record.github_issue_number,
         }

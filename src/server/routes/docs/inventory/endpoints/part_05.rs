@@ -50,7 +50,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 body_param(
                     "array[number|string|object]",
                     false,
-                    "Optional dependency references rendered into `## 의존성`",
+                    "Optional dependency references rendered into `## 의존성`; auto-queue generate holds the card until the issues named there (#N, owner/repo#N or an issue URL) are done",
                 ),
             ),
             (

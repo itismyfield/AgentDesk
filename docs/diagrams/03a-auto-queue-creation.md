@@ -20,7 +20,7 @@ start
   - Apply agent assignments;
 
 :Assign lanes (no planning)
-  - Hold cards whose metadata depends_on is not done
+  - Hold cards whose declared prerequisites (metadata, 의존성 section) are not done
   - Keep request order, else priority then age
   - Requested thread_group keeps its lane
   - Every other card gets its own lane;

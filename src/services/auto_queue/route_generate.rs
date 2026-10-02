@@ -32,33 +32,99 @@ fn assign_lanes(
         .collect()
 }
 
-/// Issue numbers a card's metadata names under `depends_on` / `dependencies`.
-/// Issue bodies are not read: prerequisites are declared, not guessed.
-fn declared_dependencies(metadata: Option<&str>, self_issue: Option<i64>) -> Vec<i64> {
-    fn collect(value: &Value, out: &mut std::collections::BTreeSet<i64>) {
+/// A prerequisite issue; `repo` is None for the dependent card's own repo.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Prerequisite {
+    repo: Option<String>,
+    issue: i64,
+}
+
+impl Prerequisite {
+    fn label(&self) -> String {
+        format!("{}#{}", self.repo.as_deref().unwrap_or(""), self.issue)
+    }
+}
+
+/// `#N`, `owner/repo#N`, or a GitHub issue or pull request URL.
+fn issue_reference_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?:https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/|([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)(\d+)",
+        )
+        .expect("issue reference regex must compile") // agentdesk-audit: allow-unwrap — constant pattern
+    })
+}
+
+fn collect_references(text: &str, out: &mut std::collections::BTreeSet<Prerequisite>) {
+    for capture in issue_reference_regex().captures_iter(text) {
+        if let Ok(issue) = capture[3].parse::<i64>() {
+            let repo = capture.get(1).or_else(|| capture.get(2));
+            out.insert(Prerequisite {
+                repo: repo.map(|repo| repo.as_str().to_string()),
+                issue,
+            });
+        }
+    }
+}
+
+/// Lines under a `의존성` heading, the section the issue-creation API writes.
+fn dependency_section_lines(description: &str) -> impl Iterator<Item = &str> {
+    let mut inside = false;
+    description.lines().filter(move |line| {
+        let trimmed = line.trim();
+        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+            inside = trimmed[hashes..].trim() == "의존성";
+            return false;
+        }
+        inside
+    })
+}
+
+/// Prerequisites from metadata `depends_on` / `dependencies` and the body's `## 의존성`
+/// section. The rest of the body is not read: prerequisites are declared, not guessed.
+fn declared_dependencies(
+    metadata: Option<&str>,
+    description: Option<&str>,
+    self_issue: Option<i64>,
+) -> Vec<Prerequisite> {
+    fn collect(value: &Value, out: &mut std::collections::BTreeSet<Prerequisite>) {
         match value {
-            Value::Number(number) => out.extend(number.as_i64()),
-            Value::String(raw) => out.extend(
-                raw.split(|ch: char| ch == ',' || ch.is_whitespace())
-                    .filter_map(|token| token.trim_start_matches('#').parse::<i64>().ok()),
+            Value::Number(number) => out.extend(
+                number
+                    .as_i64()
+                    .map(|issue| Prerequisite { repo: None, issue }),
             ),
+            Value::String(raw) => {
+                collect_references(raw, out);
+                out.extend(
+                    raw.split(|ch: char| ch == ',' || ch.is_whitespace())
+                        .filter_map(|token| token.parse::<i64>().ok())
+                        .map(|issue| Prerequisite { repo: None, issue }),
+                );
+            }
             Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
             _ => {}
         }
     }
-    let Some(Value::Object(object)) = metadata.and_then(|raw| serde_json::from_str(raw).ok())
-    else {
-        return Vec::new();
-    };
-    let mut numbers = std::collections::BTreeSet::new();
-    for (key, value) in &object {
-        if key.eq_ignore_ascii_case("depends_on") || key.eq_ignore_ascii_case("dependencies") {
-            collect(value, &mut numbers);
+    let mut found = std::collections::BTreeSet::new();
+    if let Some(Value::Object(object)) = metadata.and_then(|raw| serde_json::from_str(raw).ok()) {
+        for (key, value) in &object {
+            if key.eq_ignore_ascii_case("depends_on") || key.eq_ignore_ascii_case("dependencies") {
+                collect(value, &mut found);
+            }
         }
     }
-    numbers
+    for line in description.into_iter().flat_map(dependency_section_lines) {
+        collect_references(line, &mut found);
+    }
+    found
         .into_iter()
-        .filter(|number| *number > 0 && Some(*number) != self_issue)
+        .filter(|dependency| {
+            dependency.issue > 0
+                && !(dependency.repo.is_none() && Some(dependency.issue) == self_issue)
+        })
         .collect()
 }
 
@@ -318,30 +384,41 @@ pub async fn generate(
         }
     }
 
-    // A card waits until the issues its metadata names are done in its own repo;
-    // a card without a repo matches none, so it waits.
+    // A card waits until the issues it declares are done; `#N` means its own repo,
+    // so a card without a repo matches none and waits.
     let mut dependency_skips: Vec<serde_json::Value> = Vec::new();
     {
         let mut retained = Vec::with_capacity(cards.len());
         for card in cards.into_iter() {
-            let dependencies =
-                declared_dependencies(card.metadata.as_deref(), card.github_issue_number);
-            let statuses: HashMap<i64, Option<String>> = if dependencies.is_empty() {
+            let dependencies = declared_dependencies(
+                card.metadata.as_deref(),
+                card.description.as_deref(),
+                card.github_issue_number,
+            );
+            let rows: HashMap<i64, (bool, Option<String>)> = if dependencies.is_empty() {
                 HashMap::new()
             } else {
-                sqlx::query_as::<_, (i64, Option<String>)>(
-                    "SELECT dep.issue, (
-                         SELECT prerequisite.status FROM kanban_cards prerequisite
-                          WHERE prerequisite.repo_id = card.repo_id
-                            AND prerequisite.github_issue_number::BIGINT = dep.issue
-                          ORDER BY prerequisite.updated_at DESC NULLS LAST,
-                                   prerequisite.created_at DESC, prerequisite.id DESC
-                          LIMIT 1)
-                     FROM kanban_cards card CROSS JOIN UNNEST($2::BIGINT[]) AS dep(issue)
+                let (repos, issues): (Vec<Option<String>>, Vec<i64>) = dependencies
+                    .iter()
+                    .map(|dependency| (dependency.repo.clone(), dependency.issue))
+                    .unzip();
+                sqlx::query_as::<_, (i64, bool, Option<String>)>(
+                    "SELECT dep.ord,
+                            (LOWER(COALESCE(dep.repo, card.repo_id)) = LOWER(card.repo_id)
+                             AND dep.issue = card.github_issue_number::BIGINT) IS TRUE,
+                            (SELECT prerequisite.status FROM kanban_cards prerequisite
+                              WHERE LOWER(prerequisite.repo_id) = LOWER(COALESCE(dep.repo, card.repo_id))
+                                AND prerequisite.github_issue_number::BIGINT = dep.issue
+                              ORDER BY prerequisite.updated_at DESC NULLS LAST,
+                                       prerequisite.created_at DESC, prerequisite.id DESC
+                              LIMIT 1)
+                     FROM kanban_cards card
+                     CROSS JOIN UNNEST($2::TEXT[], $3::BIGINT[]) WITH ORDINALITY AS dep(repo, issue, ord)
                      WHERE card.id = $1",
                 )
                 .bind(&card.card_id)
-                .bind(&dependencies)
+                .bind(&repos)
+                .bind(&issues)
                 .fetch_all(pool)
                 .await
                 .map_err(|error| {
@@ -352,14 +429,18 @@ pub async fn generate(
                     .with_code(ErrorCode::AutoQueue)
                 })?
                 .into_iter()
+                .map(|(ord, is_self, status)| (ord, (is_self, status)))
                 .collect()
             };
+            // A missing row (the card vanished meanwhile) leaves every prerequisite missing.
             let unresolved: Vec<String> = dependencies
                 .iter()
-                .filter_map(|dependency| {
-                    let status = statuses.get(dependency).cloned().flatten();
-                    (status.as_deref() != Some("done")).then(|| {
-                        format!("#{dependency}:{}", status.as_deref().unwrap_or("missing"))
+                .zip(1_i64..)
+                .filter_map(|(dependency, ord)| {
+                    let (is_self, status) = rows.get(&ord).cloned().unwrap_or((false, None));
+                    (!is_self && status.as_deref() != Some("done")).then(|| {
+                        let status = status.as_deref().unwrap_or("missing");
+                        format!("{}:{status}", dependency.label())
                     })
                 })
                 .collect();
@@ -728,15 +809,35 @@ mod lane_assignment_tests {
         assert!(assign_lanes([Some(1), Some(2)].into_iter(), &requested).is_err());
     }
 
+    fn own(issue: i64) -> Prerequisite {
+        Prerequisite { repo: None, issue }
+    }
+
+    fn other(repo: &str, issue: i64) -> Prerequisite {
+        Prerequisite {
+            repo: Some(repo.to_string()),
+            issue,
+        }
+    }
+
     #[test]
-    fn dependencies_come_from_metadata_only() {
-        let metadata = r##"{"depends_on":[7, "#42", "8, #9"],"Dependencies":7,"labels":"#5"}"##;
+    fn dependencies_come_from_metadata_and_the_dependency_section() {
+        let metadata =
+            r##"{"depends_on":[7, "#42", "8, #9", "o/r#3"],"Dependencies":7,"labels":"#5"}"##;
         assert_eq!(
-            declared_dependencies(Some(metadata), Some(9)),
-            vec![7, 8, 42]
+            declared_dependencies(Some(metadata), None, Some(9)),
+            vec![own(7), own(8), own(42), other("o/r", 3)]
         );
-        assert!(declared_dependencies(Some("depends on #7"), None).is_empty());
-        assert!(declared_dependencies(None, None).is_empty());
+        let body = "## 배경\nafter #5 lands\n\n## 의존성\n- #100 (로그인)\n- other/repo#7, #9\n\
+                    - https://github.com/Owner/Repo/issues/8\n- 3단계 이후\n\n## DoD\n- [ ] #11";
+        assert_eq!(
+            declared_dependencies(None, Some(body), Some(9)),
+            vec![own(100), other("Owner/Repo", 8), other("other/repo", 7)]
+        );
+        assert!(
+            declared_dependencies(Some("depends on #7"), Some("depends on #7"), None).is_empty()
+        );
+        assert!(declared_dependencies(None, None, None).is_empty());
     }
 }
 
@@ -944,6 +1045,58 @@ mod dependency_hold_tests {
         assert_eq!(
             queued_cards(&pool, &response).await,
             vec!["card-101".to_string()]
+        );
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn a_card_waits_for_the_issues_its_dependency_section_lists_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status) VALUES ('agent-body', 'Body', 'codex', 'idle')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        // Bodies as the issue-creation API writes them; metadata is empty.
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, assigned_agent_id, github_issue_number, description)
+             VALUES ('card-200', 'body/repo', 'Prerequisite', 'in_progress', 'agent-body', 200, NULL),
+                    ('card-201', 'body/repo', 'Same repo', 'ready', 'agent-body', 201,
+                     E'## 배경\\n- #999 참고\\n\\n## 의존성\\n- #200 (로그인)\\n\\n## DoD\\n- [ ] 끝'),
+                    ('card-202', 'body/repo', 'Other repo done', 'ready', 'agent-body', 202,
+                     E'## 의존성\\n- other/lib#7'),
+                    ('card-203', 'body/repo', 'Other repo by URL', 'ready', 'agent-body', 203,
+                     E'## 의존성\\n- https://github.com/other/lib/issues/8'),
+                    ('card-l7', 'other/lib', 'Library done', 'done', NULL, 7, NULL),
+                    ('card-l8', 'other/lib', 'Library open', 'in_progress', NULL, 8, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed cards"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let response = generate_json(
+            &pool,
+            json!({ "repo": "body/repo", "agent_id": "agent-body" }),
+        )
+        .await;
+        let mut skipped = response["skipped_due_to_dependency"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        skipped.sort_by_key(|entry| entry["issue_number"].as_i64());
+        assert_eq!(
+            skipped,
+            vec![
+                json!({ "issue_number": 201, "unresolved_deps": ["#200:in_progress"] }),
+                json!({ "issue_number": 203, "unresolved_deps": ["other/lib#8:in_progress"] }),
+            ]
+        );
+        assert_eq!(
+            queued_cards(&pool, &response).await,
+            vec!["card-202".to_string()]
         );
         pool.close().await;
         pg_db.drop().await;
