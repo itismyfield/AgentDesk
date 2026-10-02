@@ -99,7 +99,7 @@ mod generate_conflict_tests {
     use super::*;
 
     #[tokio::test]
-    async fn an_unstarted_run_blocks_a_second_generate_in_its_scope() {
+    async fn an_unstarted_run_blocks_a_second_generate_in_its_scope_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query(

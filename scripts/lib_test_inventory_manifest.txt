@@ -1473,7 +1473,7 @@ services::auto_queue::route::control_routes::reset_route_status_tests::database_
 services::auto_queue::route::control_routes::reset_route_status_tests::live_run_refusal_maps_to_conflict_and_carries_its_status
 services::auto_queue::route::control_routes::reset_route_status_tests::scope_mismatch_maps_to_conflict
 services::auto_queue::route::control_routes::reset_route_status_tests::unknown_run_maps_to_not_found
-services::auto_queue::route::dispatch_query::generate_conflict_tests::an_unstarted_run_blocks_a_second_generate_in_its_scope
+services::auto_queue::route::dispatch_query::generate_conflict_tests::an_unstarted_run_blocks_a_second_generate_in_its_scope_pg
 services::auto_queue::route::fsm::tests::clamp_retry_limit_bounds
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
