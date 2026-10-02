@@ -1,8 +1,8 @@
-"""Behavioral contracts for the sharded PR Script checks runners.
+"""Behavioral contracts for the sharded PR and main Script checks runners.
 
 Every check in ``scripts/ci-script-checks.sh`` must belong to a shard that a PR
-job runs, and the ``Script checks`` required context must fail unless every
-shard job succeeds.
+job and a main-push job each run once, and the ``Script checks`` required
+context must fail unless every shard job succeeds.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/ci-script-checks.sh"
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 MIRROR_JOB = "scripts_required_context"
 NEEDS_RESULT = re.compile(r"\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}")
 
@@ -36,8 +37,8 @@ def scalar(value: object) -> str:
     return str(value).lower() if isinstance(value, bool) else str(value)
 
 
-def load_jobs() -> dict:
-    return yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+def load_jobs(workflow: Path = PR_WORKFLOW) -> dict:
+    return yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
 
 
 def workflow_shards(jobs: dict) -> dict[str, str]:
@@ -65,7 +66,13 @@ def listed(result: subprocess.CompletedProcess[str]) -> list[tuple[str, str]]:
 
 class ScriptCheckShardOwnership(unittest.TestCase):
     def test_every_check_is_owned_by_a_shard_that_a_pr_job_runs(self) -> None:
-        shards = workflow_shards(load_jobs())
+        self.assert_shards_cover_every_check_once(PR_WORKFLOW)
+
+    def test_every_check_is_owned_by_a_shard_that_a_main_job_runs(self) -> None:
+        self.assert_shards_cover_every_check_once(MAIN_WORKFLOW)
+
+    def assert_shards_cover_every_check_once(self, workflow: Path) -> None:
+        shards = workflow_shards(load_jobs(workflow))
         self.assertGreaterEqual(len(shards), 2, shards)
         self.assertNotIn("", shards.values(), shards)
         self.assertEqual(len(set(shards.values())), len(shards), shards)
@@ -76,7 +83,7 @@ class ScriptCheckShardOwnership(unittest.TestCase):
         self.assertTrue(full)
         titles = [title for _, title in full]
         self.assertEqual(len(titles), len(set(titles)), "duplicate check titles")
-        # A shard with checks but no PR job would silently drop its checks.
+        # A shard with checks but no job here would silently drop its checks.
         self.assertEqual({shard for shard, _ in full}, set(shards.values()))
 
         union: list[tuple[str, str]] = []
