@@ -42,6 +42,7 @@ pub(super) struct PollWatcherContext<'a> {
     pub(super) output_path: &'a str,
     pub(super) watcher_thread_channel_id: Option<u64>,
     pub(super) watcher_instance_id: u64,
+    pub(super) host: &'a Arc<HostSnapshot>,
 }
 
 pub(super) struct PollWatcherControls<'a> {
@@ -208,7 +209,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         match tmux_liveness_decision(
             cancel.load(Ordering::Relaxed),
             shared.restart.shutting_down.load(Ordering::Relaxed),
-            host_gate::tmux_alive(tmux_session_name, channel_id).await,
+            host_gate::tmux_alive(shared, tmux_session_name, channel_id, context.host).await,
         ) {
             TmuxLivenessDecision::Continue => {
                 // #2441 (H1) — graduate the fixed 200ms paused-loop
@@ -314,7 +315,7 @@ pub(super) async fn poll_watcher_output_or_continue(
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                host_gate::tmux_alive(tmux_session_name, channel_id).await,
+                host_gate::tmux_alive(shared, tmux_session_name, channel_id, context.host).await,
             ) {
                 TmuxLivenessDecision::Continue => {
                     // #2441 (H1) — notify-backed wake-up for the
@@ -374,7 +375,7 @@ pub(super) async fn poll_watcher_output_or_continue(
             Some(tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                host_gate::tmux_alive(tmux_session_name, channel_id).await,
+                host_gate::tmux_alive(shared, tmux_session_name, channel_id, context.host).await,
             )),
         )
     } else {
@@ -521,7 +522,7 @@ pub(super) async fn poll_watcher_output_or_continue(
     // (terminal + no-inflight) prefix already holds (keeps `tmux capture-pane` off the hot path).
     let post_terminal_pane_actively_streaming = turn_result_relayed
         && post_terminal_inflight_missing
-        && watcher_pane_actively_streaming(tmux_session_name);
+        && watcher_pane_actively_streaming(tmux_session_name, context.host);
     if post_terminal_pane_actively_streaming {
         // Self-heal: a live turn lost its inflight but kept streaming post-terminal;
         // re-establish a watcher-owned inflight (reusing the restored turn's persisted ids).

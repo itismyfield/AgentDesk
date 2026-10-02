@@ -27,6 +27,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorC
     pub(in crate::services::discord::tmux::tmux_watcher) turn_result_relayed: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) restored_injected_prompt_message_id:
         Option<u64>,
+    pub(in crate::services::discord::tmux::tmux_watcher) host: Arc<HostSnapshot>,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorIo {
@@ -201,6 +202,7 @@ impl TurnStreamCollectorContext {
             dead_marker_notify: controls.dead_marker_notify.clone(),
             turn_result_relayed,
             restored_injected_prompt_message_id,
+            host: context.host.clone(),
         }
     }
 }

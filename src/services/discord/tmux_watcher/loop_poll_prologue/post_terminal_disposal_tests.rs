@@ -136,6 +136,7 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
                     output_path: &path,
                     watcher_thread_channel_id: None,
                     watcher_instance_id: 5755,
+                    host: &Arc::new(HostSnapshot::new(WatchHost::Legacy)),
                 },
                 &PollWatcherControls {
                     cancel: &Arc::new(AtomicBool::new(false)),
@@ -336,6 +337,7 @@ async fn poll_resume_branch_scopes_the_delivery_marker_to_the_current_turn_5943(
                     output_path: &path,
                     watcher_thread_channel_id: None,
                     watcher_instance_id: 5943,
+                    host: &Arc::new(HostSnapshot::new(WatchHost::Legacy)),
                 },
                 &PollWatcherControls {
                     cancel: &Arc::new(AtomicBool::new(false)),

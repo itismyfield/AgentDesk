@@ -112,6 +112,7 @@ pub(super) async fn update_streaming_status_tick(
                 &output_path,
                 data_start_offset,
                 turn_identity_for_panel.as_ref(),
+                ctx.host,
             )
         {
             cleanup_orphan_external_input_status_panel(
@@ -260,8 +261,8 @@ pub(super) async fn update_streaming_status_tick(
             .is_none();
         // #3107: lazy pane-capture probe — only when inflight is
         // missing (expensive signal stays off the hot path).
-        let pane_actively_streaming_for_streaming =
-            inflight_missing_for_streaming && watcher_pane_actively_streaming(&tmux_session_name);
+        let pane_actively_streaming_for_streaming = inflight_missing_for_streaming
+            && watcher_pane_actively_streaming(&tmux_session_name, ctx.host);
         if inflight_missing_for_streaming && pane_actively_streaming_for_streaming {
             // #3107 self-heal: pane live but inflight cleared mid-turn —
             // re-establish a watcher-owned inflight (idempotent + 1-shot log).
@@ -440,6 +441,7 @@ pub(super) async fn update_streaming_status_tick(
                 &output_path,
                 data_start_offset,
                 turn_identity_for_panel.as_ref(),
+                ctx.host,
             ) {
                 // #3003 (codex P2 r18): do not recreate an already stopped turn's
                 // panel after interval-top reclaim; a tombstone can precede row removal.

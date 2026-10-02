@@ -534,6 +534,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
   services::discord::terminal_ui_obligation::tests::terminal_ui_reconcile_action_prefers_complete_then_deadline_then_wait
   services::discord::terminal_ui_obligation::tests::terminal_ui_snapshot_from_inflight_preserves_missing_claude_tui_output_flag
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_listed_herdr_pane_is_never_read_dead_after_a_stream
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_marked_herdr_pane_is_abandoned_only_by_its_stop_tombstone
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_streaming_tick_rechecks_the_host_before_capturing_the_pane
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::collector_death_keeps_a_turn_bound_to_another_host
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline

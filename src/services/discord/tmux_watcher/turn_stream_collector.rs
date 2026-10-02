@@ -808,7 +808,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             Some(tmux_liveness_decision(
                                 cancel.load(Ordering::Relaxed),
                                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                                host_gate::tmux_alive(&tmux_session_name, channel_id).await,
+                                host_gate::tmux_alive(
+                                    &shared,
+                                    &tmux_session_name,
+                                    channel_id,
+                                    &ctx.host,
+                                )
+                                .await,
                             )),
                         ) {
                             WatcherOutputPollDecision::DrainOutput => {}
@@ -992,6 +998,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                     tmux_session_name: &tmux_session_name,
                     output_path: &output_path,
                     turn_delivered: &turn_delivered,
+                    host: &ctx.host,
                 },
                 StreamingStatusTickTurn {
                     data_start_offset,

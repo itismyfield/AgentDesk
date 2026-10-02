@@ -33,6 +33,7 @@ static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 // `unanswered` has no server socket, `listfail` fails only `list-panes`; kills are logged.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 while [ "${1#-}" != "$1" ]; do shift; done
+echo "$*" >> "ROOT/tmux-calls"
 read -r state < "ROOT/pane" || state="unreadable"
 case "$state" in busy|idle|dead|deadpane|unanswered|listfail) ;; *) echo "$* on pane '$state'" >> "ROOT/tmux-errors"; exit 97 ;; esac
 case "$1" in
@@ -74,7 +75,9 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
                 "agentdesk::relay_flight_recorder=info,agentdesk::inflight_remove=warn,\
                  agentdesk::services::discord::tmux::tmux_watcher::cancel_handoff=info,\
                  agentdesk::services::discord::tmux::tmux_watcher::turn_stream_collector=info,\
-                 agentdesk::services::discord::host_liveness=info",
+                 agentdesk::services::discord::host_liveness=info,\
+                 agentdesk::services::discord::tmux::tmux_watcher::post_stream_exit::host_gate=debug,\
+                 agentdesk::services::discord::tmux::watcher_lifecycle::watch_host=debug",
             )
             .with_writer(|| Capture)
             .finish();
@@ -336,7 +339,8 @@ impl Harness {
             std::fs::write(marker, "dead").unwrap();
         }
         let live = crate::services::tmux_diagnostics::tmux_session_has_live_pane(&self.tmux);
-        let busy = super::super::liveness::watcher_pane_actively_streaming(&self.tmux);
+        let legacy = HostSnapshot::new(WatchHost::Legacy);
+        let busy = super::super::liveness::watcher_pane_actively_streaming(&self.tmux, &legacy);
         let expected = (matches!(state, "busy" | "idle"), state == "busy");
         assert_eq!((live, busy), expected, "fake tmux {state}");
     }
@@ -454,6 +458,19 @@ impl Harness {
             .lines()
             .filter(|line| line.contains(&self.tmux))
             .count()
+    }
+
+    /// Fake `tmux` calls naming this session since the last take, oldest first.
+    pub(super) fn take_tmux_calls(&self) -> Vec<String> {
+        let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
+        let log = format!("{root}/tmux-calls");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(log);
+        calls
+            .lines()
+            .filter(|line| line.contains(&self.tmux))
+            .map(str::to_string)
+            .collect()
     }
 
     pub(super) fn watcher_finished(&self) -> bool {

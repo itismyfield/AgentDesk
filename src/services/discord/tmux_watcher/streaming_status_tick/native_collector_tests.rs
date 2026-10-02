@@ -185,6 +185,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
             dead_marker_notify: Arc::new(tokio::sync::Notify::new()),
             turn_result_relayed: false,
             restored_injected_prompt_message_id: row.injected_prompt_message_id,
+            host: Arc::new(HostSnapshot::new(WatchHost::Legacy)),
         };
         shared.tmux_watchers.insert(
             fx.channel,

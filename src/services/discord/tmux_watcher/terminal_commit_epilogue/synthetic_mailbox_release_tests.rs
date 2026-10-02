@@ -94,6 +94,7 @@ async fn commit(
         output_path: &output,
         relay_coord: &Arc::new(TmuxRelayCoord::new(channel)),
         turn_delivered: &Arc::new(AtomicBool::new(false)),
+        host: &HostSnapshot::new(WatchHost::Legacy),
     };
     run_terminal_commit_epilogue(
         &context,

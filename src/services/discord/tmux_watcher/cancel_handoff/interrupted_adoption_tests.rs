@@ -166,6 +166,7 @@ pub(in crate::services::discord) async fn assert_committed_preflight_reaches_set
         watcher_provider: &ctx.watcher_provider,
         tmux_session_name: &ctx.tmux_session_name,
         output_path: &ctx.output_path,
+        host: &ctx.host,
     };
     let start = turn.turn_data_start_offset;
     let end = terminal_event_consumed_offset(offset, buffer);

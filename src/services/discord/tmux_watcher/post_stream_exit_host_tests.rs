@@ -136,7 +136,7 @@ async fn watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg() {
     let cases = [
         (Missing, Host::Local, "deadpane", false, Death, false, 1),
         (Legacy, Host::Local, "deadpane", false, Death, false, 1),
-        (Hosted, Host::Local, "deadpane", false, Death, true, 0),
+        (Hosted, Host::Local, "deadpane", false, Cancel, true, 0),
         (Future, Host::Local, "deadpane", false, Death, true, 0),
         (Missing, Host::Local, "unanswered", false, Cancel, true, 0),
         (Missing, Host::Local, "unanswered", true, Death, false, 0),
@@ -297,10 +297,11 @@ async fn abort_kills_take_the_keyed_host_verdict_pg() {
                 !h.showing(if admitted { NOT_RESET } else { RESET }),
                 "{label}"
             );
-            if host != Host::Local {
+            // A Herdr row takes no tmux death; elsewhere an abnormal death hands the
+            // turn off only when no kill ran.
+            if host != Host::Local || stored == Hosted {
                 continue;
             }
-            // An abnormal death hands the turn off only when no kill ran.
             h.pane("dead");
             h.exited(&label).await;
             let handoff = removals(&h).contains(&"clear_inflight_state".to_owned());
@@ -309,4 +310,180 @@ async fn abort_kills_take_the_keyed_host_verdict_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+fn set_mode(path: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Waits for `n` more "watcher kept" verdicts, so the exit the caller set up ran at least once.
+async fn kept_again(h: &Harness, what: &str, n: usize) {
+    let kept = || Harness::logged("watcher kept the session").len();
+    let before = kept();
+    h.until(what, |_| kept() >= before + n).await;
+}
+
+// A session only its sessions row places on Herdr is never probed, captured or ended as tmux at
+// any exit; at a death an unverified row is read again and keeps the session only if it names Herdr.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg() {
+    if !isolated_in(
+        "post_stream_exit_host_tests",
+        "a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg",
+        &[],
+    ) {
+        return;
+    }
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let herdr = Some((&pool, Stored::Hosted));
+    let (mut h, _) = attached(LEGACY_BASE, false, Host::Local, herdr, None).await;
+    h.pane("dead");
+    h.take_tmux_calls();
+    kept_again(&h, "end of output", 1).await;
+    set_mode(&h.path, 0o000);
+    kept_again(&h, "unreadable output", 2).await;
+    set_mode(&h.path, 0o644);
+    let paused = h
+        .shared
+        .tmux_watchers
+        .get(&h.channel)
+        .unwrap()
+        .paused
+        .clone();
+    paused.store(true, Ordering::Release);
+    kept_again(&h, "paused", 2).await;
+    paused.store(false, Ordering::Release);
+    h.append(format!("{}{}", user("T1"), said(STREAMING)).as_bytes());
+    h.until("streaming preview", |h| h.showing(STREAMING)).await;
+    kept_again(&h, "streaming turn", 1).await;
+    h.append(stop().as_bytes());
+    h.drained("terminal frame").await;
+    let seen = crate::services::discord::tmux_watcher_now_ms();
+    h.until("still polling", |h| h.heartbeat() > seen).await;
+    assert!(!h.watcher_finished(), "no exit ended the watcher");
+    h.cancel();
+    h.exited("watcher exit").await;
+    assert_eq!(h.take_tmux_calls(), Vec::<String>::new());
+    assert_eq!(h.kills(), 0);
+
+    for (n, now, death) in [(1, Stored::Hosted, false), (2, Stored::Future, true)] {
+        let unread = Some((&pool, Stored::Future));
+        let (mut h, _) = attached(LEGACY_BASE + n, false, Host::Local, unread, None).await;
+        let seen = crate::services::discord::tmux_watcher_now_ms();
+        h.until("start read done", |h| h.heartbeat() > seen).await;
+        let key = channel_key(&h.shared, &h.tmux);
+        seed(&pool, &key, &h.tmux, h.channel.get(), now).await;
+        h.pane("dead");
+        if death {
+            h.exited("death on an unreadable row").await;
+            continue;
+        }
+        let reread = || Harness::logged("its sessions row names Herdr").len();
+        h.until("row read again", |_| reread() > 0).await;
+        let seen = crate::services::discord::tmux_watcher_now_ms();
+        h.until("still polling", |h| h.heartbeat() > seen).await;
+        assert!(!h.watcher_finished(), "the re-read kept the session");
+        h.cancel();
+        h.exited("watcher exit").await;
+        assert_eq!(h.kills(), 0);
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+// A Legacy watcher re-reads the marker a later launch wrote before the streaming tick captures:
+// no capture, and no row re-acquired from a pane it cannot see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streaming_tick_rechecks_the_host_before_capturing_the_pane() {
+    if !isolated_in(
+        "post_stream_exit_host_tests",
+        "a_streaming_tick_rechecks_the_host_before_capturing_the_pane",
+        &[],
+    ) {
+        return;
+    }
+    let seed_text = turn("T0", T0);
+    let mut h = Harness::new(LEGACY_BASE, &seed_text).await;
+    let f = seed_text.len() as u64;
+    h.commit(0, f);
+    h.spawn(f);
+    let seen = crate::services::discord::tmux_watcher_now_ms();
+    h.until("started on Legacy", |h| h.heartbeat() > seen).await;
+    std::fs::write(session_temp_path(&h.tmux, "host_kind"), "herdr").unwrap();
+    // A Legacy probe already running when the marker landed logs before this verdict.
+    kept_again(&h, "marker seen", 1).await;
+    h.take_tmux_calls();
+    h.append(format!("{}{}", user("T1"), said(STREAMING)).as_bytes());
+    let skipped = || Harness::logged("pane capture skipped").len();
+    h.until("tick with data", |h| skipped() > 0 || h.row().is_some())
+        .await;
+    assert!(h.row().is_none(), "no row re-acquired from an unseen pane");
+    h.append(stop().as_bytes());
+    h.drained("terminal frame").await;
+    assert_eq!(h.take_tmux_calls(), Vec::<String>::new());
+    h.cancel();
+    h.exited("watcher exit").await;
+}
+
+// The abandonment check shared by the status tick and terminal preflight re-reads the host: a
+// marked Herdr pane is not captured, and only the turn's own stop tombstone abandons it.
+#[tokio::test]
+async fn a_marked_herdr_pane_is_abandoned_only_by_its_stop_tombstone() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+    let channel = ChannelId::new(6_284_190);
+    let name = CLAUDE.build_tmux_session_name("p8-abandon");
+    let host = HostSnapshot::new(WatchHost::Legacy);
+    let abandoned = || {
+        watcher_external_input_turn_abandoned(&CLAUDE, channel, &name, "/absent", 0, None, &host)
+    };
+    let calls = || {
+        let calls = tmux.take_calls().into_iter();
+        calls.filter(|call| call.contains(&name)).count()
+    };
+    assert!(
+        abandoned(),
+        "a Legacy pane that cannot be captured reads idle"
+    );
+    assert!(calls() > 0, "Legacy captures the pane");
+    let marker = session_temp_path(&name, "host_kind");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(marker, "herdr").unwrap();
+    assert!(!abandoned(), "an unknown pane is no abandonment evidence");
+    std::fs::write(session_temp_path(&name, "generation"), "p8").unwrap();
+    crate::services::discord::tmux::tmux_kill_policy::record_recent_turn_stop(
+        channel,
+        Some(&name),
+        "p8 test stop",
+    )
+    .await;
+    assert!(abandoned(), "the turn's own stop tombstone abandons it");
+    assert_eq!(calls(), 0, "no capture once the marker says Herdr");
+}
+
+// A pane only the Herdr admission map lists is never read dead by the post-stream clear and
+// kill or by the missing-inflight fallback, and none of them asks tmux about it.
+#[tokio::test]
+async fn a_listed_herdr_pane_is_never_read_dead_after_a_stream() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+    let channel = ChannelId::new(6_284_191);
+    let name = CLAUDE.build_tmux_session_name("p8-listed");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let host = HostSnapshot::new(WatchHost::Legacy);
+    let calls = || {
+        let calls = tmux.take_calls().into_iter();
+        calls.filter(|call| call.contains(&name)).count()
+    };
+    assert!(host_gate::tmux_pane_dead(&CLAUDE, channel, &name, &host));
+    assert!(calls() > 0, "a Legacy pane is probed");
+    crate::services::tui_prompt_dedupe::install_herdr_execution(&name, "p8-listed");
+    assert!(!host_gate::tmux_pane_dead(&CLAUDE, channel, &name, &host));
+    assert!(!host_gate::tmux_dead_pane_present(
+        &CLAUDE, channel, &name, &host
+    ));
+    assert!(host_gate::marker_alive(&shared, &name, channel, &host).await);
+    assert_eq!(calls(), 0);
 }

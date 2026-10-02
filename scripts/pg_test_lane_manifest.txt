@@ -1130,6 +1130,7 @@ services::discord::task_notification_delivery::tests::watcher_primary_key_blocks
 services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_take_the_keyed_host_verdict_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg

@@ -22,6 +22,7 @@ pub(super) struct TerminalCommitEpilogueContext<'a> {
     pub(super) output_path: &'a String,
     pub(super) relay_coord: &'a Arc<TmuxRelayCoord>,
     pub(super) turn_delivered: &'a Arc<AtomicBool>,
+    pub(super) host: &'a HostSnapshot,
 }
 
 pub(super) struct TerminalCommitEpilogueLocals<'a> {
@@ -517,7 +518,8 @@ pub(super) async fn run_terminal_commit_epilogue(
             dispatch_ok,
             watcher_handled_mailbox_finish,
         ) {
-            let tmux_alive = host_gate::tmux_alive(&tmux_session_name, channel_id).await;
+            let tmux_alive =
+                host_gate::tmux_alive(shared, &tmux_session_name, channel_id, context.host).await;
             let confirmed_end = relay_coord.confirmed_end_offset.load(Ordering::Acquire);
             let tmux_tail_offset = std::fs::metadata(&output_path)
                 .map(|meta| meta.len())

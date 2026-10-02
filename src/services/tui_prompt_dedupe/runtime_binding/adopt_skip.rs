@@ -148,6 +148,16 @@ pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
     });
 }
 
+/// Whether a launch or a reconcile listed `logical` as a Herdr pane, admitted or not.
+pub(crate) fn herdr_execution_listed(logical: &str) -> bool {
+    if !listed(|flag| flag.load(Acquire)) {
+        return false;
+    }
+    let executions = HERDR_EXECUTIONS.lock();
+    let executions = executions.unwrap_or_else(|poison| poison.into_inner());
+    executions.contains_key(logical)
+}
+
 /// Whether hooks must leave the pane on its current source; the lock is a leaf.
 fn herdr_execution_withheld(logical: &str) -> bool {
     if !listed(|flag| flag.load(Acquire)) {

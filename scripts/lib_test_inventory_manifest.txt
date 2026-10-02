@@ -6635,6 +6635,10 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegat
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_watcher_turn_shows_no_body_and_records_no_frontier
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_listed_herdr_pane_is_never_read_dead_after_a_stream
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_marked_herdr_pane_is_abandoned_only_by_its_stop_tombstone
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_streaming_tick_rechecks_the_host_before_capturing_the_pane
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_take_the_keyed_host_verdict_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::collector_death_keeps_a_turn_bound_to_another_host
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
@@ -6822,6 +6826,7 @@ services::discord::tmux::watcher_lifecycle::tests::tests::restore_scan_only_skip
 services::discord::tmux::watcher_lifecycle::tests::tests::reuse_existing_observes_reservation_mismatch_without_repair_or_candidate_write
 services::discord::tmux::watcher_lifecycle::tests::tests::same_tmux_different_output_path_replaces_watcher
 services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff
+services::discord::tmux::watcher_lifecycle::watch_host::tests::a_watcher_host_rises_to_herdr_only_on_a_herdr_marker_or_a_listed_pane
 services::discord::tmux::watcher_placeholder_status_tests::status_only_placeholder_requires_existing_card_or_activity
 services::discord::tmux::watcher_stream_progress_tests::persist_watcher_stream_progress_persists_tool_hold_witness
 services::discord::tmux::watcher_stream_progress_tests::persist_watcher_stream_progress_skips_rewind_seed_before_body_catches_up_4115

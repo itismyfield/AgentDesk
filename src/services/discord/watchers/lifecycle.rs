@@ -51,6 +51,10 @@ pub(super) use self::claude_restore::*;
 mod liveness;
 pub(super) use self::liveness::*;
 
+#[path = "lifecycle/watch_host.rs"]
+mod watch_host;
+pub(super) use self::watch_host::{HostSnapshot, WatchHost};
+
 #[path = "lifecycle/restore_support.rs"]
 mod restore_support;
 pub(super) use self::restore_support::*;
