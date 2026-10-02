@@ -180,6 +180,8 @@ pub(super) async fn run_stream_loop(
     }
 
     let mut state_dirty = false;
+    let terminal_episode = inflight_state.clone();
+    let mut observed_codex_terminal = None;
     #[rustfmt::skip]
     let (mut pending_long_running_open_after_state_save, mut pending_long_running_retarget_after_state_save, mut loop_outcome, mut runtime_handoff_retry_retained, mut admitted_codex_terminal_range, mut guarded_tool_frame_retry_retained) = (None, None, StreamLoopOutcome::Completed, false, None, false);
 
@@ -284,10 +286,22 @@ pub(super) async fn run_stream_loop(
                         finalize_cancel_inner!();
                         break 'outer;
                     }
+                    if observed_codex_terminal.is_none()
+                        && super::authority_loss::displaced_codex_terminal_matches(
+                            &terminal_episode,
+                            &cancel_token,
+                            &msg,
+                        )
+                    {
+                        observed_codex_terminal = Some(msg.clone());
+                    }
                     #[rustfmt::skip]
                     let (msg, admission, was_codex_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_deliver_directly(), (shared_owned.as_ref(), &cancel_token), &full_response, msg).await {
                         Ok(admitted) => admitted,
-                        Err(_) => { loop_outcome = StreamLoopOutcome::AuthorityLost; break 'outer; }
+                        Err(_) => {
+                            loop_outcome = StreamLoopOutcome::AuthorityLost;
+                            break 'outer;
+                        }
                     };
                     admitted_codex_terminal_range = admission.or(admitted_codex_terminal_range);
                     terminal_control_ready_observed |= was_codex_terminal;
@@ -919,6 +933,11 @@ pub(super) async fn run_stream_loop(
     *state.terminal_session_reset_required = terminal_session_reset_required;
     *state.recovery_retry = recovery_retry;
     *state.last_adk_heartbeat = last_adk_heartbeat;
+    if loop_outcome == StreamLoopOutcome::AuthorityLost
+        && let Some(terminal) = observed_codex_terminal
+    {
+        pending_stream_messages.push_front(terminal);
+    }
     *state.pending_stream_messages = pending_stream_messages;
     *state.pending_status_tool_results = pending_status_tool_results;
     *state.pending_status_tool_results_by_id = pending_status_tool_results_by_id;

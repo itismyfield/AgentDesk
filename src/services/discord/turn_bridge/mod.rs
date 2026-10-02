@@ -1,4 +1,7 @@
 mod activity_heartbeat;
+mod authority_loss;
+#[cfg(test)]
+mod authority_loss_tests;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
@@ -487,6 +490,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut expected_current_message = (entry_msg_id, inflight_state.current_msg_len);
         let (mut completion_guard, mut inflight_guard) =
             make_bridge_guards(&mut bridge, &inflight_state, &shared_owned, &provider);
+        let admitted_episode = inflight_state.clone();
         let resumed_long_running_placeholder_notice_msg_id =
             bridge_entry_persist::resumed_long_running_placeholder_notice_message_id(
                 resumed_placeholder_clear_applied,
@@ -581,6 +585,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             }),
         );
 
+        #[cfg(test)]
+        authority_loss_tests::before_stream(channel_id).await;
         let stream_loop_output = stream_loop::run_stream_loop(
             stream_loop::StreamLoopContext {
                 shared_owned: shared_owned.clone(),
@@ -678,8 +684,15 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         match stream_loop_output.outcome {
             stream_loop::StreamLoopOutcome::Completed => {}
             stream_loop::StreamLoopOutcome::AuthorityLost => {
-                completion_guard.relinquish_bridge_authority();
                 inflight_guard.defuse();
+                #[cfg(test)]
+                authority_loss_tests::authority_lost(channel_id);
+                authority_loss::settle_displaced_terminal(
+                    (&provider, &admitted_episode, &cancel_token),
+                    (&mut rx, &mut pending_stream_messages),
+                    &mut completion_guard,
+                ).await;
+                completion_guard.relinquish_bridge_authority();
                 return;
             }
         }

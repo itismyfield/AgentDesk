@@ -56,6 +56,42 @@ impl CompletionGuard {
         self.publish_completed_on_drop = false;
     }
 
+    // The original provider ended with bridge output intentionally suppressed.
+    // Finish only its captured mailbox actor; the replacement relay retains its row and UI.
+    pub(super) async fn settle_displaced_terminal(
+        &mut self,
+        provider: &ProviderKind,
+        actor: &Arc<CancelToken>,
+        row: &InflightTurnState,
+    ) {
+        let mut snapshot = super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(row);
+        snapshot.recovery_actor = Some(Arc::downgrade(actor));
+        snapshot.status_message_id = None;
+        snapshot.relay_ownership_only = true;
+        self.note_terminal_projection_settled(true);
+        self.note_terminal_disposition_settled(true);
+        let outcome = self
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                self.turn_key,
+                provider.clone(),
+                super::super::turn_finalizer::TerminalEvent::Complete,
+                super::super::turn_finalizer::FinalizeContext::bridge(),
+                Some(snapshot),
+                self.shared.clone(),
+            )
+            .await;
+        if matches!(
+            outcome,
+            super::super::turn_finalizer::FinalizeOutcome::Finalized {
+                removed_token: Some(_),
+                ..
+            }
+        ) {
+            self.note_completion_signal(BridgeCompletionSignal::DeferredToOwner);
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn for_completion_test(
         shared: Arc<SharedData>,
