@@ -462,3 +462,28 @@ async fn a_marked_herdr_pane_is_abandoned_only_by_its_stop_tombstone() {
     assert!(abandoned(), "the turn's own stop tombstone abandons it");
     assert_eq!(calls(), 0, "no capture once the marker says Herdr");
 }
+
+// A pane only the Herdr admission map lists is never read dead by the post-stream clear and
+// kill or by the missing-inflight fallback, and none of them asks tmux about it.
+#[tokio::test]
+async fn a_listed_herdr_pane_is_never_read_dead_after_a_stream() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+    let channel = ChannelId::new(6_284_191);
+    let name = CLAUDE.build_tmux_session_name("p8-listed");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let host = HostSnapshot::new(WatchHost::Legacy);
+    let calls = || {
+        let calls = tmux.take_calls().into_iter();
+        calls.filter(|call| call.contains(&name)).count()
+    };
+    assert!(host_gate::tmux_pane_dead(&CLAUDE, channel, &name, &host));
+    assert!(calls() > 0, "a Legacy pane is probed");
+    crate::services::tui_prompt_dedupe::install_herdr_execution(&name, "p8-listed");
+    assert!(!host_gate::tmux_pane_dead(&CLAUDE, channel, &name, &host));
+    assert!(!host_gate::tmux_dead_pane_present(
+        &CLAUDE, channel, &name, &host
+    ));
+    assert!(host_gate::marker_alive(&shared, &name, channel, &host).await);
+    assert_eq!(calls(), 0);
+}
