@@ -39,10 +39,7 @@ pub fn default_resource_lock_ttl_secs() -> i64 {
     DEFAULT_RESOURCE_LOCK_TTL_SECS
 }
 
-// reason: Unreal project lock-key builder referenced only by the
-// `#[cfg(test)]` multinode regression suite and unit tests; no production
-// caller in the lib build. See #3034.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn unreal_project_lock_key(repo: &str) -> String {
     format!("unreal:project:{}", repo.trim())
 }

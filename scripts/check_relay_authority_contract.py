@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -29,6 +30,9 @@ CONDITION3_MUTATION_IF = (
     " || steps.mutation_wiring.outputs.wiring_changed != 'false'"
 )
 TEST_ID_SUFFIX = ": test"
+LIB_TEST_INVENTORY = Path("scripts/lib_test_inventory_manifest.txt")
+MUTATION_FILTER_STEP_ID = "mutation_paths"
+SURFACE_GUARD_KINDS = ("mutation_row", "named_target", "entry_test", "known_gap")
 
 
 class ManifestError(ValueError):
@@ -267,6 +271,100 @@ def load_active_lanes(
     return active, gaps
 
 
+def script_mutation_files(script: str) -> set[str]:
+    """The MUTATION_FILES array as the mutation script declares it."""
+    constants = dict(re.findall(r'^readonly ([A-Z0-9_]+)="([^"]+)"$', script, re.M))
+    body = re.search(r"^readonly -a MUTATION_FILES=\(\n(.*?)^\)$", script, re.M | re.S)
+    if body is None:
+        raise ManifestError(f"{CONDITION3_MUTATION_SCRIPT} must declare a MUTATION_FILES array")
+    names = re.findall(r'"\$([A-Z0-9_]+)"', body.group(1))
+    if not names or any(name not in constants for name in names):
+        raise ManifestError(f"{CONDITION3_MUTATION_SCRIPT} MUTATION_FILES must name readonly path constants")
+    return {constants[name] for name in names}
+
+
+def mutation_filter_patterns(repo_root: Path) -> set[str]:
+    job = load_relay_authority_job(repo_root, RELAY_AUTHORITY_MUTATIONS_JOB)
+    for step in job.get("steps") or []:
+        if isinstance(step, dict) and step.get("id") == MUTATION_FILTER_STEP_ID:
+            filters = yaml.safe_load(str((step.get("with") or {}).get("filters", "")))
+            if isinstance(filters, dict) and isinstance(filters.get("mutation_sources"), list):
+                return set(filters["mutation_sources"])
+    raise ManifestError(f"workflow jobs.{RELAY_AUTHORITY_MUTATIONS_JOB} must keep its {MUTATION_FILTER_STEP_ID} filter")
+
+
+def lib_test_ids(repo_root: Path) -> set[str]:
+    try:
+        lines = (repo_root / LIB_TEST_INVENTORY).read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ManifestError(f"cannot read {LIB_TEST_INVENTORY}: {error}") from error
+    return {line for line in lines if line and not line.startswith(("#", "["))}
+
+
+def validate_authority_surface(payload: dict[str, object], repo_root: Path) -> int:
+    """Each declared authority path must exist and name guards that resolve, and every mutation row
+    and active lane must be declared. Authority cannot be read off a path, so new files enter by review."""
+    surface = payload.get("authority_surface")
+    if surface is None and payload.get("condition3_mutations_present") is not True:
+        return 0
+    if not isinstance(surface, list) or not surface:
+        raise ManifestError("manifest must declare a non-empty authority_surface")
+    rows = {row.get("name"): row for row in payload.get("condition3_mutations") or [] if isinstance(row, dict)}
+    lanes = {lane.get("name"): lane for lane in payload.get("lanes") or [] if isinstance(lane, dict)}
+    test_ids: set[str] | None = None
+    declared_rows: list[str] = []
+    named: set[str] = set()
+    paths: set[str] = set()
+    for index, entry in enumerate(surface):
+        path = entry.get("path") if isinstance(entry, dict) else None
+        guards = entry.get("guards") if isinstance(entry, dict) else None
+        if not isinstance(path, str) or not path or not isinstance(entry.get("decides"), str) or not entry["decides"]:
+            raise ManifestError(f"authority_surface entry {index} needs a path and what it decides")
+        if path in paths:
+            raise ManifestError(f"authority_surface declares {path} twice")
+        paths.add(path)
+        source = repo_root / path
+        if source.is_symlink() or not source.is_file():
+            raise ManifestError(f"authority_surface path {path} is not a regular file; reclassify it")
+        if not isinstance(guards, list) or not guards:
+            raise ManifestError(f"authority_surface {path} must name at least one guard")
+        for guard in guards:
+            kind, _, value = str(guard).partition(":")
+            if kind not in SURFACE_GUARD_KINDS or not value:
+                raise ManifestError(f"authority_surface {path} has unknown guard {guard!r}")
+            if kind == "mutation_row":
+                if rows.get(value, {}).get("file") != path:
+                    raise ManifestError(f"authority_surface {path}: mutation row {value} does not mutate it")
+                declared_rows.append(value)
+            elif kind == "named_target":
+                if lanes.get(value, {}).get("status") != "active":
+                    raise ManifestError(f"authority_surface {path}: {value} is not an active lane")
+                named.add(value)
+            elif kind == "entry_test":
+                test_ids = lib_test_ids(repo_root) if test_ids is None else test_ids
+                if value not in test_ids:
+                    raise ManifestError(f"authority_surface {path}: entry test {value} is not in {LIB_TEST_INVENTORY}")
+            elif not re.fullmatch(r"#[1-9][0-9]*", value):
+                raise ManifestError(f"authority_surface {path}: known_gap must cite an issue as #<number>")
+
+    if sorted(declared_rows) != sorted(name for name in rows if isinstance(name, str)):
+        raise ManifestError("authority_surface must declare every condition3 mutation row exactly once")
+    undeclared_lanes = sorted(name for name, lane in lanes.items() if lane.get("status") == "active" and name not in named)
+    if undeclared_lanes:
+        raise ManifestError(f"authority_surface does not declare active lanes {undeclared_lanes}")
+    mutated = {row["file"] for row in rows.values()}
+    script = (repo_root / CONDITION3_MUTATION_SCRIPT).read_text(encoding="utf-8")
+    if script_mutation_files(script) != mutated:
+        raise ManifestError(f"{CONDITION3_MUTATION_SCRIPT} MUTATION_FILES must equal the condition3 row files")
+    judges = {row.get("judge") for row in rows.values()}
+    if not all(isinstance(judge, str) and (repo_root / judge).is_file() for judge in judges):
+        raise ManifestError("every condition3 mutation row must name an existing judge file")
+    missing = sorted((mutated | judges) - mutation_filter_patterns(repo_root))
+    if missing:
+        raise ManifestError(f"mutation path filter must select every mutated and judging file; missing {missing}")
+    return len(surface)
+
+
 def count_test_ids(output: str) -> int:
     return sum(1 for line in output.splitlines() if line.strip().endswith(TEST_ID_SUFFIX))
 
@@ -336,12 +434,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         lanes, gaps = load_active_lanes(manifest, repo_root)
+        surface = validate_authority_surface(json.loads(manifest.read_text(encoding="utf-8")), repo_root)
     except ManifestError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
 
     print(
-        f"relay-authority manifest: active={len(lanes)} gaps={len(gaps)} "
+        f"relay-authority manifest: active={len(lanes)} gaps={len(gaps)} surface={surface} "
         f"path={manifest.relative_to(repo_root) if manifest.is_relative_to(repo_root) else manifest}"
     )
     for gap in gaps:

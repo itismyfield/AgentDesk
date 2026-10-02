@@ -1,42 +1,207 @@
 {
   "schema_version": 1,
   "condition3_mutations_present": true,
-  "condition3_mutations_comment": "The fixed mutation rows scripts/run_relay_authority_mutations.sh runs, in order. Not read by check_relay_authority_contract.py; kept honest by tests/test_relay_authority_mutations.py, which runs the script and compares the MUTATION_RESULT names, mutated files and named targets against this list. The declared floor stays four; S4-m5/S4-m6 are the #5071 relay-tail S4 destructive-fence rows and S4-m7 is its r2 repair row, which reopens the fence's judge/commit window instead of neutering the verdict.",
+  "condition3_mutations_comment": "The fixed mutation rows scripts/run_relay_authority_mutations.sh runs, in order. check_relay_authority_contract.py --check-manifest requires the script MUTATION_FILES to equal these files and the PR path filter to select every file and judge (the file defining the target test); tests/test_relay_authority_mutations.py runs the script and compares the MUTATION_RESULT names, mutated files and named targets against this list. The declared floor stays four; S4-m5/S4-m6 are the #5071 relay-tail S4 destructive-fence rows and S4-m7 is its r2 repair row, which reopens the fence's judge/commit window instead of neutering the verdict.",
   "condition3_mutations": [
     {
       "name": "M10",
       "file": "src/services/discord/session_relay_sink/terminal_handoff.rs",
-      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof"
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof",
+      "judge": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs"
     },
     {
       "name": "M6",
       "file": "src/services/discord/session_relay_sink/terminal_handoff.rs",
-      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered"
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered",
+      "judge": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs"
     },
     {
       "name": "M8",
       "file": "src/services/discord/session_relay_sink/terminal_handoff.rs",
-      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error"
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error",
+      "judge": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs"
     },
     {
       "name": "anchor-drop",
       "file": "src/services/discord/session_relay_sink.rs",
-      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof"
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof",
+      "judge": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs"
     },
     {
       "name": "S4-m5",
       "file": "src/services/discord/tmux_watcher_registry/fences.rs",
-      "target": "services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel"
+      "target": "services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel",
+      "judge": "src/services/discord/relay_recovery/tests.rs"
     },
     {
       "name": "S4-m6",
       "file": "src/services/discord/destructive_cancel_gate.rs",
-      "target": "services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe"
+      "target": "services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe",
+      "judge": "src/services/discord/destructive_cancel_gate.rs"
     },
     {
       "name": "S4-m7",
       "file": "src/services/discord/tmux_watcher_registry/fences.rs",
-      "target": "services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire"
+      "target": "services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire",
+      "judge": "src/services/discord/tmux_watcher_registry_restore_tests.rs"
+    }
+  ],
+  "authority_surface_comment": "Relay authority paths, each with the guards that protect it: a fixed mutation row, a named target lane run on every PR, a production entry test, or a known gap citing its issue. check_relay_authority_contract.py --check-manifest requires every path to exist, every guard to resolve (row file, active lane, test id in scripts/lib_test_inventory_manifest.txt, #issue), and every mutation row and active lane to be declared. Authority cannot be decided from a path pattern, so new authority files are added here by review.",
+  "authority_surface": [
+    {
+      "path": "src/services/discord/session_relay_sink/terminal_handoff.rs",
+      "decides": "whether a terminal relay frame was delivered, fenced or failed",
+      "guards": [
+        "mutation_row:M10",
+        "mutation_row:M6",
+        "mutation_row:M8",
+        "named_target:t1-sink-terminal-handoff"
+      ]
+    },
+    {
+      "path": "src/services/discord/session_relay_sink.rs",
+      "decides": "the tail anchor a relay delivery persists",
+      "guards": [
+        "mutation_row:anchor-drop",
+        "named_target:t1-sink-terminal-handoff"
+      ]
+    },
+    {
+      "path": "src/services/discord/tmux_watcher_registry/fences.rs",
+      "decides": "the destructive watcher fence against a live delivery lease",
+      "guards": [
+        "mutation_row:S4-m5",
+        "mutation_row:S4-m7"
+      ]
+    },
+    {
+      "path": "src/services/discord/destructive_cancel_gate.rs",
+      "decides": "whether a terminal envelope may outrank relay frontier progress on cancel",
+      "guards": [
+        "mutation_row:S4-m6"
+      ]
+    },
+    {
+      "path": "src/services/discord/relay_recovery.rs",
+      "decides": "the single-actor recovery decision for a relay channel",
+      "guards": [
+        "named_target:t4-single-actor-recovery-decision"
+      ]
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/rowless_delivery_authority.rs",
+      "decides": "whether a rowless soft terminal owes output (ledger frontier) and has a live delivery holder (lease)",
+      "guards": [
+        "named_target:t5-c1-rowless-terminal-ledger-and-lease"
+      ],
+      "note": "Not a fixed mutation row: this named target runs on every PR and kills by behaviour the ledger_owes_output polarity flip, Leased->Unleased, and dropping either the frontier or the lease lookup."
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/terminal_relay_plan.rs",
+      "decides": "the soft-terminal direct-send plan built from the rowless authority",
+      "guards": [
+        "named_target:t5-c1-rowless-terminal-ledger-and-lease"
+      ]
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/turn_identity/soft_terminal_authority.rs",
+      "decides": "which turn identity a soft terminal frame belongs to",
+      "guards": [
+        "named_target:t5-c1-rowless-terminal-ledger-and-lease"
+      ]
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/streaming_status_tick.rs",
+      "decides": "that a recovered native preview terminal stays one visible copy",
+      "guards": [
+        "named_target:t5-native-recovered-preview-terminal"
+      ]
+    },
+    {
+      "path": "src/services/discord/turn_bridge/stream_tick/guarded_persist.rs",
+      "decides": "stream lifecycle authority when the row vanishes or the watcher epoch advances",
+      "guards": [
+        "named_target:t5-s4-missing-row-cohort-lifecycle",
+        "named_target:t5-s4-same-authority-watcher-epoch"
+      ]
+    },
+    {
+      "path": "src/services/discord/turn_bridge/bridge_entry_persist.rs",
+      "decides": "the bridge entry gate over outcome and anchor for rowless turns",
+      "guards": [
+        "named_target:t5-s7a-entry-outcome-matrix",
+        "named_target:t5-s7a-no-anchor-no-visible-mutation",
+        "named_target:t5-s7a-detached-rowless-state-preserved"
+      ]
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay.rs",
+      "decides": "TUI prompt relay delivery for every executed YAML e2e scenario class",
+      "guards": [
+        "named_target:relay-e2e-scenario-census"
+      ]
+    },
+    {
+      "path": "src/services/discord/catch_up.rs",
+      "decides": "when catch-up may advance the phase-2 checkpoint past a queued message",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it",
+        "entry_test:services::discord::catch_up::classification_order_tests::queue_membership_alone_does_not_advance_the_phase2_checkpoint"
+      ]
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay/synthetic_start.rs",
+      "decides": "whether a finished synthetic owner is reclaimed when a new TUI-direct turn claims the channel",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::synthetic_start::stale_reclaim::claim_entry_tests::claim_entry_reclaims_a_finished_readopted_owner_and_starts_the_new_turn"
+      ]
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs",
+      "decides": "which stale synthetic mailbox owner may be released",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::synthetic_start::stale_reclaim::claim_entry_tests::claim_entry_reclaims_a_finished_readopted_owner_and_starts_the_new_turn"
+      ]
+    },
+    {
+      "path": "src/services/discord/turn_finalizer/episode.rs",
+      "decides": "that a finalized turn finishes its mailbox episode",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once",
+        "named_target:relay-e2e-local-model-queue-wake"
+      ]
+    },
+    {
+      "path": "src/services/discord/mailbox_finish.rs",
+      "decides": "which active turn a finish call may end",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once",
+        "named_target:relay-e2e-local-model-queue-wake"
+      ]
+    },
+    {
+      "path": "src/services/turn_orchestrator/lease_release.rs",
+      "decides": "the active-turn anchor release that frees the channel for the next queued turn",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once",
+        "named_target:relay-e2e-local-model-queue-wake"
+      ]
+    },
+    {
+      "path": "src/server/routes/health_api.rs",
+      "decides": "whether stale-mailbox repair may run while messages are queued",
+      "guards": [
+        "known_gap:#5996"
+      ],
+      "note": "Route tests reach the repair handler but none seeds a queue, so the queue gate is unproven; the queue-preservation test lands with the #5996 repair rewrite."
+    },
+    {
+      "path": "src/services/discord/tmux_watcher.rs",
+      "decides": "that the root watcher loop consults cancel_yields_before_delivery before delivering",
+      "guards": [
+        "known_gap:#4229"
+      ],
+      "note": "No test drives the root watcher loop, so only the predicate body is tested; covering the wiring waits for the loop decomposition."
     }
   ],
   "lanes": [

@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 
-use super::model::{PromptContentVisibility, PromptManifest, PromptManifestLayer};
+#[cfg(test)]
+use super::model::PromptContentVisibility;
+use super::model::{PromptManifest, PromptManifestLayer};
 use super::redaction::{normalized_opt_owned, usize_to_i64};
 
 pub struct PromptManifestBuilder {
@@ -37,9 +39,7 @@ impl PromptManifestBuilder {
         self
     }
 
-    // reason: builder convenience exercised by the prompt-manifest test suite;
-    // production callers use the lower-level `layer` API. See #3034.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn content_layer(
         self,
         layer_name: impl Into<String>,

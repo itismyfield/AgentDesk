@@ -140,8 +140,8 @@ four checks:
 
 For new tuple-style JSON route handlers, prefer the light helpers in
 `crate::utils::api` for common simple responses and API query bounds:
-`bad_request`, `internal_error`, `error_response` (any other status, such as 404),
-and `clamp_api_limit`. Keep using `AppError` for routes that already return
+`bad_request`, `error_response` (any other status, such as 404 or 500), and
+`clamp_api_limit`. Keep using `AppError` for routes that already return
 `AppResult` or need structured `code/context` fields.
 
 Allowlist format lives in `scripts/audit_allowlist.toml`. Entries are
