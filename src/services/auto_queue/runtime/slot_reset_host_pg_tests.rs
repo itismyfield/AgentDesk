@@ -40,7 +40,7 @@ mod host {
     use crate::services::discord::admin_host_guard::ManagedReset;
     use crate::services::discord::host_teardown_gate::test_support::{
         Stored, busy_turn, channel_key, inflight_needing_backfill, mailbox_turn_active,
-        nameless_turn, seed,
+        nameless_turn, running_session, runtime, runtime_state, seed,
     };
 
     /// Where `tmux` resolves: a live isolated server, a missing binary, or no server socket.
@@ -399,6 +399,118 @@ mod host {
             assert!(
                 tmux.take_calls().is_empty(),
                 "{ctx}: the resets run no tmux"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// With a pool-connected runtime, under three tmux conditions, a slot clear takes each
+    /// thread's runtime-clear verdict before its first write and runs only that verdict.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::TempDir::new().unwrap();
+        let _root =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        let conditions = [Tmux::LiveServer, Tmux::MissingBinary, Tmux::NoServerSocket];
+        for (round, condition) in conditions.into_iter().enumerate() {
+            let tmux = TmuxEnv::install(condition);
+            let id = |n: u64| 1_481_000_000_000_000 + round as u64 * 100 + n;
+            let name = |n: u64| format!("AgentDesk-claude-p4r2v-{round}-{n}");
+            let ctx = format!("{condition:?}");
+            let (ta, tb, tc, td) = (id(1), id(2), id(3), id(4));
+            let channel = ChannelId::new;
+            let agent = format!("p4r2-verdict-{round}");
+            slot(&pool, &agent, &[ta, tb, tc, td]).await;
+            let legacy = |thread: u64, n: u64| (thread, name(n), Stored::Legacy);
+            for (thread, n) in [(ta, 1), (tc, 3), (td, 5)] {
+                let (thread, name, stored) = legacy(thread, n);
+                thread_row(
+                    &pool,
+                    &shared,
+                    (thread, &name, stored),
+                    "idle",
+                    Some("claude"),
+                )
+                .await;
+            }
+            for (thread, n) in [(ta, 1), (td, 5)] {
+                running_session(&shared, &pool, channel(thread), &name(n), false, None).await;
+            }
+            // B is hosted and its compat inflight row would be saved again by a full inflight load.
+            let b_name = name(2);
+            let row = (tb, b_name.as_str(), Stored::Hosted);
+            thread_row(&pool, &shared, row, "idle", Some("claude")).await;
+            busy_turn(&shared, channel(tb), &name(2)).await;
+            let inflight = inflight_needing_backfill(channel(tb));
+            let raw = std::fs::read(&inflight).unwrap();
+            // C's runtime names the channel's current hosted row, disconnected so the update skips it.
+            running_session(&shared, &pool, channel(tc), &name(4), false, Some(&name(4))).await;
+            let sql = "UPDATE sessions SET thread_channel_id = $2, status = 'disconnected'
+                       WHERE session_key = $1";
+            let hosted_key = channel_key(&shared, &name(4));
+            exec(&pool, sql, &[Some(&hosted_key), Some(&tc.to_string())]).await;
+            for n in 1..=6 {
+                tmux.start(&name(n));
+            }
+            let (b_rows, c_rows) = (thread_rows(&pool, tb).await, thread_rows(&pool, tc).await);
+            let state = |thread: u64| runtime_state(&shared, channel(thread));
+            let (a_state, b_state, c_state) = (state(ta).await, state(tb).await, state(tc).await);
+            let _ = tmux.take_calls();
+
+            let clear = super::super::clear_slot_threads_for_slot_pg;
+            let cleared = clear(Some(registry.clone()), &pool, &agent, 0).await;
+            // Before the spawned clear runs, D's runtime switches to another session's name.
+            running_session(&shared, &pool, channel(td), &name(6), false, None).await;
+            let slot_threads = [ta, tb, tc, td];
+            let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
+            let early = runs.iter().any(|run| run.as_slice() == slot_threads);
+            drop(runs);
+            assert!(!early, "{ctx}: the rename runs before the spawned clear");
+            assert_eq!(cleared, Ok(2), "{ctx}: only A's and D's rows are idled");
+
+            let clears = runtime_clears_after_done(&slot_threads).await;
+            let applied = Some(ManagedReset::Applied(Some(name(1))));
+            assert!(
+                matches!(clears.as_slice(), [(a, a_reset), (d, Some(ManagedReset::Refused(_)))]
+                    if *a == ta && *a_reset == applied && *d == td),
+                "{ctx}: {clears:?}"
+            );
+            assert_eq!(thread_rows(&pool, tb).await, b_rows, "{ctx}");
+            assert_eq!(thread_rows(&pool, tc).await, c_rows, "{ctx}");
+            assert_eq!(runtime_state(&shared, channel(tb)).await, b_state, "{ctx}");
+            assert_eq!(runtime_state(&shared, channel(tc)).await, c_state, "{ctx}");
+            assert_eq!(
+                std::fs::read(&inflight).unwrap(),
+                raw,
+                "{ctx}: B's inflight bytes"
+            );
+            assert_ne!(
+                state(ta).await,
+                a_state,
+                "{ctx}: A's provider session is cleared"
+            );
+            let renamed = name(6).replace("AgentDesk-claude-", "") + "-sid";
+            assert!(
+                state(td).await.contains(&renamed),
+                "{ctx}: D's renamed session is kept"
+            );
+            assert!(!tmux.alive(&name(1)), "{ctx}: A's session is reset");
+            for n in 2..=6 {
+                assert!(
+                    !tmux.live || tmux.alive(&name(n)),
+                    "{ctx}: {} survives",
+                    name(n)
+                );
+            }
+            let calls = tmux.take_calls();
+            assert!(
+                calls.iter().all(|call| call.contains(&name(1))),
+                "{ctx}: {calls:?}"
             );
         }
         pool.close().await;

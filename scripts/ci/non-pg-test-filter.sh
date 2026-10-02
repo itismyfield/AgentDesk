@@ -745,6 +745,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::route::planning::record_entry_dispatch_failure_tests
   services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
+  services::auto_queue::runtime::slot_reset_host_pg_tests::host
   services::auto_queue::tests
   services::automation_candidate_materializer::iteration_result_tests
   services::cluster::attachment_transfer::storage_tests
