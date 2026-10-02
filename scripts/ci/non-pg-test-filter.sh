@@ -306,6 +306,7 @@ NON_PG_FILTER_REPLAY=(
   server::message_outbox_retry_tests::session_release_requires_matching_terminal_delivery_outbox_marker
   server::message_outbox_retry_tests::session_release_requires_same_failed_outbox_session_when_present
   server::routes::agents::host_guard_tests::auth_login_routes_refuse_a_target_another_host_claims
+  server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
   server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_detects_split_brain_completion
   server::routes::campaigns::tests::ledger_body_limit_stays_at_sixteen_mebibytes
   server::routes::campaigns::tests::ledger_put_accepts_a_document_larger_than_the_axum_default_limit
