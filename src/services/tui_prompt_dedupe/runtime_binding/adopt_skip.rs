@@ -113,17 +113,17 @@ pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
     herdr_executions(true).insert(logical.to_owned(), (nonce.to_owned(), true));
 }
 
-/// The reconcile refused execution `nonce` on `logical` (`None` when it could not name one); a
-/// refusal of another execution than the listed one leaves that one as it is.
+/// The reconcile refused execution `nonce` on `logical`, or could not name one (`None`): that
+/// only withholds a listed pane, and a refusal of another execution leaves the listed one alone.
 pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
-    let mut panes = herdr_executions(true);
-    match panes.get_mut(logical) {
-        Some((listed, _)) if nonce.is_some_and(|nonce| nonce != listed) => {}
-        Some((_, admitted)) => *admitted = false,
-        None => {
-            let nonce = nonce.unwrap_or_default().to_owned();
-            panes.insert(logical.to_owned(), (nonce, false));
+    let mut executions = herdr_executions(true);
+    match (executions.get_mut(logical), nonce) {
+        (Some((listed, _)), Some(nonce)) if nonce != listed => {}
+        (Some((_, admitted)), _) => *admitted = false,
+        (None, Some(nonce)) => {
+            executions.insert(logical.to_owned(), (nonce.to_owned(), false));
         }
+        (None, None) => {}
     }
 }
 

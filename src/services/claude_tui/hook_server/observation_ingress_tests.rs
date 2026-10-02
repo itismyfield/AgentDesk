@@ -636,45 +636,39 @@ fn a_tmux_pane_switch_never_looks_up_the_herdr_hold() {
     assert_eq!(HERDR_HOLD_LOOKUPS.with(std::cell::Cell::get), 0);
 }
 
-// A Herdr pane's hold follows the execution it names: an older execution's refusal leaves the
-// newer one's admission open, and the listed one's refusal holds a switch until it is admitted.
+// A Herdr hold follows the execution it names: an unnamed refusal holds no unlisted pane, an older
+// execution's refusal leaves a newer admission open, and the listed one's holds until admitted.
 #[test]
 fn a_herdr_hold_follows_only_the_execution_it_names() {
     use crate::services::tui_prompt_dedupe::{admit_herdr_execution, withhold_herdr_execution};
     let ingress = Ingress::new();
     let (channel, tmux) = (7_431, "ingress-herdr-hold");
-    let (a, b, c) = (uuid(), uuid(), uuid());
+    let (a, b, c, d) = (uuid(), uuid(), uuid(), uuid());
     ingress.pane(tmux, channel, &a);
     let bound = || runtime_binding_for_tmux_session(tmux).unwrap().session_id;
-    admit_herdr_execution(tmux, "n2");
-    withhold_herdr_execution(tmux, Some("n1"));
-    ingress.transcript(&b);
-    let to_b = ingress.payload(&b, None);
-    assert_eq!(
-        ingress.claude_hook("UserPromptSubmit", &a, &to_b, Some(&uuid())),
-        202
-    );
+    let switch = |next: &str, id: &str| {
+        ingress.transcript(next);
+        let payload = ingress.payload(next, None);
+        ingress.claude_hook("UserPromptSubmit", &a, &payload, Some(id))
+    };
+    withhold_herdr_execution(tmux, None);
+    assert_eq!(switch(&b, &uuid()), 202);
     assert_eq!(bound().as_deref(), Some(b.as_str()));
     clear_claude_session_rotation(tmux);
 
-    withhold_herdr_execution(tmux, Some("n2"));
-    ingress.transcript(&c);
-    let (to_c, id) = (ingress.payload(&c, None), uuid());
-    let lines = events(channel).len();
-    assert_eq!(
-        ingress.claude_hook("UserPromptSubmit", &a, &to_c, Some(&id)),
-        425
-    );
-    withhold_herdr_execution(tmux, None);
-    assert_eq!(
-        ingress.claude_hook("UserPromptSubmit", &a, &to_c, Some(&id)),
-        425
-    );
-    assert_eq!((bound(), events(channel).len()), (Some(b.clone()), lines));
     admit_herdr_execution(tmux, "n2");
-    assert_eq!(
-        ingress.claude_hook("UserPromptSubmit", &a, &to_c, Some(&id)),
-        202
-    );
+    withhold_herdr_execution(tmux, Some("n1"));
+    assert_eq!(switch(&c, &uuid()), 202);
     assert_eq!(bound().as_deref(), Some(c.as_str()));
+    clear_claude_session_rotation(tmux);
+
+    withhold_herdr_execution(tmux, Some("n2"));
+    let (id, lines) = (uuid(), events(channel).len());
+    assert_eq!(switch(&d, &id), 425);
+    withhold_herdr_execution(tmux, None);
+    assert_eq!(switch(&d, &id), 425);
+    assert_eq!((bound(), events(channel).len()), (Some(c.clone()), lines));
+    admit_herdr_execution(tmux, "n2");
+    assert_eq!(switch(&d, &id), 202);
+    assert_eq!(bound().as_deref(), Some(d.as_str()));
 }
