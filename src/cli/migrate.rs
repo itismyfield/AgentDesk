@@ -21,15 +21,6 @@ pub enum ToolPolicyMode {
 }
 
 impl ToolPolicyMode {
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Report => "report",
-            Self::BotIntersection => "bot-intersection",
-            Self::BotUnion => "bot-union",
-        }
-    }
-
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "report" => Ok(Self::Report),
