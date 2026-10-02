@@ -165,6 +165,7 @@ pub(crate) struct BeaconArmed {
 
 impl BeaconArmed {
     /// `Some(n)` when the beacon is running on an `n`-worker runtime.
+    #[cfg(test)]
     pub(crate) fn workers(self) -> Option<u64> {
         self.workers
     }

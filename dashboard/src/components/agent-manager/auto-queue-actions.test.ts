@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  buildRequestGenerateGroups,
+  buildGenerateGroups,
   resetAutoQueueForSelection,
 } from "./auto-queue-actions";
 
@@ -50,9 +50,9 @@ describe("auto-queue-actions", () => {
     },
   );
 
-  it("groups request-generate candidates by repo and agent", () => {
+  it("groups generate candidates by repo and agent", () => {
     expect(
-      buildRequestGenerateGroups(
+      buildGenerateGroups(
         [
           { repo: "repo-a", agentId: "agent-a", issueNumber: 3 },
           { repo: "repo-a", agentId: "agent-a", issueNumber: 1 },
@@ -72,7 +72,7 @@ describe("auto-queue-actions", () => {
 
   it("uses the selected repo when a ready entry has an empty repo", () => {
     expect(
-      buildRequestGenerateGroups(
+      buildGenerateGroups(
         [{ repo: "", agentId: "agent-a", issueNumber: 9 }],
         "fallback",
       ),

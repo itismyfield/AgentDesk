@@ -1628,6 +1628,8 @@ mod tests {
         )
         .unwrap();
         let stop_endpoint = endpoint.clone();
+        // Stop 응답 창에는 시험이 일부러 붙잡는 search 보류가 들어가므로 운영 상한(750ms) 대신
+        // 아래 단계별 대기 합(ingress 500ms + 보류 100ms + drain 2s×2)보다 긴 창을 준다.
         let stop_relay = std::thread::spawn(move || {
             handoff_ordered_hook_event_response_with_timeout(
                 &stop_endpoint,
@@ -1635,7 +1637,7 @@ mod tests {
                 "Stop",
                 session_id,
                 serde_json::json!({}),
-                STOP_RELAY_TIMEOUT,
+                Duration::from_secs(5),
             )
         });
         let ingress_dir = relay_queue_dir("claude", session_id)

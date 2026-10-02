@@ -12,6 +12,10 @@ use crate::services::discord::tmux_watcher_registry::{
 /// #5071 T3-A1 observation label for the dead-frontier automatic watcher cancel.
 const DEAD_FRONTIER_CANCEL_IDENTITY_SITE: &str = "relay_recovery_dead_frontier_cancel";
 
+#[cfg(all(test, unix))]
+#[path = "tests/host_deferred.rs"]
+mod host_deferred_tests;
+
 pub(super) async fn apply_relay_recovery_decision(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
@@ -51,6 +55,25 @@ pub(super) async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ClearOrphanPendingToken => {
             let channel = ChannelId::new(decision.channel_id);
+            // Every source finishes the mailbox and releases the counter below, so a session on
+            // an unconfirmed host keeps both whichever lane asked.
+            let refusal = super::super::admin_host_guard::turn_release_refusal;
+            if let Some(reason) = refusal(shared, provider, channel).await {
+                let source = source.as_str();
+                tracing::warn!(channel_id = channel.get(), source, %reason, "orphan token kept");
+                let after = mailbox_snapshot(shared, channel).await;
+                return RelayRecoveryApplyResult {
+                    status: "host_deferred",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: false,
+                    post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
+                    post_mailbox_queue_depth: Some(after.intervention_queue.len()),
+                    reattach_watcher_spawned: None,
+                    reattach_watcher_replaced: None,
+                    reattach_initial_offset: None,
+                    reattach_error: None,
+                };
+            }
             // Finish only the snapshot's exact episode and keep the queue: a
             // successor admitted after the snapshot fails the nonce/start guard.
             let finish = match (

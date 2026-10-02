@@ -1473,6 +1473,7 @@ services::auto_queue::route::control_routes::reset_route_status_tests::database_
 services::auto_queue::route::control_routes::reset_route_status_tests::live_run_refusal_maps_to_conflict_and_carries_its_status
 services::auto_queue::route::control_routes::reset_route_status_tests::scope_mismatch_maps_to_conflict
 services::auto_queue::route::control_routes::reset_route_status_tests::unknown_run_maps_to_not_found
+services::auto_queue::route::dispatch_query::generate_conflict_tests::an_unstarted_run_blocks_a_second_generate_in_its_scope_pg
 services::auto_queue::route::fsm::tests::clamp_retry_limit_bounds
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
@@ -5078,6 +5079,8 @@ services::discord::relay_owner_observability::tests::turn_identity_string_format
 services::discord::relay_owner_observability::tests::ui_outcome_committed_when_gate_emits_and_not_stale
 services::discord::relay_owner_observability::tests::ui_outcome_gate_suppressed_when_gate_does_not_emit
 services::discord::relay_owner_observability::tests::ui_outcome_stale_identity_takes_precedence_over_gate
+services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
+services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::auto_heal_apply::tests::no_transition_apply_reports_not_ok_and_not_applied_end_to_end
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_emission_in_flight_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted
@@ -5298,6 +5301,9 @@ services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idl
 services::discord::router::intake_gate::reply_context_tests::attachment_only_empty_check_ignores_leading_bot_mention
 services::discord::router::intake_gate::reply_context_tests::attachment_only_turn_accepts_any_saved_file_without_prompt
 services::discord::router::intake_gate::reply_context_tests::attachment_reply_context_keeps_canonical_message_id_and_all_files
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status
@@ -7069,6 +7075,7 @@ services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_mes
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
 services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_hook_adopted_binding_outranks_the_stale_launch_script
@@ -9894,6 +9901,11 @@ services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_stat
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound
 services::tui_o::writer::tests::actor::host_start::only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned
+services::tui_o::writer::tests::actor::host_start::reclaim::a_current_prompt_after_a_late_clear_reclaims_the_pane
+services::tui_o::writer::tests::actor::host_start::reclaim::a_first_pin_on_an_incomplete_history_does_not_reclaim_the_pane
+services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_prompt_after_a_late_clear_reclaims_the_pane
+services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
+services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source
@@ -9992,6 +10004,7 @@ services::tui_prompt_dedupe::pending::tests::history::a_new_execution_adopts_a_h
 services::tui_prompt_dedupe::pending::tests::history::a_new_execution_does_not_inherit_left_sessions
 services::tui_prompt_dedupe::pending::tests::history::a_new_session_with_an_older_mtime_is_still_adopted
 services::tui_prompt_dedupe::pending::tests::history::a_prompt_proves_a_return_when_the_session_start_was_dropped
+services::tui_prompt_dedupe::pending::tests::history::a_prompt_published_before_the_clear_does_not_reclaim
 services::tui_prompt_dedupe::pending::tests::history::a_registration_naming_another_session_keeps_the_waiting_pending
 services::tui_prompt_dedupe::pending::tests::history::a_replayed_resume_published_before_the_switch_is_refused
 services::tui_prompt_dedupe::pending::tests::history::a_resume_back_to_a_left_session_is_adopted_at_its_session_start
@@ -10007,6 +10020,7 @@ services::tui_prompt_dedupe::pending::tests::history::an_observed_rebind_does_no
 services::tui_prompt_dedupe::pending::tests::history::an_old_log_resolution_of_a_superseded_pending_folds_at_its_own_time
 services::tui_prompt_dedupe::pending::tests::history::left_sessions_survive_a_restart_of_the_same_execution
 services::tui_prompt_dedupe::pending::tests::history::live_history_equals_the_history_folded_after_a_restart
+services::tui_prompt_dedupe::pending::tests::history::only_a_prompt_reclaims_and_only_on_a_complete_history
 services::tui_prompt_dedupe::pending::tests::history::the_relay_publish_time_header_reaches_the_binding_judgment
 services::tui_prompt_dedupe::pending::tests::launch_seed_needs_the_launch_binding_and_its_alias_first
 services::tui_prompt_dedupe::pending::tests::pending_of_another_execution_is_not_restored

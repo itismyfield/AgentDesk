@@ -65,6 +65,7 @@ src/services/auto_queue/activate_command.rs
 src/services/auto_queue/cancel_run.rs
 src/services/auto_queue/cleanup_tasks_pg_tests.rs
 src/services/auto_queue/command.rs
+src/services/auto_queue/dispatch_query.rs
 src/services/auto_queue/fsm.rs
 src/services/auto_queue/phase_gate.rs
 src/services/auto_queue/planning.rs
@@ -106,9 +107,11 @@ src/services/discord/recovery_engine/host_reconcile_tests.rs
 src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs
 src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
 src/services/discord/recovery_engine/routing_orphan_tests.rs
+src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/tests.rs
+src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
@@ -239,6 +242,7 @@ services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tes
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
 services::auto_queue::route::command::reset_run_scope_pg_tests
 services::auto_queue::route::command::tests
+services::auto_queue::route::dispatch_query::generate_conflict_tests
 services::auto_queue::route::fsm::tests
 services::auto_queue::route::phase_gate::tests
 services::auto_queue::route::planning::record_entry_dispatch_failure_tests
@@ -282,9 +286,11 @@ services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::restore_inflight::host_probe_tests
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
 services::discord::recovery_engine::routing_orphan::host_guard_tests
+services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
+services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
 services::discord::router::message_handler::provider_isolation::host_tests
@@ -849,6 +855,7 @@ services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_ev
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_non_live_run_linked_to_live_dispatch_pg
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_non_live_run_with_dispatched_entry_pg
 services::auto_queue::route::command::tests::reopen_and_force_pause_share_multi_run_advisory_order_pg
+services::auto_queue::route::dispatch_query::generate_conflict_tests::an_unstarted_run_blocks_a_second_generate_in_its_scope_pg
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg
@@ -990,6 +997,8 @@ services::discord::recovery_engine::restore_inflight::host_probe_tests::a_restor
 services::discord::recovery_engine::restore_inflight::host_probe_tests::restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
+services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
+services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
@@ -1002,6 +1011,9 @@ services::discord::router::intake_dispatch::tests::obligation_window_facade_rest
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
