@@ -1347,6 +1347,58 @@ RUBY
 }
 validate_main_script_check_shards
 
+# Main's full sweep must run unconditionally with the PR sweep's PostgreSQL and
+# debuginfo-free env; lint must stay an unconditional job of its own.
+validate_main_full_sweep() {
+  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+require "yaml"
+main_path, pr_path = ARGV
+main_jobs = YAML.load_file(main_path).fetch("jobs", {})
+pr_sweep = YAML.load_file(pr_path).dig("jobs", "library_sweep")
+errors = []
+sweep_name = "Library sweep (selection-set gated)"
+{"full_non_pg" => "Full tests (ubuntu-latest)", "lint" => "Main lint (ubuntu-latest)"}.each do |job_id, name|
+  job = main_jobs[job_id]
+  unless job.is_a?(Hash)
+    errors << "job #{job_id} is missing"
+    next
+  end
+  errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
+  errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+  %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
+end
+job = main_jobs["full_non_pg"]
+if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
+  env = job["env"] || {}
+  errors << "job full_non_pg env must equal #{pr_path} library_sweep env" unless env == pr_sweep["env"]
+  { "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0", "AGENTDESK_REQUIRE_PG" => "1" }.each do |key, value|
+    errors << "job full_non_pg env must set #{key}=#{value}" unless env[key] == value
+  end
+  steps = Array(job["steps"])
+  index = ->(pred) { steps.index { |step| step.is_a?(Hash) && pred.(step) } }
+  start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start" && !step.key?("if") })
+  sweep = index.(->(step) { step["name"] == sweep_name })
+  stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" && step["if"] == "always()" })
+  errors << "job full_non_pg must start PostgreSQL, sweep, then stop PostgreSQL under always()" unless start && sweep && stop && start < sweep && sweep < stop
+  if sweep
+    step = steps[sweep]
+    %w[if continue-on-error].each { |key| errors << "full_non_pg #{sweep_name} must not set #{key}" if step.key?(key) }
+    %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
+      errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
+    end
+  end
+else
+  errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
+end
+errors.each { |message| warn "#{main_path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must run the full non-PG sweep unconditionally with PostgreSQL and debuginfo stripped"
+  fi
+}
+validate_main_full_sweep
+
 # The main-only Windows warm job must save the cache keys the PR Windows jobs
 # restore: same workflow/job env, setup steps, rust-cache inputs and compile.
 validate_main_windows_cache_warm() {

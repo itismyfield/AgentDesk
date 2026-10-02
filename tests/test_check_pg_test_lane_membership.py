@@ -136,6 +136,9 @@ class NonPgFilterContract(unittest.TestCase):
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  library_sweep:\n" + consumer, "utf-8"
         )
+        (self.root / ".github/workflows/ci-main.yml").write_text(
+            "jobs:\n  full_non_pg:\n" + consumer, "utf-8"
+        )
         (self.root / ".github/workflows/ci-nightly.yml").write_text(
             "jobs:\n  full_macos:\n"
             + consumer
