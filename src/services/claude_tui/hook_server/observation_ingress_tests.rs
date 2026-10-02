@@ -617,3 +617,110 @@ fn a_legacy_command_alias_is_kept_until_its_mapping_is_ready() {
     );
     assert_eq!(pending_lines(channel, &b), 1);
 }
+
+// With no Herdr pane listed a tmux pane's switch never looks the hold up, so the hook path takes
+// no lock it did not take before Herdr existed.
+#[test]
+fn a_tmux_pane_switch_never_looks_up_the_herdr_hold() {
+    use crate::services::tui_prompt_dedupe::HERDR_HOLD_LOOKUPS;
+    let ingress = Ingress::new();
+    let (channel, tmux) = (7_430, "ingress-herdr-off");
+    let (a, b) = (uuid(), uuid());
+    ingress.pane(tmux, channel, &a);
+    ingress.transcript(&b);
+    let switch = ingress.payload(&b, None);
+    let status = ingress.claude_hook("UserPromptSubmit", &a, &switch, Some(&uuid()));
+    assert_eq!(status, 202);
+    let bound = runtime_binding_for_tmux_session(tmux).unwrap().session_id;
+    assert_eq!(bound.as_deref(), Some(b.as_str()));
+    assert_eq!(HERDR_HOLD_LOOKUPS.with(std::cell::Cell::get), 0);
+}
+
+// A Herdr hold follows the execution it names: an unnamed refusal holds no unlisted pane, an older
+// execution's refusal or admission leaves the listed one alone, and that one holds until admitted.
+#[test]
+fn a_herdr_hold_follows_only_the_execution_it_names() {
+    use crate::services::tui_prompt_dedupe::{admit_herdr_execution, withhold_herdr_execution};
+    let ingress = Ingress::new();
+    let (channel, tmux) = (7_431, "ingress-herdr-hold");
+    let (a, b, c, d) = (uuid(), uuid(), uuid(), uuid());
+    ingress.pane(tmux, channel, &a);
+    let bound = || runtime_binding_for_tmux_session(tmux).unwrap().session_id;
+    let switch = |next: &str, id: &str| {
+        ingress.transcript(next);
+        let payload = ingress.payload(next, None);
+        ingress.claude_hook("UserPromptSubmit", &a, &payload, Some(id))
+    };
+    withhold_herdr_execution(tmux, None);
+    assert_eq!(switch(&b, &uuid()), 202);
+    assert_eq!(bound().as_deref(), Some(b.as_str()));
+    clear_claude_session_rotation(tmux);
+
+    admit_herdr_execution(tmux, "n2");
+    withhold_herdr_execution(tmux, Some("n1"));
+    assert_eq!(switch(&c, &uuid()), 202);
+    assert_eq!(bound().as_deref(), Some(c.as_str()));
+    clear_claude_session_rotation(tmux);
+
+    withhold_herdr_execution(tmux, Some("n2"));
+    admit_herdr_execution(tmux, "n1");
+    let (id, lines) = (uuid(), events(channel).len());
+    assert_eq!(switch(&d, &id), 425);
+    withhold_herdr_execution(tmux, None);
+    assert_eq!(switch(&d, &id), 425);
+    assert_eq!((bound(), events(channel).len()), (Some(c.clone()), lines));
+    admit_herdr_execution(tmux, "n2");
+    assert_eq!(switch(&d, &id), 202);
+    assert_eq!(bound().as_deref(), Some(d.as_str()));
+}
+
+// A refusal that lands while a hook is past its check returns only after that hook commits, so
+// no switch follows the refusal's return.
+#[test]
+fn a_herdr_refusal_waits_for_a_hook_already_past_its_check() {
+    use crate::services::tui_prompt_dedupe::{AFTER_CHECK, admit_herdr_execution};
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::{Arc, Mutex};
+    let ingress = Ingress::new();
+    let (channel, tmux) = (7_432, "ingress-herdr-race");
+    let (a, b, c) = (uuid(), uuid(), uuid());
+    ingress.pane(tmux, channel, &a);
+    admit_herdr_execution(tmux, "n1");
+    let (returned, early) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let refusal = Arc::new(Mutex::new(None));
+    let (done, seen, slot) = (returned.clone(), early.clone(), refusal.clone());
+    AFTER_CHECK.with_borrow_mut(|after| {
+        *after = Some(Box::new(move || {
+            let worker = std::thread::spawn(move || {
+                crate::services::tui_prompt_dedupe::withhold_herdr_execution(tmux, Some("n1"));
+                done.store(true, SeqCst);
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            seen.store(returned.load(SeqCst), SeqCst);
+            *slot.lock().unwrap() = Some(worker);
+        }))
+    });
+    ingress.transcript(&b);
+    let payload = ingress.payload(&b, None);
+    assert_eq!(
+        ingress.claude_hook("UserPromptSubmit", &a, &payload, Some(&uuid())),
+        202
+    );
+    refusal.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(
+        !early.load(SeqCst),
+        "the refusal returned while the hook was committing"
+    );
+    clear_claude_session_rotation(tmux);
+    ingress.transcript(&c);
+    let payload = ingress.payload(&c, None);
+    assert_eq!(
+        ingress.claude_hook("UserPromptSubmit", &a, &payload, Some(&uuid())),
+        425
+    );
+    let bound = runtime_binding_for_tmux_session(tmux).unwrap().session_id;
+    assert_eq!(bound.as_deref(), Some(b.as_str()));
+}
