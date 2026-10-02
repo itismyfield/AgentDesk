@@ -454,6 +454,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
         "watcher_backstop_turn_is_terminal:peek",
     ),
+    "src/services/herdr_launch.rs": ("o_ready_at:peek",),
     "src/services/tui_o/cutover.rs": (
         "claim_for_placement:claim",
     ),

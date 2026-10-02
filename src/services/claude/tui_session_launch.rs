@@ -308,6 +308,94 @@ mod herdr_off_tests {
             0
         );
     }
+
+    // The launch entry reads O readiness only for a selected channel, keeps an unready one on
+    // tmux, and leaves tmux only for a channel whose O writer already holds a seeded store.
+    #[cfg(unix)]
+    #[test]
+    fn claude_launch_takes_herdr_only_for_a_selected_channel_with_a_ready_o_store() {
+        use super::prepare_and_create_claude_tui_session as launch;
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+        use crate::services::herdr_launch::{
+            HERDR_NOT_ADMITTED, force_launch_gate, o_store_for_test,
+            readiness_reads_on_this_thread as reads,
+        };
+        use crate::services::tui_o::cutover::test_override::{force_candidates, force_channels};
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
+        use std::os::unix::fs::PermissionsExt;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = tests::fixture_after_shared_test_env_lock();
+        let executable = |name: &str, body: &str| {
+            let path = root.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        executable(
+            "tmux",
+            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n",
+        );
+        let claude = executable("claude", "#!/bin/bash\necho '2.1.0 (Claude Code)'\n");
+        let path = format!(
+            "{}:{}",
+            root.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let _path = Guard::set_value_after_shared_test_env_lock("PATH", path.as_ref());
+        let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &claude);
+        let (store, era) = o_store_for_test(root.path(), &[46]);
+        let mut seeded = store.open_channel(&era, 46).unwrap().unwrap();
+        seeded.set_binding_checkpoint(3).unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let dir = root.path().to_str().unwrap();
+        let run = |tmux: &str, channel| {
+            launch(
+                tmux,
+                dir,
+                root.path(),
+                id,
+                None,
+                None,
+                "".into(),
+                false,
+                "",
+                Some(channel),
+            )
+        };
+        let created = |tmux: &str| {
+            let calls = std::fs::read_to_string(root.path().join("tmux.calls")).unwrap_or_default();
+            calls.contains(&format!("new-session -d -s {tmux}"))
+        };
+
+        let _ready_channel = force_channels(&[(46, ClaudeTui), (47, ClaudeTui)]);
+        let _writer = force_launch_gate(false, Some(true));
+        run("AgentDesk-claude-gate-off", 46).expect("an unselected channel stays on tmux");
+        assert!(created("AgentDesk-claude-gate-off"));
+        assert_eq!(
+            reads(),
+            0,
+            "no readiness is read while nothing selects Herdr"
+        );
+
+        let _selected = force_launch_gate(true, Some(true));
+        let refused = run("AgentDesk-claude-gate-ready", 46);
+        assert_eq!(refused.err().as_deref(), Some(HERDR_NOT_ADMITTED));
+        assert!(
+            !created("AgentDesk-claude-gate-ready"),
+            "the Herdr branch creates no tmux"
+        );
+        assert_eq!(reads(), 1);
+
+        let _pending = force_candidates(&[(46, ClaudeTui)]);
+        run("AgentDesk-claude-gate-pending", 46).expect("an unadopted channel stays on tmux");
+        assert!(created("AgentDesk-claude-gate-pending"));
+        drop(_pending);
+        run("AgentDesk-claude-gate-no-store", 47).expect("a channel without a store stays on tmux");
+        assert!(created("AgentDesk-claude-gate-no-store"));
+        assert_eq!(reads(), 3);
+    }
 }
 
 #[cfg(all(test, unix))]
