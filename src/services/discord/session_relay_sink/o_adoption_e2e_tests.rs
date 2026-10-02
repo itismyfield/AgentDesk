@@ -967,3 +967,50 @@ async fn a_tail_legacy_never_delivers_is_abandoned_once_after_the_stall_and_neve
         row_over_a_dead_tail().await;
     }
 }
+
+async fn tail_left_by_a_restart_drain() {
+    let pair = Pair::new().await;
+    pair.delivered_history().await;
+    let leg = &pair.legs[0];
+    // A restart drained Legacy's row and kept its frontier; the turn written before it is owed.
+    let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
+    let cursor = rehydrated(leg);
+    let candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let hosts = pair.host(&pair.io);
+    settle().await;
+    assert_eq!(adoption(A), Adoption::Deferred, "{:?}", pair.alarms());
+    assert!(!pair.init_exists());
+    assert_eq!(pair.alarms(), []);
+    deliver_second(leg, start, &rows).await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
+    assert_eq!(pair.o_start(), cursor);
+    assert_eq!(pair.alarms(), [], "what Legacy delivered is not reported");
+    assert_eq!(
+        pair.posts(&pair.io, 0),
+        (0, 2),
+        "Legacy posts the owed turn once"
+    );
+    let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
+    deliver_second(leg, start, &rows).await;
+    settle().await;
+    assert_eq!(
+        pair.posts(&pair.io, 0),
+        (1, 2),
+        "O posts the next turn once"
+    );
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+    drop(candidates);
+    let io = pair.restarted().await;
+    assert_eq!(pair.posts(&io, 0), (0, 2), "a restart posts nothing more");
+    assert_eq!(*io.alarms.0.lock().unwrap(), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_legacy_owes_after_a_restart_goes_through_legacy_before_o_adopts() {
+    if isolated("adoption::a_turn_legacy_owes_after_a_restart_goes_through_legacy_before_o_adopts")
+    {
+        tail_left_by_a_restart_drain().await;
+    }
+}

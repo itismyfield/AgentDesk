@@ -264,7 +264,6 @@ async fn host_channel<I: HostIo>(
                 }
             };
             let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
-            let mut abandoned = None;
             let created = match legacy {
                 None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
                 Some(legacy) => 'held: {
@@ -309,7 +308,6 @@ async fn host_channel<I: HostIo>(
                             return release(&candidate, &alarms, channel, &refused.to_string());
                         }
                     };
-                    abandoned = snapshot.abandoned();
                     let sources = || {
                         snapshot
                             .recheck(&*legacy, &**log, channel)
@@ -321,14 +319,6 @@ async fn host_channel<I: HostIo>(
             if let Err(detail) = created {
                 let detail = format!("first activation: {detail}");
                 return stop(&candidate, &alarms, channel, &detail);
-            }
-            if let Some(alarm) = abandoned {
-                tracing::info!(
-                    channel,
-                    ?alarm,
-                    "[tui_o] adopted past Legacy's undelivered records"
-                );
-                alarms.raise(channel, alarm);
             }
             match recover(&runtime_root, channel) {
                 Ok(Recovered::Store(store)) => store,

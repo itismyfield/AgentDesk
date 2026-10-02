@@ -5692,6 +5692,7 @@ services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_sink_that_loses_its_delivery_lease_leaves_a_pending_adoption
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_store_failure_after_the_init_is_readable_commits_the_channel_and_a_restart_posts_nothing_more
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_tail_legacy_never_delivers_is_abandoned_once_after_the_stall_and_never_posted
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_turn_legacy_owes_after_a_restart_goes_through_legacy_before_o_adopts
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_unit_written_after_the_facts_but_before_the_lock_keeps_the_channel_on_legacy
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_cursor
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::adoption::a_unit_written_after_the_recheck_goes_to_o_from_legacys_cursor
@@ -9908,7 +9909,7 @@ services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor
-services::tui_o::writer::tests::actor::host_start::a_closed_turn_legacy_never_delivered_is_adopted_past_and_never_posted
+services::tui_o::writer::tests::actor::host_start::a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 services::tui_o::writer::tests::actor::host_start::a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restart_reuses
 services::tui_o::writer::tests::actor::host_start::a_published_flag_alone_does_not_accept_work
