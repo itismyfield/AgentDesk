@@ -847,7 +847,7 @@ mod dependency_hold_tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_card_waits_until_its_declared_prerequisite_is_done() {
+    async fn a_card_waits_until_its_declared_prerequisite_is_done_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query(
