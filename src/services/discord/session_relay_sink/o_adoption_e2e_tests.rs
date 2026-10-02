@@ -572,34 +572,31 @@ async fn undelivered_closed_turn() {
     let leg = &pair.legs[0];
     std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
     pair.read_legacy();
-    rehydrated(&pair.legs[0]);
-    *pair.io.custody.lock().unwrap() = Some(|channel| {
-        crate::services::discord::inflight::inflight_state_file_exists(
-            &ProviderKind::Claude,
-            channel,
-        )
-    });
+    let cursor = rehydrated(leg);
+    row_custody(&pair);
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let hosts = pair.host(&pair.io);
-    settle().await;
-    assert_eq!(adoption(A), Adoption::Released);
-    pair.released_for("Legacy retains delivery custody");
+    tokio::time::sleep(Duration::from_secs(39 * 60)).await;
+    assert_eq!(adoption(A), Adoption::Deferred);
     // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
-    finish(&pair.legs[0]).await;
-    settle().await;
+    finish(leg).await;
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
     assert_eq!(
         pair.posts(&pair.io, 0),
         (0, 1),
         "Legacy posts the turn once"
     );
-    assert!(!pair.init_exists());
+    assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
+    assert_eq!(pair.o_start(), cursor);
+    assert_eq!(pair.alarms(), [], "what Legacy delivered is not reported");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_closed_turn_legacy_has_not_delivered_keeps_the_channel_on_legacy() {
-    if isolated("adoption::a_closed_turn_legacy_has_not_delivered_keeps_the_channel_on_legacy") {
+async fn a_closed_turn_legacy_delivers_late_goes_through_legacy_before_o_adopts() {
+    if isolated("adoption::a_closed_turn_legacy_delivers_late_goes_through_legacy_before_o_adopts")
+    {
         undelivered_closed_turn().await;
     }
 }
@@ -777,5 +774,196 @@ async fn lost_lease() {
 async fn a_sink_that_loses_its_delivery_lease_leaves_a_pending_adoption() {
     if isolated("adoption::a_sink_that_loses_its_delivery_lease_leaves_a_pending_adoption") {
         lost_lease().await;
+    }
+}
+
+/// Reads Legacy's inflight file as the gateway does: a row alone is Legacy's custody.
+fn row_custody(pair: &Pair) {
+    *pair.io.custody.lock().unwrap() = Some(|channel| {
+        crate::services::discord::inflight::inflight_state_file_exists(
+            &ProviderKind::Claude,
+            channel,
+        )
+    });
+}
+
+/// A's row as Legacy left it: a turn from the transcript's start that nothing clears.
+fn stale_row(leg: &Leg) -> crate::services::discord::inflight::InflightTurnState {
+    let session = &leg.binding.expected_session_name;
+    let mut row = inflight_with_identity_offset(leg.channel, session, 712, STARTED, Some(0));
+    row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    row.current_msg_id = 88012;
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+    row
+}
+
+/// Legacy's sink handed the first turn's terminal frame again, as a recovered watcher would.
+async fn retry_first_turn(leg: &Leg) {
+    let payload = first_turn(&leg.body);
+    let end = payload.len() as u64;
+    let mut frame = terminal_frame_offset(&leg.binding, &payload, 1, end, 710, STARTED, Some(0));
+    let session = &leg.binding.expected_session_name;
+    frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
+    let outcome = leg.sink.deliver(&frame).await;
+    assert!(
+        matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+        "{outcome:?}"
+    );
+}
+
+impl Pair {
+    fn alarms(&self) -> Vec<(u64, crate::services::tui_o::writer::WriterAlarm)> {
+        self.io.alarms.0.lock().unwrap().clone()
+    }
+
+    /// Hosts A again over its store as a restart would, and lets it settle.
+    async fn restarted(&self) -> Arc<TestHost> {
+        let _channels =
+            cutover::test_override::force_channels(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+        let io = TestHost::new([(A, self.legs[0].source())]);
+        let hosts = self.host(&io);
+        settle().await;
+        assert_eq!(adoption(A), Adoption::Committed);
+        hosts.iter().for_each(tokio::task::JoinHandle::abort);
+        io
+    }
+}
+
+async fn row_over_delivered_history() {
+    let pair = Pair::new().await;
+    let cursor = pair.delivered_history().await;
+    stale_row(&pair.legs[0]);
+    row_custody(&pair);
+    let candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let hosts = pair.host(&pair.io);
+    settle().await;
+    assert_eq!(
+        adoption(A),
+        Adoption::Deferred,
+        "the row defers the adoption"
+    );
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
+    assert_eq!(pair.o_start(), cursor);
+    assert_eq!(
+        pair.alarms(),
+        [],
+        "Legacy owed nothing, so nothing is abandoned"
+    );
+    let leg = &pair.legs[0];
+    retry_first_turn(leg).await;
+    assert_eq!(
+        pair.posts(&pair.io, 0),
+        (0, 1),
+        "the retried turn is posted by neither"
+    );
+    let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
+    deliver_second(leg, start, &rows).await;
+    settle().await;
+    let posts = pair.io.posts.to(A);
+    assert_eq!(posts.len(), 1, "O posts the second turn once: {posts:?}");
+    assert!(posts[0].ends_with("second"), "{posts:?}");
+    assert_eq!(leg.legacy_posts(), 1, "Legacy posted only the warm-up");
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+    drop(candidates);
+    let io = pair.restarted().await;
+    assert_eq!(pair.posts(&io, 0), (0, 1), "a restart posts nothing more");
+    assert_eq!(*io.alarms.0.lock().unwrap(), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_inflight_row_left_over_delivered_history_does_not_keep_the_channel_from_o() {
+    if isolated(
+        "adoption::an_inflight_row_left_over_delivered_history_does_not_keep_the_channel_from_o",
+    ) {
+        row_over_delivered_history().await;
+    }
+}
+
+async fn row_over_a_dead_tail() {
+    let pair = Pair::new().await;
+    let leg = &pair.legs[0];
+    std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
+    pair.read_legacy();
+    let cursor = rehydrated(leg);
+    let row = stale_row(leg);
+    row_custody(&pair);
+    let candidates =
+        cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
+    let hosts = pair.host(&pair.io);
+    tokio::time::sleep(Duration::from_secs(39 * 60)).await;
+    assert_eq!(adoption(A), Adoption::Deferred, "Legacy may still deliver");
+    assert_eq!(pair.alarms(), []);
+    tokio::time::sleep(Duration::from_secs(3 * 60)).await;
+    assert_eq!(adoption(A), Adoption::Committed, "{:?}", pair.alarms());
+    assert_eq!(pair.o_start(), cursor);
+    let abandoned = crate::services::tui_o::writer::WriterAlarm::Abandoned {
+        source: leg.source(),
+        from: 0,
+        to: cursor,
+    };
+    assert_eq!(
+        pair.alarms(),
+        [(A, abandoned.clone())],
+        "one report of the whole tail"
+    );
+
+    retry_first_turn(leg).await;
+    assert_eq!(
+        pair.posts(&pair.io, 0),
+        (0, 0),
+        "the retried tail is posted by neither"
+    );
+    let judged = cutover::claims_judged(A);
+    // Legacy's standby relay over the row reaches the body gate and stops there.
+    let (timeout, began) = (Duration::from_secs(60), tokio::time::Instant::now());
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    crate::services::discord::standby_relay::run_standby_relay(
+        Arc::new(poise::serenity_prelude::Http::new("")),
+        ChannelId::new(A),
+        None,
+        leg.binding.expected_rollout_path.clone(),
+        crate::services::discord::standby_relay::StandbyRelayTurnBinding::from_state(&row),
+        0,
+        Arc::clone(&cancel),
+        pair.shared.clone(),
+        ProviderKind::Claude,
+        timeout,
+    )
+    .await;
+    let after = cutover::claims_judged(A);
+    assert_eq!(after[judged.len()..], [true], "the standby body went to O");
+    assert!(
+        began.elapsed() < timeout,
+        "the relay ended at the gate, not its deadline"
+    );
+    assert!(!cancel.load(std::sync::atomic::Ordering::SeqCst));
+
+    let (start, rows) = write_second(&leg.binding.expected_rollout_path, &leg.body);
+    deliver_second(leg, start, &rows).await;
+    settle().await;
+    let posts = pair.io.posts.to(A);
+    assert_eq!(posts.len(), 1, "O posts the second turn once: {posts:?}");
+    assert!(posts[0].ends_with("second"), "{posts:?}");
+    assert_eq!(leg.legacy_posts(), 0, "the abandoned turn was never posted");
+    hosts.iter().for_each(tokio::task::JoinHandle::abort);
+    drop(candidates);
+    let io = pair.restarted().await;
+    assert_eq!(pair.posts(&io, 0), (0, 0), "a restart posts nothing more");
+    assert_eq!(
+        *io.alarms.0.lock().unwrap(),
+        [],
+        "nor reports the tail again"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tail_legacy_never_delivers_is_abandoned_once_after_the_stall_and_never_posted() {
+    if isolated(
+        "adoption::a_tail_legacy_never_delivers_is_abandoned_once_after_the_stall_and_never_posted",
+    ) {
+        row_over_a_dead_tail().await;
     }
 }

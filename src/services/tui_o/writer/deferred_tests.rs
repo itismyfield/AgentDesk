@@ -289,10 +289,10 @@ async fn a_busy_legacy_keeps_the_adoption_deferred_and_one_read_serves_the_open_
         "an unchanged open turn is not read again"
     );
     open.close();
-    *open.io.custody.lock().unwrap() = Ok(true);
+    *open.io.custody.lock().unwrap() = Ok(Custody::Active);
     retried().await;
     open.assert_waiting("Legacy custody");
-    *open.io.custody.lock().unwrap() = Ok(false);
+    *open.io.custody.lock().unwrap() = Ok(Custody::Free);
     open.io.busy.store(true, Ordering::SeqCst);
     retried().await;
     open.assert_waiting("Legacy's mailbox");
@@ -564,3 +564,6 @@ async fn a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved() {
     );
     open.assert_adopted().await;
 }
+
+#[path = "stall_tests.rs"]
+mod stall;

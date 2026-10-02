@@ -15,7 +15,7 @@ use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
-use crate::services::tui_o::writer::host::{self, HostIo};
+use crate::services::tui_o::writer::host::{self, Custody, HostIo};
 
 /// How long a first activation waits for the cluster bootstrap to publish this node's id.
 const SELF_ID_WAIT: Duration = Duration::from_secs(10);
@@ -119,7 +119,7 @@ impl HostIo for GatewayHost {
     }
 
     /// Legacy inflight, delivery custody and pending starts, durable or in memory: all local files.
-    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<bool, String> {
+    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
@@ -134,9 +134,11 @@ impl HostIo for GatewayHost {
                 kind.as_str(),
                 channel,
             );
-        Ok(pending_start
-            || super::super::inflight::inflight_state_file_exists(&kind, channel)
-            || super::super::terminal_delivery_custody::retains_channel(channel)?)
+        if pending_start || super::super::terminal_delivery_custody::retains_channel(channel)? {
+            return Ok(Custody::Active);
+        }
+        let row = super::super::inflight::inflight_state_file_exists(&kind, channel);
+        Ok(if row { Custody::Row } else { Custody::Free })
     }
 
     fn legacy(&self) -> Arc<dyn LegacyView> {
