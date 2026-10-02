@@ -1531,6 +1531,9 @@ services::auto_queue::route::view::activate_next_dispatch_type_tests::direct_is_
 services::auto_queue::route::view::activate_next_dispatch_type_tests::full_and_plan_only_without_completed_plan_create_plan
 services::auto_queue::route::view::activate_next_dispatch_type_tests::unrecognized_present_depth_is_cautious_plan
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
 services::auto_queue::tests::auto_queue_status_entry_normalizes_github_repo_url
 services::auto_queue::tests::auto_queue_status_omits_diagnostics_without_slot_invariant_violation
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg

@@ -2009,6 +2009,7 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                 ("src/services/discord/commands/control.rs", 2, MISSING),
                 ("src/services/discord/commands/mod.rs", 0, ENTRY),
                 ("src/services/discord/health/recovery.rs", 1, MISSING),
+                ("src/services/discord/admin_host_guard.rs", 1, MISSING),
             ],
         ),
     ];

@@ -502,7 +502,8 @@ src/
 │   │   └── storage.rs
 │   ├── auto_queue/
 │   │   ├── runtime/
-│   │   │   └── clear_slot_sessions_pg_tests.rs
+│   │   │   ├── clear_slot_sessions_pg_tests.rs
+│   │   │   └── slot_reset_host_pg_tests.rs
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
