@@ -22,7 +22,7 @@ establish a durable row deletion or prove the cause of `Missing`.
 The direct-resume helper is consumed by startup recovery in
 `watchers/lifecycle/restore.rs`. A live, unpaused watcher with the same output
 path is skipped before its commit step. At commit,
-`try_claim_watcher_with_thread_parent` atomically refuses an existing equivalent
+`try_claim_watcher_for_host` atomically refuses an existing equivalent
 watcher; a paused/cancelled watcher or a changed output path can cancel and
 replace it, after which a supervised watcher is spawned. Those asynchronous
 lifecycle effects are real, but the periodic rehydration transaction's `Some`

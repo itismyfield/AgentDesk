@@ -13,6 +13,8 @@ pub(super) struct WatcherRuntimeHandoffContext<'a> {
     pub(super) session_id: Option<String>,
     pub(super) last_offset: u64,
     pub(super) done: bool,
+    #[cfg(unix)]
+    pub(super) host: super::super::tmux::WatchHost,
 }
 
 pub(super) struct WatcherRuntimeHandoffState<'a> {
@@ -172,7 +174,7 @@ pub(super) fn handle_watcher_runtime_handoff(
         owner_changed_after_claim,
         watcher_claim_incarnation,
     ) = {
-        let claim = super::super::tmux::claim_or_reuse_watcher_with_thread_parent(
+        let claim = super::super::tmux::claim_or_reuse_watcher_for_host(
             &shared_owned.tmux_watchers,
             channel_id,
             handle,
@@ -183,7 +185,19 @@ pub(super) fn handle_watcher_runtime_handoff(
                 inflight_state.logical_channel_id,
                 inflight_state.thread_id,
             ),
+            ctx.host,
         );
+        // A withheld Herdr pane gets no watcher, owner or relay, as a failed save.
+        let Ok(claim) = claim else {
+            *watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
+            *watcher_relay_available_for_turn = false;
+            *tmux_handed_off = false;
+            *watcher_owns_assistant_relay = false;
+            if done {
+                *terminal_control_drain_until = None;
+            }
+            return outcome;
+        };
         *watcher_owner_channel_id = claim.owner_channel_id();
         let owner_changed =
             inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());

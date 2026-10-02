@@ -1143,7 +1143,8 @@ src/
 │   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── voice_announcement_route.rs
 │   │   │   │   ├── voice_announcement_scope.rs
-│   │   │   │   └── watchdog.rs
+│   │   │   │   ├── watchdog.rs
+│   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── intake_dispatch.rs
@@ -1310,6 +1311,7 @@ src/
 │   │   │   ├── controller_heartbeat.rs
 │   │   │   ├── discrete_trigger_marker.rs
 │   │   │   ├── entry.rs
+│   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── liveness.rs
@@ -1621,6 +1623,7 @@ src/
 │   │   │   ├── lifecycle/
 │   │   │   │   ├── activity.rs
 │   │   │   │   ├── claims.rs
+│   │   │   │   ├── claims_host_tests.rs
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
@@ -2093,6 +2096,7 @@ src/
 │   │   │   ├── deliver.rs
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_tests.rs
+│   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── mod.rs

@@ -2310,7 +2310,8 @@ pub(super) async fn handle_text_message(
         "turn_start_message",
         final_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
         &mut inflight_state,
-    );
+    )
+    .await;
 
     // Auto-sync worktree before sending message to session
     {

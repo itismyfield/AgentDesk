@@ -1079,3 +1079,7 @@ mod deferred;
 #[cfg(unix)]
 #[path = "reclaim_tests.rs"]
 mod reclaim;
+
+#[cfg(test)]
+#[path = "herdr_resume_tests.rs"]
+mod herdr_resume;

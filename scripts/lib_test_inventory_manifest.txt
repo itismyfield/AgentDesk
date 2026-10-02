@@ -5510,6 +5510,8 @@ services::discord::router::message_handler::watchdog::cold_start_retry_tests::co
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::deferred_paused_watcher_attach_retries_when_tmux_goes_live
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::headless_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::message_retry_after_precheck_preserves_handoff_incarnation
+services::discord::router::message_handler::watchdog::host_tests::a_scheduled_paused_attach_rereads_the_host_before_each_attempt
+services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::router::message_handler::watchdog::relay_state_contract_refs::contract_symbols_exist
 services::discord::router::queue_status_presentation::tests::queued_user_messages_never_render_status_cards
 services::discord::router::response_format::tests::absent_voluntary_feedback_reminder_leaves_reply_context_unchanged
@@ -6631,6 +6633,9 @@ services::discord::tmux::tmux_watcher::tests::restored_response_seed_is_kept_for
 services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_mid_turn_cutover_shows_no_post_cutover_body
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
@@ -6783,6 +6788,9 @@ services::discord::tmux::tui_completion_gate_tests::legacy_tmux_wrapper_skips_th
 services::discord::tmux::tui_completion_gate_tests::missing_runtime_kind_skips_the_gate
 services::discord::tmux::tui_completion_gate_tests::process_backend_skips_the_gate
 services::discord::tmux::tui_completion_gate_tests::rebind_origin_inflight_skips_the_gate
+services::discord::tmux::watcher_lifecycle::claims::host_tests::a_claim_takes_no_source_authority
+services::discord::tmux::watcher_lifecycle::claims::host_tests::a_herdr_claim_commits_only_under_its_admission_and_keeps_the_incumbent
+services::discord::tmux::watcher_lifecycle::claims::host_tests::a_withhold_waits_for_a_claim_that_read_the_admission
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::applies_launch_time_floor_to_skip_prior_session_transcripts
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::excludes_transcripts_claimed_by_other_shared_workspace_sessions
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::missing_launch_context_uses_restored_cwd_with_marker_mtime_floor
@@ -9958,6 +9966,7 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::an_emission_
 services::tui_o::writer::tests::actor::host_start::deferred::stall::an_inflight_row_alone_does_not_keep_legacy_busy_but_an_active_custody_does
 services::tui_o::writer::tests::actor::host_start::deferred::stall::an_open_turn_at_the_cursor_waits_only_on_a_sound_frontier
 services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intake_open_when_the_stall_ends_restarts_it
+services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound

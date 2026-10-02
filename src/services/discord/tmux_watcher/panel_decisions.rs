@@ -235,6 +235,8 @@ pub(super) fn watcher_external_input_turn_abandoned(
     expected_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
     host: &HostSnapshot,
 ) -> bool {
+    #[cfg(test)]
+    pause_before_abandon_check();
     match crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()) {
         // #3107: absence alone isn't abandonment — a live turn can momentarily
         // lose its inflight row while the pane keeps producing. Probe the pane
@@ -294,6 +296,36 @@ pub(super) fn redrive_shielded_placeholder(
         >= nudged_at_millis
         && frontier_not_advanced
         && now_millis.saturating_sub(nudged_at_millis).max(0) < REDRIVE_PLACEHOLDER_SHIELD_MILLIS
+}
+
+/// A test's parked abandonment check: the call site its backtrace must name, then the
+/// channels that report the park and release it.
+#[cfg(test)]
+type AbandonPause = (
+    &'static str,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+pub(super) static ABANDON_PAUSE: std::sync::Mutex<Option<AbandonPause>> =
+    std::sync::Mutex::new(None);
+
+/// Parks the first abandonment check reached from the armed call site, before it reads the row.
+#[cfg(test)]
+fn pause_before_abandon_check() {
+    let mut armed = ABANDON_PAUSE.lock().unwrap_or_else(|p| p.into_inner());
+    let at_site = |(site, ..): &AbandonPause| {
+        std::backtrace::Backtrace::force_capture()
+            .to_string()
+            .contains(site)
+    };
+    if !armed.as_ref().is_some_and(at_site) {
+        return;
+    }
+    let (_, paused, resume) = armed.take().unwrap();
+    drop(armed);
+    paused.send(()).unwrap();
+    resume.recv().unwrap();
 }
 
 /// #3107: a missing inflight is abandonment only when the pane isn't actively
