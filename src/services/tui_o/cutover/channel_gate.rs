@@ -145,12 +145,32 @@ pub(crate) async fn claim_then_send<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<BodySend<T>, IdentityError> {
-    if let Some(claim) = claim
-        && claim.claim()?
-    {
-        return Ok(BodySend::OwnedByO);
+    if let Some(claim) = claim {
+        let owned = claim.claim()?;
+        #[cfg(test)]
+        CLAIMS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((claim.channel_id, owned));
+        if owned {
+            return Ok(BodySend::OwnedByO);
+        }
     }
     Ok(BodySend::Sent(send().await))
+}
+
+/// Test builds: every body claim this process judged, with whether O took the body.
+#[cfg(test)]
+static CLAIMS: std::sync::Mutex<Vec<(u64, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// The body claims judged for `channel` so far, true where O took the body.
+#[cfg(test)]
+pub(crate) fn claims_judged(channel: u64) -> Vec<bool> {
+    let claims = CLAIMS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let judged = claims.iter().filter(|(c, _)| *c == channel);
+    judged.map(|(_, owned)| *owned).collect()
 }
 
 fn session_kind(session: Option<&str>) -> Option<RuntimeHandoffKind> {

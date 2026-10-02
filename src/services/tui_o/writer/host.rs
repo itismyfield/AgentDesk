@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use super::activation::{self, ActivationFacts};
 use super::actor;
-use super::adoption::{self, Hold, LegacyView};
+use super::adoption::{self, LegacyView};
 use super::binding::BindingEvents;
 use super::deferred;
 use super::deliver::ChannelWriter;
@@ -40,15 +40,25 @@ pub trait HostIo: Send + Sync + 'static {
         channel: u64,
         provider: ShadowProvider,
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send;
-    /// Whether local Legacy inflight, custody or a pending start holds the channel. Read under its
+    /// What local Legacy inflight, custody or a pending start holds of the channel. Read under its
     /// adoption lock right before the first `init`, so it must not judge TUI output itself.
-    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<bool, String>;
+    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String>;
     /// Legacy's relay state, asked only for a Claude channel whose sources already hold output.
     fn legacy(&self) -> Arc<dyn LegacyView>;
     /// Whether Legacy's mailbox for the channel holds a turn, an intervention or a pending dispatch.
     fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send;
     /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
     fn relaying(&self, channel: u64) -> bool;
+}
+
+/// Legacy's local hold on a channel as the gateway reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Custody {
+    Free,
+    /// Only an inflight row, which outlives its turn when Legacy never clears it.
+    Row,
+    /// A pending start or a terminal delivery Legacy still owns.
+    Active,
 }
 
 /// Channels with a hosted actor and those ready to take work.
@@ -253,7 +263,7 @@ async fn host_channel<I: HostIo>(
                     break facts;
                 }
             };
-            let local = || io.local_custody(channel, provider);
+            let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
             let mut abandoned = None;
             let created = match legacy {
                 None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
@@ -267,10 +277,10 @@ async fn host_channel<I: HostIo>(
                     let events = events.map_err(|error| format!("binding log: {error}"));
                     let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
                     let current = events.as_deref().ok().and_then(adoption::current);
-                    let pinned = deferred::pin(Arc::clone(&legacy), events, channel).await;
-                    let snapshot = match pinned {
-                        Ok(snapshot) => snapshot,
-                        Err(refused) if matches!(refused.hold, Hold::OpenTurn(_)) => {
+                    let first = deferred::first(&*io, channel, provider, &legacy, events).await;
+                    let snapshot = match first {
+                        deferred::First::Adopt(snapshot) => snapshot,
+                        deferred::First::Wait(refused) => {
                             let detail = refused.to_string();
                             let Some((source, _)) = current else {
                                 return release(&candidate, &alarms, channel, &detail);
@@ -295,7 +305,7 @@ async fn host_channel<I: HostIo>(
                             }
                             break 'held Ok(());
                         }
-                        Err(refused) => {
+                        deferred::First::Leave(refused) => {
                             return release(&candidate, &alarms, channel, &refused.to_string());
                         }
                     };
@@ -518,7 +528,7 @@ pub(crate) mod test_io {
         pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
         /// The tmux session each channel's binding names, `host-<channel>` when unset.
         pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
-        /// Legacy's custody of a channel as the gateway reads it; none when unset.
+        /// Legacy's custody of a channel as the gateway reads it, as an inflight row; none when unset.
         pub(crate) custody: Mutex<Option<fn(u64) -> bool>>,
         /// Legacy's mailbox work and watcher emission for every channel; idle by default.
         pub(crate) busy: std::sync::atomic::AtomicBool,
@@ -603,9 +613,10 @@ pub(crate) mod test_io {
             std::future::ready(Ok(locked(&self.facts).clone()))
         }
 
-        fn local_custody(&self, channel: u64, _: ShadowProvider) -> Result<bool, String> {
+        fn local_custody(&self, channel: u64, _: ShadowProvider) -> Result<Custody, String> {
             let custody = *locked(&self.custody);
-            Ok(custody.is_some_and(|custody| custody(channel)))
+            let row = custody.is_some_and(|custody| custody(channel));
+            Ok(if row { Custody::Row } else { Custody::Free })
         }
 
         fn legacy(&self) -> Arc<dyn LegacyView> {

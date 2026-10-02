@@ -12,6 +12,8 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod channel_gate;
 pub(crate) mod intake_route;
+#[cfg(test)]
+pub(crate) use channel_gate::claims_judged;
 pub(crate) use channel_gate::{
     BodyClaim, BodySend, IdentityError, claim_then_send, o_keeps_body,
     o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
