@@ -753,6 +753,8 @@ src/
 │   │   │   ├── exact_lease.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
+│   │   │   ├── herdr_agent_hint.rs
+│   │   │   ├── herdr_agent_hint_tests.rs
 │   │   │   ├── herdr_observation.rs
 │   │   │   ├── herdr_observation_tests.rs
 │   │   │   ├── herdr_report_order.rs

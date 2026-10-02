@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::config::runtime_root;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
@@ -16,9 +17,12 @@ use crate::db::dispatched_sessions::hosted_execution::{
     SourceRef, install_pending_pg, load_hosted_execution_pg, record_launch_evidence_pg,
     record_pane_location_pg,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 pub(crate) use crate::services::session_host::RESTORE_RESUME_NOT_OFF;
 use crate::services::session_host::{HostKind, RestoreResume};
+use crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
+use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, PreparedIncarnation, stable_host_identity,
 };
@@ -35,10 +39,40 @@ pub(crate) const HERDR_PANE_ENV: [&str; 4] = [
     "HERDR_SOCKET_PATH",
 ];
 
-/// Whether a Claude TUI launch goes to Herdr, decided before any launch I/O. Nothing
-/// admits Herdr yet, so every launch stays on tmux.
-pub(crate) const fn herdr_admitted_for_claude_launch(_channel_id: Option<u64>) -> bool {
+/// Whether a Claude TUI launch goes to Herdr, decided before any launch I/O: only a selected
+/// channel whose O writer already runs on a store with a seeded binding baseline.
+pub(crate) fn herdr_admitted_for_claude_launch(channel_id: Option<u64>) -> bool {
+    herdr_selected(channel_id)
+        && channel_id.is_some_and(|channel| o_ready_at(runtime_root().as_deref(), channel))
+}
+
+/// Nothing selects Herdr yet; activation changes only this predicate, never the gate above.
+fn herdr_selected(_channel_id: Option<u64>) -> bool {
+    #[cfg(test)]
+    return SELECTED.with(std::cell::Cell::get);
+    #[cfg(not(test))]
     false
+}
+
+/// O owns the channel's output, its writer accepts work, and its store holds a binding
+/// checkpoint, which only a found baseline or an applied binding writes; the store is not opened.
+fn o_ready_at(runtime_root: Option<&Path>, channel: u64) -> bool {
+    #[cfg(test)]
+    READINESS_READS.with(|reads| reads.set(reads.get() + 1));
+    let owned = peek_o_owns_tui_output_for_channel(channel, Some(RuntimeHandoffKind::ClaudeTui));
+    let seeded = |root| {
+        OStore::existing(root)
+            .is_some_and(|store| matches!(store.peek_binding_checkpoint(channel), Ok(Some(_))))
+    };
+    owned == Ok(true) && writer_accepts(channel) && runtime_root.is_some_and(seeded)
+}
+
+fn writer_accepts(channel: u64) -> bool {
+    #[cfg(test)]
+    if let Some(answer) = WRITER_ACCEPTS.with(std::cell::Cell::get) {
+        return answer;
+    }
+    crate::services::tui_o::writer::host::channel_accepts(channel)
 }
 
 /// A configured Herdr endpoint; no field falls back to a default socket, session or pane.
@@ -129,6 +163,58 @@ pub(crate) enum HerdrLaunchError {
 #[cfg(test)]
 thread_local! {
     static ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SELECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static WRITER_ACCEPTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static READINESS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Selects Herdr and stands in for the writer's readiness on this thread until dropped.
+#[cfg(test)]
+pub(crate) struct LaunchGateGuard(bool, Option<bool>);
+
+#[cfg(test)]
+pub(crate) fn force_launch_gate(selected: bool, writer_accepts: Option<bool>) -> LaunchGateGuard {
+    LaunchGateGuard(
+        SELECTED.with(|cell| cell.replace(selected)),
+        WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)),
+    )
+}
+
+#[cfg(test)]
+impl Drop for LaunchGateGuard {
+    fn drop(&mut self) {
+        SELECTED.with(|cell| cell.set(self.0));
+        WRITER_ACCEPTS.with(|cell| cell.set(self.1));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn readiness_reads_on_this_thread() -> usize {
+    READINESS_READS.with(std::cell::Cell::get)
+}
+
+/// An O store sealed over `channels` with no checkpoint yet, as a writer's first start leaves it.
+#[cfg(test)]
+pub(crate) fn o_store_for_test(
+    runtime_root: &Path,
+    channels: &[u64],
+) -> (OStore, crate::services::tui_o::store::OEra) {
+    use crate::services::tui_o::store::{Initialized, StoreConfig};
+    let config = StoreConfig { enabled: true };
+    let store = OStore::open_if_enabled(&config, runtime_root)
+        .unwrap()
+        .unwrap();
+    let init = |channel| {
+        Ok(Initialized {
+            channel,
+            sources: Vec::new(),
+            initial_anchor: 1,
+            build_digest: "test".into(),
+            at: chrono::Utc::now(),
+        })
+    };
+    let era = store.begin_era(channels, chrono::Utc::now(), init).unwrap();
+    (store, era)
 }
 
 #[cfg(test)]
