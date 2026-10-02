@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use poise::serenity_prelude::ChannelId;
 
+use crate::services::discord::SharedData;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::{
-    ChannelTeardown, backfill_inflight_after_guard, channel_teardown, guard_tmux_name,
-    nameless_teardown_kept, row_gate,
+    ChannelTeardown, backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown,
+    row_gate, runtime_target_holds, runtime_teardown,
 };
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
@@ -216,7 +219,7 @@ pub(crate) struct ForceKillVerdict {
 impl ForceKillVerdict {
     /// The host guard keeps the session: the caller must change nothing for this kill.
     pub(crate) fn kept(&self) -> bool {
-        matches!(self.host, ForceKillHost::Gate(ChannelTeardown::Kept))
+        matches!(self.host, ForceKillHost::Gate(ChannelTeardown::Kept, _))
     }
 }
 
@@ -233,7 +236,7 @@ pub(crate) async fn force_kill_verdict(
                 error,
                 "host guard kept a force-kill whose inflight is unreadable"
             );
-            let host = ForceKillHost::Gate(ChannelTeardown::Kept);
+            let host = ForceKillHost::Gate(ChannelTeardown::Kept, None);
             let (target, observed, backfill) = (target.clone(), None, false);
             return ForceKillVerdict {
                 target,
@@ -338,8 +341,26 @@ async fn stop_turn_with_policy(
         .clone()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| target.tmux_name.clone());
-    if matches!(host, ForceKillHost::Gate(ChannelTeardown::Kept)) {
+    if matches!(host, ForceKillHost::Gate(ChannelTeardown::Kept, _)) {
         return kept_by_host_guard(tmux_session_observed);
+    }
+    // A kill on a channel's runtime stops only the runtime and session its verdict approved.
+    let approved = host.approved(&probe_session_owned);
+    let keys = (health_registry, target.provider.as_ref(), target.channel_id);
+    if let (true, Some(_), Some(provider), Some(channel)) =
+        (cleanup_policy.should_cleanup_tmux(), keys.0, keys.1, keys.2)
+    {
+        let holds = match approved {
+            Some((shared, name)) => runtime_target_holds(shared, provider, channel, name).await,
+            None => false,
+        };
+        if !holds {
+            tracing::warn!(
+                ?channel,
+                "host guard kept a force-kill: its runtime moved on"
+            );
+            return kept_by_host_guard(tmux_session_observed);
+        }
     }
     if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
         backfill_inflight_after_guard(provider, channel);
@@ -373,14 +394,16 @@ async fn stop_turn_with_policy(
                     ..
                 } => "force_kill",
             };
-            crate::services::discord::health::force_kill_provider_channel_runtime(
-                registry,
-                provider.as_str(),
-                channel_id,
-                reason,
-                termination_reason_code,
-            )
-            .await
+            let policy = crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+                termination_reason_code: Some(termination_reason_code),
+            };
+            let stop = crate::services::discord::health::stop_channel_runtime;
+            match approved {
+                Some((shared, name)) => {
+                    Some(stop(shared, provider, channel_id, reason, policy, Some(name)).await)
+                }
+                None => None,
+            }
         } else {
             crate::services::discord::health::stop_provider_channel_runtime_with_policy(
                 registry,
@@ -461,7 +484,7 @@ async fn stop_turn_with_policy(
         // stale jsonl/FIFO/owner markers after forced termination (#892).
         if killed_now {
             match &host {
-                ForceKillHost::Gate(ChannelTeardown::Cleared(session)) => {
+                ForceKillHost::Gate(ChannelTeardown::Cleared(session), _) => {
                     crate::services::tmux_common::cleanup_cleared_session_temp_files(session)
                 }
                 _ => crate::services::tmux_common::cleanup_session_temp_files(kill_target),
@@ -858,13 +881,25 @@ pub(crate) mod policy_observability_tests {
 enum ForceKillHost {
     /// The policy keeps tmux: not a kill.
     NotKill,
-    /// A keyed channel holding no tmux name that the nameless gate admits.
-    Nameless,
-    Gate(ChannelTeardown),
+    /// A keyed channel holding no tmux name, on the runtime the nameless gate admits.
+    Nameless(Arc<SharedData>),
+    /// The gate's verdict; a kill it admits on a channel's runtime holds that runtime.
+    Gate(ChannelTeardown, Option<Arc<SharedData>>),
 }
 
-/// The host guard for a force-kill: the registry's key when it can build one, else the
-/// caller's own row; with neither, or a nameless channel the nameless gate keeps, it keeps.
+impl ForceKillHost {
+    /// The runtime and session name an admitted kill on a channel's runtime may stop.
+    fn approved<'a>(&'a self, name: &'a str) -> Option<(&'a Arc<SharedData>, Option<&'a str>)> {
+        match self {
+            Self::Nameless(shared) => Some((shared, None)),
+            Self::Gate(_, Some(shared)) => Some((shared, Some(name))),
+            Self::NotKill | Self::Gate(_, None) => None,
+        }
+    }
+}
+
+/// The host guard for a force-kill: on a channel's runtime, that runtime's targets with the
+/// caller's row, the runtime's key and the channel's row; else the caller's own row alone.
 async fn force_kill_host_gate(
     registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
@@ -874,22 +909,23 @@ async fn force_kill_host_gate(
     let caller = "turn_lifecycle_force_kill";
     match (registry, target.provider.as_ref(), target.channel_id) {
         (Some(registry), Some(provider), Some(channel)) if tmux_name.is_empty() => {
-            if nameless_teardown_kept(registry, provider, channel, caller).await {
-                ForceKillHost::Gate(ChannelTeardown::Kept)
-            } else {
-                ForceKillHost::Nameless
+            match nameless_runtime_teardown(registry, provider, channel, caller).await {
+                Some(shared) => ForceKillHost::Nameless(shared),
+                None => ForceKillHost::Gate(ChannelTeardown::Kept, None),
             }
         }
         (Some(registry), Some(provider), Some(channel)) => {
-            let gate = channel_teardown(registry, provider, channel, tmux_name, None, caller);
-            ForceKillHost::Gate(gate.await)
+            let key = row.map(|row| row.session_key);
+            let gate = runtime_teardown(registry, provider, channel, tmux_name, key, caller);
+            let (gate, runtime) = gate.await;
+            ForceKillHost::Gate(gate, runtime)
         }
         _ => match row.filter(|_| !tmux_name.is_empty()) {
             Some(row) => {
                 let (provider, key) = (row.stored_provider, row.session_key);
                 let channel = target.channel_id.map_or(0, ChannelId::get);
                 let gate = row_gate(row.pool, provider, channel, key, tmux_name, caller);
-                ForceKillHost::Gate(gate.await.0)
+                ForceKillHost::Gate(gate.await.0, None)
             }
             None => {
                 tracing::warn!(
@@ -897,7 +933,7 @@ async fn force_kill_host_gate(
                     tmux_name,
                     "host guard kept a force-kill holding no key"
                 );
-                ForceKillHost::Gate(ChannelTeardown::Kept)
+                ForceKillHost::Gate(ChannelTeardown::Kept, None)
             }
         },
     }
@@ -1040,7 +1076,7 @@ fn compute_queue_preserved(
 mod host_guard_tests {
     use super::*;
     use crate::services::discord::host_teardown_gate::test_support::{
-        Stored, busy_turn, channel_key, runtime, seed, stop_recorded, turn_kept,
+        Stored, busy_turn, channel_key, runtime, runtime_state, seed, stop_recorded, turn_kept,
     };
 
     // A force-kill the registry can key reads the stored rows before its tombstone, stop
@@ -1082,6 +1118,38 @@ mod host_guard_tests {
             );
             assert_eq!(stop_recorded(channel), admitted, "{stored:?}");
         }
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // A kill runs only on the session its verdict approved: a runtime that took up another
+    // session between the verdict and the kill is left as it is.
+    #[tokio::test]
+    async fn force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        let channel = ChannelId::new(1_479_671_301_387_059_900);
+        let name = "AgentDesk-claude-p4r-moved-a";
+        let key = channel_key(&shared, name);
+        seed(&pool, &key, name, channel.get(), Stored::Legacy).await;
+        let token = busy_turn(&shared, channel, name).await;
+        let target = TurnLifecycleTarget {
+            provider: Some(ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: name.to_string(),
+        };
+        let verdict = force_kill_verdict(Some(&registry), &target, None).await;
+        assert!(!verdict.kept(), "the legacy session is admitted");
+        let moved = "AgentDesk-claude-p4r-moved-b";
+        crate::services::discord::register_resume_watcher_for_tests(&shared, channel, moved);
+        let before = runtime_state(&shared, channel).await;
+        let kill = force_kill_turn_with_verdict(Some(&registry), verdict, "moved on", "p4r");
+        assert_eq!(kill.await.lifecycle_path, HOST_GUARD_KEPT_PATH);
+        assert_eq!(runtime_state(&shared, channel).await, before);
+        assert!(turn_kept(&shared, channel, &token).await);
+        assert!(!stop_recorded(channel), "no stop is recorded");
         pool.close().await;
         db.drop().await;
     }

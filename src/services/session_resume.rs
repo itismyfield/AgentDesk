@@ -42,7 +42,7 @@ use crate::services::discord::health::{
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{
-    TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
+    ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
 };
 use poise::serenity_prelude::ChannelId;
 
@@ -526,7 +526,13 @@ pub(crate) async fn perform_resume_rebind(
                 channel_id: Some(channel_id),
                 tmux_name: tmux_name.to_string(),
             };
-            let verdict = force_kill_verdict(Some(registry), &target, None).await;
+            let stored_provider = Some(provider.as_str());
+            let row = ForceKillRow {
+                pool,
+                session_key,
+                stored_provider,
+            };
+            let verdict = force_kill_verdict(Some(registry), &target, Some(row)).await;
             if verdict.kept() {
                 let reason = "the session's teardown is kept by the host guard".to_string();
                 return Err(ResumeRebindError::HostUnsupported(reason));

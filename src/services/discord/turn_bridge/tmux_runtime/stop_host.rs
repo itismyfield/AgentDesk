@@ -1,5 +1,5 @@
-//! The host a stop acts on, decided once from the token and shared by the interrupt, the
-//! cooperative cancel and the hard stop. Only a confirmed legacy tmux name reaches tmux.
+//! The host a stop acts on, decided once (from the token, or by a force-kill verdict) and shared
+//! by the interrupt, the cooperative cancel and the hard stop. Only legacy tmux reaches tmux.
 
 use std::sync::Arc;
 
@@ -31,6 +31,8 @@ impl LegacyTmuxName {
 pub(super) enum StopRefusal {
     /// The token's `.host_kind` marker is not tmux; `local_tmux` logs what it holds.
     Marker,
+    /// The token names a session other than the one the force-kill verdict approved.
+    NotApproved,
     #[cfg(test)]
     Unknown,
     #[cfg(test)]
@@ -82,6 +84,18 @@ impl StopTarget {
         }
         let refusal = StopRefusal::Marker;
         Self::Refused { name, refusal }
+    }
+
+    /// The target a force-kill verdict approved; its host evidence, marker included, was read then.
+    pub(super) fn approved(token: &CancelToken, approved: Option<&str>) -> Self {
+        match token.tmux_session_name() {
+            None => Self::Process,
+            Some(name) if Some(name.as_str()) == approved => Self::LegacyTmux(LegacyTmuxName(name)),
+            Some(name) => {
+                let refusal = StopRefusal::NotApproved;
+                Self::Refused { name, refusal }
+            }
+        }
     }
 
     /// Resolved host evidence for a Herdr turn; Unknown and Conflict never become tmux.

@@ -106,7 +106,7 @@ pub use recovery::{
 pub(crate) use recovery::{
     STALL_WATCHDOG_INTERVAL_SECS, channel_has_active_turn, clear_resume_runtime_owner_after_death,
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
-    resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown,
+    resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown, stop_channel_runtime,
     stop_provider_channel_runtime_with_policy,
 };
 #[cfg(test)]

@@ -1090,6 +1090,7 @@ server::routes::discord::tests::snowflake_or_none_rejects_injection_attempts
 server::routes::discord::tests::thread_parent_id_extracts_discord_thread_parent
 server::routes::discord::tests::thread_parent_id_ignores_regular_channels
 server::routes::dispatched_sessions::tests::backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg
+server::routes::dispatched_sessions::tests::backlog_revert_refuses_a_card_whose_runtime_runs_another_session_pg
 server::routes::dispatched_sessions::tests::backlog_revert_refuses_the_card_when_any_session_host_is_unconfirmed_pg
 server::routes::dispatched_sessions::tests::force_kill_without_runtime_keys_refuses_unconfirmed_hosts_pg
 server::routes::dispatched_sessions::tests::idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
@@ -1097,8 +1098,10 @@ server::routes::dispatched_sessions::tests::kill_tmux_route_checks_the_host_befo
 server::routes::dispatched_sessions::tests::nameless_force_kill_refused_by_its_inflight_name_writes_nothing_pg
 server::routes::dispatched_sessions::tests::nameless_process_turn_force_kill_still_cancels_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
+server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_runtime_runs_another_session_pg
 server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg
 server::routes::dispatched_sessions::tests::routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg
+server::routes::dispatched_sessions::tests::routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_allows_active_statuses
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_rejects_terminal_statuses
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
@@ -10268,6 +10271,7 @@ services::turn_cancel_queue_guard::tests::queue_truth_purge_requires_a_complete_
 services::turn_cancel_queue_guard::tests::records_the_queued_message_a_cancel_removed
 services::turn_cancel_queue_guard::tests::the_guard_never_writes_to_the_mailbox
 services::turn_cancel_queue_guard::tests::the_promoted_message_is_not_recorded_as_lost
+services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
 services::turn_lifecycle::host_guard_tests::force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg
 services::turn_lifecycle::policy_observability_tests::cancel_observability_emits_unknown_noop_direct_fallback
 services::turn_lifecycle::policy_observability_tests::cleanup_policy_observability_surface_matches_cancel_contract

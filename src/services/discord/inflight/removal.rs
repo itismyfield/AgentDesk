@@ -568,14 +568,12 @@ fn relock(
 }
 
 /// One channel's row as the probe scan shows it, without the finalizer backfill a scan writes
-/// into every row it reads; `Err` when the row exists but could not be read.
+/// into every row it reads; `Err` when the root or the row cannot be read or parsed.
 pub(in crate::services::discord) fn load_channel_inflight_for_probe(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Result<Option<InflightTurnState>, String> {
-    let Some(root) = super::inflight_runtime_root() else {
-        return Ok(None);
-    };
+    let root = super::inflight_runtime_root().ok_or("inflight root unavailable")?;
     let path = super::inflight_state_path(&root, provider, channel_id);
     match fs::metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -586,10 +584,12 @@ pub(in crate::services::discord) fn load_channel_inflight_for_probe(
     match classify_inflight_row(&path, provider, allocation) {
         RowVerdict::Keep(state, _) | RowVerdict::KeepGateRefused(state, _) => Ok(Some(state)),
         RowVerdict::Skip(true) => Err(format!("inflight row unreadable: {}", path.display())),
-        RowVerdict::Skip(false)
-        | RowVerdict::HideStale(..)
-        | RowVerdict::HideForeign(..)
-        | RowVerdict::HideMalformed(..) => Ok(None),
+        RowVerdict::HideMalformed(..) => {
+            Err(format!("inflight row unparseable: {}", path.display()))
+        }
+        RowVerdict::Skip(false) | RowVerdict::HideStale(..) | RowVerdict::HideForeign(..) => {
+            Ok(None)
+        }
     }
 }
 
@@ -1267,6 +1267,12 @@ mod nondestructive_loader_tests {
             Ok(true),
             "an unreadable row defers"
         );
+        let malformed = inflight_state_path(&env.dir(), &CLAUDE, 5_996_103);
+        fs::write(&malformed, "{ malformed json ]").unwrap();
+        let before = snapshot(&malformed);
+        let deferred = defer(None, "5996103").await;
+        assert_eq!(deferred, Ok(true), "an unparseable row defers");
+        assert_eq!(snapshot(&malformed), before, "and is left as it was");
     }
 
     // R1-R4: every production read wrapper hides the rows it used to unlink.

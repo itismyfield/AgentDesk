@@ -531,7 +531,7 @@ pub(crate) fn inflight_state_allows_idle_tmux_repair_for_channel(
 }
 
 /// Reads only `channel_id`'s rows and writes nothing, so probing one thread never saves another
-/// thread's row; a row that cannot be read counts as fresh.
+/// thread's row; a row that cannot be read or parsed counts as fresh.
 pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     let now_unix_secs = chrono::Local::now().timestamp();
     [
