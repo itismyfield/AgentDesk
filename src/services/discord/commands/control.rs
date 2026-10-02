@@ -621,8 +621,8 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
         CommandStop::Stop(stop) => {
             ctx.say(super::STOPPING_RESPONSE).await?;
 
-            // #1218: the judged stop keeps the abort-key-then-SIGKILL order
-            // identical across every stop entrypoint.
+            // The judged stop keeps the abort-key-then-SIGKILL order identical
+            // across every stop entrypoint.
             let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
             stop.stop(policy, "/stop").await;
             // #5176 — "the interrupt was sent (or deliberately skipped)" is not
