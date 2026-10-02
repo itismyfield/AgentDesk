@@ -775,9 +775,11 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::recovery_engine::restore_inflight::host_probe_tests
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
   services::discord::recovery_engine::routing_orphan::host_guard_tests
+  services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   services::discord::router::intake_dispatch::tests
+  services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   services::discord::router::message_handler::provider_isolation::host_tests
