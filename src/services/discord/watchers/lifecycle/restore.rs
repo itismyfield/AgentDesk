@@ -678,18 +678,21 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
+        let host = watch_host_of(shared, &provider, pw.channel_id.get(), &pw.session_name).await;
         let claimed = codex_restore::commit_live_direct_resume_fallback(
             &pw.session_name,
             pw.channel_id,
             pw.codex_direct_resume_fallback,
             || {
-                try_claim_watcher_with_thread_parent(
+                try_claim_watcher_for_host(
                     &shared.tmux_watchers,
                     pw.channel_id,
                     handle,
                     Some(&provider),
                     pw.thread_parent,
+                    host,
                 )
+                .unwrap_or(false)
             },
         );
         if !claimed {

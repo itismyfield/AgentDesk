@@ -113,8 +113,38 @@ fn listed<R>(read: impl FnOnce(&AtomicBool) -> R) -> R {
 fn change_hold(logical: &str, change: impl FnOnce(&mut HashMap<String, (String, bool)>)) {
     crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
         listed(|flag| flag.fetch_or(true, AcqRel));
+        #[cfg(test)]
+        if let Err(std::sync::TryLockError::WouldBlock) = HERDR_EXECUTIONS.try_lock() {
+            HOLD_CONTENDED.with_borrow(|sent| sent.as_ref().map(|tx| tx.send("hold contended")));
+        }
         change(&mut HERDR_EXECUTIONS.lock().unwrap_or_else(|p| p.into_inner()));
     });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Told when this thread's hold change waits on a claim holding the admission map.
+    pub(crate) static HOLD_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<&'static str>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The admission a watcher claim on `logical` commits under, the map locked until it drops.
+/// `Err` withholds a listed pane no reconcile admitted, or a Herdr host the map does not list.
+#[allow(clippy::result_unit_err)]
+pub(crate) fn herdr_claim_admission(
+    logical: &str,
+    herdr_host: bool,
+) -> Result<Option<std::sync::MutexGuard<'static, HashMap<String, (String, bool)>>>, ()> {
+    if !herdr_host && !listed(|flag| flag.load(Acquire)) {
+        return Ok(None);
+    }
+    let executions = HERDR_EXECUTIONS.lock();
+    let executions = executions.unwrap_or_else(|poison| poison.into_inner());
+    match executions.get(logical) {
+        Some((_, true)) => Ok(Some(executions)),
+        None if !herdr_host => Ok(Some(executions)),
+        _ => Err(()),
+    }
 }
 
 /// A launch installed execution `nonce` on `logical`: it is held until a reconcile admits it, and

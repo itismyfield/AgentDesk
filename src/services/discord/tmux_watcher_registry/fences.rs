@@ -158,8 +158,8 @@ struct PinnedWatcherBinding {
 ///
 /// No production writer can build that sequence at this commit. `insert_locked`
 /// is the registry's only insertion path, and its only production callers are
-/// `watchers::lifecycle::claims::{try_claim_watcher_with_thread_parent,
-/// claim_watcher}`. Both take the handle by value from the caller, and every
+/// `watchers::lifecycle::claims::{try_claim_watcher_for_host,
+/// claim_watcher_for_host}`. Both take the handle by value from the caller, and every
 /// production caller that reaches them constructs a NEW handle with a fresh
 /// `Arc<AtomicBool>` for `cancel` immediately beforehand:
 /// `turn_bridge::runtime_handoff_loop` and its `watcher_handoff` sibling;
@@ -170,7 +170,7 @@ struct PinnedWatcherBinding {
 /// `recovery_engine::manual_rebind::rebind_inflight_for_channel_inner`. So no
 /// production re-admission restores the pinned pointer. The handoff pair is the
 /// closest shape to a "move" and is not one: it mints a fresh pointer and lets
-/// `claim_watcher` cancel and remove the incumbent, which is a replacement the
+/// `claim_watcher_for_host` cancel and remove the incumbent, which is a replacement the
 /// CAS correctly refuses for a pin taken before it.
 ///
 /// That is an enumeration of today's writers, not an invariant the types hold. A

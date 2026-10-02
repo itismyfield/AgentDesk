@@ -142,6 +142,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+  --skip services::discord::router::message_handler::watchdog::host_tests
   --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
@@ -152,6 +153,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_delivery_custody::pg_tests
   --skip services::discord::terminal_ui_obligation::tests
+  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   --skip services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
@@ -476,6 +478,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
+  services::discord::router::message_handler::watchdog::host_tests::a_scheduled_paused_attach_rereads_the_host_before_each_attempt
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::foreign_nonce_terminal_artifact_does_not_mask_our_cancellation
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::identity_terminal_proof_commits_handoff_despite_clock_regression
@@ -534,6 +537,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
   services::discord::terminal_ui_obligation::tests::terminal_ui_reconcile_action_prefers_complete_then_deadline_then_wait
   services::discord::terminal_ui_obligation::tests::terminal_ui_snapshot_from_inflight_preserves_missing_claude_tui_output_flag
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_listed_herdr_pane_is_never_read_dead_after_a_stream
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_marked_herdr_pane_is_abandoned_only_by_its_stop_tombstone
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_streaming_tick_rechecks_the_host_before_capturing_the_pane
@@ -800,6 +805,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   services::discord::router::message_handler::provider_isolation::host_tests
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+  services::discord::router::message_handler::watchdog::host_tests
   services::discord::runtime_bootstrap::gateway_handback_integration_tests
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
@@ -810,6 +816,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::task_notification_delivery::tests
   services::discord::terminal_delivery_custody::pg_tests
   services::discord::terminal_ui_obligation::tests
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests

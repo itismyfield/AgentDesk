@@ -193,25 +193,67 @@ pub(crate) fn restore_scan_should_skip_existing_watcher(
     !cancelled && !paused && existing_output_path == restored_output_path
 }
 
+/// A claim on a Herdr pane whose execution no reconcile admitted: nothing was claimed,
+/// reused or replaced, so there is no owner to adopt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WatchWithheld;
+
+/// The Herdr admission check a claim runs under the registry lock; the guard keeps the
+/// admission map locked until the claim commits. Takes no source authority.
+fn admit_claim(
+    tmux_session_name: &str,
+    host: WatchHost,
+) -> Result<Option<impl Sized + use<>>, WatchWithheld> {
+    let herdr_host = host == WatchHost::Herdr;
+    let admission =
+        crate::services::tui_prompt_dedupe::herdr_claim_admission(tmux_session_name, herdr_host);
+    #[cfg(test)]
+    CLAIM_PAUSE.with_borrow(|pause| {
+        pause
+            .as_ref()
+            .map(|(paused, resume)| paused.send(()).ok().and_then(|()| resume.recv().ok()))
+    });
+    admission.map_err(|()| {
+        tracing::info!(
+            tmux_session_name,
+            ?host,
+            "watcher claim withheld: Herdr execution not admitted"
+        );
+        WatchWithheld
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Parks this thread's claim after its admission read until the test resumes it.
+    pub(crate) static CLAIM_PAUSE: std::cell::RefCell<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
 /// #226/#1170: Atomically claim a tmux session for watcher creation.
 /// Returns true if the claim succeeded (caller should spawn the watcher).
 /// Returns false if a watcher already exists (caller should skip).
+#[cfg(test)]
 pub(in crate::services::discord) fn try_claim_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
 ) -> bool {
-    try_claim_watcher_with_thread_parent(watchers, channel_id, handle, None, None)
+    try_claim_watcher_for_host(watchers, channel_id, handle, None, None, WatchHost::Legacy)
+        .expect("a legacy claim on an unlisted pane is never withheld")
 }
 
-pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
+pub(in crate::services::discord) fn try_claim_watcher_for_host(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
     provider: Option<&ProviderKind>,
     thread_parent: Option<ThreadFollowUpParent>,
-) -> bool {
+    host: WatchHost,
+) -> Result<bool, WatchWithheld> {
     let guard = lock_tmux_watcher_registry();
+    let _admission = admit_claim(&handle.tmux_session_name, host)?;
     let requested_tmux = handle.tmux_session_name.clone();
     let requested_output_path = handle.output_path.clone();
     if let Some(existing) = find_watcher_by_tmux_session(watchers, &requested_tmux) {
@@ -248,7 +290,7 @@ pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
                     "watcher_slots": watchers.len(),
                 }),
             );
-            return false;
+            return Ok(false);
         }
     }
     let claimed = if watchers.contains_key(&channel_id) {
@@ -274,7 +316,7 @@ pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
         slot_present,
         "watcher claim must leave a channel-owned watcher slot"
     );
-    claimed
+    Ok(claimed)
 }
 
 /// Claim a channel for watcher creation with the #1135 single-watcher policy.
@@ -286,6 +328,7 @@ pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
 /// Same channel but a different tmux session still replaces the incumbent. That
 /// preserves the existing new-turn recovery behavior without allowing two
 /// owners for one tmux session.
+#[cfg(test)]
 pub(in crate::services::discord) fn claim_or_reuse_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
@@ -293,32 +336,27 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_or_reuse_watcher_with_thread_parent(watchers, channel_id, handle, provider, source, None)
+    claim_watcher(watchers, channel_id, handle, provider, source, false, None)
 }
 
-pub(in crate::services::discord) fn claim_or_reuse_watcher_with_thread_parent(
+pub(in crate::services::discord) fn claim_or_reuse_watcher_for_host(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
     provider: &ProviderKind,
     source: &str,
     thread_parent: Option<ThreadFollowUpParent>,
-) -> WatcherClaimOutcome {
-    claim_watcher(
-        watchers,
-        channel_id,
-        handle,
-        provider,
-        source,
-        false,
-        thread_parent,
-    )
+    host: WatchHost,
+) -> Result<WatcherClaimOutcome, WatchWithheld> {
+    let claim = (source, false, thread_parent, host);
+    claim_watcher_for_host(watchers, channel_id, handle, provider, claim)
 }
 
 /// Force a fresh watcher/converter generation even when a live same-session
 /// incumbent watches the same output path. Recovery uses this only after it
 /// proves that the persisted Codex render seed belongs to an earlier provider
 /// turn: reusing that incumbent would keep the stale Discord anchor alive.
+#[cfg(test)]
 pub(in crate::services::discord) fn claim_or_replace_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
@@ -326,30 +364,23 @@ pub(in crate::services::discord) fn claim_or_replace_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_or_replace_watcher_with_thread_parent(
-        watchers, channel_id, handle, provider, source, None,
-    )
+    claim_watcher(watchers, channel_id, handle, provider, source, true, None)
 }
 
-pub(in crate::services::discord) fn claim_or_replace_watcher_with_thread_parent(
+pub(in crate::services::discord) fn claim_or_replace_watcher_for_host(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
     provider: &ProviderKind,
     source: &str,
     thread_parent: Option<ThreadFollowUpParent>,
-) -> WatcherClaimOutcome {
-    claim_watcher(
-        watchers,
-        channel_id,
-        handle,
-        provider,
-        source,
-        true,
-        thread_parent,
-    )
+    host: WatchHost,
+) -> Result<WatcherClaimOutcome, WatchWithheld> {
+    let claim = (source, true, thread_parent, host);
+    claim_watcher_for_host(watchers, channel_id, handle, provider, claim)
 }
 
+#[cfg(test)]
 pub(crate) fn claim_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
@@ -359,7 +390,30 @@ pub(crate) fn claim_watcher(
     force_replace_live_same_tmux: bool,
     thread_parent: Option<ThreadFollowUpParent>,
 ) -> WatcherClaimOutcome {
+    let claim = (
+        source,
+        force_replace_live_same_tmux,
+        thread_parent,
+        WatchHost::Legacy,
+    );
+    claim_watcher_for_host(watchers, channel_id, handle, provider, claim)
+        .expect("a legacy claim on an unlisted pane is never withheld")
+}
+
+fn claim_watcher_for_host(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    provider: &ProviderKind,
+    (source, force_replace_live_same_tmux, thread_parent, host): (
+        &str,
+        bool,
+        Option<ThreadFollowUpParent>,
+        WatchHost,
+    ),
+) -> Result<WatcherClaimOutcome, WatchWithheld> {
     let guard = lock_tmux_watcher_registry();
+    let _admission = admit_claim(&handle.tmux_session_name, host)?;
     let requested_tmux = handle.tmux_session_name.clone();
     let requested_output_path = handle.output_path.clone();
     let mut removed_stale_same_tmux = false;
@@ -458,11 +512,11 @@ pub(crate) fn claim_watcher(
                     "tmux_session_name": requested_tmux,
                 }),
             );
-            return WatcherClaimOutcome::new(
+            return Ok(WatcherClaimOutcome::new(
                 WatcherClaimAction::ReuseExisting,
                 existing_channel_id,
                 incarnation,
-            );
+            ));
         }
     }
 
@@ -566,7 +620,7 @@ pub(crate) fn claim_watcher(
         slot_present,
         "watcher replacement must leave a channel-owned watcher slot"
     );
-    outcome
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -612,3 +666,7 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_test(
     assert_eq!(outcome.action, WatcherClaimAction::ReuseExisting);
     assert_eq!(outcome.owner_channel_id(), existing_channel_id);
 }
+
+#[cfg(test)]
+#[path = "claims_host_tests.rs"]
+mod host_tests;

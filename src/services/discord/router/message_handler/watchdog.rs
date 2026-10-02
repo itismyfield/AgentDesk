@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::services::discord::tmux::{HostSnapshot, WatchHost};
 
 #[cfg(unix)]
 #[derive(Clone)]
@@ -12,6 +14,7 @@ struct PausedTurnWatcherAttachRequest {
     initial_offset: u64,
     source: &'static str,
     thread_parent_channel_id: Option<serenity::ChannelId>,
+    host: Arc<HostSnapshot>,
 }
 
 #[cfg(unix)]
@@ -168,11 +171,14 @@ fn schedule_pending_paused_turn_watcher_attach(request: PausedTurnWatcherAttachR
                     return;
                 }
 
-                if paused_watcher_tmux_session_has_live_pane(&request.tmux_session_name) {
+                // Each attempt re-reads the host: a Herdr launch since scheduling skips the tmux wait.
+                let herdr =
+                    request.host.refresh_sync(&request.tmux_session_name) == WatchHost::Herdr;
+                if herdr || paused_watcher_tmux_session_has_live_pane(&request.tmux_session_name) {
                     let owner = attach_paused_turn_watcher_inner(request.clone(), false);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
-                        "  [{ts}] ↻ Re-attached paused tmux watcher for channel {} via cold-start retry attempt {attempt}; owner={}",
+                        "  [{ts}] ↻ Re-attached paused tmux watcher for channel {} via cold-start retry attempt {attempt}; owner={:?}",
                         request.channel_id,
                         owner
                     );
@@ -193,8 +199,9 @@ fn schedule_pending_paused_turn_watcher_attach(request: PausedTurnWatcherAttachR
     );
 }
 
+#[cfg(all(test, unix))]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn attach_paused_turn_watcher(
+fn attach_paused_turn_watcher(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
     provider: &ProviderKind,
@@ -205,43 +212,29 @@ pub(super) fn attach_paused_turn_watcher(
     source: &'static str,
     thread_parent_channel_id: Option<serenity::ChannelId>,
 ) -> serenity::ChannelId {
-    #[cfg(unix)]
-    if let (Some(tmux_session_name), Some(output_path)) = (tmux_session_name, output_path) {
-        return attach_paused_turn_watcher_inner(
-            PausedTurnWatcherAttachRequest {
-                shared: shared.clone(),
-                http,
-                provider: provider.clone(),
-                channel_id,
-                tmux_session_name,
-                output_path,
-                initial_offset,
-                source,
-                thread_parent_channel_id,
-            },
-            true,
-        );
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = (
-            shared,
-            http,
-            provider,
-            tmux_session_name,
-            output_path,
-            initial_offset,
-            source,
-            thread_parent_channel_id,
-        );
-    }
-
-    channel_id
+    let (Some(tmux_session_name), Some(output_path)) = (tmux_session_name, output_path) else {
+        return channel_id;
+    };
+    let host = HostSnapshot::new(WatchHost::Legacy);
+    let request = PausedTurnWatcherAttachRequest {
+        shared: shared.clone(),
+        http,
+        provider: provider.clone(),
+        channel_id,
+        tmux_session_name,
+        output_path,
+        initial_offset,
+        source,
+        thread_parent_channel_id,
+        host: Arc::new(host),
+    };
+    attach_paused_turn_watcher_inner(request, true).expect("a legacy attach is never withheld")
 }
 
+/// Attaches the paused turn watcher and records its owner on the inflight row; `None` when the
+/// pane is a Herdr execution no reconcile admitted, which leaves registry and row untouched.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn attach_paused_turn_watcher_for_inflight(
+pub(super) async fn attach_paused_turn_watcher_for_inflight(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
     provider: &ProviderKind,
@@ -252,18 +245,41 @@ pub(super) fn attach_paused_turn_watcher_for_inflight(
     source: &'static str,
     thread_parent_channel_id: Option<serenity::ChannelId>,
     inflight_state: &mut InflightTurnState,
-) -> serenity::ChannelId {
-    let owner_channel_id = attach_paused_turn_watcher(
-        shared,
-        http,
-        provider,
-        channel_id,
-        tmux_session_name,
-        output_path,
-        initial_offset,
-        source,
-        thread_parent_channel_id,
-    );
+) -> Option<serenity::ChannelId> {
+    #[cfg(unix)]
+    let owner_channel_id = match (tmux_session_name, output_path) {
+        (Some(tmux_session_name), Some(output_path)) => {
+            let read = HostSnapshot::read(shared, provider, channel_id, &tmux_session_name);
+            let host = read.await;
+            let request = PausedTurnWatcherAttachRequest {
+                shared: shared.clone(),
+                http,
+                provider: provider.clone(),
+                channel_id,
+                tmux_session_name,
+                output_path,
+                initial_offset,
+                source,
+                thread_parent_channel_id,
+                host,
+            };
+            attach_paused_turn_watcher_inner(request, true).ok()?
+        }
+        _ => channel_id,
+    };
+    #[cfg(not(unix))]
+    let owner_channel_id = {
+        let _ = (
+            shared,
+            http,
+            provider,
+            tmux_session_name,
+            output_path,
+            initial_offset,
+        );
+        let _ = (source, thread_parent_channel_id);
+        channel_id
+    };
     if inflight_state.set_watcher_owner_channel_id(owner_channel_id.get()) {
         let outcome = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
             inflight_state,
@@ -277,14 +293,14 @@ pub(super) fn attach_paused_turn_watcher_for_inflight(
             tracing::info!("  [{ts}]   ⚠ inflight owner-channel save skipped: {outcome:?}");
         }
     }
-    owner_channel_id
+    Some(owner_channel_id)
 }
 
 #[cfg(unix)]
 fn attach_paused_turn_watcher_inner(
     request: PausedTurnWatcherAttachRequest,
     allow_cold_start_retry: bool,
-) -> serenity::ChannelId {
+) -> Result<serenity::ChannelId, super::super::super::tmux::WatchWithheld> {
     let PausedTurnWatcherAttachRequest {
         shared,
         http,
@@ -295,13 +311,17 @@ fn attach_paused_turn_watcher_inner(
         initial_offset,
         source,
         thread_parent_channel_id,
+        host,
     } = request;
     let mut watcher_owner_channel_id = channel_id;
 
     {
+        // A Herdr pane has no tmux to wait for; it goes straight to the admission check.
+        let host_now = host.refresh_sync(&tmux_session_name);
         let existing_owner_for_tmux =
             active_watcher_owner_for_tmux(&shared, &tmux_session_name).is_some();
-        let tmux_live = paused_watcher_tmux_session_has_live_pane(&tmux_session_name);
+        let tmux_live = host_now == WatchHost::Herdr
+            || paused_watcher_tmux_session_has_live_pane(&tmux_session_name);
         if !tmux_live && !existing_owner_for_tmux {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -320,9 +340,10 @@ fn attach_paused_turn_watcher_inner(
                     initial_offset,
                     source,
                     thread_parent_channel_id,
+                    host,
                 });
             }
-            return watcher_owner_channel_id;
+            return Ok(watcher_owner_channel_id);
         }
 
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -345,14 +366,15 @@ fn attach_paused_turn_watcher_inner(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
-        let claim = super::super::super::tmux::claim_or_reuse_watcher_with_thread_parent(
+        let claim = super::super::super::tmux::claim_or_reuse_watcher_for_host(
             &shared.tmux_watchers,
             channel_id,
             handle,
             &provider,
             source,
             super::super::super::tmux::thread_follow_up_parent_from_live(thread_parent_channel_id),
-        );
+            host_now,
+        )?;
         watcher_owner_channel_id = claim.owner_channel_id();
         if claim.should_spawn() {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -405,7 +427,7 @@ fn attach_paused_turn_watcher_inner(
     // Deferred retries prepare their pause before claim and never pause a later owner.
     // Immediate turn starts still open a pause window before provider input.
     if !allow_cold_start_retry {
-        return watcher_owner_channel_id;
+        return Ok(watcher_owner_channel_id);
     }
 
     if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel_id) {
@@ -417,7 +439,7 @@ fn attach_paused_turn_watcher_inner(
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    watcher_owner_channel_id
+    Ok(watcher_owner_channel_id)
 }
 
 #[cfg(all(test, unix))]
@@ -461,12 +483,12 @@ mod cold_start_retry_tests {
 
     static RETRY_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-    struct RetryTestGuard {
+    pub(super) struct RetryTestGuard {
         _lock: MutexGuard<'static, ()>,
     }
 
     impl RetryTestGuard {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let lock = RETRY_TEST_MUTEX
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -622,11 +644,12 @@ mod cold_start_retry_tests {
                 initial_offset: 0,
                 source,
                 thread_parent_channel_id: None,
+                host: Arc::new(tmux::HostSnapshot::new(tmux::WatchHost::Legacy)),
             },
             false,
         );
 
-        assert_eq!(owner, channel);
+        assert_eq!(owner, Ok(channel));
         assert_eq!(
             active_watcher_owner_for_tmux(&shared, &tmux_name),
             Some(channel)
@@ -732,3 +755,7 @@ mod cold_start_retry_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "watchdog_host_tests.rs"]
+mod host_tests;
