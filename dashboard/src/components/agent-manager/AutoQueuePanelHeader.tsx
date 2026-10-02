@@ -1,5 +1,5 @@
 import { AUTOQUEUE_RUN_STATUS_TONES } from "../../theme/statusTokens";
-import { buildRequestGenerateGroups } from "./auto-queue-actions";
+import { buildGenerateGroups } from "./auto-queue-actions";
 import type { AutoQueuePanelCtx } from "./auto-queue-panel-ctx";
 import { isLiveAutoQueueRunStatus } from "./auto-queue-panel-state";
 import { formatTs } from "./auto-queue-panel-utils";
@@ -22,7 +22,6 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
     locale,
     primaryAction,
     readyEntries,
-    requestProgress,
     run,
     selectedRepo,
     setExpanded,
@@ -90,10 +89,9 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
             </button>
           )}
           {primaryAction === "generate" && (() => {
-            const eligibleGroupCount = buildRequestGenerateGroups(readyEntries, selectedRepo).length;
+            const eligibleGroupCount = buildGenerateGroups(readyEntries, selectedRepo).length;
             const disabledByReady = eligibleGroupCount === 0;
-            const disabled = generating || disabledByReady || Boolean(requestProgress);
-            const pendingCountDisplay = requestProgress?.pendingGroups.size ?? 0;
+            const disabled = generating || disabledByReady;
             return (
               <button
                 onClick={() => void handleGenerate()}
@@ -115,22 +113,13 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
                         "준비됨 카드가 없습니다 (assignee + GitHub 이슈 필요)",
                         "No ready cards available (need assignee + GitHub issue)",
                       )
-                    : requestProgress
-                      ? tr(
-                          `${pendingCountDisplay}개 큐 그룹 응답 대기 중`,
-                          `Waiting on ${pendingCountDisplay} queue group(s)`,
-                        )
-                      : tr(
-                          `${eligibleGroupCount}개 큐 생성 요청`,
-                          `Request ${eligibleGroupCount} queue group(s)`,
-                        )
+                    : tr(
+                        `${eligibleGroupCount}개 큐 생성`,
+                        `Generate ${eligibleGroupCount} queue group(s)`,
+                      )
                 }
               >
-                {requestProgress
-                  ? tr(`요청 중... (${pendingCountDisplay})`, `Requesting... (${pendingCountDisplay})`)
-                  : generating
-                    ? tr("요청 전송 중...", "Dispatching...")
-                    : tr("큐 생성", "Generate")}
+                {generating ? tr("생성 중...", "Generating...") : tr("큐 생성", "Generate")}
               </button>
             );
           })()}
