@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
 use crate::db::scheduled_messages as db;
+#[cfg(test)]
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
 
@@ -11,6 +12,7 @@ pub(super) enum TurnEvidence {
     TerminalFailure(String),
 }
 
+#[cfg(test)]
 pub(super) fn transcript_delivery_evidence(
     assistant_message: &str,
     events: &[SessionTranscriptEvent],
