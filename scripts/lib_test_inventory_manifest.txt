@@ -1015,7 +1015,6 @@ server::policy_tick_schedule_tests::slo_api_friction_aggregation_falls_back_to_f
 server::policy_tick_schedule_tests::slo_api_friction_aggregation_runs_while_leader_epoch_is_pending
 server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
-server::rate_limit_profiles::tests::test_011_upsert_conflict_is_provider_and_profile
 server::rate_limit_sync::backoff::tests::exponential_backoff_doubles_and_caps_at_thirty_minutes
 server::rate_limit_sync::backoff::tests::parses_retry_after_seconds_and_http_date
 server::rate_limit_sync::backoff::tests::retry_after_is_clamped_and_leaves_the_ladder_alone
@@ -8653,7 +8652,6 @@ services::memory::memento::static_slice_cache_tests::elide_static_slice_keeps_ba
 services::memory::memento::static_slice_cache_tests::elide_static_slice_re_emits_when_content_drifts
 services::memory::memento::static_slice_cache_tests::elide_static_slice_second_call_replaces_with_pointer_when_unchanged
 services::memory::memento::static_slice_cache_tests::static_slice_split_separates_ranked_and_core_from_dynamic
-services::memory::memento::tool_feedback_trigger_type_tests::normalizes_automatic_tool_feedback_trigger_to_sampled
 services::memory::memento::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
 services::memory::memento::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
 services::memory::memento::writer_tests::ambiguous_write_error_is_neither_replayed_nor_reported_as_success
@@ -9057,7 +9055,6 @@ services::release_source::tests::release_source_reports_invalid_json_as_unobserv
 services::release_source::tests::release_source_reports_missing_file_as_unobserved
 services::release_source::tests::release_source_reserves_unobserved_for_a_manifest_with_no_confirmed_fact
 services::remote_stub::tests::password_and_keyfile_auth_parse_for_compatibility_only
-services::remote_stub::tests::ssh_connect_stub_refuses_before_auth_for_all_legacy_variants
 services::retrospectives::tests::retrospective_content_remains_available_for_local_audit
 services::retrospectives::tests::terminal_summary_without_new_knowledge_never_queues_memory_sync
 services::review_decision::repo_card::tests::commit_sha_differs_distinct_is_true

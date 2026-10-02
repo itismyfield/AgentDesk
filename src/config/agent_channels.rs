@@ -18,6 +18,7 @@ pub struct AgentChannels {
 }
 
 impl AgentChannels {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -30,22 +31,15 @@ impl AgentChannels {
         self.inner.get(&Self::normalize_key(id))
     }
 
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut AgentChannel> {
-        self.inner.get_mut(&Self::normalize_key(id))
-    }
-
     pub fn insert(&mut self, id: impl AsRef<str>, channel: AgentChannel) -> Option<AgentChannel> {
         self.inner.insert(Self::normalize_key(id.as_ref()), channel)
-    }
-
-    pub fn remove(&mut self, id: &str) -> Option<AgentChannel> {
-        self.inner.remove(&Self::normalize_key(id))
     }
 
     pub fn contains_key(&self, id: &str) -> bool {
         self.inner.contains_key(&Self::normalize_key(id))
     }
 
+    #[cfg(test)]
     pub fn with(mut self, id: impl AsRef<str>, channel: AgentChannel) -> Self {
         self.insert(id, channel);
         self
@@ -57,12 +51,9 @@ impl AgentChannels {
             .map(|(key, channel)| (key.as_str(), channel))
     }
 
+    #[cfg(test)]
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.inner.keys().map(String::as_str)
-    }
-
-    pub fn is_map_empty(&self) -> bool {
-        self.inner.is_empty()
     }
 
     /// Empty maps and maps whose channels have no usable target both count as
@@ -75,14 +66,5 @@ impl AgentChannels {
 
     pub fn first_present(&self) -> Option<(&str, &AgentChannel)> {
         self.iter().next()
-    }
-
-    pub fn upsert<F>(&mut self, id: &str, update: F)
-    where
-        F: FnOnce(Option<AgentChannel>) -> Option<AgentChannel>,
-    {
-        if let Some(channel) = update(self.remove(id)) {
-            self.insert(id, channel);
-        }
     }
 }
