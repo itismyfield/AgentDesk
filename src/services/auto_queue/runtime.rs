@@ -7,9 +7,19 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::host_teardown_gate::row_host_refusal;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
+
+/// The statuses a slot reset idles; the host check reads the same rows.
+const SLOT_RESET_STATUSES: [&str; 5] = [
+    "turn_active",
+    "awaiting_bg",
+    "awaiting_user",
+    "working",
+    "idle",
+];
 
 #[derive(Debug, Clone)]
 struct RuntimeSlotClearTarget {
@@ -18,9 +28,19 @@ struct RuntimeSlotClearTarget {
     session_key: Option<String>,
 }
 
+/// The row a thread's runtime clear is chosen from, as stored, whatever its status.
+#[derive(Debug, Clone)]
+struct SlotThreadRow {
+    thread_channel_id: u64,
+    provider: Option<String>,
+    session_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SlotClearTarget {
     thread_channel_ids: Vec<u64>,
+    /// Kept even when no runtime target can be built from it, so the host check still reads it.
+    selected_rows: Vec<SlotThreadRow>,
     runtime_targets: Vec<RuntimeSlotClearTarget>,
 }
 
@@ -62,6 +82,7 @@ async fn build_slot_clear_target_pg(
     .unwrap_or_else(|| serde_json::json!({}));
 
     let thread_channel_ids = parse_slot_thread_channel_ids_from_value(&raw_map);
+    let mut selected_rows = Vec::with_capacity(thread_channel_ids.len());
     let mut runtime_targets = Vec::with_capacity(thread_channel_ids.len());
 
     for thread_channel_id in &thread_channel_ids {
@@ -89,10 +110,13 @@ async fn build_slot_clear_target_pg(
             .try_get::<Option<String>, _>("session_key")
             .ok()
             .flatten();
-        let provider_name = row
-            .try_get::<Option<String>, _>("provider")
-            .ok()
-            .flatten()
+        let provider = row.try_get::<Option<String>, _>("provider").ok().flatten();
+        selected_rows.push(SlotThreadRow {
+            thread_channel_id: *thread_channel_id,
+            provider: provider.clone(),
+            session_key: session_key.clone(),
+        });
+        let provider_name = provider
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
                 session_key.as_deref().and_then(|key| {
@@ -116,6 +140,7 @@ async fn build_slot_clear_target_pg(
 
     Ok(SlotClearTarget {
         thread_channel_ids,
+        selected_rows,
         runtime_targets,
     })
 }
@@ -144,10 +169,11 @@ pub async fn clear_slot_sessions_pg(
              tokens = 0,
              last_heartbeat = NOW()
          WHERE thread_channel_id = ANY($2::TEXT[])
-           AND status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle')",
+           AND status = ANY($3::TEXT[])",
     )
     .bind(SLOT_THREAD_RESET_SESSION_INFO)
     .bind(&thread_channel_ids)
+    .bind(&SLOT_RESET_STATUSES[..])
     .execute(pool)
     .await
     .map(|result| result.rows_affected() as usize)
@@ -161,8 +187,7 @@ pub async fn clear_slot_threads_for_slot_pg(
     slot_index: i64,
 ) -> Result<usize, String> {
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
-    let safe_to_clear_thread_ids =
-        filter_safe_slot_thread_reset_targets(pool, &target.thread_channel_ids).await?;
+    let safe_to_clear_thread_ids = filter_safe_slot_thread_reset_targets(pool, &target).await?;
     let cleared = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
 
     if let Some(registry) = health_registry {
@@ -173,6 +198,8 @@ pub async fn clear_slot_threads_for_slot_pg(
             .into_iter()
             .filter(|target| safe_to_clear.contains(&target.thread_channel_id))
             .collect::<Vec<_>>();
+        #[cfg(test)]
+        let slot_threads = target.thread_channel_ids.clone();
         tokio::spawn(async move {
             for runtime_target in runtime_targets {
                 let thread = runtime_target.thread_channel_id;
@@ -192,6 +219,11 @@ pub async fn clear_slot_threads_for_slot_pg(
                 #[cfg(not(test))]
                 let _ = reset;
             }
+            #[cfg(test)]
+            RUNTIME_CLEARS_DONE
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(slot_threads);
         });
     }
 
@@ -285,8 +317,7 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
     }
 
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
-    let safe_to_clear_thread_ids =
-        filter_safe_slot_thread_reset_targets(pool, &target.thread_channel_ids).await?;
+    let safe_to_clear_thread_ids = filter_safe_slot_thread_reset_targets(pool, &target).await?;
     let archived_threads = archive_slot_threads(&safe_to_clear_thread_ids).await?;
     let cleared_sessions = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
     let cleared_bindings = if safe_to_clear_thread_ids.len() == target.thread_channel_ids.len() {
@@ -306,7 +337,7 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
         .rows_affected() as usize
     } else {
         tracing::warn!(
-            "[auto-queue] preserving slot thread bindings for {agent_id}:{slot_index}: active thread archive was deferred"
+            "[auto-queue] preserving slot thread bindings for {agent_id}:{slot_index}: a thread reset was deferred or refused"
         );
         0
     };
@@ -381,11 +412,22 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
 
 async fn filter_safe_slot_thread_reset_targets(
     pool: &PgPool,
-    thread_channel_ids: &[u64],
+    target: &SlotClearTarget,
 ) -> Result<Vec<u64>, String> {
     let mut safe_to_reset = Vec::new();
-    for thread_channel_id in thread_channel_ids {
+    for thread_channel_id in &target.thread_channel_ids {
         let thread_id = thread_channel_id.to_string();
+        let selected = target
+            .selected_rows
+            .iter()
+            .find(|row| row.thread_channel_id == *thread_channel_id);
+        // The host check only reads; it runs first because the defer probe can rewrite inflight rows.
+        if let Some(reason) = slot_thread_host_refusal(pool, &thread_id, selected).await {
+            tracing::warn!(
+                "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
+            );
+            continue;
+        }
         match crate::services::discord::should_defer_thread_archive_pg(Some(pool), &thread_id).await
         {
             Ok(true) => {
@@ -404,6 +446,44 @@ async fn filter_safe_slot_thread_reset_targets(
     Ok(safe_to_reset)
 }
 
+/// Why a slot thread may not be reset: every row the reset idles and the row its runtime
+/// clear is chosen from must each be a confirmed legacy tmux session.
+async fn slot_thread_host_refusal(
+    pool: &PgPool,
+    thread_id: &str,
+    selected: Option<&SlotThreadRow>,
+) -> Option<String> {
+    let rows = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT provider, session_key
+         FROM sessions
+         WHERE thread_channel_id = $1
+           AND status = ANY($2::TEXT[])",
+    )
+    .bind(thread_id)
+    .bind(&SLOT_RESET_STATUSES[..])
+    .fetch_all(pool)
+    .await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return Some(format!("read the thread's sessions: {error}")),
+    };
+    let selected = selected.map(|row| (row.provider.clone(), row.session_key.clone()));
+    for (provider, session_key) in rows.into_iter().chain(selected) {
+        let Some(key) = session_key else {
+            return Some("a session row holds no session key".to_string());
+        };
+        let Some(name) = tmux_name_from_session_key(&key) else {
+            return Some(format!("`{key}` names no tmux session"));
+        };
+        let (provider, caller) = (provider.as_deref(), "auto_queue_slot_reset");
+        let refused = row_host_refusal(pool, provider, Some(thread_id), &key, &name, caller).await;
+        if refused.is_some() {
+            return refused;
+        }
+    }
+    None
+}
+
 /// Each spawned slot-thread runtime clear, in order, for the tests that wait on it.
 #[cfg(test)]
 pub(crate) static RUNTIME_CLEARS: std::sync::Mutex<
@@ -413,6 +493,15 @@ pub(crate) static RUNTIME_CLEARS: std::sync::Mutex<
     )>,
 > = std::sync::Mutex::new(Vec::new());
 
+/// The slot's thread ids once each spawned runtime-clear loop has finished.
+#[cfg(test)]
+pub(crate) static RUNTIME_CLEARS_DONE: std::sync::Mutex<Vec<Vec<u64>>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 #[path = "runtime/clear_slot_sessions_pg_tests.rs"]
 mod clear_slot_sessions_pg_tests;
+
+#[cfg(test)]
+#[path = "runtime/slot_reset_host_pg_tests.rs"]
+pub(crate) mod slot_reset_host_pg_tests;

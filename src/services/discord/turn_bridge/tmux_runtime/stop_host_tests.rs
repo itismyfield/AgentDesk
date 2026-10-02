@@ -931,8 +931,8 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
         crate::services::session_backend::remove_process_session(&name);
     }
 
-    // One slot, three threads: a fresh inflight row keeps the first from the guard, the
-    // hosted second passes the filter and is refused, the legacy third clears.
+    // One slot, three threads: the slot filter keeps both hosted threads from any change and
+    // only the legacy third reaches the runtime clear.
     sqlx::query(
         "INSERT INTO agents (id, name, provider) VALUES ('agent-p6ao-slot', 'slot', 'claude')",
     )
@@ -989,31 +989,11 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
         .await
         .unwrap();
     let ids: Vec<u64> = threads.iter().map(|thread| thread.get()).collect();
-    let clears = || -> Vec<(u64, Option<ManagedReset>)> {
-        let all = crate::services::auto_queue::runtime::RUNTIME_CLEARS
-            .lock()
-            .unwrap();
-        all.iter()
-            .filter(|(thread, _)| ids.contains(thread))
-            .cloned()
-            .collect()
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while clears().len() < 2 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let clears = clears();
-    assert_eq!(clears.len(), 2, "{clears:?}");
+    let after =
+        crate::services::auto_queue::runtime::slot_reset_host_pg_tests::runtime_clears_after_done;
+    let clears = after(&ids).await;
     assert!(
-        !clears.iter().any(|(thread, _)| *thread == ids[0]),
-        "the filter kept the first"
-    );
-    assert!(
-        matches!(&clears[0], (thread, Some(ManagedReset::Refused(_))) if *thread == ids[1]),
-        "{clears:?}"
-    );
-    assert!(
-        matches!(&clears[1], (thread, Some(ManagedReset::Applied(_))) if *thread == ids[2]),
+        matches!(clears.as_slice(), [(thread, Some(ManagedReset::Applied(_)))] if *thread == ids[2]),
         "{clears:?}"
     );
     assert!(runtime_kept(&shared, threads[1], &seeded[1].1).await);

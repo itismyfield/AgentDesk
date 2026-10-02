@@ -109,6 +109,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/agent_recovery/tests.rs",
         "src/services/auto_queue/cleanup_tasks_pg_tests.rs",
         "src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs",
+        "src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs",
         "src/services/automation_candidate_materializer/allowed_path_tests.rs",
         "src/services/automation_candidate_materializer/iteration_result_tests.rs",
         "src/services/claude_tui/hook_output_guard_tests.rs",

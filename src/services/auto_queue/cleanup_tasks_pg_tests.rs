@@ -93,7 +93,7 @@ mod pg_tests {
              )
              VALUES ($1, 'claude', 'idle', $2, 'before cleanup', 17, $3, $4)",
         )
-        .bind(format!("session-cleanup-{suffix}"))
+        .bind(format!("test-host:AgentDesk-claude-cleanup-{suffix}"))
         .bind(&dispatch_id)
         .bind(slot_thread_id)
         .bind(format!("claude-session-{suffix}"))
@@ -116,7 +116,7 @@ mod pg_tests {
     async fn provider_session_ids(pool: &PgPool) -> Vec<Option<String>> {
         sqlx::query_scalar::<_, Option<String>>(
             "SELECT claude_session_id FROM sessions
-             WHERE session_key LIKE 'session-cleanup-%' ORDER BY session_key",
+             WHERE session_key LIKE 'test-host:AgentDesk-claude-cleanup-%' ORDER BY session_key",
         )
         .fetch_all(pool)
         .await
@@ -609,7 +609,7 @@ mod pg_tests {
                 session_key, provider, status, active_dispatch_id, session_info,
                 tokens, thread_channel_id, claude_session_id
              )
-             VALUES ('session-successor', 'claude', 'idle', 'dispatch-successor',
+             VALUES ('test-host:AgentDesk-claude-successor', 'claude', 'idle', 'dispatch-successor',
                      'successor session', 5, $1, 'claude-session-successor')",
         )
         .bind(SLOT_THREAD_ID)
@@ -642,7 +642,7 @@ mod pg_tests {
             "the replay must not steal the slot back from the successor run"
         );
         let successor_session = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT claude_session_id FROM sessions WHERE session_key = 'session-successor'",
+            "SELECT claude_session_id FROM sessions WHERE session_key = 'test-host:AgentDesk-claude-successor'",
         )
         .fetch_one(&pool)
         .await
