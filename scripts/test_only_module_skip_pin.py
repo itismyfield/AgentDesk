@@ -310,6 +310,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/prompt_identity_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/claim_entry_tests.rs",
+        "src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
     }
