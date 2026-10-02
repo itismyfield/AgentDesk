@@ -264,8 +264,7 @@ impl CancelToken {
 
     fn kill_pid_tree_guarded(&self, target: &CapturedProcess) -> bool {
         #[cfg(test)]
-        {
-            let _ = target;
+        if !REAL_PID_KILL.with(std::cell::Cell::get) {
             let barriers = PID_DISPATCH_BARRIERS.lock().unwrap().clone();
             if let Some((entered, release)) = barriers {
                 entered.wait();
@@ -274,7 +273,6 @@ impl CancelToken {
             PID_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
             return PID_KILL_SUCCEEDS.load(Ordering::Relaxed);
         }
-        #[cfg(not(test))]
         match target.identity {
             Some(identity) => {
                 crate::services::process::kill_pid_tree_if_identity_matches(target.pid, identity)
@@ -377,6 +375,25 @@ static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static REQUESTED_INTENTS: std::cell::RefCell<Vec<TmuxCleanupIntent>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with this thread's PID kills sent for real instead of counted.
+#[cfg(test)]
+pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REAL_PID_KILL.with(|real| real.set(false));
+        }
+    }
+    REAL_PID_KILL.with(|real| real.set(true));
+    let _restore = Restore;
+    test()
 }
 
 /// The intents this thread has requested since the last call.
