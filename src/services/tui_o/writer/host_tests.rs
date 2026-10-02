@@ -787,66 +787,49 @@ impl LegacyView for Cursor {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_closed_turn_legacy_never_delivered_is_adopted_past_and_never_posted() {
+async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall() {
     let closed = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
     let debt = [row("m0", "undelivered"), format!("{closed}\n").into_bytes()].concat();
-    for custody in [true, false] {
+    for held in [Custody::Row, Custody::Free] {
         let (harness, path) = fresh(startup);
         append(&path, &debt);
         harness.gate.acquired();
         let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
         let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-        let cursor = debt.len() as u64;
         let legacy = Cursor {
             path: path.clone(),
-            cursor,
+            cursor: debt.len() as u64,
             frontier: 0,
         };
         *io.legacy.lock().unwrap() = Some(Arc::new(legacy));
-        let held = if custody { Custody::Row } else { Custody::Free };
         *io.custody.lock().unwrap() = Ok(held);
         let tasks = start_host(&harness, &io, &ready);
         polls(3).await;
-        if custody {
-            // Legacy's custody defers the adoption instead of ending it.
-            assert_eq!(adoption(CHANNEL), Adoption::Deferred);
-            assert_eq!(*io.alarms.0.lock().unwrap(), []);
-            assert!(!harness.store.has_channel_dir(CHANNEL));
-            abort(tasks);
-            continue;
-        }
-        assert_eq!(adoption(CHANNEL), Adoption::Committed);
+        // Legacy may still send the turn from its frontier, so nothing is given up at boot.
+        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "{held:?}");
+        assert_eq!(*io.alarms.0.lock().unwrap(), [], "{held:?}");
+        assert!(!harness.store.has_channel_dir(CHANNEL), "{held:?}");
+        assert_eq!(harness.port.posts(), Vec::<String>::new(), "{held:?}");
+        // A Legacy that never delivers it is given up once, only after the stall.
+        let minutes = |n: u64| std::time::Duration::from_secs(n * 60);
+        tokio::time::sleep(minutes(39)).await;
+        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "{held:?}");
+        tokio::time::sleep(minutes(3)).await;
+        assert_eq!(adoption(CHANNEL), Adoption::Committed, "{held:?}");
         let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
-        let starts: Vec<_> = init.sources.iter().map(|s| s.delivery_start).collect();
-        assert_eq!(starts, [cursor], "O starts at Legacy's cursor");
-        let source = init.sources[0].source_id.clone();
+        let (source, to) = (init.sources[0].source_id.clone(), debt.len() as u64);
         let abandoned = WriterAlarm::Abandoned {
             source,
             from: 0,
-            to: cursor,
+            to,
         };
-        assert_eq!(*io.alarms.0.lock().unwrap(), [(CHANNEL, abandoned)]);
-        append(&path, &row("m1", "after"));
-        polls(3).await;
-        assert_eq!(harness.port.posts(), ["after"]);
-
-        abort(tasks);
-        polls(2).await;
-        let written = std::fs::read(init_path(&harness, CHANNEL)).unwrap();
-        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-        let _tasks = start_host(&harness, &io, &ready);
-        append(&path, &row("m2", "again"));
-        polls(3).await;
-        assert!(
-            !io.calls().contains(&("facts", CHANNEL)),
-            "a restart recovers"
-        );
-        assert_eq!(io.alarms.0.lock().unwrap().as_slice(), []);
         assert_eq!(
-            std::fs::read(init_path(&harness, CHANNEL)).unwrap(),
-            written
+            *io.alarms.0.lock().unwrap(),
+            [(CHANNEL, abandoned)],
+            "{held:?}"
         );
-        assert_eq!(harness.port.posts(), ["after", "again"]);
+        assert_eq!(harness.port.posts(), Vec::<String>::new(), "{held:?}");
+        abort(tasks);
     }
 }
 

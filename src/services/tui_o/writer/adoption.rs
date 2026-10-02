@@ -671,7 +671,7 @@ impl Snapshot {
         self.pinned.first().map_or(0, |pinned| pinned.len)
     }
 
-    /// Why a runtime adoption must wait: a record past Legacy's frontier that Legacy may still send.
+    /// Why an adoption must wait: a record past Legacy's frontier that Legacy may still send.
     pub fn owed(&self) -> Option<Refused> {
         let current = self.pinned.first()?;
         let from = self.undelivered?;

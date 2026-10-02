@@ -1,5 +1,5 @@
-//! A channel whose first adoption met an open turn, Legacy's custody or a lagging cursor: O adopts
-//! once an idle Legacy owes nothing before O's start, or once Legacy stayed behind for `STALLED`.
+//! A channel whose first adoption met an open turn, a record Legacy owes, its custody or a lagging
+//! cursor: O adopts once an idle Legacy owes nothing before O's start, or after `STALLED` behind.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,8 +48,8 @@ pub(super) enum First {
     Leave(Refused),
 }
 
-/// An open turn, Legacy's custody, or a cursor that lags a source whose end O could start at waits;
-/// any other refusal leaves the channel to Legacy.
+/// An open turn, a record Legacy owes, its custody, or a cursor that lags a source whose end O could
+/// start at waits; any other refusal leaves the channel to Legacy.
 pub(super) async fn first<I: HostIo>(
     io: &I,
     channel: u64,
@@ -60,6 +60,10 @@ pub(super) async fn first<I: HostIo>(
     let pinned = pin(Arc::clone(legacy), events.clone(), channel, At::Cursor).await;
     let refused = match pinned {
         Ok(snapshot) => {
+            // Legacy resumes from its frontier after a restart, so what it owes is not given up yet.
+            if let Some(owed) = snapshot.owed() {
+                return First::Wait(Refused::retry(owed.to_string()));
+            }
             return match io.local_custody(channel, provider) {
                 Ok(Custody::Row | Custody::Active) => {
                     First::Wait(Refused::retry("Legacy retains delivery custody"))
@@ -206,7 +210,7 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             }
             let legacy = Arc::clone(&waiting.legacy);
             let pinned = pin(Arc::clone(&legacy), Ok(events.clone()), channel, At::Cursor).await;
-            // Unlike a boot, Legacy may still send a record past its frontier.
+            // Legacy may still send a record past its frontier.
             let (mut again, end) = match pinned {
                 Ok(snapshot) => match snapshot.owed() {
                     None => break 'read (snapshot, None),
