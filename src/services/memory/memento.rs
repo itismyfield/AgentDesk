@@ -13,8 +13,7 @@ use super::{
     RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID, extract_token_usage,
     memento_throttle::{
         cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
-        note_memento_tool_feedback_trigger, note_memento_tool_request,
-        record_static_slice_emission, store_recall_response,
+        note_memento_tool_request, record_static_slice_emission, store_recall_response,
     },
 };
 use crate::runtime_layout;
@@ -89,19 +88,6 @@ pub(crate) struct MementoRememberRequest {
     pub resolution_status: Option<String>,
     pub assertion_status: Option<String>,
     pub context_summary: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct MementoToolFeedbackRequest {
-    pub tool_name: String,
-    pub relevant: bool,
-    pub sufficient: bool,
-    pub session_id: Option<String>,
-    pub search_event_id: Option<String>,
-    pub fragment_ids: Vec<String>,
-    pub suggestion: Option<String>,
-    pub context: Option<String>,
-    pub trigger_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -437,53 +423,6 @@ impl MementoBackend {
             .await
             .map(|result| result.token_usage)
     }
-
-    pub(crate) async fn tool_feedback(
-        &self,
-        request: MementoToolFeedbackRequest,
-    ) -> Result<TokenUsage, String> {
-        if request.tool_name.trim().is_empty() {
-            return Err("memento tool_feedback requires non-empty tool_name".to_string());
-        }
-
-        let config = self.runtime_config()?;
-        let mut args = Map::new();
-        args.insert("tool_name".to_string(), json!(request.tool_name.trim()));
-        args.insert("relevant".to_string(), json!(request.relevant));
-        args.insert("sufficient".to_string(), json!(request.sufficient));
-
-        insert_optional_arg(&mut args, "sessionId", request.session_id);
-        insert_optional_arg(&mut args, "searchEventId", request.search_event_id);
-
-        let fragment_ids = request
-            .fragment_ids
-            .into_iter()
-            .map(|value| normalize_whitespace(&value))
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        if !fragment_ids.is_empty() {
-            args.insert("fragmentIds".to_string(), json!(fragment_ids));
-        }
-
-        insert_optional_arg(&mut args, "suggestion", request.suggestion);
-        insert_optional_arg(&mut args, "context", request.context);
-        insert_optional_arg(
-            &mut args,
-            "triggerType",
-            Some(normalize_tool_feedback_trigger_type(request.trigger_type)),
-        );
-
-        note_memento_tool_request("tool_feedback");
-        note_memento_tool_feedback_trigger(
-            args.get("triggerType")
-                .and_then(Value::as_str)
-                .unwrap_or("voluntary"),
-        );
-        note_memento_remote_call("tool_feedback");
-        self.call_tool(&config, "tool_feedback", Value::Object(args))
-            .await
-            .map(|result| result.token_usage)
-    }
 }
 
 fn env_var_value(name: &str) -> Option<String> {
@@ -491,37 +430,6 @@ fn env_var_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn normalize_tool_feedback_trigger_type(trigger_type: Option<String>) -> String {
-    match trigger_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("sampled") | Some("automatic") => "sampled".to_string(),
-        Some("voluntary") | Some("manual") => "voluntary".to_string(),
-        _ => "voluntary".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tool_feedback_trigger_type_tests {
-    use super::normalize_tool_feedback_trigger_type;
-
-    #[test]
-    fn normalizes_automatic_tool_feedback_trigger_to_sampled() {
-        assert_eq!(
-            normalize_tool_feedback_trigger_type(Some("automatic".to_string())),
-            "sampled"
-        );
-        assert_eq!(
-            normalize_tool_feedback_trigger_type(Some("sampled".to_string())),
-            "sampled"
-        );
-    }
 }
 
 /// #2660 — cache key for the static-slice tracker. Crucially excludes

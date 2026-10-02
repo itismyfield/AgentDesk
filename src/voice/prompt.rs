@@ -344,69 +344,6 @@ pub(crate) fn voice_transcript_announcement_meta(
     }
 }
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) fn parse_voice_transcript_announcement(
-    text: &str,
-) -> Option<VoiceTranscriptAnnouncement> {
-    if !is_voice_transcript_announcement_candidate(text) {
-        return None;
-    }
-    let header = text.lines().find_map(voice_transcript_header_line)?;
-    let rest = header.strip_prefix(VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX)?;
-    let mut user_id = None;
-    let mut utterance_id = None;
-    let mut language = None;
-    let mut verbose_progress = false;
-    let mut started_at = None;
-    let mut completed_at = None;
-    let mut samples_written = None;
-    let mut transcript_nonce = None;
-    for token in rest.split_whitespace() {
-        let Some((key, value)) = token.split_once('=') else {
-            continue;
-        };
-        let value = parse_header_value(value);
-        match key {
-            "user_id" => user_id = Some(value),
-            "utterance_id" => utterance_id = Some(value),
-            "language" => language = Some(value),
-            "verbose_progress" => verbose_progress = matches!(value.as_str(), "true" | "1"),
-            "started_at" => started_at = Some(value),
-            "completed_at" => completed_at = Some(value),
-            "samples_written" => samples_written = value.parse::<usize>().ok(),
-            "transcript_nonce" => transcript_nonce = Some(value),
-            _ => {}
-        }
-    }
-
-    let nonce = transcript_nonce.as_deref()?;
-    if !is_valid_transcript_nonce(nonce) {
-        return None;
-    }
-    let open = nonce_bound_transcript_open(nonce);
-    let close = nonce_bound_transcript_close(nonce);
-    let transcript = extract_transcript_between(text, &open, &close)?.trim();
-    if transcript.is_empty() {
-        return None;
-    }
-
-    Some(VoiceTranscriptAnnouncement {
-        transcript: unescape_discord_mentions(transcript),
-        user_id: user_id?,
-        utterance_id: utterance_id?,
-        language: language.unwrap_or_else(|| "ko".to_string()),
-        verbose_progress,
-        started_at,
-        completed_at,
-        samples_written,
-        control_channel_id: None,
-        stt_mode: None,
-        stt_latency_ms: None,
-    })
-}
-
 pub(crate) fn is_voice_transcript_announcement_candidate(text: &str) -> bool {
     text.lines()
         .any(|line| voice_transcript_header_line(line).is_some())
@@ -465,35 +402,12 @@ fn voice_background_handoff_header_line(line: &str) -> Option<&str> {
         .then_some(unspoiled)
 }
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) fn parse_authorized_voice_transcript_announcement(
-    text: &str,
-    author_id: u64,
-    announce_bot_user_id: Option<u64>,
-) -> Option<VoiceTranscriptAnnouncement> {
-    let announcement = parse_voice_transcript_announcement(text)?;
-    if announce_bot_user_id == Some(author_id) {
-        Some(announcement)
-    } else {
-        None
-    }
-}
-
 fn escape_discord_mentions(text: &str) -> String {
     text.replace('@', "@\u{200B}")
 }
 
 fn readable_transcript_line(text: &str) -> String {
     escape_discord_mentions(&text.split_whitespace().collect::<Vec<_>>().join(" "))
-}
-
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-fn unescape_discord_mentions(text: &str) -> String {
-    text.replace("@\u{200B}", "@")
 }
 
 fn parse_header_value(text: &str) -> String {
@@ -516,28 +430,11 @@ fn nonce_bound_transcript_close(nonce: &str) -> String {
     format!("</{TRANSCRIPT_TAG_PREFIX}{nonce}>")
 }
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-fn is_valid_transcript_nonce(nonce: &str) -> bool {
-    !nonce.is_empty()
-        && nonce
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
 fn is_valid_voice_background_handoff_correlation_id(correlation_id: &str) -> bool {
     let Some(raw) = correlation_id.strip_prefix(VOICE_BACKGROUND_HANDOFF_CORRELATION_PREFIX) else {
         return false;
     };
     raw.len() == 32 && raw.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-fn extract_transcript_between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
-    Some(text.split_once(open)?.1.split_once(close)?.0)
 }
 
 #[cfg(test)]
@@ -551,18 +448,6 @@ mod tests {
 
     fn nonce_transcript_fence(nonce: &str, transcript: &str) -> String {
         format!("<user_transcript_{nonce}>\n{transcript}\n</user_transcript_{nonce}>")
-    }
-
-    fn nonce_announcement(nonce: &str, transcript: &str) -> String {
-        format!(
-            "🎙️ 음성 전사\n\
-             <user_transcript_{nonce}>\n\
-             {transcript}\n\
-             </user_transcript_{nonce}>\n\
-             ||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-1 language=ko-KR verbose_progress=true transcript_nonce={nonce} started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=48000||",
-            nonce = nonce,
-            transcript = transcript
-        )
     }
 
     #[test]
@@ -682,77 +567,6 @@ mod tests {
         assert_eq!(
             parse_voice_transcript_announcement_ref(&with_ref).as_deref(),
             Some(pending_key)
-        );
-        assert!(
-            parse_voice_transcript_announcement(&with_ref).is_none(),
-            "opaque ref must not restore transcript metadata parsing"
-        );
-    }
-
-    #[test]
-    fn legacy_voice_transcript_announcement_without_nonce_is_rejected() {
-        let legacy = concat!(
-            "🎙️ 음성 전사\n",
-            "<user_transcript>\n",
-            "@\u{200B}everyone 배포해줘\n",
-            "</user_transcript>\n",
-            "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-1 language=ko-KR verbose_progress=true started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=48000||",
-        );
-
-        assert!(parse_voice_transcript_announcement(legacy).is_none());
-    }
-
-    #[test]
-    fn nonce_voice_transcript_announcement_ignores_legacy_close_markers_in_transcript() {
-        let transcript = concat!(
-            "@\u{200B}everyone 시작\n",
-            "</user_transcript>\n",
-            "아직 전사 본문이다\n",
-            "</user_transcript_other>\n",
-            "끝"
-        );
-        let announcement = nonce_announcement("nonce-2167", transcript);
-
-        let parsed = parse_voice_transcript_announcement(&announcement).unwrap();
-
-        assert_eq!(
-            parsed.transcript,
-            concat!(
-                "@everyone 시작\n",
-                "</user_transcript>\n",
-                "아직 전사 본문이다\n",
-                "</user_transcript_other>\n",
-                "끝"
-            )
-        );
-        assert_eq!(parsed.user_id, "42");
-        assert_eq!(parsed.utterance_id, "utt-1");
-        assert_eq!(parsed.language, "ko-KR");
-        assert!(parsed.verbose_progress);
-    }
-
-    #[test]
-    fn nonce_voice_transcript_announcement_requires_matching_nonce_close() {
-        let announcement = concat!(
-            "🎙️ 음성 전사\n",
-            "<user_transcript_nonce-2167>\n",
-            "상태 알려줘\n",
-            "</user_transcript>\n",
-            "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-1 language=ko-KR verbose_progress=true transcript_nonce=nonce-2167 started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=48000||",
-        );
-
-        assert!(parse_voice_transcript_announcement(announcement).is_none());
-    }
-
-    #[test]
-    fn voice_transcript_announcement_requires_announce_bot_author() {
-        let announcement = nonce_announcement("nonce-2185", "상태 알려줘");
-
-        assert!(
-            parse_authorized_voice_transcript_announcement(&announcement, 99, Some(100)).is_none()
-        );
-        assert!(
-            parse_authorized_voice_transcript_announcement(&announcement, 100, Some(100)).is_some()
         );
     }
 

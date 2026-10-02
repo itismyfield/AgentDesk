@@ -15,7 +15,6 @@ pub struct GitCommand {
     repo: Option<PathBuf>,
     args: Vec<OsString>,
     timeout: Duration,
-    clear_env: bool,
     envs: Vec<(OsString, OsString)>,
 }
 
@@ -31,7 +30,6 @@ impl GitCommand {
             repo: None,
             args: Vec::new(),
             timeout: DEFAULT_GIT_TIMEOUT,
-            clear_env: false,
             envs: Vec::new(),
         }
     }
@@ -64,13 +62,7 @@ impl GitCommand {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn env_clear(mut self) -> Self {
-        self.clear_env = true;
-        self
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.envs
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
@@ -114,9 +106,6 @@ impl GitCommand {
         command.args(&self.args);
         if let Some(repo) = &self.repo {
             command.current_dir(repo);
-        }
-        if self.clear_env {
-            command.env_clear();
         }
         for (key, value) in &self.envs {
             command.env(key, value);
@@ -318,14 +307,7 @@ impl GitCommandError {
         self.status.and_then(|status| status.code())
     }
 
-    #[allow(dead_code)]
-    pub fn stdout(&self) -> &[u8] {
-        &self.stdout
-    }
-
-    // #3034: test-only accessor — the error tests assert on raw stderr;
-    // production formats via Display.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn stderr(&self) -> &[u8] {
         &self.stderr
     }
@@ -333,11 +315,6 @@ impl GitCommandError {
     #[allow(dead_code)]
     pub fn stderr_text(&self) -> String {
         String::from_utf8_lossy(&self.stderr).trim().to_string()
-    }
-
-    #[allow(dead_code)]
-    pub fn timed_out_flag(&self) -> bool {
-        matches!(self.kind, GitCommandErrorKind::Timeout)
     }
 }
 
