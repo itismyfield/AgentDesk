@@ -301,6 +301,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/server/routes/health_api/tui_output_readiness_tests.rs",
         "src/services/tui_o/writer/writer_tests.rs",
         "src/services/tui_o/writer/actor_tests.rs",
+        "src/services/tui_o/store/ledger_lock_tests.rs",
         "src/services/tui_o/store/rotation_tests.rs",
         "src/services/tui_o/writer/rotation_tests.rs",
         "src/services/tui_input/bounded_tmux_tests.rs",

@@ -9884,6 +9884,9 @@ services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_
 services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_one_pass
 services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published_file_and_its_crash_alias_untouched
+services::tui_o::store::ledger::lock_tests::operator_child
+services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
+services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
 services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
 services::tui_o::store::rotation::tests::rotation_fields_are_invisible_to_a_reader_of_the_plain_source_map
