@@ -160,5 +160,35 @@ pub(crate) async fn nameless_teardown_kept(
     deferred(&shared, provider, channel_id.get()).await
 }
 
+/// A nameless force-kill target's tmux name found as the cancel lookup finds it, minus its
+/// inflight backfill write (the flag); an unreadable inflight row errs so the caller keeps.
+pub(crate) async fn guard_tmux_name(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Result<(Option<String>, bool), String> {
+    let shared = registry.shared_for_provider_on_channel(provider, channel_id);
+    let Some(shared) = shared.await else {
+        return Ok((None, false));
+    };
+    if let Some(binding) = shared.tmux_watchers.channel_binding(&channel_id) {
+        return Ok((Some(binding.tmux_session_name), false));
+    }
+    let row = super::inflight::load_inflight_state_read_only_result(provider, channel_id.get())?;
+    if let Some(name) = row.and_then(|row| row.tmux_session_name) {
+        return Ok((Some(name), true));
+    }
+    let data = shared.core.lock().await;
+    let session = data.sessions.get(&channel_id);
+    let channel_name = session.and_then(|session| session.channel_name.as_ref());
+    let name = channel_name.map(|name| provider.build_tmux_session_name(name));
+    Ok((name, true))
+}
+
+/// The inflight finalizer backfill the cancel lookup writes, run only once the guard admits.
+pub(crate) fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId) {
+    let _ = super::inflight::load_inflight_state(provider, channel_id.get());
+}
+
 #[cfg(test)]
 pub(crate) mod test_support;

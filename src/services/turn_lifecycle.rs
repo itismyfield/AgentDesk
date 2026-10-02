@@ -2,7 +2,8 @@ use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::{
-    ChannelTeardown, channel_teardown, nameless_teardown_kept, row_gate,
+    ChannelTeardown, backfill_inflight_after_guard, channel_teardown, guard_tmux_name,
+    nameless_teardown_kept, row_gate,
 };
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
@@ -222,7 +223,25 @@ async fn stop_turn_with_policy(
     // response and the cancel observability event both want
     // post-fact-accurate fields, not the hardcoded "queue_preserved=true"
     // contract that masked the 2026-05-04 ch-dd queue-loss incident.
-    let tmux_session_observed = resolve_tmux_session_observed(health_registry, target).await;
+    // A force-kill reads the name without writing, so its guard refuses before any change.
+    let guarded = cleanup_policy.should_cleanup_tmux();
+    let (tmux_session_observed, backfill) = if guarded {
+        match guard_observed(health_registry, target).await {
+            Ok(observed) => observed,
+            Err(error) => {
+                tracing::warn!(
+                    error,
+                    "host guard kept a force-kill whose inflight is unreadable"
+                );
+                return kept_by_host_guard(None);
+            }
+        }
+    } else {
+        (
+            resolve_tmux_session_observed(health_registry, target).await,
+            false,
+        )
+    };
     let probe_session_owned = tmux_session_observed
         .clone()
         .filter(|name| !name.is_empty())
@@ -237,6 +256,9 @@ async fn stop_turn_with_policy(
     let host = host.await;
     if matches!(host, ForceKillHost::Gate(ChannelTeardown::Kept)) {
         return kept_by_host_guard(tmux_session_observed);
+    }
+    if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
+        backfill_inflight_after_guard(provider, channel);
     }
     if let Some(channel_id) = target.channel_id {
         let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
@@ -839,6 +861,22 @@ fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> 
 /// the cancel API response so `tmux_session` can never be reported as
 /// `""` while the runtime knows perfectly well which session is being
 /// stopped.
+/// [`resolve_tmux_session_observed`] for a force-kill, read only; the flag asks for the
+/// inflight backfill the normal lookup writes once the guard admits.
+async fn guard_observed(
+    registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+) -> Result<(Option<String>, bool), String> {
+    if !target.tmux_name.is_empty() {
+        return Ok((Some(target.tmux_name.clone()), false));
+    }
+    let keys = (registry, target.provider.as_ref(), target.channel_id);
+    let (Some(registry), Some(provider), Some(channel)) = keys else {
+        return Ok((None, false));
+    };
+    guard_tmux_name(registry, provider, channel).await
+}
+
 async fn resolve_tmux_session_observed(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,

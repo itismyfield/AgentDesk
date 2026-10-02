@@ -819,3 +819,123 @@ async fn backlog_revert_refuses_the_card_when_any_session_host_is_unconfirmed_pg
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// A nameless force-kill whose inflight row names a session the guard refuses: the name
+/// lookup must not save that row (its finalizer backfill) before the guard keeps the turn.
+#[tokio::test(flavor = "current_thread")]
+async fn nameless_force_kill_refused_by_its_inflight_name_writes_nothing_pg() {
+    use crate::services::discord::host_teardown_gate::test_support as host;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _root_guard = set("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let (shared, registry) = host::runtime(&pool).await;
+    for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
+        .into_iter()
+        .enumerate()
+    {
+        let tmux = TmuxEnv::install(condition);
+        let channel =
+            poise::serenity_prelude::ChannelId::new(1_479_671_301_387_065_100 + round as u64);
+        let name = format!("AgentDesk-claude-backfill-{round}");
+        let key = host::channel_key(&shared, &name);
+        host::seed(&pool, &key, &name, channel.get(), host::Stored::Hosted).await;
+        tmux.start(&name);
+        let token = host::busy_turn(&shared, channel, &name).await;
+        let path = host::inflight_needing_backfill(channel);
+        let before = (
+            std::fs::read(&path).unwrap(),
+            snapshot(&pool, "sessions", "session_key", &[&key]).await,
+        );
+        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
+            provider: Some(crate::services::provider::ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: String::new(),
+        };
+        let kill = crate::services::turn_lifecycle::force_kill_turn;
+        let lifecycle = kill(
+            Some(&registry),
+            &target,
+            "operator cleanup",
+            "force_kill_api",
+        )
+        .await;
+        assert!(lifecycle.host_guard_kept(), "{condition:?}");
+        let after = (
+            std::fs::read(&path).unwrap(),
+            snapshot(&pool, "sessions", "session_key", &[&key]).await,
+        );
+        assert!(
+            after == before,
+            "{condition:?}: the inflight row and session row are untouched"
+        );
+        assert!(
+            host::turn_kept(&shared, channel, &token).await,
+            "{condition:?}: the turn is kept"
+        );
+        assert!(!host::stop_recorded(channel), "{condition:?}: no tombstone");
+        assert!(
+            !tmux.live || tmux.alive(&name),
+            "{condition:?}: tmux survives"
+        );
+        assert_eq!(tmux.take_calls(), [""; 0], "{condition:?}: no tmux call");
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A nameless process-backend turn on an unkeyed idle channel is still cancelled: the
+/// nameless gate admits it and the force-kill stops the turn as before.
+#[tokio::test(flavor = "current_thread")]
+async fn nameless_process_turn_force_kill_still_cancels_pg() {
+    use crate::services::discord::host_teardown_gate::test_support as host;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _root_guard = set("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let (shared, registry) = host::runtime(&pool).await;
+    for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
+        .into_iter()
+        .enumerate()
+    {
+        let tmux = TmuxEnv::install(condition);
+        let channel =
+            poise::serenity_prelude::ChannelId::new(1_479_671_301_387_065_200 + round as u64);
+        let token = host::nameless_turn(&shared, channel).await;
+        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
+            provider: Some(crate::services::provider::ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: String::new(),
+        };
+        let kill = crate::services::turn_lifecycle::force_kill_turn;
+        let lifecycle = kill(
+            Some(&registry),
+            &target,
+            "operator cleanup",
+            "force_kill_api",
+        )
+        .await;
+        assert!(
+            !lifecycle.host_guard_kept(),
+            "{condition:?}: {}",
+            lifecycle.lifecycle_path
+        );
+        let cancelled = token.cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(cancelled, "{condition:?}: the turn's token is cancelled");
+        assert!(
+            !host::mailbox_turn_active(&shared, channel).await,
+            "{condition:?}: mailbox freed"
+        );
+        assert_eq!(
+            tmux.take_calls(),
+            [""; 0],
+            "{condition:?}: a nameless turn reaches no tmux"
+        );
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}

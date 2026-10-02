@@ -739,6 +739,8 @@ server::routes::dispatched_sessions::tests::backlog_revert_refuses_the_card_when
 server::routes::dispatched_sessions::tests::force_kill_without_runtime_keys_refuses_unconfirmed_hosts_pg
 server::routes::dispatched_sessions::tests::idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
 server::routes::dispatched_sessions::tests::kill_tmux_route_checks_the_host_before_any_probe_or_write_pg
+server::routes::dispatched_sessions::tests::nameless_force_kill_refused_by_its_inflight_name_writes_nothing_pg
+server::routes::dispatched_sessions::tests::nameless_process_turn_force_kill_still_cancels_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
