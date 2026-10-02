@@ -2043,7 +2043,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=9eb48f67ea5d78efd29098e3584ddaa373d2c247084ebf59f389d7ee84339329
+          expected=b47025553a859c1e369ab5f7c4b0853819a4b370738d4f68887e099d873ac7d6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2188,9 +2188,12 @@ jobs:
               - 'scripts/relay_mutation_wiring_digest.py'
 
       # ci-pr.yml counts only when the relay jobs' resolved YAML changed; doubt reports true.
+      # PyYAML is installed only if missing, and a failed install leaves the digest to report true.
       - name: Detect relay-authority mutation wiring
         id: mutation_wiring
-        run: python3 scripts/relay_mutation_wiring_digest.py
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --disable-pip-version-check --break-system-packages pyyaml || echo "::warning::PyYAML unavailable; the wiring digest reports true"
+          python3 scripts/relay_mutation_wiring_digest.py
 
       - name: Install Rust toolchain
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
@@ -2266,7 +2269,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=9eb48f67ea5d78efd29098e3584ddaa373d2c247084ebf59f389d7ee84339329
+          expected=b47025553a859c1e369ab5f7c4b0853819a4b370738d4f68887e099d873ac7d6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

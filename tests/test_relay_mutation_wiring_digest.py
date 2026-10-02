@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +40,27 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: "true"}]
 """
+# A relay job env value written as each side of a pair below.
+SCALAR = """\
+on: pull_request
+jobs:
+  relay_authority_mutations:
+    runs-on: ubuntu-latest
+    env:
+      MODE: {value}
+    steps: [{{run: bash scripts/run_relay_authority_mutations.sh}}]
+  relay-authority-contract:
+    runs-on: ubuntu-latest
+    steps: [{{run: "true"}}]
+"""
+# PyYAML's YAML 1.1 typing, or the source text alone for the explicit tags, maps both
+# sides of each pair to one value; GitHub reads YAML 1.2, where they differ.
+MERGED_BY_YAML_1_1 = (
+    ("yes", "true"), ("on", "true"), ("off", "no"), ("055", "45"), ("1.0", "1.00"),
+    ("0o17", "'0o17'"), ("1_000", "1000"), ("1:30", "90"),
+    ("2026-10-02 00:00:00", "2026-10-02T00:00:00"),
+    ("!!str 055", "055"), ('!!int "055"', '"055"'),
+)
 
 
 def edit(text: str, old: str, new: str) -> str:
@@ -124,6 +148,49 @@ class WiringDigestTests(unittest.TestCase):
         self.setUp()
         local = edit(ANCHORED, "    timeout-minutes: 5", "    timeout-minutes: 9")
         self.assertEqual(self.judge(ANCHORED, local), "wiring_changed=false\n")
+
+    def test_scalars_yaml_1_1_merges_still_count_as_changed(self) -> None:
+        for old, new in MERGED_BY_YAML_1_1:
+            with self.subTest(old=old, new=new):
+                self.setUp()
+                self.assertEqual(self.judge(SCALAR.format(value=old), SCALAR.format(value=new)),
+                                 "wiring_changed=true\n")
+
+    def test_workflow_step_without_pyyaml_runs_the_gate_and_never_fails_the_job(self) -> None:
+        """Run the step's own `run:` block under bash -e, as Actions does, after an unrelated
+        edit: with PyYAML it says false; with PyYAML unimportable and its install failing
+        it must still exit 0 and say true."""
+        step = next(s for s in yaml.safe_load(REAL_WORKFLOW)["jobs"]["relay_authority_mutations"]["steps"]
+                    if s.get("id") == "mutation_wiring")
+        self.merge_pr(REAL_WORKFLOW, edit(REAL_WORKFLOW, "    name: Changed paths",
+                                          "    name: Changed paths renamed"))
+        (self.repo / "scripts").mkdir()
+        shutil.copy2(DIGEST_SCRIPT, self.repo / "scripts" / DIGEST_SCRIPT.name)
+        tmp = Path(self.tmp.name)
+        (tmp / "bin").mkdir()
+        (tmp / "bin/python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        (tmp / "bin/python3").chmod(0o755)
+        (tmp / "shadow/yaml").mkdir(parents=True)
+        (tmp / "shadow/yaml/__init__.py").write_text("raise ImportError('PyYAML hidden by the test')\n")
+        # Shadows `python3 -m pip` too, so the install fails whatever the host has installed.
+        (tmp / "shadow/pip").mkdir()
+        (tmp / "shadow/pip/__init__.py").write_text("")
+        (tmp / "shadow/pip/__main__.py").write_text("raise SystemExit('pip unavailable in this test')\n")
+        for case, extra, expected in (
+            ("PyYAML available", {}, "wiring_changed=false\n"),
+            ("PyYAML missing", {"PYTHONPATH": str(tmp / "shadow")}, "wiring_changed=true\n"),
+        ):
+            with self.subTest(case=case):
+                output = tmp / f"output-{len(extra)}"
+                env = {**GIT_ENV, "PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
+                       "PIP_NO_INDEX": "1", "GITHUB_OUTPUT": str(output), **extra}
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+                    cwd=self.repo, env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(output.read_text(encoding="utf-8"), expected,
+                                 result.stdout + result.stderr)
 
     def test_missing_parent_or_unreadable_workflow_runs_the_gate(self) -> None:
         with self.subTest(case="no HEAD^1"):

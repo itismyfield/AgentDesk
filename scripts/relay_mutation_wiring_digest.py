@@ -24,16 +24,39 @@ class WiringUnknown(Exception):
     """The comparison cannot be made, so the gate must run."""
 
 
+class RawScalar(str):
+    """A scalar kept as its text plus tag and quoting, since YAML 1.1 and GitHub's 1.2 type it differently."""
+
+    kind = ""
+
+
+def _raw_scalar_loader() -> type:
+    import yaml  # Imported here so a missing PyYAML also fails closed.
+
+    class RawScalarLoader(yaml.SafeLoader):
+        pass
+
+    def construct(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> str:
+        scalar = RawScalar(node.value)
+        scalar.kind = f"{node.tag}|{'plain' if node.style is None else 'quoted'}"
+        return scalar
+
+    # Anchors, aliases and merge keys still resolve; only scalar typing is skipped.
+    for tag in ("bool", "int", "float", "null", "timestamp", "str"):
+        RawScalarLoader.add_constructor(f"tag:yaml.org,2002:{tag}", construct)
+    return RawScalarLoader
+
+
 def _canonical(value: object) -> object:
-    # Typed keys keep `on:` (loaded as True) apart from "True" and let mixed keys sort;
-    # every real value canonicalizes to a list, so the bare string marks an absent key.
+    # Every real value canonicalizes to a list, so the bare string marks an absent key.
     if value is _ABSENT:
         return "absent"
     if isinstance(value, dict):
-        return [[f"{type(key).__name__}:{key}", _canonical(item)] for key, item in
-                sorted(value.items(), key=lambda pair: f"{type(pair[0]).__name__}:{pair[0]}")]
+        return sorted([json.dumps(_canonical(key)), _canonical(item)] for key, item in value.items())
     if isinstance(value, list):
         return [_canonical(item) for item in value]
+    if isinstance(value, RawScalar):
+        return ["scalar", value.kind, str(value)]
     return [type(value).__name__, value if isinstance(value, (bool, int, float, str, type(None))) else str(value)]
 
 
@@ -42,9 +65,9 @@ def _load(repo: Path, rev: str) -> dict:
                            capture_output=True, text=True)
     if shown.returncode != 0:
         raise WiringUnknown(f"git show {rev}:{WORKFLOW} failed: {shown.stderr.strip()}")
-    import yaml  # Imported here so a missing PyYAML also fails closed.
+    import yaml
 
-    document = yaml.safe_load(shown.stdout)
+    document = yaml.load(shown.stdout, Loader=_raw_scalar_loader())
     if not isinstance(document, dict):
         raise WiringUnknown(f"{rev}:{WORKFLOW} is not a mapping")
     return document
@@ -52,8 +75,7 @@ def _load(repo: Path, rev: str) -> dict:
 
 def wiring_subtrees(document: dict) -> dict[str, object]:
     """Every subtree whose resolved value the mutation gate depends on."""
-    # PyYAML reads the bare `on:` key as boolean True.
-    trigger = document.get(True, document.get("on", _ABSENT))
+    trigger = document.get("on", _ABSENT)
     jobs = document.get("jobs")
     if trigger is _ABSENT or not isinstance(jobs, dict):
         raise WiringUnknown("workflow lacks `on` or `jobs`")

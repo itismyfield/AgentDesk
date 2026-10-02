@@ -959,7 +959,8 @@ class MutationPathFilterContractTests(unittest.TestCase):
         digests = [index for index, step in enumerate(steps) if step.get("id") == WIRING_ID]
         self.assertEqual(len(digests), 1)
         digest = steps[digests[0]]
-        self.assertEqual(digest["run"].strip(), f"python3 {WIRING_SCRIPT}")
+        # Its exit status and output come from the digest; earlier lines only prepare PyYAML.
+        self.assertEqual(digest["run"].strip().splitlines()[-1], f"python3 {WIRING_SCRIPT}")
         self.assertNotIn("if", digest)
         self.assertNotIn("continue-on-error", digest)
         first_gated = min(index for index, step in enumerate(steps) if WIRING_ID in str(step.get("if", "")))
