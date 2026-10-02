@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "19c08d3af0102d3c1a8b979a8f6a0f78c92b1018",
+  "measured_at_sha": "63726c6d621c10e9291e6e783d7ae496d89f0061",
   "records": [
     {
       "root": "migrations/postgres",

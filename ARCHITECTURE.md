@@ -524,7 +524,6 @@ src/
 │   │   ├── query.rs
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
-│   │   ├── route_request_generate.rs
 │   │   ├── route_types.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
