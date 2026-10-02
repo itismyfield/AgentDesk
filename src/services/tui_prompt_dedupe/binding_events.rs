@@ -233,6 +233,7 @@ enum Plan<'a> {
     Reclaim(&'a SourceId),
 }
 
+#[derive(Default)]
 struct Writer {
     last_seq: u64,
     panes: HashMap<String, PaneState>,
@@ -316,15 +317,16 @@ pub(crate) fn binding_events_since(
     channel_id: u64,
     after_seq: u64,
 ) -> io::Result<Vec<BindingEvent>> {
-    let events = binding_events_published_since(channel_id, after_seq)?;
+    let events = binding_events_judged_since(channel_id, after_seq)?;
     Ok(events.into_iter().map(|(event, _)| event).collect())
 }
 
-/// `binding_events_since` with each record's hook publish time beside it.
-pub(crate) fn binding_events_published_since(
+/// `binding_events_since` with whether each record superseded its pane's waiting Pending as a
+/// prompt reclaim, judged by replaying the log through the writer's own fold.
+pub(crate) fn binding_events_judged_since(
     channel_id: u64,
     after_seq: u64,
-) -> io::Result<Vec<(BindingEvent, Option<DateTime<Utc>>)>> {
+) -> io::Result<Vec<(BindingEvent, bool)>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(Vec::new());
     };
@@ -338,10 +340,11 @@ pub(crate) fn binding_events_published_since(
             path.display()
         )));
     }
-    let records = read
-        .records
-        .into_iter()
-        .map(|line| (line.event, line.published_at));
+    let mut replay = Writer::default();
+    let records = read.records.into_iter().map(|line| {
+        let reclaimed = replay.apply(&line.event, line.verified, line.published_at);
+        (line.event, reclaimed)
+    });
     Ok(records
         .filter(|(record, _)| record.seq > after_seq)
         .collect())
@@ -669,7 +672,7 @@ impl Writer {
         record: &BindingEvent,
         verified: bool,
         published_at: Option<DateTime<Utc>>,
-    ) {
+    ) -> bool {
         self.last_seq = self.last_seq.max(record.seq);
         let tainted = std::mem::take(&mut self.tainted);
         if tainted {
@@ -679,9 +682,15 @@ impl Writer {
         if record.execution_nonce.is_some() {
             pane.nonce = record.execution_nonce.clone();
         }
+        let mut reclaimed = false;
         if record.provider == "claude" {
             let waiting = (pane.pending.as_ref()).map(|p| Waiting::of(p, pane.pending_published));
-            let step = claude_fold::step(record, published_at, waiting);
+            // Only a verified record of the source the pane already holds verified is a re-pin.
+            let same =
+                matches!(&record.new, BindingTarget::Source(s) if pane.current.as_ref() == Some(s));
+            let repinned = verified && pane.verified && same;
+            let step = claude_fold::step(record, published_at, waiting, repinned);
+            reclaimed = step == claude_fold::Step::Reclaim;
             #[cfg(test)]
             let kept = n2b_mutant("supersede-off");
             #[cfg(not(test))]
@@ -732,6 +741,7 @@ impl Writer {
             "[I-P] the writer's Pending and the fold's awaiting session diverged at seq {}",
             record.seq
         );
+        reclaimed
     }
 
     /// What the pane's pin makes of `seen`, an observation of the proposal's path.
@@ -859,6 +869,14 @@ impl Writer {
         let verified = matches!(mode, Plan::Verified(_));
         // Pinning the source it already names is not a new source, so it has no parent.
         let repinned = matches!(&new, BindingTarget::Source(s) if pane.current.as_ref() == Some(s));
+        // As the fold judges it: only a re-pin of the source the pane holds verified reclaims.
+        #[cfg(test)]
+        let pinned = pane.verified || n2b_mutant("r5-reclaim-first-pin");
+        #[cfg(not(test))]
+        let pinned = pane.verified;
+        if reclaim && !(repinned && pinned) {
+            return Planned::Keep(Committed::Unchanged);
+        }
         let rejected = matches!(mode, Plan::Rejected(_)).then_some(());
         let nonce = match observe_spawn_nonce_marker(p.tmux_session) {
             SpawnNonceMarker::Known(nonce) => Some(nonce),

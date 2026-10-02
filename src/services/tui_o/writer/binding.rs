@@ -37,9 +37,9 @@ pub enum BindingTarget {
 pub struct BindingEvidence {
     pub hook_event: String,
     pub received_at: DateTime<Utc>,
-    /// When the relay queued the hook; a hook-less record or an older log has none.
+    /// The binding writer judged this prompt to supersede its pane's waiting Pending.
     #[serde(default)]
-    pub published_at: Option<DateTime<Utc>>,
+    pub reclaims: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,10 +83,10 @@ pub struct BindingLog;
 
 impl BindingEvents for BindingLog {
     fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
-        let events = p5::binding_events_published_since(channel, after);
+        let events = p5::binding_events_judged_since(channel, after);
         let events = events.map_err(|e| e.to_string())?;
         (events.into_iter())
-            .map(|(event, published_at)| from_p5(event, published_at))
+            .map(|(event, reclaims)| from_p5(event, reclaims))
             .collect()
     }
 
@@ -135,10 +135,7 @@ impl BindingEvents for ChannelBindingLog {
     }
 }
 
-fn from_p5(
-    event: p5::BindingEvent,
-    published_at: Option<DateTime<Utc>>,
-) -> Result<BindingEvent, String> {
+fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, String> {
     let provider = match event.provider.as_str() {
         "claude" => ShadowProvider::Claude,
         "codex" => ShadowProvider::Codex,
@@ -150,9 +147,7 @@ fn from_p5(
         }
     };
     let record = match event.new.clone() {
-        p5::BindingTarget::Source(source) => {
-            bound(&event, published_at, BindingTarget::Source(source))
-        }
+        p5::BindingTarget::Source(source) => bound(&event, reclaims, BindingTarget::Source(source)),
         p5::BindingTarget::Pending {
             payload_session_id,
             payload_transcript_path,
@@ -162,7 +157,7 @@ fn from_p5(
                 payload_session_id,
                 payload_transcript_path,
             };
-            bound(&event, published_at, pending)
+            bound(&event, reclaims, pending)
         }
         p5::BindingTarget::Resolved {
             pending_seq,
@@ -184,11 +179,7 @@ fn from_p5(
     })
 }
 
-fn bound(
-    event: &p5::BindingEvent,
-    published_at: Option<DateTime<Utc>>,
-    new: BindingTarget,
-) -> BindingRecord {
+fn bound(event: &p5::BindingEvent, reclaims: bool, new: BindingTarget) -> BindingRecord {
     let cause = match event.cause {
         p5::BindingCause::Startup => BindingCause::Startup,
         p5::BindingCause::Resume => BindingCause::Resume,
@@ -201,7 +192,7 @@ fn bound(
     let evidence = BindingEvidence {
         hook_event: event.evidence.hook_event.clone().unwrap_or_default(),
         received_at: event.evidence.received_at,
-        published_at,
+        reclaims,
     };
     BindingRecord::Bound {
         old: event.old.clone(),

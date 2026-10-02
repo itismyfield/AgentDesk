@@ -211,7 +211,7 @@ fn o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite() {
             evidence: crate::services::tui_o::writer::binding::BindingEvidence {
                 hook_event: "session_start".into(),
                 received_at: Utc::now(),
-                published_at: None,
+                reclaims: false,
             },
         },
         committed_at: Utc::now(),
@@ -290,4 +290,78 @@ async fn a_launch_session_prompt_after_a_late_clear_reclaims_the_pane() {
     assert_eq!(harness.port.posts(), ["a out"], "[R5:reclaim_launch] posts");
     halt(stop, task).await;
     restarted(&harness, &pane, &events, &x, &a_path).await;
+}
+
+/// The pane is on S, registered without a hook and so unpinned, on an incomplete history: S's
+/// prompt after a late /clear X pins S but supersedes nothing, in the writer, its fold or O.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_first_pin_on_an_incomplete_history_does_not_reclaim_the_pane() {
+    use crate::services::tui_prompt_dedupe as dedupe;
+    let [a, s, x] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
+    let (harness, a_path) = launched(&a);
+    let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
+    let pane = ProducerPane::launch(&a, &a_path);
+    std::fs::write(path(&s), session_row(&s)).unwrap();
+    let binding = dedupe::TuiRuntimeBinding {
+        runtime_kind: ClaudeTui,
+        output_path: path(&s).display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(s.clone()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    let tmux = pane.tmux;
+    assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+        "claude", tmux, CHANNEL, binding
+    ));
+    // A record logged while the spawn nonce is unreadable leaves this execution incomplete.
+    let marker = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+    let nonce = std::fs::read_to_string(&marker).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    pane.http("SessionStart", Some("clear"), &a, &x, &path(&x), 40);
+    std::fs::write(&marker, nonce).unwrap();
+    let waits = |pane: &ProducerPane| pane.history().awaiting.map(|w| w.session);
+    assert!(!pane.history().complete && waits(&pane) == Some(x.clone()));
+    let x_seq = BindingLog
+        .binding_events_since(CHANNEL, 0)
+        .unwrap()
+        .last()
+        .unwrap()
+        .seq;
+    pane.http("UserPromptSubmit", None, &a, &s, &path(&s), 45);
+    assert_eq!(pane.bound(), Some(s.clone()));
+    let events = BindingLog.binding_events_since(CHANNEL, 0).unwrap();
+    let held = |events: &[BindingEvent], tag: &str| {
+        let refused = crate::services::tui_o::writer::adoption::logged(events).err();
+        let refused = refused.map(|refused| refused.to_string());
+        let expected = format!("bind {x_seq} is still pending");
+        assert_eq!(refused, Some(expected), "{tag} {events:#?}");
+    };
+    assert_eq!(waits(&pane), Some(x.clone()), "[R5:first_pin] fold");
+    held(&events, "[R5:first_pin]");
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(6).await;
+    let checkpoint = harness.channel().binding_checkpoint().unwrap();
+    assert!(
+        checkpoint < Some(x_seq),
+        "[R5:first_pin] O waits on X: {checkpoint:?}"
+    );
+    halt(stop, task).await;
+
+    p5::forget_channel_for_tests(CHANNEL);
+    assert_eq!(waits(&pane), Some(x.clone()), "[R5:first_pin_reload] fold");
+    let after = BindingLog.binding_events_since(CHANNEL, 0).unwrap();
+    assert_eq!(after, events, "[R5:first_pin_reload]");
+    held(&after, "[R5:first_pin_reload]");
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(6).await;
+    let checkpoint = harness.channel().binding_checkpoint().unwrap();
+    assert!(
+        checkpoint < Some(x_seq),
+        "[R5:first_pin_reload] O waits on X: {checkpoint:?}"
+    );
+    halt(stop, task).await;
 }

@@ -241,6 +241,13 @@ impl Candidate<'_> {
                 false
             }
             Some(Ok(Committed::Stale)) => wait(failure),
+            Some(Ok(_)) => {
+                // A re-pin after the pin is what reclaims, so only the gate above can supersede.
+                if let (true, Some(p)) = (reclaimable, proposal) {
+                    self.log_reclaim(p, &source);
+                }
+                true
+            }
             _ => true,
         }
     }
@@ -257,15 +264,19 @@ impl Candidate<'_> {
         }
     }
 
-    /// Supersedes the pane's waiting Pending when this prompt of the bound session outlived it;
-    /// nothing else is recorded and the binding is not touched.
+    /// Supersedes the pane's waiting Pending when this prompt of the bound session outlived it,
+    /// pinning that source first if it has no pin; the binding is not touched.
     pub(super) fn reclaim(&self) -> bool {
         let (Some(proposal), Ok((checked, true))) = (self.proposal.as_ref(), self.check()) else {
             return false;
         };
         match checked {
-            Checked::Bound(Some(source)) | Checked::Verified(source) => {
-                self.log_reclaim(proposal, &source)
+            Checked::Bound(Some(source)) => self.log_reclaim(proposal, &source),
+            Checked::Verified(source) => {
+                let pinned = binding_events::codex::source_file_matches(&source)
+                    && binding_events::record_verified(proposal, &source)
+                        .is_ok_and(|c| matches!(c, Committed::Appended | Committed::Unchanged));
+                pinned && self.log_reclaim(proposal, &source)
             }
             _ => false,
         }

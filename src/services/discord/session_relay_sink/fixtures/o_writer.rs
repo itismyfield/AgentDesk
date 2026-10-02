@@ -145,7 +145,7 @@ impl WriterFixture {
                 evidence: BindingEvidence {
                     hook_event: "SessionStart".into(),
                     received_at: Utc::now(),
-                    published_at: None,
+                    reclaims: false,
                 },
             },
         };

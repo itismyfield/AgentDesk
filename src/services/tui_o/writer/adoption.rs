@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::WriterAlarm;
-use super::binding::{BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget};
+use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
@@ -188,36 +188,11 @@ pub(super) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
     let moved = old
         .as_ref()
         .is_none_or(|old| old.session_id != source.session_id);
-    !evidence.hook_event.is_empty() && (moved || reclaims(pending, source, evidence))
-}
-
-/// A prompt naming `source`'s session, published after the Pending of another session it outlived.
-fn reclaims(pending: &BindingEvent, source: &SourceId, evidence: &BindingEvidence) -> bool {
-    use crate::services::claude_tui::hook_server::HookEventKind;
+    // The writer's own fold judged the prompt reclaim; O follows that one judgment.
+    let reclaims = evidence.reclaims;
     #[cfg(test)]
-    use crate::services::claude_tui::source_verify::n2b_mutant;
-    let BindingRecord::Bound {
-        new: BindingTarget::Pending {
-            payload_session_id, ..
-        },
-        evidence: waited,
-        ..
-    } = &pending.record
-    else {
-        return false;
-    };
-    let prompt = evidence.hook_event == HookEventKind::UserPromptSubmit.as_str();
-    #[cfg(test)]
-    let prompt = prompt || n2b_mutant("r5-reclaim-any-event");
-    let later =
-        matches!((evidence.published_at, waited.published_at), (Some(t), Some(since)) if t > since);
-    #[cfg(test)]
-    let later = later || n2b_mutant("r5-reclaim-time-off");
-    #[cfg(test)]
-    if n2b_mutant("r5-reclaim-o-off") {
-        return false;
-    }
-    prompt && *payload_session_id != source.session_id && later
+    let reclaims = reclaims && !n2b_mutant("r5-reclaim-o-off");
+    !evidence.hook_event.is_empty() && (moved || reclaims)
 }
 
 /// The sources a binding log names: every bound one in seq order, and those only named as an old

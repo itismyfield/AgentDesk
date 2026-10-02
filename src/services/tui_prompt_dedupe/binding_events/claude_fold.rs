@@ -73,11 +73,13 @@ pub(super) fn reclaims(
     provider == "claude" && prompt && waiting.session != session && later
 }
 
-/// `published_at` is the record's hook publish time; `waiting` the pane's Pending, if any.
+/// `published_at` is the record's hook publish time; `waiting` the pane's Pending, if any;
+/// `repinned` whether the record re-pins the source the pane already held verified.
 pub(super) fn step(
     record: &BindingEvent,
     published_at: Option<DateTime<Utc>>,
     waiting: Option<Waiting>,
+    repinned: bool,
 ) -> Step {
     let source = match &record.new {
         BindingTarget::Pending { .. } => return Step::Await,
@@ -99,10 +101,13 @@ pub(super) fn step(
     match (hooked, moved) {
         (false, _) => Step::Observe,
         (true, true) => Step::Switch,
+        // A first pin is written whether or not the reclaim gate held, so only a re-pin reclaims.
         (true, false) => {
             let event = record.evidence.hook_event.as_deref();
             let session = source.session_id.as_str();
-            match reclaims(&record.provider, event, session, published_at, waiting) {
+            #[cfg(test)]
+            let repinned = repinned || super::n2b_mutant("r5-reclaim-first-pin");
+            match repinned && reclaims(&record.provider, event, session, published_at, waiting) {
                 true => Step::Reclaim,
                 false => Step::Confirm,
             }
