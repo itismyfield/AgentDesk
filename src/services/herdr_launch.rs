@@ -204,6 +204,8 @@ pub(crate) async fn launch_herdr_session(
         }
         Err(error) => return Err(HerdrLaunchError::Pending(format!("{error:?}"))),
     }
+    // The new execution is held until a reconcile admits it; an earlier admission ends here.
+    crate::services::tui_prompt_dedupe::install_herdr_execution(&owner.logical_key, &nonce);
     record_herdr_host_marker(&owner.logical_key).map_err(HerdrLaunchError::Marker)?;
     // Hooks and binding events name an execution by its spawn nonce marker, as on tmux.
     #[cfg(unix)]

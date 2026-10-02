@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner};
@@ -18,7 +18,7 @@ use crate::services::herdr_launch::{
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session, unset_herdr_env_before_exec,
 };
 use crate::services::session_host::RestoreResume;
-use crate::services::tui_o::shadow::capture::{SourceCapture, file_identity};
+use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use crate::services::tui_prompt_dedupe::binding_events::{
     APPEND_FAULT, BindingEvent, forget_channel_for_tests,
@@ -233,6 +233,17 @@ impl Herdr {
         (state, raw)
     }
 
+    /// Clears the row's hosted execution so the channel can launch again.
+    fn retire(&self) {
+        self.rt.block_on(async {
+            sqlx::query("UPDATE sessions SET hosted_execution = NULL WHERE channel_id = $1")
+                .bind(CHANNEL)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        });
+    }
+
     fn log(&self) -> Vec<BindingEvent> {
         events(self.channel)
             .into_iter()
@@ -267,6 +278,14 @@ impl Drop for Herdr {
             db.drop().await;
         });
     }
+}
+
+/// Puts a copy at `path` that exists before the old file goes, so the two inodes differ on any
+/// filesystem; a delete and recreate may get the same inode back.
+fn replace(path: &std::path::Path) {
+    let next = path.with_extension("next");
+    std::fs::copy(path, &next).unwrap();
+    std::fs::rename(&next, path).unwrap();
 }
 
 fn source_of(event: &BindingEvent) -> Option<&SourceId> {
@@ -348,13 +367,7 @@ fn herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source
             herdr.launched(&older, &a, &reader),
             HerdrSourceAttach::Published { bound: true, .. }
         ));
-        herdr.rt.block_on(async {
-            sqlx::query("UPDATE sessions SET hosted_execution = NULL WHERE channel_id = $1")
-                .bind(CHANNEL)
-                .execute(&herdr.pool)
-                .await
-                .unwrap();
-        });
+        herdr.retire();
         let lines = herdr.log().len();
         let nonce = herdr.launch(&a);
         let reader = herdr.pane(&nonce, |_| {});
@@ -534,9 +547,7 @@ fn herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_p
         );
 
         // The logged path now names another file: nothing is published, pinned or not.
-        let path_b = herdr.ingress.path(&b);
-        std::fs::remove_file(&path_b).unwrap();
-        herdr.ingress.transcript(&b);
+        replace(&herdr.ingress.path(&b));
         herdr.restart();
         let reader = herdr.pane(&nonce, |_| {});
         assert_eq!(herdr.restarted(&reader), HerdrSourceAttach::NotPublished);
@@ -552,8 +563,7 @@ fn herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_p
             herdr.launched(&nonce, &a, &reader),
             HerdrSourceAttach::Published { .. }
         ));
-        std::fs::remove_file(&path_a).unwrap();
-        herdr.ingress.transcript(&a);
+        replace(&path_a);
         herdr.restart();
         assert_eq!(herdr.restarted(&reader), HerdrSourceAttach::NotPublished);
         assert_eq!(
@@ -564,62 +574,95 @@ fn herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_p
     }
 }
 
-// A restart attach that refuses the execution withholds the pane at once: a hook switch is
-// refused until a later attach matches, and the bound source keeps being readable meanwhile.
+// A refused attach withholds the pane at once: a hook switch is refused until a later attach
+// matches, and what the bound source wrote meanwhile is still ahead of its cursor after that.
 #[test]
 fn a_refused_restart_attach_withholds_hook_switches_until_a_match_pg() {
-    let herdr = &mut Herdr::new("hold");
-    let a = uuid();
-    let nonce = herdr.launch(&a);
-    let path_a = herdr.ingress.transcript(&a);
-    let reader = herdr.pane(&nonce, |_| {});
-    assert!(matches!(
-        herdr.launched(&nonce, &a, &reader),
-        HerdrSourceAttach::Published { .. }
-    ));
-    let source = source_of(herdr.log().last().unwrap()).unwrap().clone();
-    let gone = Pane {
-        endpoint: herdr.location.as_ref().map(HerdrEndpointId::of),
-        reading: HerdrPaneReading::Missing,
-    };
-    assert_eq!(
-        herdr.restarted(&gone),
-        HerdrSourceAttach::Refused(HostReconcile::Missing)
-    );
+    {
+        let herdr = &mut Herdr::new("hold");
+        let a = uuid();
+        let nonce = herdr.launch(&a);
+        let path_a = herdr.ingress.transcript(&a);
+        let reader = herdr.pane(&nonce, |_| {});
+        assert!(matches!(
+            herdr.launched(&nonce, &a, &reader),
+            HerdrSourceAttach::Published { .. }
+        ));
+        let gone = Pane {
+            endpoint: herdr.location.as_ref().map(HerdrEndpointId::of),
+            reading: HerdrPaneReading::Missing,
+        };
+        assert_eq!(
+            herdr.restarted(&gone),
+            HerdrSourceAttach::Refused(HostReconcile::Missing)
+        );
 
-    let (b, id) = (uuid(), uuid());
-    herdr.ingress.transcript(&b);
-    let lines = herdr.log().len();
-    assert_eq!(herdr.switch_hook(&a, &b, &id), 425);
-    assert_eq!(
-        herdr.bound().unwrap().session_id.as_deref(),
-        Some(a.as_str())
-    );
-    assert_eq!(herdr.log().len(), lines, "a withheld switch logs nothing");
-    // What the bound source writes after the refusal is still read from its cursor.
-    let cursor = herdr.bound().unwrap().last_offset;
-    let mut capture = SourceCapture::open(source, cursor).unwrap();
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path_a)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, b"{\"type\":\"assistant\"}\n"))
-        .unwrap();
-    use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource};
-    let CaptureOutcome::Batch(batch) = capture.poll(1 << 20) else {
-        panic!("the bound source stopped being readable");
-    };
-    assert_eq!(batch.records.len(), 1);
+        let (b, id) = (uuid(), uuid());
+        herdr.ingress.transcript(&b);
+        let lines = herdr.log().len();
+        assert_eq!(herdr.switch_hook(&a, &b, &id), 425);
+        assert_eq!(
+            herdr.bound().unwrap().session_id.as_deref(),
+            Some(a.as_str())
+        );
+        assert_eq!(herdr.log().len(), lines, "a withheld switch logs nothing");
 
-    // A matched attach admits the pane again and the same request is taken.
-    assert!(matches!(
-        herdr.restarted(&reader),
-        HerdrSourceAttach::Published { .. }
-    ));
-    assert_eq!(herdr.switch_hook(&a, &b, &id), 202);
-    assert_eq!(
-        herdr.bound().unwrap().session_id.as_deref(),
-        Some(b.as_str())
-    );
+        // A prompt written after the refusal is still what the idle relay scans once admitted.
+        let cursor = herdr.bound().unwrap().last_offset;
+        let prompt = json!({"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "unread prompt"}]}, "sessionId": a});
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path_a)
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, format!("{prompt}\n").as_bytes())
+            })
+            .unwrap();
+        assert!(matches!(
+            herdr.restarted(&reader),
+            HerdrSourceAttach::Published { .. }
+        ));
+        assert_eq!(herdr.bound().unwrap().last_offset, cursor);
+        let scan = super::super::scan_claude_idle_transcript_for_prompt(&path_a, cursor);
+        assert!(
+            matches!(&scan, Ok(super::super::ClaudeIdleTranscriptScan::Prompt { prompt, .. })
+                if prompt == "unread prompt"),
+            "{scan:?}"
+        );
+
+        // A matched attach admits the pane again and the same request is taken.
+        assert_eq!(herdr.switch_hook(&a, &b, &id), 202);
+        assert_eq!(
+            herdr.bound().unwrap().session_id.as_deref(),
+            Some(b.as_str())
+        );
+    }
+    {
+        // A new execution of the same source is held from its launch, so its refusal leaves no
+        // admission of the earlier execution open.
+        let herdr = &mut Herdr::new("superseded");
+        let a = uuid();
+        herdr.ingress.transcript(&a);
+        let older = herdr.launch(&a);
+        let reader = herdr.pane(&older, |_| {});
+        assert!(matches!(
+            herdr.launched(&older, &a, &reader),
+            HerdrSourceAttach::Published { bound: true, .. }
+        ));
+        herdr.retire();
+        let nonce = herdr.launch(&a);
+        let replaced = herdr.pane(&nonce, |e| e.root.as_mut().unwrap().pid += 9);
+        let refused = herdr.launched(&nonce, &a, &replaced);
+        assert!(
+            matches!(refused, HerdrSourceAttach::Refused(_)),
+            "{refused:?}"
+        );
+        let (b, lines) = (uuid(), herdr.log().len());
+        herdr.ingress.transcript(&b);
+        assert_eq!(herdr.switch_hook(&a, &b, &uuid()), 425);
+        let bound = herdr.bound().unwrap().session_id;
+        assert_eq!((bound, herdr.log().len()), (Some(a.clone()), lines));
+    }
 }
 
 // O begins a channel's era only on a binding baseline its log names: a Herdr launch's own source

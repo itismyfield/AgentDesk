@@ -20,10 +20,12 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
+use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_events::{self, BindingTarget, SourceId};
-use crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane_with;
+use crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane_under_source_authority;
 use crate::services::tui_prompt_dedupe::{self as dedupe, Persisted, Record, TuiRuntimeBinding};
-use dedupe::{admit_herdr_execution, withhold_herdr_execution};
+use dedupe::withhold_herdr_execution;
+use dedupe::{admit_herdr_execution, runtime_binding_for_tmux_session_under_source_authority};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum HerdrSourceAttach {
@@ -33,7 +35,8 @@ pub(in crate::services::discord) enum HerdrSourceAttach {
     Refused(HostReconcile),
     /// The log names no source of this execution to restore.
     NoBaseline,
-    /// The binding event was not persisted or the log refused it; nothing was published.
+    /// The binding event was not persisted, the log refused it, or another source is live there;
+    /// nothing was published.
     NotPublished,
     /// `bound` once the pane's latest logged source is this execution's. `agent_agrees` compares
     /// Herdr's reported agent session with that source: a hint for a re-read, never a switch.
@@ -107,6 +110,11 @@ fn nonce_baseline(channel: u64, logical: &str, nonce: &str) -> Option<SourceId> 
     }
 }
 
+fn live_is(live: &TuiRuntimeBinding, source: &SourceId) -> bool {
+    live.session_id.as_deref() == Some(source.session_id.as_str())
+        && Path::new(&live.output_path) == source.path
+}
+
 fn agent_agrees(agent: Option<String>, source: Option<&SourceId>) -> Option<bool> {
     agent.map(|agent| source.is_some_and(|source| source.session_id == agent))
 }
@@ -145,12 +153,9 @@ pub(in crate::services::discord) async fn attach_launched_herdr_source(
         relay_last_offset: None,
     };
     dedupe::register_tmux_channel(logical, channel);
-    let published =
-        crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
-            dedupe::register_launched_tmux_runtime_binding_under_source_authority(
-                authority, binding,
-            )
-        });
+    let published = with_tmux_source_authority(logical, |authority| {
+        dedupe::register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
+    });
     if !published {
         withhold_herdr_execution(logical, Some(nonce));
         return HerdrSourceAttach::NotPublished;
@@ -192,9 +197,16 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
         withhold_herdr_execution(logical, Some(&nonce));
         return HerdrSourceAttach::NoBaseline;
     };
-    let binding = claude_tui_rehydrated_binding(&source.session_id, &source.path);
-    let record = Record::Exact(source.clone());
-    let registered = register_claude_pane_with(logical, channel, binding, record);
+    // A live binding of this source keeps its unread cursor; another live source is left alone.
+    let registered = with_tmux_source_authority(logical, |authority| {
+        let binding = match runtime_binding_for_tmux_session_under_source_authority(authority) {
+            None => claude_tui_rehydrated_binding(&source.session_id, &source.path),
+            Some(live) if live_is(&live, &source) => live,
+            Some(_) => return None,
+        };
+        let record = Record::Exact(source.clone());
+        register_claude_pane_under_source_authority(authority, channel, binding, record)
+    });
     if !registered.is_some_and(Persisted::published) {
         withhold_herdr_execution(logical, Some(&nonce));
         return HerdrSourceAttach::NotPublished;

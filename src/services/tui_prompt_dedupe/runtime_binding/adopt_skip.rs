@@ -83,62 +83,81 @@ pub(crate) fn adopt_claude_continuation_explained(
     failure.map_or(Ok((adopted, skip)), Err)
 }
 
-/// Herdr panes by logical key: the execution nonce the latest reconcile judged and whether it
-/// admitted it. A withheld pane keeps its binding and cursor; tmux panes are never listed.
+/// Herdr panes by logical key: the latest installed or judged execution's nonce and whether a
+/// reconcile admitted it. A withheld pane keeps its binding and cursor; tmux panes are not listed.
 static HERDR_EXECUTIONS: LazyLock<Mutex<HashMap<String, (String, bool)>>> =
     LazyLock::new(Default::default);
-// Until a Herdr pane is listed the hook path reads this flag and takes no lock.
+// Until a Herdr pane is listed the hook path reads this flag and takes no lock; tests keep the flag
+// per thread but run the same atomic operations on it.
 #[cfg(not(test))]
-static LISTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LISTED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 thread_local! {
-    static LISTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LISTED: AtomicBool = const { AtomicBool::new(false) };
     pub(crate) static HERDR_HOLD_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering::{AcqRel, Acquire},
+};
 
-fn herdr_executions(
-    listing: bool,
-) -> std::sync::MutexGuard<'static, HashMap<String, (String, bool)>> {
+fn listed<R>(read: impl FnOnce(&AtomicBool) -> R) -> R {
     #[cfg(not(test))]
-    LISTED.fetch_or(listing, std::sync::atomic::Ordering::AcqRel);
+    return read(&LISTED);
     #[cfg(test)]
-    LISTED.set(LISTED.get() || listing);
-    HERDR_EXECUTIONS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
+    LISTED.with(read)
 }
 
-/// The reconcile admitted execution `nonce` on `logical`; it replaces any older execution.
+/// Changes `logical`'s hold in the source authority hooks adopt under, so a hook past its check
+/// commits before the change returns and a later hook sees the change.
+fn change_hold(logical: &str, change: impl FnOnce(&mut HashMap<String, (String, bool)>)) {
+    crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
+        listed(|flag| flag.fetch_or(true, AcqRel));
+        change(&mut HERDR_EXECUTIONS.lock().unwrap_or_else(|p| p.into_inner()));
+    });
+}
+
+/// A launch installed execution `nonce` on `logical`: it is held until a reconcile admits it, and
+/// an earlier execution's admission ends here.
+pub(crate) fn install_herdr_execution(logical: &str, nonce: &str) {
+    change_hold(logical, |executions| {
+        executions.insert(logical.to_owned(), (nonce.to_owned(), false));
+    });
+}
+
+/// The reconcile admitted execution `nonce` on `logical`, unless a newer one is installed there.
 pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
-    herdr_executions(true).insert(logical.to_owned(), (nonce.to_owned(), true));
+    change_hold(logical, |executions| match executions.get(logical) {
+        Some((listed, _)) if listed != nonce => {}
+        _ => drop(executions.insert(logical.to_owned(), (nonce.to_owned(), true))),
+    });
 }
 
 /// The reconcile refused execution `nonce` on `logical`, or could not name one (`None`): that
 /// only withholds a listed pane, and a refusal of another execution leaves the listed one alone.
 pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
-    let mut executions = herdr_executions(true);
-    match (executions.get_mut(logical), nonce) {
-        (Some((listed, _)), Some(nonce)) if nonce != listed => {}
-        (Some((_, admitted)), _) => *admitted = false,
-        (None, Some(nonce)) => {
-            executions.insert(logical.to_owned(), (nonce.to_owned(), false));
+    change_hold(logical, |executions| {
+        match (executions.get_mut(logical), nonce) {
+            (Some((listed, _)), Some(nonce)) if nonce != listed => {}
+            (Some((_, admitted)), _) => *admitted = false,
+            (None, Some(nonce)) => {
+                drop(executions.insert(logical.to_owned(), (nonce.to_owned(), false)))
+            }
+            (None, None) => {}
         }
-        (None, None) => {}
-    }
+    });
 }
 
 /// Whether hooks must leave the pane on its current source; the lock is a leaf.
 fn herdr_execution_withheld(logical: &str) -> bool {
-    #[cfg(not(test))]
-    let listed = LISTED.load(std::sync::atomic::Ordering::Acquire);
-    #[cfg(test)]
-    let listed = LISTED.get();
-    if !listed {
+    if !listed(|flag| flag.load(Acquire)) {
         return false;
     }
     #[cfg(test)]
     HERDR_HOLD_LOOKUPS.set(HERDR_HOLD_LOOKUPS.get() + 1);
-    herdr_executions(false)
+    let executions = HERDR_EXECUTIONS.lock();
+    let executions = executions.unwrap_or_else(|poison| poison.into_inner());
+    executions
         .get(logical)
         .is_some_and(|(_, admitted)| !admitted)
 }
