@@ -161,9 +161,16 @@ jobs:
         run: sccache --show-stats || true
 
   postgres:
-    name: PostgreSQL tests
+    name: PostgreSQL tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    # Each shard runs one generated part of the PG selection on its own database;
+    # the run stays green only if both shards succeed.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     env:
+      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432

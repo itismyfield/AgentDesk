@@ -34,6 +34,10 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
+# Main's PG lane runs as two shards: shard 0 selects these include values and
+# shard 1 the rest with them skipped, so the shards partition the selection.
+PG_SHARD_0_SELECTORS = ("pg_", "postgres")
+PG_SHARD_JOB = ".github/workflows/ci-main.yml:postgres"
 ALLOWLIST_REL = Path("scripts/pg_test_lane_allowlist.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
@@ -1482,7 +1486,73 @@ def non_pg_filter_contract_errors(
             errors.append(f"{key}: does not use the derived {variable} array")
         if source_command not in job.code:
             errors.append(f"{key}: does not source {NON_PG_FILTER_REL}")
+    errors.extend(pg_shard_contract_errors(repo_root, relevant.values()))
     return tuple(errors)
+
+
+def load_pg_include_shards(repo_root: Path) -> tuple[tuple[str, ...], ...]:
+    text = (repo_root / NON_PG_FILTER_REL).read_text("utf-8")
+    shards = []
+    for index in range(2):
+        match = re.search(
+            rf"^PG_INCLUDE_ARGS_SHARD_{index}=\((.*?)^\)$", text, re.MULTILINE | re.DOTALL
+        )
+        if match is None:
+            raise ValueError(f"{NON_PG_FILTER_REL}: missing PG_INCLUDE_ARGS_SHARD_{index}")
+        shards.append(tuple(shlex.split(match.group(1))))
+    return tuple(shards)
+
+
+def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
+    """Each test the unsharded PG selection runs must run in exactly one shard,
+    and only the sharded main job may narrow the selection, from its matrix."""
+    try:
+        shards = load_pg_include_shards(repo_root)
+    except ValueError as error:
+        return [str(error)]
+    coverage = _load_coverage_module(repo_root)
+
+    def lane(args: Iterable[str]):
+        return coverage.cargo_test_filter(shlex.join(["cargo", "test", "--lib", "--", *args]))
+
+    whole = lane(load_non_pg_skip_args(repo_root)[1::2])
+    shard_lanes = [lane(args) for args in shards]
+    errors: list[str] = []
+    wrong = [
+        (test, [index for index, shard in enumerate(shard_lanes) if shard.selects_test(test)])
+        for test in sorted(load_lib_test_inventory(repo_root))
+    ]
+    wrong = [
+        (test, hits) for test, hits in wrong
+        if len(hits) != (1 if whole.selects_test(test) else 0)
+    ]
+    for test, hits in wrong[:20]:
+        errors.append(
+            f"{NON_PG_FILTER_REL}: PG shards {hits} select {test}; the unsharded "
+            f"PG selection runs it {'once' if whole.selects_test(test) else 'never'}"
+        )
+    if len(wrong) > 20:
+        errors.append(f"{NON_PG_FILTER_REL}: {len(wrong) - 20} more PG shard partition error(s)")
+
+    shard_job = next((job for job in jobs if job.key == PG_SHARD_JOB), None)
+    owned = shard_job.code.count("PG_INCLUDE_SHARD") if shard_job else 0
+    if owned and (
+        owned != 1
+        or not re.search(
+            r"(?m)^\s+PG_INCLUDE_SHARD:\s*\$\{\{\s*matrix\.shard\s*\}\}\s*$",
+            shard_job.code,
+        )
+    ):
+        errors.append(f"{PG_SHARD_JOB}: PG_INCLUDE_SHARD must be set once, from matrix.shard")
+    workflows = (repo_root / ".github/workflows")
+    for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml"), repo_root / "justfile"]):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(repo_root).as_posix()
+        count = _strip_comments(path.read_text("utf-8")).count("PG_INCLUDE_SHARD")
+        if count != (owned if shard_job and shard_job.workflow == rel else 0):
+            errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside {PG_SHARD_JOB}")
+    return errors
 
 
 def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1508,13 +1578,31 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
     return skips, tuple(sorted(replay))
 
 
+def pg_include_shards(skips: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """libtest arguments for the two PG shards; a test matching a shard 0
+    selector is skipped by shard 1, so each selected test runs exactly once."""
+    missing = [value for value in PG_SHARD_0_SELECTORS if value not in skips]
+    if missing:
+        raise ValueError(f"PG shard 0 selectors are not include values: {missing}")
+    shard_1 = tuple(value for value in skips if value not in PG_SHARD_0_SELECTORS)
+    skipped = tuple(arg for value in PG_SHARD_0_SELECTORS for arg in ("--skip", value))
+    return PG_SHARD_0_SELECTORS, shard_1 + skipped
+
+
 def render_non_pg_selection(skips: tuple[str, ...], replay: tuple[str, ...]) -> list[str]:
+    shard_0, shard_1 = pg_include_shards(skips)
     lines = [NON_PG_SELECTION_BEGIN, "NON_PG_SKIP_ARGS=("]
     lines.extend(f"  --skip {value}" for value in skips)
     lines.append(")")
     lines.append("NON_PG_FILTER_REPLAY=(")
     lines.extend(f"  {test}" for test in replay)
     lines.append(")")
+    for name, args in (("PG_INCLUDE_ARGS_SHARD_0", shard_0), ("PG_INCLUDE_ARGS_SHARD_1", shard_1)):
+        lines.append(f"{name}=(")
+        lines.extend(f"  {shlex.join(args[index:index + 2])}" if arg == "--skip" else f"  {arg}"
+                     for index, arg in enumerate(args)
+                     if index == 0 or args[index - 1] != "--skip")
+        lines.append(")")
     lines.append(NON_PG_SELECTION_END)
     return lines
 
@@ -1560,9 +1648,8 @@ def write_non_pg_selection_block(repo_root: Path) -> int:
         return 2
     path = repo_root / NON_PG_FILTER_REL
     _atomic_write_text(path, "\n".join(lines[:begin] + expected + lines[end + 1 :]) + "\n")
-    skips = sum(1 for line in expected if line.startswith("  --skip "))
-    replay = sum(1 for line in expected if line.startswith("  ") and not line.startswith("  --skip "))
-    print(f"wrote {skips} skip value(s) and {replay} replay test(s) into {path}")
+    skips, replay = non_pg_selection(repo_root)
+    print(f"wrote {len(skips)} skip value(s) and {len(replay)} replay test(s) into {path}")
     return 0
 
 
