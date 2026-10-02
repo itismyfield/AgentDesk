@@ -65,9 +65,8 @@ async fn a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it() {
         .await
         .expect("intake queues behind the active turn");
     assert_eq!(queued_ids(&harness).await, vec![queued]);
-    // Rewind the live cursor below the queued message, the shape a cursor lagging
-    // the durable queue leaves. Phase 1 resumes past the newest intake and reads
-    // nothing, so phase 2 meets both messages.
+    // A live cursor lagging the durable queue: phase 1 resumes past the newest
+    // intake and reads nothing, so phase 2 alone meets both messages.
     harness
         .shared
         .last_message_ids
