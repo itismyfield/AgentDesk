@@ -2506,6 +2506,10 @@ services::codex_tui::rollout_index::tests::signature_miss_reuses_surviving_file_
 services::codex_tui::rollout_index::tests::tree_signature_changes_when_rollout_added
 services::codex_tui::rollout_index::tests::warm_lookup_end_to_end_reuses_cache
 services::codex_tui::rollout_index::tests::warm_scan_reuses_cached_header_without_reread
+services::codex_tui::rollout_tail::child_binding_tests::child_only_launch_publishes_no_binding_or_marker
+services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refuses_both_child_indicators
+services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
+services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
@@ -7065,6 +7069,7 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_life
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_queue_eligible_before_mailbox_release
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::local_model_observation_wakes_idle_durable_queue_through_production_workers
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_completion_lifecycle_validates_order_and_cardinality
+services::discord::tui_prompt_relay::rehydration::child_binding_tests::child_marker_rehydrate_publishes_no_child_and_fallback_excludes_it
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_live_pane_marked_for_another_host_is_not_adopted_by_name
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation

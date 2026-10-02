@@ -67,17 +67,30 @@ const MAX_CACHED_ROOTS: usize = 32;
 pub struct RolloutSessionMeta {
     pub id: Option<String>,
     pub cwd: PathBuf,
-    pub source: Option<String>,
+    pub source: Option<Value>,
+    pub parent_thread_id: Option<String>,
     pub originator: Option<String>,
 }
 
 impl RolloutSessionMeta {
+    pub fn is_subagent(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.get("subagent").is_some())
+            || self.parent_thread_id.is_some()
+    }
+
     /// Codex direct TUI can safely resume sessions recorded by the interactive
     /// CLI. Older AgentDesk codex-exec rollouts share the same JSONL directory
     /// and UUID shape, but resuming them through the TUI can leave no fresh
     /// rollout transcript for the tailer to follow.
     pub fn is_tui_compatible(&self) -> bool {
-        !self.source.as_deref().is_some_and(|value| value == "exec")
+        !self.is_subagent()
+            && !self
+                .source
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "exec")
             && !self
                 .originator
                 .as_deref()
@@ -181,6 +194,10 @@ pub fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
     session_meta_from_header(std::fs::File::open(path).ok()?)
 }
 
+pub(crate) fn rollout_is_subagent(path: &Path) -> bool {
+    read_rollout_session_meta(path).is_some_and(|meta| meta.is_subagent())
+}
+
 fn session_meta_from_header(file: std::fs::File) -> Option<RolloutSessionMeta> {
     let reader = std::io::BufReader::new(file);
     reader
@@ -229,8 +246,9 @@ fn header_line_meta(line: &[u8]) -> Option<Option<RolloutSessionMeta>> {
     Some(Some(RolloutSessionMeta {
         id,
         cwd: PathBuf::from(cwd),
-        source: payload
-            .get("source")
+        source: payload.get("source").cloned(),
+        parent_thread_id: payload
+            .get("parent_thread_id")
             .and_then(Value::as_str)
             .map(ToString::to_string),
         originator: payload
@@ -848,6 +866,7 @@ mod tests {
                     id: Some("cached-sentinel".to_string()),
                     cwd: cwd.path().to_path_buf(),
                     source: None,
+                    parent_thread_id: None,
                     originator: None,
                 }),
             },
@@ -872,6 +891,7 @@ mod tests {
                     id: Some("cached-sentinel".to_string()),
                     cwd: cwd.path().to_path_buf(),
                     source: None,
+                    parent_thread_id: None,
                     originator: None,
                 }),
             },

@@ -7,7 +7,9 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod codex_hook;
 pub(crate) use codex_hook::{
-    codex_tail_source_retired, observe_codex_hook, publish_unless_codex_tail_retired,
+    codex_tail_source_retired, codex_tui_binding_is_subagent, observe_codex_hook,
+    publish_unless_codex_tail_retired, register_launched_tmux_runtime_binding,
+    register_launched_tmux_runtime_binding_under_source_authority,
 };
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
@@ -140,24 +142,6 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
         .is_some_and(Persisted::published)
 }
 
-/// Launch paths let the execution's context name the cause of a new source.
-pub(crate) fn register_launched_tmux_runtime_binding(
-    tmux_session_name: &str,
-    binding: TuiRuntimeBinding,
-) {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
-    });
-}
-
-pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
-    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    binding: TuiRuntimeBinding,
-) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
-        .is_some_and(Persisted::published)
-}
-
 /// Persists the binding event first; nothing is published on failure (`None`) or when a pin refuses.
 fn publish_runtime_binding(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -171,6 +155,9 @@ fn publish_runtime_binding(
         return None;
     }
     if binding.relay_output_path().trim().is_empty() {
+        return None;
+    }
+    if codex_tui_binding_is_subagent(tmux_session_name, &binding) {
         return None;
     }
     with_runtime_binding_state_under_source_authority(authority, |state| {
