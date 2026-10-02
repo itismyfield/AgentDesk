@@ -4,7 +4,7 @@ mod adopt_skip;
 mod claude_source;
 #[cfg(test)]
 pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
-pub(crate) use claude_source::{Persisted, Record};
+pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod codex_hook;
 pub(crate) use codex_hook::{
     codex_tail_source_retired, observe_codex_hook, publish_unless_codex_tail_retired,
@@ -698,9 +698,12 @@ fn adopt_continuation(
     let command_session_id = command_session_id.trim();
     let payload_session_id = payload_session_id.trim();
     *skip = Some(AdoptSkip::PayloadNotUuid);
+    let same = command_session_id == payload_session_id;
+    #[cfg(test)]
+    let same = same && !crate::services::claude_tui::source_verify::n2b_mutant("r5-ingress-start");
     if command_session_id.is_empty()
         || payload_session_id.is_empty()
-        || command_session_id == payload_session_id
+        || same
         || uuid::Uuid::parse_str(payload_session_id).is_err()
     {
         return None;

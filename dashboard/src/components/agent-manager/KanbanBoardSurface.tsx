@@ -48,7 +48,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
     <>
       {selectedRepo && (() => {
         // #2128: ready 카드(`status = requested`) 중 assignee + GH 이슈 번호가 있는 것만
-        // request-generate 후보로 전달. 그 외 카드는 활성화 카운트에서도 빠진다.
+        // 큐 생성 후보로 전달. 그 외 카드는 활성화 카운트에서도 빠진다.
         const readyCards = cardsByStatus.get("requested") ?? [];
         const readyEntries = readyCards
           .filter((card: any) => Boolean(card.assignee_agent_id) && Boolean(card.github_issue_number))

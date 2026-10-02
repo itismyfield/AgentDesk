@@ -287,7 +287,6 @@ describe("AutoQueuePanelView with a phase-gate run", () => {
       ],
       primaryAction: "dispatch",
       readyEntries: [],
-      requestProgress: null,
       run: makeRun(),
       selectedRepo: "itismyfield/AgentDesk",
       setExpanded: () => {},

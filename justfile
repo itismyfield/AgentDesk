@@ -211,4 +211,15 @@ test-postgres:
     cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
     cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
 
+# Main's PG matrix job: shard 0 runs the whole recipe on its part of the
+# selection and shard 1 only its part, so the targeted commands run once.
+test-postgres-shard:
+    @case "${PG_INCLUDE_SHARD:-}" in 0|1) ;; *) echo "PG_INCLUDE_SHARD must be 0 or 1" >&2; exit 1 ;; esac
+    if [ "$PG_INCLUDE_SHARD" = 0 ]; then just test-postgres; else just test-postgres-selection; fi
+
+# The first command of test-postgres alone.
+test-postgres-selection:
+    @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
+    source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+
 check: fmt-check lint cargo-check test

@@ -140,17 +140,6 @@ pub(crate) fn observe_binding_hook(
     let (Some(command), Some(payload_session)) = (command_session_id, payload_session_id) else {
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
     };
-    if command == payload_session
-        && !(provider == "codex"
-            && HookEventKind::from_path(event) == HookEventKind::SessionStart
-            && payload["source"] == "clear")
-    {
-        return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
-    }
-    let envelope = headers
-        .get(BINDING_HEADER)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| decode_binding_header(h).ok());
     let published_at = headers
         .get(RELAY_PUBLISHED_AT_HEADER)
         .and_then(|h| h.to_str().ok());
@@ -159,6 +148,36 @@ pub(crate) fn observe_binding_hook(
         published_at: published_at.map(|t| t.with_timezone(&chrono::Utc)),
         ..HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload)
     };
+    if command == payload_session
+        && !(provider == "codex"
+            && HookEventKind::from_path(event) == HookEventKind::SessionStart
+            && payload["source"] == "clear")
+    {
+        // A prompt of the launch session may still supersede a Pending it outlived; no switch.
+        let prompt = HookEventKind::from_path(event) == HookEventKind::UserPromptSubmit;
+        #[cfg(test)]
+        let prompt = prompt
+            && !crate::services::claude_tui::source_verify::n2b_mutant("r5-reclaim-ingress-off");
+        if provider == "claude" && prompt {
+            adoption_retry::reclaim_from_prompt(command, &hook);
+        }
+        #[cfg(test)]
+        if provider == "claude"
+            && !prompt
+            && crate::services::claude_tui::source_verify::n2b_mutant("r5-ingress-start")
+        {
+            return match adoption_retry::adopt_from_hook(command, payload_session, &hook) {
+                AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
+                AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
+                AdoptionHttp::Skipped(skip) => classify_skip(skip, command, None),
+            };
+        }
+        return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
+    }
+    let envelope = headers
+        .get(BINDING_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| decode_binding_header(h).ok());
     match provider {
         "claude" => {}
         "codex" => {
