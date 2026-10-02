@@ -7954,6 +7954,8 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_host_owned_s
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_judged_cancel_leaves_a_turn_that_replaced_the_judged_one
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_name_only_preserve_stop_keeps_a_turn_on_another_host
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_preserve_stop_keeps_a_turn_on_another_host_before_any_write
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_keeps_a_turn_it_could_not_read
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_observes_child_termination
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid

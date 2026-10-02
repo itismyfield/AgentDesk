@@ -14,6 +14,23 @@ use crate::services::turn_orchestrator::CancelActiveTurnResult;
 /// The reason the channel cancel records on the token and its tombstone.
 const CANCEL_REASON: &str = "mailbox_cancel_active_turn";
 
+/// The turn could not be judged: its mailbox or its inflight row failed to read. Nothing was
+/// written, and the stop keeps the turn as it keeps a refused host's.
+#[derive(Debug)]
+pub(in crate::services::discord) struct StopUnobserved(String);
+
+/// A channel's judged stop; `Ok(None)` with no active turn.
+pub(in crate::services::discord) type ChannelJudgement =
+    Result<Option<ChannelStop>, StopUnobserved>;
+
+/// Whether `judgement` keeps the turn: a refused host or a turn that could not be read.
+pub(in crate::services::discord) fn keeps_turn(judgement: &ChannelJudgement) -> bool {
+    match judgement {
+        Ok(stop) => stop.as_ref().is_some_and(ChannelStop::refused),
+        Err(_) => true,
+    }
+}
+
 pub(in crate::services::discord) struct ChannelStop {
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -26,20 +43,29 @@ pub(in crate::services::discord) struct ChannelStop {
 }
 
 impl ChannelStop {
-    /// Judges `channel`'s active turn, or `None` with no turn. `approved` is a force-kill
-    /// verdict's session; with `bind_unbound`, a token with no name is judged by its inflight row.
+    /// Judges `channel`'s active turn. `approved` is a force-kill verdict's session; with
+    /// `bind_unbound`, a token with no name is judged by its inflight row.
     pub(in crate::services::discord) async fn judge(
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel: ChannelId,
         approved: Option<Option<&str>>,
         bind_unbound: bool,
-    ) -> Option<Self> {
-        let handle = shared.mailbox_peek(channel)?;
-        let token = handle.cancel_token().await.ok().flatten()?;
+    ) -> ChannelJudgement {
+        let Some(handle) = shared.mailbox_peek(channel) else {
+            return Ok(None);
+        };
+        let token = handle.cancel_token().await;
+        let token = token.map_err(|_| unobserved(channel, "mailbox unreachable".to_string()))?;
+        let Some(token) = token else {
+            return Ok(None);
+        };
         let bound = token.tmux_session_name();
         let unbound = bound.is_none() && bind_unbound;
-        let name = bound.or_else(|| unbound.then(|| inflight_name(provider, channel)).flatten());
+        let name = match unbound {
+            true => inflight_name(provider, channel).map_err(|error| unobserved(channel, error))?,
+            false => bound,
+        };
         let mut stop = Self::judge_token(shared, provider, channel, token, approved, name);
         #[cfg(test)]
         if let Some(target) = NEXT_TARGET.with_borrow_mut(Option::take) {
@@ -58,9 +84,11 @@ impl ChannelStop {
                     ProviderKind::Gemini,
                     ProviderKind::Qwen,
                 ];
-                providers.iter().find_map(|p| inflight_name(p, channel))
+                providers
+                    .iter()
+                    .find_map(|p| inflight_name(p, channel).ok().flatten())
             });
-        Some(stop)
+        Ok(Some(stop))
     }
 
     /// Judges `token` by `name` alone, for a stop that neither cancels nor binds it.
@@ -155,14 +183,22 @@ fn judge_next_as(target: StopTarget) {
     NEXT_TARGET.with_borrow_mut(|next| *next = Some(target));
 }
 
-fn inflight_name(provider: &ProviderKind, channel: ChannelId) -> Option<String> {
-    let row = inflight::load_inflight_state_read_only_result(provider, channel.get());
-    row.ok().flatten().and_then(|row| row.tmux_session_name)
+/// The session `provider`'s row on `channel` names; a row that fails to read or parse is an
+/// error, never "no name".
+fn inflight_name(provider: &ProviderKind, channel: ChannelId) -> Result<Option<String>, String> {
+    let row = inflight::load_inflight_state_read_only_result(provider, channel.get())?;
+    Ok(row.and_then(|row| row.tmux_session_name))
+}
+
+fn unobserved(channel: ChannelId, error: String) -> StopUnobserved {
+    let channel_id = channel.get();
+    tracing::warn!(channel_id, %error, "stop keeps a turn it could not judge");
+    StopUnobserved(error)
 }
 
 pub(in crate::services::discord) enum CommandStop {
     NoActiveTurn,
-    /// The turn's host is not a confirmed legacy tmux: nothing was cancelled.
+    /// The turn's host is not a confirmed legacy tmux, or could not be read: nothing was cancelled.
     HostRefused,
     AlreadyStopping,
     Stop(ChannelStop),
@@ -175,12 +211,13 @@ pub(in crate::services::discord) async fn begin_command_stop(
     channel: ChannelId,
     bind_unbound: bool,
 ) -> CommandStop {
-    let Some(stop) = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await else {
-        return CommandStop::NoActiveTurn;
-    };
-    if stop.refused() {
+    let judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
+    if keeps_turn(&judgement) {
         return CommandStop::HostRefused;
     }
+    let Ok(Some(stop)) = judgement else {
+        return CommandStop::NoActiveTurn;
+    };
     let result = stop.cancel().await;
     match result.token {
         None => CommandStop::NoActiveTurn,

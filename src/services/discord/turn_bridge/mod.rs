@@ -132,7 +132,9 @@ pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::tmux_generation_file_mtime_ns;
-pub(super) use tmux_runtime::{ChannelStop, CommandStop, begin_command_stop};
+pub(super) use tmux_runtime::{
+    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, keeps_turn,
+};
 pub(super) use tmux_runtime::{
     stop_active_turn, stop_active_turn_with_outcome, stop_approved_turn,
 };

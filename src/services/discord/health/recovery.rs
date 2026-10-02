@@ -345,11 +345,18 @@ async fn stop_judged_channel_runtime(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    stop: Option<discord::turn_bridge::ChannelStop>,
+    stop: discord::turn_bridge::ChannelJudgement,
     reason: &str,
     cleanup_policy: discord::TmuxCleanupPolicy,
     approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
+    // A turn that could not be read is kept as a refused host's is, unless a force-kill verdict
+    // already approved its host.
+    let stop = match stop {
+        Ok(stop) => stop,
+        Err(_) if approved.is_some() => None,
+        Err(_) => return host_guard_preserved(shared, channel_id).await,
+    };
     let (shared, provider) = (shared.clone(), provider.clone());
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();
     let should_clear_persistent_inflight = cleanup_policy.should_clear_inflight();
@@ -1347,7 +1354,7 @@ async fn runtime_turn_cleanup_by_lookup(
         let (shared, provider, channel) = (&runtime.shared, &runtime.provider, runtime.channel_id);
         let judged =
             discord::turn_bridge::ChannelStop::judge(shared, provider, channel, None, false);
-        if !stop_watcher && judged.await.is_some_and(|stop| stop.refused()) {
+        if !stop_watcher && discord::turn_bridge::keeps_turn(&judged.await) {
             let (cleanup_path, had_active_turn) = ("host-guard-kept", true);
             let kept = HardStopRuntimeResult::default();
             return HardStopRuntimeResult {

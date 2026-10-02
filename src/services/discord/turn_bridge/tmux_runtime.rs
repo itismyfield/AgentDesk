@@ -29,7 +29,9 @@ use process_backend_cancel::{
 use process_table::{provider_cli_pid_in_tmux, send_sigint};
 use stop_host::{LegacyTmuxName, StopOutcome, StopTarget};
 
-pub(in crate::services::discord) use judged_stop::{ChannelStop, CommandStop, begin_command_stop};
+pub(in crate::services::discord) use judged_stop::{
+    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, keeps_turn,
+};
 
 // #3169: `mod.rs`'s cancel epilogue records this sentinel via the
 // `tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON` path, so re-export it

@@ -124,8 +124,8 @@ fn a_preserve_stop_keeps_a_turn_on_another_host_before_any_write() {
     });
 }
 
-// A user stop leaves another host's turn and row untouched; an admitted unbound turn is bound
-// to and tombstoned under its row's name without saving the row, for Claude and for Codex.
+// A user stop leaves another host's turn and row untouched; an admitted unbound turn is judged,
+// cancelled and bound (not stopped here), tombstoned under its row's name, its row unsaved.
 #[test]
 fn a_command_stop_judges_before_any_write_and_binds_what_it_judged() {
     let fx = Fixture::new();
@@ -194,7 +194,7 @@ fn a_command_stop_binds_its_verdict_when_the_marker_changes_after_it() {
         start(&shared, channel, &token).await;
         inflight_row(&ProviderKind::Codex, channel, name, false);
         let judge = ChannelStop::judge(&shared, &ProviderKind::Codex, channel, None, true);
-        let stop = judge.await.expect("an active turn");
+        let stop = judge.await.expect("a judged turn").expect("an active turn");
         assert!(!stop.refused());
         mark(name, Mark::Herdr);
 
@@ -222,7 +222,7 @@ fn a_judged_cancel_leaves_a_turn_that_replaced_the_judged_one() {
         let judged = bound_token(&ProviderKind::Claude, name);
         start(&shared, channel, &judged).await;
         let judge = ChannelStop::judge(&shared, &ProviderKind::Claude, channel, None, false);
-        let stop = judge.await.expect("an active turn");
+        let stop = judge.await.expect("a judged turn").expect("an active turn");
         let finish = crate::services::discord::mailbox_finish_turn;
         finish(&shared, &ProviderKind::Claude, channel).await;
         let next = bound_token(&ProviderKind::Claude, name);
@@ -389,4 +389,264 @@ fn a_name_only_preserve_stop_keeps_a_turn_on_another_host() {
             assert_eq!(mailbox_holds(&shared, channel, &token).await, !legacy);
         }
     });
+}
+
+// A turn the stop cannot read is kept as a refused host's: a user stop on an unbound turn whose
+// row fails to read or parse, and a runtime stop behind an unreachable mailbox, change nothing.
+#[test]
+fn a_stop_keeps_a_turn_it_could_not_read() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    run(async {
+        let (shared, registry) = runtime().await;
+        let root = inflight::inflight_runtime_root().expect("inflight root");
+        for (n, row) in ["unreadable", "unparsable"].into_iter().enumerate() {
+            let channel = ChannelId::new(5_340_680_000 + n as u64 * 10);
+            let token = Arc::new(CancelToken::new());
+            start(&shared, channel, &token).await;
+            let path = inflight::inflight_state_path(&root, &ProviderKind::Claude, channel.get());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            match row {
+                "unreadable" => std::fs::create_dir(&path).unwrap(),
+                _ => std::fs::write(&path, "{\"channel_id\": ").unwrap(),
+            }
+            let before = std::fs::read(&path).ok();
+
+            let stop = begin_command_stop(&shared, &ProviderKind::Claude, channel, true).await;
+
+            assert!(!token.cancelled.load(Ordering::SeqCst), "{row}");
+            assert!(mailbox_holds(&shared, channel, &token).await, "{row}");
+            assert_eq!(token.tmux_session_name(), None, "{row}: not bound");
+            assert_eq!(tombstone(channel), None, "{row}");
+            assert_eq!(std::fs::read(&path).ok(), before, "{row}: row as it was");
+            assert_eq!(path.is_dir(), row == "unreadable", "{row}");
+            assert!(matches!(stop, CommandStop::HostRefused), "{row}");
+        }
+        let channel = ChannelId::new(5_340_680_100);
+        let row = inflight_row(&ProviderKind::Claude, channel, "p6asb-unreachable", false);
+        shared.mailboxes.insert_unreachable_for_test(channel);
+        let before = file_state(&row);
+        let stop = crate::services::discord::health::stop_provider_channel_runtime_with_policy;
+        let policy = TmuxCleanupPolicy::PreserveSession;
+        let result = stop(&registry, "claude", channel, "p6asb", policy).await;
+        shared.mailboxes.remove_fixture_for_test(channel);
+        assert_eq!(
+            file_state(&row),
+            before,
+            "the row is neither cleared nor saved"
+        );
+        assert_eq!(tombstone(channel), None);
+        let kept = InflightDisposition::PreservedByHostGuard;
+        assert_eq!(result.map(|result| result.inflight), Some(kept));
+    });
+}
+
+/// The variable a real-tmux child reads its condition from.
+const REAL_TMUX_CHILD: &str = "ADK_P6ASB_REAL_TMUX";
+
+/// The child's exec of any `tmux` is refused by the OS, wherever the runtime PATH finds it.
+const DENY_TMUX_EXEC: &str = r#"(version 1)(allow default)(deny process-exec (regex #"/tmux$"))"#;
+
+// Under a real tmux (live private server, no runnable binary, no socket; no stand-in on PATH), a
+// stop on another host's turn writes nothing and leaves its pane; a legacy stop reaches the pane.
+#[test]
+fn a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was() {
+    let Some(condition) = std::env::var_os(REAL_TMUX_CHILD) else {
+        for condition in ["live", "nobinary", "nosocket"] {
+            real_tmux_child(condition);
+        }
+        return;
+    };
+    real_tmux_cells(condition.to_str().unwrap());
+}
+
+/// Runs the test again in a child process holding `condition` alone in its environment.
+fn real_tmux_child(condition: &str) {
+    let sockets = tempfile::Builder::new()
+        .prefix("p6asb")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let test = "a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was";
+    let name = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+    let exe = std::env::current_exe().unwrap();
+    let sandboxed = condition == "nobinary" && cfg!(target_os = "macos");
+    let mut command = match sandboxed {
+        true => std::process::Command::new("/usr/bin/sandbox-exec"),
+        false => std::process::Command::new(&exe),
+    };
+    if sandboxed {
+        command.args(["-p", DENY_TMUX_EXEC]).arg(&exe);
+    }
+    command
+        .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+        .env(REAL_TMUX_CHILD, condition)
+        .env("TMUX_TMPDIR", sockets.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    if condition == "nobinary" {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::env::split_paths(&path).filter(|dir| !dir.join("tmux").is_file());
+        command.env("PATH", std::env::join_paths(dirs).unwrap());
+    }
+    // Spawned under the env lock, so no concurrent fixture's tmux stand-in is on the inherited PATH.
+    let lock = crate::config::shared_test_env_lock().lock();
+    let env = lock.unwrap_or_else(|error| error.into_inner());
+    let piped = std::process::Stdio::piped;
+    let child = command.stdout(piped()).stderr(piped()).spawn();
+    drop(env);
+    let output = child
+        .unwrap()
+        .wait_with_output()
+        .expect("run the real-tmux child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("[real tmux {condition}]\n{stderr}");
+    assert!(output.status.success(), "{condition}\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("1 passed"),
+        "{condition}\n{stdout}\n{stderr}"
+    );
+}
+
+/// Runs tmux as production finds it (the runtime PATH) on the private socket directory.
+fn real_tmux(sockets: &std::path::Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut command = std::process::Command::new("tmux");
+    crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
+    command
+        .args(args)
+        .env("TMUX_TMPDIR", sockets)
+        .env_remove("TMUX");
+    command.output()
+}
+
+/// The session's pane text and process, or `None` when tmux cannot show it.
+fn pane(sockets: &std::path::Path, session: &str) -> Option<(String, String)> {
+    let target = format!("={session}:");
+    let read = |args: &[&str]| {
+        let output = real_tmux(sockets, args).ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        output.status.success().then_some(text)
+    };
+    let text = read(&["capture-pane", "-p", "-t", &target])?;
+    Some((
+        text,
+        read(&["display-message", "-p", "-t", &target, "#{pane_pid}"])?,
+    ))
+}
+
+fn real_tmux_cells(condition: &str) {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let sockets = std::path::PathBuf::from(std::env::var_os("TMUX_TMPDIR").unwrap());
+    let session = format!("p6asb-real-{}", std::process::id());
+    let probe = real_tmux(&sockets, &["has-session", "-t", "=p6asb-none:"]);
+    let realized = match (condition, &probe) {
+        ("live", _) => {
+            let args = [
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "-x",
+                "80",
+                "-y",
+                "10",
+                "cat",
+            ];
+            let started = real_tmux(&sockets, &args);
+            eprintln!("private server started {session}: {started:?}");
+            started.is_ok_and(|output| output.status.success())
+        }
+        ("nobinary", Err(error)) => {
+            eprintln!("tmux cannot run: {error}");
+            true
+        }
+        ("nosocket", Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("tmux runs with no server: {}", stderr.trim());
+            let absent = ["no server running", "error connecting"];
+            !output.status.success() && absent.iter().any(|text| stderr.contains(text))
+        }
+        _ => false,
+    };
+    if !realized {
+        eprintln!("skipping the {condition} cells: the condition is not realized here {probe:?}");
+        return;
+    }
+    let live = condition == "live";
+    let _server = PrivateServer(sockets.clone());
+    run(async {
+        let (shared, registry) = runtime().await;
+        let mut n = 0;
+        let entries = [
+            ("runtime", ProviderKind::Codex),
+            ("preserve", ProviderKind::Claude),
+            ("command", ProviderKind::Codex),
+        ];
+        for (entry, provider) in entries {
+            n += 1;
+            let channel = ChannelId::new(5_340_690_000 + n * 10);
+            mark(&session, Mark::Herdr);
+            let token = bound_token(&provider, &session);
+            start(&shared, channel, &token).await;
+            let row = inflight_row(&provider, channel, &session, false);
+            let before = (file_state(&row), pane(&sockets, &session));
+            let kept = match entry {
+                "runtime" => {
+                    let stop = crate::services::discord::health::stop_channel_runtime;
+                    let policy = TmuxCleanupPolicy::PreserveSession;
+                    let result = stop(&shared, &provider, channel, "p6asb", policy, None).await;
+                    result.inflight == InflightDisposition::PreservedByHostGuard
+                }
+                "preserve" => {
+                    let target = TurnLifecycleTarget {
+                        provider: Some(provider.clone()),
+                        channel_id: Some(channel),
+                        tmux_name: session.clone(),
+                    };
+                    let stop = crate::services::turn_lifecycle::stop_turn_preserving_queue;
+                    stop(Some(&registry), &target, "p6asb")
+                        .await
+                        .host_guard_kept()
+                }
+                _ => {
+                    let stop = begin_command_stop(&shared, &provider, channel, true);
+                    matches!(stop.await, CommandStop::HostRefused)
+                }
+            };
+            let case = format!("{condition} {entry}");
+            assert!(!token.cancelled.load(Ordering::SeqCst), "{case}");
+            assert!(mailbox_holds(&shared, channel, &token).await, "{case}");
+            assert_eq!(tombstone(channel), None, "{case}");
+            let after = (file_state(&row), pane(&sockets, &session));
+            assert_eq!(after, before, "{case}: row, session and pane as they were");
+            assert_eq!(before.1.is_some(), live, "{case}: {:?}", before.1);
+            assert!(kept, "{case}");
+        }
+        if live {
+            let channel = ChannelId::new(5_340_690_100);
+            mark(&session, Mark::Absent);
+            let token = bound_token(&ProviderKind::Codex, &session);
+            start(&shared, channel, &token).await;
+            let before = pane(&sockets, &session).expect("the live pane");
+            let stop = crate::services::discord::health::stop_channel_runtime;
+            let policy = TmuxCleanupPolicy::PreserveSession;
+            let codex = ProviderKind::Codex;
+            let _ = stop(&shared, &codex, channel, "p6asb", policy, None).await;
+            let after = pane(&sockets, &session).expect("the session survives a preserve stop");
+            assert!(token.cancelled.load(Ordering::SeqCst));
+            assert_eq!(after.1, before.1, "the same pane process");
+            assert!(
+                after.0.contains("^["),
+                "the Escape reached the pane: {after:?}"
+            );
+        }
+    });
+}
+
+/// Stops the private server when the cells end, a failed assertion included.
+struct PrivateServer(std::path::PathBuf);
+
+impl Drop for PrivateServer {
+    fn drop(&mut self) {
+        let _ = real_tmux(&self.0, &["kill-server"]);
+    }
 }

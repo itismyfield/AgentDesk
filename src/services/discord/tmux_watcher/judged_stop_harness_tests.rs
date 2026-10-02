@@ -7,8 +7,8 @@ const T0: &str = "ADK-P6ASB T0 delivered before the watcher attached";
 const HEAD: &str = "ADK-P6ASB T1 head streamed before the stop";
 const TAIL: &str = "ADK-P6ASB T1 tail written after the stop was kept";
 
-// A /turns cancel of that turn records no tombstone over its range and cancels nothing, so the
-// watcher posts the tail exactly once and kills nothing; main's tombstone dropped the tail.
+// A /turns cancel of that turn is kept and cancels nothing: the watcher posts the tail exactly
+// once, with no missing bytes, and kills nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_stop_leaves_the_watcher_to_deliver_the_tail_once() {
     let test = "a_kept_stop_leaves_the_watcher_to_deliver_the_tail_once";

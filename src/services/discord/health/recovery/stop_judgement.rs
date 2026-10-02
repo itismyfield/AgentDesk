@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serenity::ChannelId;
 
 use super::{HealthRegistry, RuntimeTurnStopResult, shared_for_provider};
-use crate::services::discord::turn_bridge::ChannelStop;
+use crate::services::discord::turn_bridge::{ChannelJudgement, ChannelStop, keeps_turn};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
@@ -17,13 +17,16 @@ struct JudgedChannel {
     shared: Arc<SharedData>,
     provider: ProviderKind,
     channel: ChannelId,
-    stop: Option<ChannelStop>,
+    stop: ChannelJudgement,
 }
 
 impl ProviderChannelStop {
-    /// The channel's active turn runs on a host that is not a confirmed legacy tmux.
+    /// The channel's active turn runs on a host that is not a confirmed legacy tmux, or its
+    /// turn could not be read.
     pub(crate) fn host_refused(&self) -> bool {
-        self.judged_stop().is_some_and(ChannelStop::refused)
+        self.0
+            .as_ref()
+            .is_some_and(|judged| keeps_turn(&judged.stop))
     }
 
     /// The session the verdict judged.
@@ -32,7 +35,7 @@ impl ProviderChannelStop {
     }
 
     fn judged_stop(&self) -> Option<&ChannelStop> {
-        self.0.as_ref()?.stop.as_ref()
+        self.0.as_ref()?.stop.as_ref().ok()?.as_ref()
     }
 }
 
