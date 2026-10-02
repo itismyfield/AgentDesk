@@ -380,11 +380,14 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             None => true,
         };
         if should_refresh {
-            crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane(
+            let registered = crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane(
                 tmux_session_name,
                 channel_id,
                 fresh.clone(),
             );
+            if !registered {
+                return;
+            }
             tracing::info!(
                 tmux_session_name = %tmux_session_name,
                 channel_id,

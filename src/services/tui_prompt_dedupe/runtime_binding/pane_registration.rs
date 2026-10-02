@@ -21,6 +21,15 @@ pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntime
     register_claude_pane_with(tmux, channel, binding, Record::Stat);
 }
 
+pub(crate) fn register_launched_claude_pane(
+    tmux: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+) -> bool {
+    register_claude_pane_with_cause(tmux, channel, binding, Record::Stat, CauseSource::Launch)
+        .is_some_and(Persisted::published)
+}
+
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
 /// an unpublished `Persisted` when the pane's pin refused it.
 pub(crate) fn register_claude_pane_with(
@@ -29,10 +38,26 @@ pub(crate) fn register_claude_pane_with(
     binding: TuiRuntimeBinding,
     record: Record,
 ) -> Option<Persisted> {
+    register_claude_pane_with_cause(tmux, channel, binding, record, CauseSource::Observed)
+}
+
+fn register_claude_pane_with_cause(
+    tmux: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+    record: Record,
+    cause: CauseSource,
+) -> Option<Persisted> {
     let key = pane_key(tmux);
     begin_pane_registration(&key, &binding);
     let registered = crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
-        register_rehydrated_under_source_authority(authority, "claude", channel, binding, record)
+        let cause = match cause {
+            CauseSource::Launch => launch_cause(authority, channel, &binding)?,
+            other => other,
+        };
+        register_rehydrated_under_source_authority(
+            authority, "claude", channel, binding, record, cause,
+        )
     });
     #[cfg(test)]
     if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
@@ -40,6 +65,43 @@ pub(crate) fn register_claude_pane_with(
     }
     finish_registration(&key, registered.is_some_and(Persisted::published));
     registered
+}
+
+// A launch observation uses only the current execution's matching immutable context.
+// Refusing a stale selector before append preserves the current nonce's first launch record.
+fn launch_cause(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    channel: u64,
+    binding: &TuiRuntimeBinding,
+) -> Option<CauseSource> {
+    let tmux = authority.session();
+    let nonce = match binding_context::observe_spawn_nonce_marker(tmux) {
+        SpawnNonceMarker::Known(nonce) => nonce,
+        SpawnNonceMarker::Absent => return Some(CauseSource::Observed),
+        SpawnNonceMarker::Unreadable => return None,
+    };
+    match binding_context::context_presence("claude", &nonce) {
+        binding_context::ContextPresence::Absent => return Some(CauseSource::Observed),
+        binding_context::ContextPresence::Unknown => return None,
+        binding_context::ContextPresence::Present => {}
+    }
+    let context = binding_context::pane_context(tmux, &nonce)?;
+    let cause = (binding.runtime_kind == RuntimeHandoffKind::ClaudeTui
+        && context.channel_id == Some(channel)
+        && context.owner_runtime_root == crate::services::tmux_common::current_tmux_owner_marker()
+        && binding.session_id.as_deref().is_some_and(|session| {
+            !session.trim().is_empty()
+                && context.expected_native_session_id.as_deref() == Some(session)
+        })
+        && matches!(context.launch_mode.as_str(), "fresh" | "resume"))
+    .then_some(CauseSource::Launch);
+    #[cfg(test)]
+    if cause.is_some()
+        && crate::services::claude_tui::source_verify::n2b_mutant("clear-launch-observed")
+    {
+        return Some(CauseSource::Observed);
+    }
+    cause
 }
 
 /// `register_claude_pane_with` for a caller that holds the pane's source authority across its
@@ -52,8 +114,14 @@ pub(crate) fn register_claude_pane_under_source_authority(
 ) -> Option<Persisted> {
     let key = pane_key(authority.session());
     begin_pane_registration(&key, &binding);
-    let registered =
-        register_rehydrated_under_source_authority(authority, "claude", channel, binding, record);
+    let registered = register_rehydrated_under_source_authority(
+        authority,
+        "claude",
+        channel,
+        binding,
+        record,
+        CauseSource::Observed,
+    );
     finish_under_authority(&key, registered.is_some_and(Persisted::published));
     registered
 }

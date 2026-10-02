@@ -229,8 +229,15 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     binding: TuiRuntimeBinding,
 ) -> bool {
     let record = Record::Stat;
-    register_rehydrated_under_source_authority(authority, provider, channel_id, binding, record)
-        .is_some_and(Persisted::published)
+    register_rehydrated_under_source_authority(
+        authority,
+        provider,
+        channel_id,
+        binding,
+        record,
+        CauseSource::Observed,
+    )
+    .is_some_and(Persisted::published)
 }
 
 /// `None` when nothing was published; otherwise what the record left, published only if it says so.
@@ -240,6 +247,7 @@ fn register_rehydrated_under_source_authority(
     channel_id: u64,
     binding: TuiRuntimeBinding,
     record: Record,
+    cause: CauseSource,
 ) -> Option<Persisted> {
     let provider = normalize_provider(provider);
     let tmux_session_name = authority.session();
@@ -253,7 +261,6 @@ fn register_rehydrated_under_source_authority(
     }
     let binding = codex_hook::restored_source(authority, &provider, channel_id, binding)?;
     let session_id = binding.session_id.clone();
-    let cause = CauseSource::Observed;
     let persisted = publish_runtime_binding(authority, binding, Some(channel_id), cause, record)?;
     if !persisted.published() {
         return Some(persisted);

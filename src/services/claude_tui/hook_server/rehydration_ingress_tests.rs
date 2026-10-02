@@ -847,3 +847,125 @@ fn a_live_pane_marked_for_another_host_is_not_adopted_by_name() {
         assert_eq!(owner.is_some(), adopted, "{marker:?}");
     }
 }
+
+#[test]
+fn a_rehydrated_replacement_execution_uses_its_matching_launch_context_once() {
+    use crate::services::tmux_common as tc;
+    let (root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let _ingress = Ingress::new();
+    let _reset = Reset;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mut peers = Vec::new();
+    for (index, (mode, expected_cause)) in [
+        ("fresh", BindingCause::Startup),
+        ("resume", BindingCause::Resume),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (tmux, channel, old, new) = (
+            format!("replacement-launch-{}", uuid()),
+            7_510 + index as u64,
+            uuid(),
+            uuid(),
+        );
+        let home = root.path().join("claude-home");
+        let cwd = root.path().join(format!("project-{index}"));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path = |session: &str| {
+            crate::services::claude_tui::transcript_tail::claude_transcript_path(
+                &cwd,
+                session,
+                Some(&home),
+            )
+            .unwrap()
+        };
+        let (old_path, new_path) = (path(&old), path(&new));
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        std::fs::write(&old_path, format!("{{\"sessionId\":\"{old}\"}}\n")).unwrap();
+        std::fs::write(&new_path, format!("{{\"sessionId\":\"{new}\"}}\n")).unwrap();
+        let prepare = |session: &str, mode: &str| {
+            let prepared = PreparedIncarnation::create(BindingContext {
+                schema: 1,
+                provider: "claude".into(),
+                created_at: chrono::Utc::now(),
+                execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+                tmux_session: tmux.clone(),
+                channel_id: Some(channel),
+                owner_runtime_root: root.path().display().to_string(),
+                host: None,
+                expected_native_session_id: Some(session.into()),
+                launch_mode: mode.into(),
+                provider_root: Some(home.clone()),
+            })
+            .unwrap();
+            let marker = tc::session_temp_path(&tmux, "spawn_nonce");
+            std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(marker, &prepared.context.execution_nonce).unwrap();
+            prepared
+        };
+        let previous = prepare(&old, "fresh");
+        assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+            "claude",
+            &tmux,
+            channel,
+            claude(&old_path, &old),
+        ));
+        let launched = prepare(&new, mode);
+        let selector = if mode == "resume" {
+            "--resume"
+        } else {
+            "--session-id"
+        };
+        std::fs::write(
+            tc::session_temp_path(&tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
+            format!(
+                "{}cd '{}'\nexec 'claude' '{selector}' '{new}'\n",
+                launched.env_lines(),
+                cwd.display(),
+            ),
+        )
+        .unwrap();
+        VIEW.with_borrow_mut(|v| {
+            *v = Some(View {
+                tmux: tmux.clone(),
+                channel,
+                home,
+                peers: peers.clone(),
+            })
+        });
+        rehydrate_existing_claude_tui_bindings(&shared);
+        let logged = events(channel);
+        assert_eq!(logged.len(), 2, "{mode}: one replacement was logged");
+        assert_eq!(
+            logged[0].execution_nonce.as_deref(),
+            Some(previous.context.execution_nonce.as_str())
+        );
+        let replacement = &logged[1];
+        assert_eq!(replacement.cause, expected_cause, "{mode}");
+        assert_eq!(
+            replacement.execution_nonce.as_deref(),
+            Some(launched.context.execution_nonce.as_str())
+        );
+        assert_eq!(replacement.old.as_ref().unwrap().session_id, old);
+        assert!(
+            matches!(&replacement.new, BindingTarget::Source(source) if source.session_id == new)
+        );
+        assert!(replacement.evidence.hook_event.is_none());
+        assert!(replacement.parent_hint.is_none());
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(&tmux)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some(new.as_str())
+        );
+        rehydrate_existing_claude_tui_bindings(&shared);
+        assert_eq!(
+            events(channel),
+            logged,
+            "{mode}: the same execution is unchanged"
+        );
+        peers.push(tmux);
+    }
+}
