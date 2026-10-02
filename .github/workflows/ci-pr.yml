@@ -278,6 +278,7 @@ jobs:
               - 'src/services/auto_queue/cancel_run.rs'
               - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
               - 'src/services/auto_queue/command.rs'
+              - 'src/services/auto_queue/dispatch_query.rs'
               - 'src/services/auto_queue/fsm.rs'
               - 'src/services/auto_queue/phase_gate.rs'
               - 'src/services/auto_queue/planning.rs'
@@ -2044,7 +2045,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c2bf965d89ee2587303e2aef7de23defee29b82d36740aa3143764695537f8f1
+          expected=0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2270,7 +2271,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c2bf965d89ee2587303e2aef7de23defee29b82d36740aa3143764695537f8f1
+          expected=0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

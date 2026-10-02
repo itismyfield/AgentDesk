@@ -113,20 +113,35 @@ export interface AutoQueueHistoryResponse {
   runs: AutoQueueHistoryRun[];
 }
 
-export async function generateAutoQueue(
-  repo?: string | null,
-  agentId?: string | null,
-): Promise<{
-  run: AutoQueueRun;
+/** A card generate left out; `reason` is set for filter skips. */
+export interface GenerateSkip {
+  issue_number: number;
+  reason?: string;
+}
+
+export interface GenerateAutoQueueResponse {
+  run: AutoQueueRun | null;
   entries: DispatchQueueEntry[];
-}> {
-  const body: Record<string, unknown> = {
-    repo: repo ?? null,
-    agent_id: agentId ?? null,
+  message?: string;
+  skipped_due_to_active_dispatch?: GenerateSkip[];
+  skipped_due_to_dependency?: GenerateSkip[];
+  skipped_due_to_filter?: GenerateSkip[];
+}
+
+export async function generateAutoQueue(input: {
+  repo: string;
+  agentId: string;
+  issueNumbers: number[];
+}): Promise<GenerateAutoQueueResponse> {
+  const body = {
+    repo: input.repo,
+    agent_id: input.agentId,
+    issue_numbers: input.issueNumbers,
   };
   return request("/api/queue/generate", {
     method: "POST",
     body: JSON.stringify(body),
+    timeoutMs: 60_000,
   });
 }
 
@@ -154,12 +169,15 @@ export async function activateAutoQueue(
 export async function getAutoQueueStatus(
   repo?: string | null,
   agentId?: string | null,
+  opts?: { fresh?: boolean },
 ): Promise<AutoQueueStatus> {
   const params = new URLSearchParams();
   if (repo) params.set("repo", repo);
   if (agentId) params.set("agent_id", agentId);
   const qs = params.toString();
-  return request(`/api/queue/status${qs ? `?${qs}` : ""}`);
+  // A signal opts out of sharing an in-flight GET that started earlier.
+  const fresh = opts?.fresh ? { signal: new AbortController().signal } : undefined;
+  return request(`/api/queue/status${qs ? `?${qs}` : ""}`, fresh);
 }
 
 export async function getAutoQueueHistory(
@@ -308,44 +326,6 @@ export interface PhaseGateCatalog {
 
 export async function getPhaseGateCatalog(): Promise<PhaseGateCatalog> {
   return request("/api/queue/phase-gates/catalog");
-}
-
-// ── Auto-queue request-generate (#2126) ──
-
-export interface RequestGenerateAutoQueueBody {
-  repo: string;
-  agentId: string;
-  issueNumbers: number[];
-  allowedGateKinds?: string[];
-  force?: boolean;
-}
-
-export interface RequestGenerateAutoQueueResponse {
-  request_id: string;
-  target: string;
-  channel_id?: string | null;
-  dispatched_at: string;
-  instruction_preview?: string;
-}
-
-export async function requestGenerateAutoQueue(
-  input: RequestGenerateAutoQueueBody,
-): Promise<RequestGenerateAutoQueueResponse> {
-  const body: Record<string, unknown> = {
-    repo: input.repo,
-    agent_id: input.agentId,
-    issue_numbers: input.issueNumbers,
-  };
-  if (input.allowedGateKinds && input.allowedGateKinds.length > 0) {
-    body.allowed_gate_kinds = input.allowedGateKinds;
-  }
-  if (typeof input.force === "boolean") {
-    body.force = input.force;
-  }
-  return request("/api/queue/request-generate", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 }
 
 // ── Pipeline Config Hierarchy (#135) ──

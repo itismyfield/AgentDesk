@@ -2,17 +2,7 @@ import type { AutoQueueThreadLink, DispatchQueueEntry as DispatchQueueEntryType 
 import type { UiLanguage } from "../../types";
 import { getQueueGroupColor } from "../../theme/statusTokens";
 
-const REQUEST_GROUP_KEY_SEPARATOR = "\u0000";
-
 export type ViewMode = "thread" | "all" | "agent";
-
-export function requestGroupKey(repo: string, agentId: string): string {
-  return `${repo}${REQUEST_GROUP_KEY_SEPARATOR}${agentId}`;
-}
-
-export function formatRequestGroupKey(key: string): string {
-  return key.split(REQUEST_GROUP_KEY_SEPARATOR).join("/");
-}
 
 export function formatTs(
   value: number | null | undefined,

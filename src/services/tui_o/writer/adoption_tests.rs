@@ -75,6 +75,7 @@ fn bound(seq: u64, channel: u64, old: Option<&SourceId>, new: &SourceId) -> Bind
             evidence: BindingEvidence {
                 hook_event: "SessionStart".into(),
                 received_at,
+                reclaims: false,
             },
         },
         committed_at: received_at,
