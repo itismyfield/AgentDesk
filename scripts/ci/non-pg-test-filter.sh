@@ -231,9 +231,12 @@ NON_PG_FILTER_REPLAY=(
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_malformed_json
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_non_object_context
   db::intake_outbox_delivery_proof::tests::stale_reader_projects_exactly_id
+  db::postgres::test_db_reclaim::tests::reclaim_audit_log_appends_stay_whole_across_processes
+  db::postgres::test_db_reclaim::tests::reclaim_audit_log_closes_a_torn_tail
   db::postgres::test_db_reclaim::tests::reclaim_classify_owner_identity
   db::postgres::test_db_reclaim::tests::reclaim_classify_real_process_identity
   db::postgres::test_db_reclaim::tests::reclaim_execute_rechecks_before_drop
+  db::postgres::test_db_reclaim::tests::reclaim_execute_rechecks_budget_before_drop
   db::postgres::test_db_reclaim::tests::reclaim_execute_stops_on_log_failure
   db::postgres::test_db_reclaim::tests::reclaim_gate_decision
   db::postgres::test_db_reclaim::tests::reclaim_plan_caps_per_process_oldest_first

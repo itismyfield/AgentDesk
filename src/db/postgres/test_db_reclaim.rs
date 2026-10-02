@@ -1,7 +1,7 @@
 //! Reclaims PostgreSQL test databases whose owning test process provably died.
 //! Only marked fixtures on an opted-in server are dropped; see `docs/runbooks/orphan-test-database-cleanup.md`.
 
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
@@ -304,11 +304,30 @@ fn plan_drops(classified: &[Classified]) -> (Vec<&Classified>, usize) {
     (dead, deferred)
 }
 
-trait SyncData {
+/// The audit file, shared by every sweeping process through an exclusive lock.
+trait AuditFile: Write {
+    fn lock(&self) -> std::io::Result<()>;
+    fn unlock(&self) -> std::io::Result<()>;
+    fn ends_mid_line(&mut self) -> std::io::Result<bool>;
     fn sync_data(&self) -> std::io::Result<()>;
 }
 
-impl SyncData for std::fs::File {
+impl AuditFile for std::fs::File {
+    fn lock(&self) -> std::io::Result<()> {
+        std::fs::File::lock(self)
+    }
+    fn unlock(&self) -> std::io::Result<()> {
+        std::fs::File::unlock(self)
+    }
+    fn ends_mid_line(&mut self) -> std::io::Result<bool> {
+        if self.metadata()?.len() == 0 {
+            return Ok(false);
+        }
+        self.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8];
+        self.read_exact(&mut last)?;
+        Ok(last != *b"\n")
+    }
     fn sync_data(&self) -> std::io::Result<()> {
         std::fs::File::sync_data(self)
     }
@@ -318,10 +337,25 @@ struct AuditLog<W> {
     out: W,
 }
 
-impl<W: Write + SyncData> AuditLog<W> {
-    /// A line counts as recorded only after write, flush and sync all succeed.
+impl<W: AuditFile> AuditLog<W> {
+    /// A line counts as recorded only after lock, whole-line append, flush and sync all succeed.
     fn record(&mut self, line: &serde_json::Value) -> std::io::Result<()> {
-        writeln!(self.out, "{line}")?;
+        self.out.lock()?;
+        let appended = self.append(line);
+        let unlocked = self.out.unlock();
+        appended.and(unlocked)
+    }
+
+    /// One write per line; a line left unterminated by a dead writer is closed first.
+    fn append(&mut self, line: &serde_json::Value) -> std::io::Result<()> {
+        let mut bytes = if self.out.ends_mid_line()? {
+            b"\n".to_vec()
+        } else {
+            Vec::new()
+        };
+        bytes.extend_from_slice(line.to_string().as_bytes());
+        bytes.push(b'\n');
+        self.out.write_all(&bytes)?;
         self.out.flush()?;
         self.out.sync_data()
     }
@@ -335,8 +369,14 @@ fn open_audit_log(sysid: Option<u64>) -> std::io::Result<AuditLog<std::fs::File>
             let server = sysid.map_or_else(|| "unknown".to_string(), |id| id.to_string());
             std::env::temp_dir().join(format!("agentdesk-pg-reclaim-{server}.jsonl"))
         });
+    open_audit_log_at(&path)
+}
+
+/// Readable too, so a record can see whether the file ends mid-line.
+fn open_audit_log_at(path: &std::path::Path) -> std::io::Result<AuditLog<std::fs::File>> {
     let out = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)?;
     Ok(AuditLog { out })
@@ -407,7 +447,7 @@ struct Outcome {
 }
 
 /// Rechecks each planned database, records intent durably, then drops; any log or DROP error stops the run.
-async fn execute<B: ReclaimBackend, W: Write + SyncData>(
+async fn execute<B: ReclaimBackend, W: AuditFile>(
     plan: &[&Classified],
     sysid: u64,
     log: &mut AuditLog<W>,
@@ -463,6 +503,12 @@ async fn execute<B: ReclaimBackend, W: Write + SyncData>(
         }
         if let Err(error) = log.record(&entry("intent", "drop")) {
             outcome.stopped = Some(format!("audit log write failed: {error}"));
+            break;
+        }
+        // The recheck and the intent sync take time too; never start a DROP past the budget.
+        if started.elapsed() >= budget {
+            let _ = log.record(&entry("result", "not run: drop time budget spent"));
+            outcome.stopped = Some("drop time budget spent".to_string());
             break;
         }
         let dropped = backend.drop_database(name).await;
@@ -911,15 +957,18 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq)]
     enum Step {
+        Lock,
         Write,
         Flush,
         Sync,
     }
 
-    /// Fails `step` while recording line number `at` (0-based).
+    /// Fails `step` while recording line number `at` (0-based); keeps what was written.
+    #[derive(Default)]
     struct FaultyOut {
         fail: Option<(Step, usize)>,
         recorded: std::cell::Cell<usize>,
+        written: Vec<u8>,
     }
 
     impl FaultyOut {
@@ -935,14 +984,25 @@ mod tests {
 
     impl Write for FaultyOut {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.check(Step::Write).map(|()| buf.len())
+            self.check(Step::Write)?;
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             self.check(Step::Flush)
         }
     }
 
-    impl SyncData for FaultyOut {
+    impl AuditFile for FaultyOut {
+        fn lock(&self) -> std::io::Result<()> {
+            self.check(Step::Lock)
+        }
+        fn unlock(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn ends_mid_line(&mut self) -> std::io::Result<bool> {
+            Ok(false)
+        }
         fn sync_data(&self) -> std::io::Result<()> {
             self.check(Step::Sync)?;
             self.recorded.set(self.recorded.get() + 1);
@@ -954,10 +1014,12 @@ mod tests {
     struct FakeBackend {
         changed: std::collections::HashMap<String, Option<CurrentRow>>,
         dropped: Vec<String>,
+        recheck_delay: Duration,
     }
 
     impl ReclaimBackend for FakeBackend {
         async fn current(&mut self, name: &str) -> Result<Option<CurrentRow>, String> {
+            tokio::time::sleep(self.recheck_delay).await;
             if let Some(changed) = self.changed.remove(name) {
                 return Ok(changed);
             }
@@ -985,7 +1047,7 @@ mod tests {
         let mut log = AuditLog {
             out: FaultyOut {
                 fail,
-                recorded: std::cell::Cell::new(0),
+                ..FaultyOut::default()
             },
         };
         let plan: Vec<&Classified> = plan.iter().collect();
@@ -1010,7 +1072,7 @@ mod tests {
         assert_eq!(clean.dropped, ["fx_a", "fx_b", "fx_c"]);
         assert_eq!(outcome.stopped, None);
         // Lines alternate intent, result per database: line 2 is fx_b's intent, line 1 fx_a's result.
-        for step in [Step::Write, Step::Flush, Step::Sync] {
+        for step in [Step::Lock, Step::Write, Step::Flush, Step::Sync] {
             let mut backend = FakeBackend::default();
             let outcome = run_execute(&plan, &mut backend, Some((step, 2)), gone).await;
             assert_eq!(
@@ -1113,6 +1175,103 @@ mod tests {
         assert_eq!(backend.dropped, ["fx_ok"]);
         assert_eq!(outcome.kept, names[..7].to_vec());
         assert_eq!(outcome.stopped, None);
+    }
+
+    #[tokio::test]
+    async fn reclaim_execute_rechecks_budget_before_drop() {
+        let plan = [dead("fx_slow", 1)];
+        let mut backend = FakeBackend {
+            recheck_delay: Duration::from_millis(200),
+            ..FakeBackend::default()
+        };
+        let mut log = AuditLog {
+            out: FaultyOut::default(),
+        };
+        let gone = |_: &Owner| ProcessIdentityProbe::GoneOrReused;
+        let budget = Duration::from_millis(50);
+        let outcome = execute(
+            &[&plan[0]],
+            1,
+            &mut log,
+            &mut backend,
+            Some(HOST),
+            &gone,
+            budget,
+        )
+        .await;
+        let lines = String::from_utf8_lossy(&log.out.written).into_owned();
+        assert!(backend.dropped.is_empty(), "{lines}");
+        assert_eq!(outcome.stopped.as_deref(), Some("drop time budget spent"));
+        assert!(
+            lines.contains("\"result\":\"not run: drop time budget spent\""),
+            "{lines}"
+        );
+    }
+
+    #[test]
+    fn reclaim_audit_log_closes_a_torn_tail() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, "{\"phase\":\"intent\",\"datname\":\"tor").expect("torn tail");
+        let mut log = open_audit_log_at(&path).expect("open log");
+        for index in 0..2 {
+            log.record(&serde_json::json!({"phase": "intent", "index": index}))
+                .expect("record");
+        }
+        let text = std::fs::read_to_string(&path).expect("read log");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        for (index, line) in lines[1..].iter().enumerate() {
+            let value: serde_json::Value = serde_json::from_str(line).expect("whole line");
+            assert_eq!(value["index"], index);
+        }
+    }
+
+    const APPEND_LINES: usize = 50;
+
+    /// Writers in two processes leave only whole lines and wait while another process holds the log lock.
+    #[test]
+    fn reclaim_audit_log_appends_stay_whole_across_processes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("audit.jsonl");
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open log");
+        holder.lock().expect("hold the log lock");
+        let log = path.to_string_lossy().into_owned();
+        let mut writers: Vec<ChildRun> = (0..2)
+            .map(|_| ChildRun::spawn_in(dir.path(), "append", &[(LOG_ENV, log.as_str())]))
+            .collect();
+        for writer in &mut writers {
+            writer.line("RECLAIM_CHILD APPENDING");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let written_while_held = std::fs::metadata(&path).expect("log metadata").len();
+        holder.unlock().expect("release the log lock");
+        for writer in writers {
+            writer.finish();
+        }
+        let text = std::fs::read_to_string(&path).expect("read log");
+        let mut per_writer = std::collections::HashMap::<u64, usize>::new();
+        for line in text.lines() {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("torn line ({error}): {line:.160}"));
+            assert_eq!(value["phase"], "intent");
+            *per_writer
+                .entry(value["writer"].as_u64().expect("writer pid"))
+                .or_default() += 1;
+        }
+        assert_eq!(per_writer.len(), 2, "{per_writer:?}");
+        assert!(
+            per_writer.values().all(|lines| *lines == APPEND_LINES),
+            "{per_writer:?}"
+        );
+        assert_eq!(
+            written_while_held, 0,
+            "appended while another process held the lock"
+        );
     }
 
     fn require_pg() -> bool {
@@ -1346,9 +1505,16 @@ mod tests {
 
     impl ChildRun {
         fn spawn(cluster: &OwnCluster, mode: &str, env: &[(&str, &str)]) -> Self {
-            let stderr = cluster
-                .dir
-                .join(format!("child-{}.stderr", uuid::Uuid::new_v4().simple()));
+            let mut all = vec![
+                ("POSTGRES_TEST_DATABASE_URL_BASE", cluster.base.as_str()),
+                ("POSTGRES_TEST_ADMIN_DB", "postgres"),
+            ];
+            all.extend_from_slice(env);
+            Self::spawn_in(&cluster.dir, mode, &all)
+        }
+
+        fn spawn_in(dir: &Path, mode: &str, env: &[(&str, &str)]) -> Self {
+            let stderr = dir.join(format!("child-{}.stderr", uuid::Uuid::new_v4().simple()));
             let mut child = Command::new(std::env::current_exe().expect("test binary"))
                 .args([
                     "--ignored",
@@ -1358,8 +1524,6 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD_ENV, mode)
-                .env("POSTGRES_TEST_DATABASE_URL_BASE", &cluster.base)
-                .env("POSTGRES_TEST_ADMIN_DB", "postgres")
                 .env_remove(OPT_IN_ENV)
                 .env_remove(DENY_ENV)
                 .env_remove(LOG_ENV)
@@ -1531,9 +1695,7 @@ mod tests {
             [name.as_str()]
         );
         let log_path = env.cluster.dir.join("audit.jsonl");
-        let mut log = AuditLog {
-            out: std::fs::File::create(&log_path).expect("audit log"),
-        };
+        let mut log = open_audit_log_at(&log_path).expect("audit log");
         let mut backend = PgBackend {
             pool: &env.admin,
             label: LABEL,
@@ -1688,9 +1850,7 @@ mod tests {
             .await
             .expect("mark");
 
-        let mut log = AuditLog {
-            out: std::fs::File::create(env.cluster.dir.join("same-name.jsonl")).expect("log"),
-        };
+        let mut log = open_audit_log_at(&env.cluster.dir.join("same-name.jsonl")).expect("log");
         let mut backend = PgBackend {
             pool: &env.admin,
             label: LABEL,
@@ -1727,10 +1887,73 @@ mod tests {
             .expect("open session");
         let listed = env.row(&orphan).await.is_some();
         session.close().await;
-        let listed_after_close = env.row(&orphan).await.is_some();
+        let classified = classify(&env.rows().await, local_host(), &probe_owner).expect("classify");
+        let (plan, _) = plan_drops(&classified);
+        let planned = plan
+            .iter()
+            .map(|entry| entry.row.name.clone())
+            .collect::<Vec<_>>();
+
+        // The recheck sees no session; one opens before the real DROP runs.
+        let mut log = open_audit_log_at(&env.cluster.dir.join("session.jsonl")).expect("log");
+        let mut backend = SessionAfterRecheck {
+            inner: PgBackend {
+                pool: &env.admin,
+                label: LABEL,
+            },
+            url: format!("{}/{orphan}", env.cluster.base),
+            session: None,
+        };
+        let outcome = execute(
+            &plan,
+            1,
+            &mut log,
+            &mut backend,
+            local_host(),
+            &probe_owner,
+            RECLAIM_DROP_BUDGET,
+        )
+        .await;
+        let mut late = backend
+            .session
+            .take()
+            .expect("session opened after the recheck");
+        let session_alive = sqlx::query("SELECT 1").execute(&mut late).await.is_ok();
+        let survived = env.exists(&orphan).await;
+        drop(late);
         drop_all(&env, &[orphan.clone()]).await;
         assert!(!listed, "{orphan} listed while a session is open");
-        assert!(listed_after_close);
+        assert_eq!(planned, [orphan.clone()]);
+        assert!(outcome.dropped.is_empty(), "{outcome:?}");
+        assert!(
+            outcome
+                .stopped
+                .as_deref()
+                .is_some_and(|error| error.contains("being accessed by other users")),
+            "{outcome:?}"
+        );
+        assert!(survived && session_alive, "DROP removed a database in use");
+    }
+
+    /// The real backend, plus a session on the target opened right after each recheck.
+    struct SessionAfterRecheck<'a> {
+        inner: PgBackend<'a>,
+        url: String,
+        session: Option<sqlx::PgConnection>,
+    }
+
+    impl ReclaimBackend for SessionAfterRecheck<'_> {
+        async fn current(&mut self, name: &str) -> Result<Option<CurrentRow>, String> {
+            let current = self.inner.current(name).await;
+            let session = <sqlx::PgConnection as sqlx::Connection>::connect(&self.url)
+                .await
+                .map_err(|error| format!("late session: {error}"))?;
+            self.session = Some(session);
+            current
+        }
+        async fn drop_database(&mut self, name: &str) -> Result<(), String> {
+            self.inner.drop_database(name).await
+        }
     }
 
     /// Driven by the own-cluster tests above; without its env it does nothing.
@@ -1740,6 +1963,21 @@ mod tests {
         let Ok(mode) = std::env::var(CHILD_ENV) else {
             return;
         };
+        if mode == "append" {
+            let mut log = open_audit_log(None).expect("child log");
+            println!("RECLAIM_CHILD APPENDING");
+            let fields: Vec<usize> = (0..400).collect();
+            for index in 0..APPEND_LINES {
+                let line = serde_json::json!({
+                    "phase": "intent",
+                    "writer": std::process::id(),
+                    "index": index,
+                    "fields": fields,
+                });
+                log.record(&line).expect("child record");
+            }
+            return;
+        }
         let base = crate::db::postgres::postgres_test_database_url_base().expect("child base");
         let admin_url = format!("{base}/postgres");
         let name = fresh_name("child");

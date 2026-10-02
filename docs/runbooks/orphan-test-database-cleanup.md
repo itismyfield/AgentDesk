@@ -62,8 +62,8 @@ session. It drops a database only when all of these hold:
   `agentdesk` or `memento`, marker or not;
 - no protected name (`postgres`, `template0`, `template1`, `agentdesk`,
   `memento`) or template appears among the candidates; one aborts the sweep;
-- an intent line was written, flushed and synced to the audit log
-  (`AGENTDESK_TEST_PG_RECLAIM_LOG`, default
+- an intent line was appended whole under the file lock, flushed and synced
+  to the audit log (`AGENTDESK_TEST_PG_RECLAIM_LOG`, default
   `$TMPDIR/agentdesk-pg-reclaim-<sysid>.jsonl`) before the DROP, and the
   database still has the same oid, owner role and marker just before it.
 

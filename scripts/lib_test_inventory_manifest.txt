@@ -563,9 +563,12 @@ db::postgres::test_db_reclaim::tests::pg_reclaim_live_owner_old_database_is_kept
 db::postgres::test_db_reclaim::tests::pg_reclaim_never_targets_unmarked_databases
 db::postgres::test_db_reclaim::tests::pg_reclaim_same_name_recreated_after_scan_is_kept
 db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_with_active_session
+db::postgres::test_db_reclaim::tests::reclaim_audit_log_appends_stay_whole_across_processes
+db::postgres::test_db_reclaim::tests::reclaim_audit_log_closes_a_torn_tail
 db::postgres::test_db_reclaim::tests::reclaim_classify_owner_identity
 db::postgres::test_db_reclaim::tests::reclaim_classify_real_process_identity
 db::postgres::test_db_reclaim::tests::reclaim_execute_rechecks_before_drop
+db::postgres::test_db_reclaim::tests::reclaim_execute_rechecks_budget_before_drop
 db::postgres::test_db_reclaim::tests::reclaim_execute_stops_on_log_failure
 db::postgres::test_db_reclaim::tests::reclaim_gate_decision
 db::postgres::test_db_reclaim::tests::reclaim_plan_caps_per_process_oldest_first
