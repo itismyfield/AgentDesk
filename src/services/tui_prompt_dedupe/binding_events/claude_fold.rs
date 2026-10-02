@@ -1,9 +1,11 @@
 //! The Claude sessions one pane moved through in the execution its records name. Only
 //! `Writer::apply` folds it, so a reloaded writer and the live one hold the same history.
 
+use std::io;
+
 use chrono::{DateTime, Utc};
 
-use super::{BindingEvent, BindingTarget};
+use super::{BindingEvent, BindingTarget, Logged, Writer, lock_logs, log_path, read_log};
 use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::claude_tui::source_verify::{Left, SourceHistory, Visit};
 
@@ -113,6 +115,35 @@ pub(super) fn step(
             }
         }
     }
+}
+
+/// `binding_events_since` with whether each record superseded its pane's waiting Pending as a
+/// prompt reclaim, judged by replaying the log through the writer's own fold.
+pub(crate) fn binding_events_judged_since(
+    channel_id: u64,
+    after_seq: u64,
+) -> io::Result<Vec<(BindingEvent, bool)>> {
+    let Some(path) = log_path(channel_id)? else {
+        return Ok(Vec::new());
+    };
+    // Holding the lock keeps a record that is being rolled back out of every read.
+    let _logs = lock_logs();
+    let read = read_log::<Logged>(&path)?;
+    if read.lines != read.records.len() as u64 {
+        let unreadable = read.lines - read.records.len() as u64;
+        return Err(io::Error::other(format!(
+            "{unreadable} unreadable binding event line(s) in {}",
+            path.display()
+        )));
+    }
+    let mut replay = Writer::default();
+    let records = read.records.into_iter().map(|line| {
+        let reclaimed = replay.apply(&line.event, line.verified, line.published_at);
+        (line.event, reclaimed)
+    });
+    Ok(records
+        .filter(|(record, _)| record.seq > after_seq)
+        .collect())
 }
 
 #[derive(Clone, Debug, Default)]
