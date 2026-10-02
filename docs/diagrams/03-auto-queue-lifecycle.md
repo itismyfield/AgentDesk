@@ -28,12 +28,11 @@ start
   - Apply agent assignments
   - Validate dispatchable states;
 
-:Smart Planner: build_group_plan()
-  - Extract file paths from descriptions
-  - Detect dependency edges (#N refs)
-  - Compute path similarity (Jaccard/Overlap)
-  - Union-Find grouping
-  - Topological sort within groups;
+:Assign lanes (no planning)
+  - Hold cards whose declared prerequisites (metadata, 의존성 section) are not done
+  - Keep request order, else priority then age
+  - Requested thread_group keeps its lane
+  - Every other card gets its own lane;
 
 :Create **auto_queue_runs** row
   status = 'generated'

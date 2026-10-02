@@ -19,11 +19,11 @@ start
   - Resolve kanban cards
   - Apply agent assignments;
 
-:Smart Planner: build_group_plan()
-  - Dependency edges (#N refs)
-  - File path similarity
-  - Union-Find grouping
-  - Topological sort;
+:Assign lanes (no planning)
+  - Hold cards whose declared prerequisites (metadata, 의존성 section) are not done
+  - Keep request order, else priority then age
+  - Requested thread_group keeps its lane
+  - Every other card gets its own lane;
 
 :Create **auto_queue_runs**
   status = 'generated'

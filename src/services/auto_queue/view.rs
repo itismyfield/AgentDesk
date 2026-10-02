@@ -30,24 +30,6 @@ pub(super) struct AutoQueueHistorySummary {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct GroupPlan {
-    pub(super) entries: Vec<PlannedEntry>,
-    pub(super) thread_group_count: i64,
-    pub(super) recommended_parallel_threads: i64,
-    pub(super) dependency_edges: usize,
-    pub(super) similarity_edges: usize,
-    pub(super) path_backed_card_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GroupKind {
-    Independent,
-    Similarity,
-    Dependency,
-    Mixed,
-}
-
-#[derive(Debug, Clone)]
 pub(super) struct RequestedGenerateEntry {
     pub(super) issue_number: i64,
     pub(super) batch_phase: i64,

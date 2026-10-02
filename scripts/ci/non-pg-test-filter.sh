@@ -90,6 +90,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::route::fsm::tests
   --skip services::auto_queue::route::phase_gate::tests
   --skip services::auto_queue::route::planning::record_entry_dispatch_failure_tests
+  --skip services::auto_queue::route::route_generate::dependency_hold_tests
   --skip services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   --skip services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   --skip services::auto_queue::tests
@@ -742,6 +743,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::route::fsm::tests
   services::auto_queue::route::phase_gate::tests
   services::auto_queue::route::planning::record_entry_dispatch_failure_tests
+  services::auto_queue::route::route_generate::dependency_hold_tests
   services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   services::auto_queue::tests
