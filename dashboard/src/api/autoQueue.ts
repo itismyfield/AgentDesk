@@ -113,15 +113,26 @@ export interface AutoQueueHistoryResponse {
   runs: AutoQueueHistoryRun[];
 }
 
+/** A card generate left out; `reason` is set for filter skips. */
+export interface GenerateSkip {
+  issue_number: number;
+  reason?: string;
+}
+
+export interface GenerateAutoQueueResponse {
+  run: AutoQueueRun | null;
+  entries: DispatchQueueEntry[];
+  message?: string;
+  skipped_due_to_active_dispatch?: GenerateSkip[];
+  skipped_due_to_dependency?: GenerateSkip[];
+  skipped_due_to_filter?: GenerateSkip[];
+}
+
 export async function generateAutoQueue(input: {
   repo: string;
   agentId: string;
   issueNumbers: number[];
-}): Promise<{
-  run: AutoQueueRun | null;
-  entries: DispatchQueueEntry[];
-  message?: string;
-}> {
+}): Promise<GenerateAutoQueueResponse> {
   const body = {
     repo: input.repo,
     agent_id: input.agentId,

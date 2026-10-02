@@ -133,6 +133,7 @@ export type {
   AutoQueueHistoryRun,
   PhaseGateKind,
   PhaseGateCatalog,
+  GenerateAutoQueueResponse,
   AutoQueueHistorySummary,
   AutoQueueHistoryResponse,
   DispatchQueueEntry,

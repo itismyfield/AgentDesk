@@ -1,4 +1,8 @@
-import type { AutoQueueResetScope } from "../../api/autoQueue";
+import type {
+  AutoQueueResetScope,
+  GenerateAutoQueueResponse,
+  GenerateSkip,
+} from "../../api/autoQueue";
 
 interface AutoQueueResetApi {
   resetAutoQueue(scope: AutoQueueResetScope): Promise<unknown>;
@@ -37,6 +41,23 @@ export function buildGenerateGroups(
       issueNumbers: [...issues].sort((a, b) => a - b),
     }))
     .sort((a, b) => a.repo.localeCompare(b.repo) || a.agentId.localeCompare(b.agentId));
+}
+
+/** "#5 already dispatched, #7 filtered" for the cards a generate call left out. */
+export function describeGenerateSkips(
+  result: GenerateAutoQueueResponse,
+  tr: (ko: string, en: string) => string,
+): string {
+  const groups: Array<[GenerateSkip[] | undefined, string]> = [
+    [result.skipped_due_to_active_dispatch, tr("이미 실행 중", "already dispatched")],
+    [result.skipped_due_to_dependency, tr("선행 이슈 미완료", "dependency not done")],
+    [result.skipped_due_to_filter, tr("대상 아님", "filtered")],
+  ];
+  return groups
+    .flatMap(([skips, label]) =>
+      (skips ?? []).map((skip) => `#${skip.issue_number} ${skip.reason ?? label}`),
+    )
+    .join(", ");
 }
 
 /**

@@ -17,7 +17,7 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
-import { buildGenerateGroups, resetAutoQueueForSelection } from "./auto-queue-actions";
+import { buildGenerateGroups, describeGenerateSkips, resetAutoQueueForSelection } from "./auto-queue-actions";
 import AutoQueuePanelView from "./AutoQueuePanelView";
 import { useSortableReorder } from "./AutoQueueSortableRows";
 import { deriveGateKindByPhase, isCompletedEntry, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
@@ -54,6 +54,8 @@ export default function AutoQueuePanel({
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
   const suppressedRunIdRef = useRef<string | null>(null);
+  // Keeps Generate locked after a created run until a status refresh shows it.
+  const holdGenerateUntilRefreshRef = useRef(false);
 
   const resetPanelState = useCallback(() => {
     setStatus(createEmptyAutoQueueStatus());
@@ -74,6 +76,10 @@ export default function AutoQueuePanel({
       setStatus(normalized);
       // Only reset noReadyCards when a run with entries exists
       if (!normalized.run || normalized.entries.length > 0) setNoReadyCards(false);
+      if (holdGenerateUntilRefreshRef.current) {
+        holdGenerateUntilRefreshRef.current = false;
+        setGenerating(false);
+      }
     } catch {
       // silent
     }
@@ -111,18 +117,30 @@ export default function AutoQueuePanel({
     suppressedRunIdRef.current = null;
 
     const failures: string[] = [];
+    const partial: string[] = [];
+    let created = false;
     for (const { repo, agentId, issueNumbers } of groups) {
+      const label = getAgentLabel(agentId);
       try {
         const result = await api.generateAutoQueue({ repo, agentId, issueNumbers });
-        if (!result.run) failures.push(`${getAgentLabel(agentId)}: ${result.message ?? "-"}`);
+        const skipped = describeGenerateSkips(result, tr);
+        if (!result.run) failures.push(`${label}: ${result.message ?? "-"}${skipped ? ` (${skipped})` : ""}`);
+        else if (skipped) partial.push(`${label}: ${skipped}`);
+        created ||= Boolean(result.run);
       } catch (e) {
-        failures.push(`${getAgentLabel(agentId)}: ${e instanceof Error ? e.message : String(e)}`);
+        failures.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    setGenerating(false);
+    const messages: string[] = [];
     if (failures.length > 0) {
-      setError(tr(`큐를 만들지 못했습니다: ${failures.join(", ")}`, `Queue not created: ${failures.join(", ")}`));
+      messages.push(tr(`큐를 만들지 못했습니다: ${failures.join(", ")}`, `Queue not created: ${failures.join(", ")}`));
     }
+    if (partial.length > 0) {
+      messages.push(tr(`큐에 넣지 않은 카드: ${partial.join(", ")}`, `Cards left out: ${partial.join(", ")}`));
+    }
+    if (messages.length > 0) setError(messages.join(" · "));
+    holdGenerateUntilRefreshRef.current = created;
+    if (!created) setGenerating(false);
     await fetchStatus();
   };
 
