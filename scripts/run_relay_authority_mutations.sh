@@ -53,8 +53,8 @@ readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
 # they mutate the child; the registry root no longer carries a mutated anchor.
 readonly WATCHER_FENCES="src/services/discord/tmux_watcher_registry/fences.rs"
 readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
-# The path filter selects these sources plus their judges and fixture owners.
-# Other authority paths are covered by the unconditional named contract targets.
+# The path filter selects these sources plus their judges and fixture owners. Other authority paths, e.g. rowless soft-terminal
+# delivery (its mutants die per PR in named target t5-c1), are listed with guard and reason in authority_surface of the targets json.
 readonly -a MUTATION_FILES=(
   "$TERMINAL_HANDOFF"
   "$SESSION_RELAY_SINK"
