@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use super::RelayE2eHarness;
 
+const QUEUED_TEXT: &str = "queued question [queued-input]";
+const FRESH_TEXT: &str = "fresh question [fresh-input]";
+
 /// A snowflake base minted 30s ago, inside both catch-up age windows.
 fn recent_snowflake_base() -> u64 {
     const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -50,8 +53,8 @@ async fn a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it() {
     let history: Vec<(u64, &str, bool)> = ids
         .iter()
         .map(|id| match *id {
-            id if id == queued => (id, "queued question", false),
-            id if id == fresh => (id, "fresh question", false),
+            id if id == queued => (id, QUEUED_TEXT, false),
+            id if id == fresh => (id, FRESH_TEXT, false),
             id => (id, "bot noise", true),
         })
         .collect();
@@ -61,7 +64,7 @@ async fn a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it() {
         .spawn_turn_held_at_placeholder(base | 500, "holds the mailbox", Duration::from_secs(2))
         .await;
     harness
-        .deliver_user_message(queued, "queued question")
+        .deliver_user_message(queued, QUEUED_TEXT)
         .await
         .expect("intake queues behind the active turn");
     assert_eq!(queued_ids(&harness).await, vec![queued]);
@@ -115,9 +118,19 @@ async fn a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it() {
         harness.messages()
     );
     assert!(harness.durable_queue().is_empty());
+    // Ids alone can drain while a body is lost: each input must reach the provider
+    // exactly once, the queued one first.
+    let delivered = harness.provider_inputs().concat();
+    for text in [QUEUED_TEXT, FRESH_TEXT] {
+        assert_eq!(
+            delivered.matches(text).count(),
+            1,
+            "{text:?} must reach the provider exactly once: {delivered:?}"
+        );
+    }
     assert!(
-        harness.provider_starts() >= 1,
-        "a provider turn must take the queued input"
+        delivered.find(QUEUED_TEXT) < delivered.find(FRESH_TEXT),
+        "the queued input must reach the provider before the fresh one: {delivered:?}"
     );
     let unhandled = harness.unhandled_requests();
     assert!(
