@@ -52,7 +52,7 @@
 | `GET` | `/api/campaigns` | `campaigns::list` | `src/server/routes/campaigns.rs:80` | `src/server/routes/domains/admin.rs:18` |
 | `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:115` | `src/server/routes/domains/admin.rs:18` |
 | `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:96` | `src/server/routes/domains/admin.rs:19` |
-| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:126` | `src/server/routes/domains/admin.rs:19` |
+| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:130` | `src/server/routes/domains/admin.rs:19` |
 | `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:106` | `src/server/routes/domains/admin.rs:23` |
 | `GET` | `/api/channels/{channel_id}/monitoring` | `monitoring::list_monitoring` | `src/server/routes/monitoring.rs:69` | `src/server/routes/domains/runtime.rs:118` |
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/runtime.rs:118` |

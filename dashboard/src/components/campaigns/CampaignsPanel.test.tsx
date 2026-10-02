@@ -11,6 +11,7 @@ import { makeLargeCampaign } from "./campaignTestFixtures";
 vi.mock("../../api/campaigns", () => ({
   getCampaigns: vi.fn(),
   updateCampaignNode: vi.fn(),
+  setCampaignAutoQueue: vi.fn(),
 }));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodeClick }: { nodes: Array<{ id: string; data: { group?: string } }>; onNodeClick?: (event: unknown, node: unknown) => void }) => (
@@ -38,6 +39,7 @@ const campaign: Campaign = {
   status: "active",
   round: 3,
   revision: 5,
+  auto_queue: false,
   created_at: "2026-09-20T00:00:00Z",
   updated_at: "2026-09-20T00:00:00Z",
   nodes: [
@@ -87,7 +89,7 @@ beforeEach(() => {
   root = createRoot(container);
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [campaign],
-    live: {},
+    live: {}, read: 1,
   });
 });
 afterEach(async () => {
@@ -129,7 +131,7 @@ it("restores the selected campaign and exposes the durable continuation checkpoi
   window.localStorage.setItem(STORAGE_KEYS.dashboardActiveCampaign, JSON.stringify(campaign.id));
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [other, campaign],
-    live: {},
+    live: {}, read: 1,
   });
   await render();
   expect(selectFor("Select campaign").value).toBe("ongoing");
@@ -150,7 +152,7 @@ it("retains the prior checkpoint and explicitly marks a failed refresh", async (
 });
 
 it("shows an empty state and distinguishes initial fetch failure", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [], live: {}, read: 1 });
   await render();
   expect(container.textContent).toContain("No campaigns yet");
   vi.mocked(getCampaigns).mockRejectedValue(new Error("Forbidden"));
@@ -165,7 +167,7 @@ it("preserves the edit revision and the draft when another session changes the c
   await act(async () => button("Edit task").click());
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [{ ...campaign, revision: 6 }],
-    live: {},
+    live: {}, read: 1,
   });
   await act(async () => button("Refresh").click());
   vi.mocked(updateCampaignNode).mockRejectedValue(new ApiRequestError("conflict", { status: 409 }));
@@ -178,7 +180,7 @@ it("preserves the edit revision and the draft when another session changes the c
 it("browses 120 tasks through group collapse, issue search and combined filters without a full graph", async () => {
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [makeLargeCampaign()],
-    live: {},
+    live: {}, read: 1,
   });
   await render();
   expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(0);
@@ -207,7 +209,7 @@ it("preserves selection, filters, collapse and a group edit draft across polls, 
   const large = makeLargeCampaign();
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [large, campaign],
-    live: {},
+    live: {}, read: 1,
   });
   await render();
   await selectTask("task-31");
@@ -225,7 +227,7 @@ it("preserves selection, filters, collapse and a group edit draft across polls, 
   await act(async () => container.querySelector<HTMLButtonElement>(".campaign-group-heading")!.click());
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [{ ...large, revision: 6 }, campaign],
-    live: {},
+    live: {}, read: 1,
   });
   await act(async () => button("Refresh").click());
   expect(selectFor("Group filter").value).toBe(JSON.stringify("Gateway"));
@@ -244,7 +246,7 @@ it("preserves selection, filters, collapse and a group edit draft across polls, 
 it("keeps hidden cross-group dependencies explicit and keyboard navigation skips collapsed rows", async () => {
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [makeLargeCampaign()],
-    live: {},
+    live: {}, read: 1,
   });
   await render();
   await selectTask("task-30");
@@ -272,7 +274,7 @@ it("keeps hidden cross-group dependencies explicit and keyboard navigation skips
 it("opens a canonical group from the overview and keeps advanced mobile filters opt-in", async () => {
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [makeLargeCampaign()],
-    live: {},
+    live: {}, read: 1,
   });
   await render();
   expect(button("Filters").getAttribute("aria-expanded")).toBe("false");
@@ -293,7 +295,7 @@ it("does not discard a newer draft when an older save resolves after switching a
   };
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [twoTasks],
-    live: {},
+    live: {}, read: 1,
   });
   let resolveSave!: (value: Campaign) => void;
   vi.mocked(updateCampaignNode).mockImplementationOnce(
@@ -342,7 +344,7 @@ it("never regresses a newer polled revision when an older save response arrives"
     revision: 9,
     nodes: [{ ...campaign.nodes[0], next_action: "Newer authoritative checkpoint" }],
   };
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [latest], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [latest], live: {}, read: 1 });
   await act(async () => button("Refresh").click());
   await act(async () => resolveSave({ ...campaign, revision: 6 }));
   expect(container.querySelector("form")).toBeNull();
@@ -350,7 +352,7 @@ it("never regresses a newer polled revision when an older save response arrives"
   // A stale read response is fenced too, regardless of its request arrival order.
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [{ ...campaign, revision: 7 }],
-    live: {},
+    live: {}, read: 1,
   });
   await act(async () => button("Refresh").click());
   expect(container.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
@@ -391,7 +393,7 @@ it("shows what the issue card is doing next to the ledger status without sending
   };
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [linked],
-    live: { ongoing: { review: live } },
+    live: { ongoing: { review: live } }, read: 1,
   });
   await render();
   expect(container.textContent).toContain("Running now 1");
@@ -431,7 +433,7 @@ it("does not call a dispatch running when no session is working on it", async ()
   };
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [linked],
-    live: { ongoing: { review: live } },
+    live: { ongoing: { review: live } }, read: 1,
   });
   await render();
   expect(container.textContent).toContain("Running now 0");
@@ -463,7 +465,7 @@ it.each(["pending", "completed"])("shows the working implementation on a pending
   };
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [linked],
-    live: { ongoing: { review: live } },
+    live: { ongoing: { review: live } }, read: 1,
   });
   await render();
   expect(container.textContent).toContain("Running now 1");

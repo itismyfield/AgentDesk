@@ -513,6 +513,14 @@ async fn policy_tick_loop(
 
         // ── 1min tier: every 2nd tick (60s) ──
         if count % 2 == 0 {
+            // Before OnTick1min, so the auto-queue tick sees what was just handed off.
+            if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool())
+                && let Err(error) =
+                    crate::services::auto_queue::route::hand_off_auto_campaigns_pg(pool, &engine)
+                        .await
+            {
+                tracing::warn!("[policy-tick] campaign handoff failed: {error}");
+            }
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick1min", "1min").await;
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
                 match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(

@@ -33,6 +33,8 @@ mod activate_command;
 mod activate_preflight;
 #[path = "activate_route.rs"]
 mod activate_route;
+#[path = "campaign_handoff.rs"]
+mod campaign_handoff;
 #[path = "command.rs"]
 mod command;
 #[path = "control_routes.rs"]
@@ -92,6 +94,7 @@ pub use slot_routes::{rebind_slot, skip_entry};
 pub use view_admin_routes::{add_run_entry, history, restore_run, status, update_entry};
 
 pub(crate) use activate_command::activate_with_deps_pg;
+pub(crate) use campaign_handoff::{hand_off_auto_campaigns_pg, hand_off_ready_nodes_pg};
 pub(crate) use fsm::{AutoQueueActivateDeps, activate_with_bridge_pg};
 
 use activate_preflight::*;
