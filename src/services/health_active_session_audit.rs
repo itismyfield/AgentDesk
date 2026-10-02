@@ -71,7 +71,7 @@ impl RecommendedRepairPath {
     /// Stable string contract (mirrors the `serde(rename_all = "snake_case")`
     /// JSON form). Kept as the documented enum→string mapping and exercised by
     /// the repair-mapping regression test.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             RecommendedRepairPath::None => "none",
