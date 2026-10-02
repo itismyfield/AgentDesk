@@ -1,5 +1,5 @@
-//! Adoption of a selected Claude channel that already holds output: O starts at Legacy's own
-//! cursor after a closed turn. Records Legacy left undelivered before it are reported, not posted.
+//! Adoption of a selected Claude channel that already holds output: O starts at Legacy's cursor, or
+//! at the source's end once Legacy stalled behind it. Records Legacy left before it are only reported.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -45,6 +45,19 @@ pub trait LegacyView: Send + Sync + 'static {
     /// Legacy's delivered frontier within `eof`; `None` while its delivery record is not authority.
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
+    /// What restarts Legacy's own redrive cycle for the channel; unchanged when nothing can say.
+    fn epoch(&self, _channel: u64) -> LegacyEpoch {
+        LegacyEpoch::default()
+    }
+}
+
+/// Legacy's redrive episode as this process can read it: its frontier reset, watcher reattaches,
+/// and the inflight row's identity (user message, start, tmux, turn start) and turn nonce.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LegacyEpoch {
+    pub reset_incarnation: u64,
+    pub reconnects: u64,
+    pub turn: Option<(u64, String, Option<String>, Option<u64>, Option<String>)>,
 }
 
 /// Waits for Legacy's first rehydrate pass; false once the wait is over without one.
@@ -157,28 +170,42 @@ impl ReadVersion {
     }
 }
 
-/// Whether `later` supersedes the Pending bind `pending`: the writer drops a waiting Pending once a
-/// hook on the same pane adopts another session, so that Pending is never resolved.
+/// Whether `later` supersedes `pending` as the writer drops it, never to resolve it: a hook on the
+/// pane adopting another session, a later Pending, or a prompt of its own session it outlived.
 pub(super) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
+    #[cfg(test)]
+    use crate::services::claude_tui::source_verify::n2b_mutant;
+    let same_pane = later.tmux_session == pending.tmux_session;
+    #[cfg(test)]
+    let same_pane = same_pane || n2b_mutant("r5-overwrite-any-pane");
+    let claude = later.provider == ShadowProvider::Claude;
     let BindingRecord::Bound {
-        old,
-        new: BindingTarget::Source(source),
-        evidence,
-        ..
+        old, new, evidence, ..
     } = &later.record
     else {
         return false;
     };
+    if later.seq <= pending.seq || !same_pane || !claude {
+        return false;
+    }
+    let source = match new {
+        #[cfg(test)]
+        BindingTarget::Pending { .. } if n2b_mutant("r5-overwrite-off") => return false,
+        BindingTarget::Pending { .. } => return true,
+        BindingTarget::Source(source) => source,
+    };
     #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("o-supersede-off") {
+    if n2b_mutant("o-supersede-off") {
         return false;
     }
     let moved = old
         .as_ref()
         .is_none_or(|old| old.session_id != source.session_id);
-    let same_pane = later.tmux_session == pending.tmux_session;
-    let claude = later.provider == ShadowProvider::Claude;
-    later.seq > pending.seq && same_pane && claude && !evidence.hook_event.is_empty() && moved
+    // The writer's own fold judged the prompt reclaim; O follows that one judgment.
+    let reclaims = evidence.reclaims;
+    #[cfg(test)]
+    let reclaims = reclaims && !n2b_mutant("r5-reclaim-o-off");
+    !evidence.hook_event.is_empty() && (moved || reclaims)
 }
 
 /// The sources a binding log names: every bound one in seq order, and those only named as an old
@@ -199,7 +226,10 @@ pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
                         pending.retain(|waiting| !supersedes(waiting, event));
                         bound.push(source);
                     }
-                    BindingTarget::Pending { .. } => pending.push(event),
+                    BindingTarget::Pending { .. } => {
+                        pending.retain(|waiting| !supersedes(waiting, event));
+                        pending.push(event);
+                    }
                 }
             }
             BindingRecord::Resolved {
@@ -412,6 +442,8 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
 pub struct Snapshot {
     seq: u64,
     tmux: String,
+    /// Legacy's cursor on the current source when the pin read it.
+    cursor: Option<u64>,
     /// The current source first, then the ones bound before it.
     pinned: Vec<Pinned>,
     named: Vec<SourceId>,
@@ -420,12 +452,32 @@ pub struct Snapshot {
     frontier: u64,
 }
 
+/// Where a pin starts the current source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum At {
+    /// At Legacy's cursor, which must be the source's end.
+    Cursor,
+    /// At the source's end, with Legacy's cursor bound on it at or before that end.
+    End,
+}
+
 /// Pins every source the channel's `events` bind; the current one starts at Legacy's cursor, after
 /// a closed turn and with Legacy's delivered frontier on a record at or before it.
 pub fn pin(
     legacy: &dyn LegacyView,
     events: &[BindingEvent],
     channel: u64,
+) -> Result<Snapshot, Refused> {
+    pin_at(legacy, events, channel, At::Cursor)
+}
+
+/// As `pin`, starting the current source where `at` says. The frontier is checked before the turn,
+/// so an open turn either pin reports already has a frontier on a record within its start.
+pub fn pin_at(
+    legacy: &dyn LegacyView,
+    events: &[BindingEvent],
+    channel: u64,
+    at: At,
 ) -> Result<Snapshot, Refused> {
     #[cfg(test)]
     super::activation::test_hook::run(channel, super::activation::test_hook::Step::Snapshot)
@@ -446,13 +498,24 @@ pub fn pin(
         let (tmux, path) = (tmux.clone(), current.path.clone());
         Refused::new(Hold::Cursor { tmux, path }, detail)
     };
-    let start = match legacy.cursor(&tmux) {
-        LegacyCursor::Bound { path, offset } if path == current.path => offset,
+    let cursor = match legacy.cursor(&tmux) {
+        LegacyCursor::Bound { path, offset } if path == current.path => Some(offset),
         LegacyCursor::Bound { path, .. } => {
             return Err(waiting(format!("Legacy reads {} instead", path.display())));
         }
         LegacyCursor::Unbound => return Err(waiting("legacy cursor not established".into())),
-        LegacyCursor::NoPane => len_of(&current.path).map_err(Refused::retry)?,
+        LegacyCursor::NoPane => None,
+    };
+    let start = match (at, cursor) {
+        (At::Cursor, Some(offset)) => offset,
+        (At::Cursor, None) => len_of(&current.path).map_err(Refused::retry)?,
+        (At::End, cursor) => {
+            let end = len_of(&current.path).map_err(Refused::retry)?;
+            if cursor.is_some_and(|offset| offset > end) {
+                return Err(waiting(format!("Legacy's cursor is past {end}")));
+            }
+            end
+        }
     };
     let frontier = legacy.frontier(channel, &tmux, start);
     let not_authority = || Refused::new(Hold::Final, "the delivery record is not authoritative");
@@ -463,10 +526,10 @@ pub fn pin(
         Err(Unread::Short(detail)) => return Err(waiting(detail)),
         Err(Unread::Other(detail)) => return Err(Refused::retry(detail)),
     };
-    if turns.open {
+    let open = || {
         let detail = format!("a turn after {} is still open", turns.closed_at);
-        return Err(Refused::new(Hold::OpenTurn(head.version()), detail));
-    }
+        Refused::new(Hold::OpenTurn(head.version()), detail)
+    };
     if !turns.frontier_on_line || frontier > start {
         let (read, tmux) = (head.version(), tmux.clone());
         let detail = format!("frontier {frontier} ends no record within ..={start}");
@@ -476,6 +539,9 @@ pub fn pin(
             frontier,
         };
         return Err(Refused::new(hold, detail));
+    }
+    if turns.open {
+        return Err(open());
     }
     let mut pinned = vec![head];
     let past = past_of(&bound);
@@ -499,6 +565,7 @@ pub fn pin(
     Ok(Snapshot {
         seq,
         tmux,
+        cursor,
         pinned,
         named: named.into_iter().cloned().collect(),
         undelivered: turns.undelivered,
@@ -626,6 +693,27 @@ impl Snapshot {
             from: self.undelivered?,
             to: current.len,
         })
+    }
+
+    /// Whether Legacy is behind O's start: its cursor short of it or a record past its frontier.
+    pub fn behind(&self) -> bool {
+        self.undelivered.is_some() || self.cursor != Some(self.start())
+    }
+
+    /// Whether the current source and Legacy's cursor and frontier still read as this pin saw them.
+    pub fn unchanged(&self, legacy: &dyn LegacyView, channel: u64) -> bool {
+        let Some(current) = self.pinned.first() else {
+            return false;
+        };
+        let cursor = match legacy.cursor(&self.tmux) {
+            LegacyCursor::Bound { path, offset } if path == current.source.path => Some(offset),
+            LegacyCursor::NoPane => None,
+            _ => return false,
+        };
+        let frontier = legacy.frontier(channel, &self.tmux, current.len);
+        ReadVersion::of(&current.source.path).as_ref() == Some(&current.version())
+            && cursor == self.cursor
+            && frontier == Some(self.frontier)
     }
 }
 

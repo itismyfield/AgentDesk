@@ -541,6 +541,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub async fn health_check(pool: &PgPool) -> Result<(), String> {
     run_health_check(pool)
         .await

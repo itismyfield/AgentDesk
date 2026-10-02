@@ -275,9 +275,11 @@ jobs:
               - 'src/services/agent_recovery/durable/postgres_tests.rs'
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/activate_command.rs'
+              - 'src/services/auto_queue/campaign_handoff_tests.rs'
               - 'src/services/auto_queue/cancel_run.rs'
               - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
               - 'src/services/auto_queue/command.rs'
+              - 'src/services/auto_queue/dispatch_query.rs'
               - 'src/services/auto_queue/fsm.rs'
               - 'src/services/auto_queue/phase_gate.rs'
               - 'src/services/auto_queue/planning.rs'
@@ -320,9 +322,11 @@ jobs:
               - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
+              - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
+              - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
@@ -350,6 +354,7 @@ jobs:
               - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
@@ -2042,7 +2047,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c2bf965d89ee2587303e2aef7de23defee29b82d36740aa3143764695537f8f1
+          expected=0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2268,7 +2273,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c2bf965d89ee2587303e2aef7de23defee29b82d36740aa3143764695537f8f1
+          expected=0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

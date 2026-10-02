@@ -9,7 +9,7 @@ use super::super::SharedData;
 use super::delivery_record as dr;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
+use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyEpoch, LegacyView};
 
 pub(in crate::services::discord) struct LegacyRelay {
     shared: Arc<SharedData>,
@@ -50,5 +50,28 @@ impl LegacyView for LegacyRelay {
 
     fn tail_running(&self, tmux: &str) -> bool {
         super::super::tui_prompt_relay::claude_idle_tail_running(tmux)
+    }
+
+    /// What `relay_auto_heal` restarts a redrive episode on, read without writing the inflight row.
+    fn epoch(&self, channel: u64) -> LegacyEpoch {
+        let id = ChannelId::new(channel);
+        let row =
+            super::super::inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel);
+        LegacyEpoch {
+            reset_incarnation: self.shared.relay_frontier_token(id).reset_incarnation,
+            reconnects: (self.shared.tmux_relay_coord(id).reconnect_count)
+                .load(std::sync::atomic::Ordering::Acquire),
+            turn: row.map(|row| {
+                let nonce = row.turn_nonce.filter(|nonce| !nonce.is_empty());
+                let start = row.turn_start_offset;
+                (
+                    row.user_msg_id,
+                    row.started_at,
+                    row.tmux_session_name,
+                    start,
+                    nonce,
+                )
+            }),
+        }
     }
 }

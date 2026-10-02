@@ -439,6 +439,34 @@ fn mark_process_session_stopped(session_name: impl Into<String>) {
     process_sessions().mark_stopped(session_name.into());
 }
 
+/// The children of `wrapper_pid` that lead a process group of their own, with their
+/// identities: the provider CLIs a process-backend wrapper starts outside its group.
+#[cfg(unix)]
+pub(crate) fn owned_cli_groups(wrapper_pid: u32) -> Vec<(u32, ProcessIdentity)> {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,ppid="]).output() else {
+        return Vec::new();
+    };
+    let leads_group = |pid: u32| {
+        #[allow(unsafe_code)]
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        pgid == pid as libc::pid_t
+    };
+    let rows = String::from_utf8_lossy(&output.stdout).into_owned();
+    rows.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(str::parse::<u32>);
+            Some((fields.next()?.ok()?, fields.next()?.ok()?))
+        })
+        .filter(|&(pid, ppid)| ppid == wrapper_pid && leads_group(pid))
+        .map(|(pid, _)| (pid, ProcessIdentity::capture(pid)))
+        .collect()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn owned_cli_groups(_wrapper_pid: u32) -> Vec<(u32, ProcessIdentity)> {
+    Vec::new()
+}
+
 pub fn mark_process_sessions_stopped_by_pid(pid: u32) -> Vec<String> {
     let mut registry = process_sessions();
     let session_names = registry

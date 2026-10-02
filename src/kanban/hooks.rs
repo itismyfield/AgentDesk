@@ -314,6 +314,24 @@ fn fire_transition_hooks_pg(
                     error
                 );
             }
+            // Before onCardTerminal, so a run continuing after this card already sees the new entries.
+            let engine_owned = engine.clone();
+            let handoff = crate::utils::async_bridge::block_on_pg_result(
+                pg_pool,
+                move |bridge_pool| async move {
+                    crate::services::auto_queue::route::hand_off_auto_campaigns_pg(
+                        &bridge_pool,
+                        &engine_owned,
+                    )
+                    .await
+                },
+                |error| error,
+            );
+            if let Err(error) = handoff {
+                tracing::warn!(
+                    "[kanban] campaign handoff after {card_id} finished failed: {error}"
+                );
+            }
         }
 
         let pg_pool_owned = pg_pool.clone();

@@ -209,16 +209,3 @@ pub async fn phase_gate_violations(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     route::violations_route(state).await
 }
-
-/// POST /api/queue/request-generate (#2126)
-///
-/// Dashboard-facing: send a standardized "build a queue from these issues"
-/// instruction to an agent's Discord channel. The backend owns both the
-/// instruction text and channel routing so the dashboard stays decoupled
-/// from prompt evolution.
-pub async fn request_generate(
-    state: State<AppState>,
-    body: Json<serde_json::Value>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    route::request_generate(state, body).await
-}

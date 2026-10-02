@@ -2,7 +2,6 @@
 //! Only the data types needed by services::discord are provided here.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
@@ -40,12 +39,6 @@ pub struct SessionData {
     pub remote_profile_name: Option<String>,
     #[serde(default)]
     pub born_generation: u64,
-}
-
-/// Get the AI sessions directory path ($AGENTDESK_ROOT_DIR/ai_sessions)
-#[allow(dead_code)]
-pub fn ai_sessions_dir() -> Option<PathBuf> {
-    crate::cli::dcserver::agentdesk_runtime_root().map(|root| root.join("ai_sessions"))
 }
 
 /// Sanitize user input — remove common prompt injection patterns and truncate.

@@ -786,6 +786,11 @@ impl CancelToken {
     }
 
     #[cfg(test)]
+    pub(crate) fn store_child_process_for_test(&self, process: CapturedProcess) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+    }
+
+    #[cfg(test)]
     pub(crate) fn store_child_pid_without_identity_for_test(&self, pid: u32) {
         *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(CapturedProcess {
             pid,

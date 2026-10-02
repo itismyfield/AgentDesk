@@ -906,6 +906,13 @@ class MutationPathFilterContractTests(unittest.TestCase):
         self.assertIn("src/services/discord/tmux_watcher_registry.rs", owners)
         self.assertTrue(owners.issubset(set(self.patterns)), sorted(owners))
 
+    def test_the_judges_this_fixture_copies_are_the_manifest_judges(self) -> None:
+        """The manifest rows are the canonical judge mapping; this copy feeds the filter equality above."""
+        manifest = json.loads((REPO_ROOT / CONTRACT_MANIFEST).read_text(encoding="utf-8"))
+        self.assertEqual(
+            {row["name"]: row["judge"] for row in manifest["condition3_mutations"]}, JUDGE_FILES,
+        )
+
     def test_every_pattern_is_a_literal_path_that_exists(self) -> None:
         """Set equality above is only a real comparison while every pattern is
         a literal; one glob would make it silently over- or under-match."""

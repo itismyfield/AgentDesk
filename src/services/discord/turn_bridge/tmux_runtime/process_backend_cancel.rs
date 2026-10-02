@@ -154,3 +154,7 @@ pub(super) async fn hard_stop_unresponsive_process_backend_turn(
     }
     crate::services::process::kill_pid_tree(target_pid);
 }
+
+#[cfg(all(test, unix))]
+#[path = "process_force_kill_tests.rs"]
+mod tests;

@@ -161,9 +161,16 @@ jobs:
         run: sccache --show-stats || true
 
   postgres:
-    name: PostgreSQL tests
+    name: PostgreSQL tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    # Each shard runs one generated part of the PG selection on its own database;
+    # the run stays green only if both shards succeed.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     env:
+      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -218,10 +225,10 @@ jobs:
           # `wait` on this sampler. The hosted VM reclaims it when the job ends.
           resource_sample > "$RUNNER_TEMP/pg-resource-samples.log" 2>&1 &
 
-      - name: just test-postgres
+      - name: just test-postgres-shard
         # Same budget as ci-pr.yml; main hit 30 min at 25–27 min typical runtime.
         timeout-minutes: 40
-        run: just test-postgres
+        run: just test-postgres-shard
         env:
           # #4245: see Full tests lane — keep test debuginfo off so the build
           # and serial PostgreSQL suite retain headroom in the bounded step.

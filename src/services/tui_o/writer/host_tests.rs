@@ -4,7 +4,7 @@ use crate::services::tui_o::cutover::{self, test_override};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
-use crate::services::tui_o::writer::host::{HostIo, HostParts, Readiness, start};
+use crate::services::tui_o::writer::host::{Custody, HostIo, HostParts, Readiness, start};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
@@ -56,7 +56,7 @@ struct TestIo {
     alarms: Raised,
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
-    custody: Mutex<Result<bool, String>>,
+    custody: Mutex<Result<Custody, String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The gateway never comes up.
@@ -74,7 +74,7 @@ impl TestIo {
             alarms: Raised::default(),
             calls: Mutex::default(),
             facts: Mutex::new(Ok(ActivationFacts::default())),
-            custody: Mutex::new(Ok(false)),
+            custody: Mutex::new(Ok(Custody::Free)),
             on_facts: Mutex::default(),
             port_down: Default::default(),
             legacy: Mutex::default(),
@@ -133,7 +133,7 @@ impl HostIo for TestIo {
         async move { facts }
     }
 
-    fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<bool, String> {
+    fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<Custody, String> {
         self.custody.lock().unwrap().clone()
     }
 
@@ -613,7 +613,12 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
         let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
         let io = TestIo::over(&harness);
         *io.facts.lock().unwrap() = facts;
-        *io.custody.lock().unwrap() = Ok(why.starts_with("Legacy"));
+        let custody = if why.starts_with("Legacy") {
+            Custody::Row
+        } else {
+            Custody::Free
+        };
+        *io.custody.lock().unwrap() = Ok(custody);
         let ready = Arc::new(Readiness::default());
         host(&harness, &io, pg, &ready);
         polls(3).await;
@@ -798,17 +803,16 @@ async fn a_closed_turn_legacy_never_delivered_is_adopted_past_and_never_posted()
             frontier: 0,
         };
         *io.legacy.lock().unwrap() = Some(Arc::new(legacy));
-        *io.custody.lock().unwrap() = Ok(custody);
+        let held = if custody { Custody::Row } else { Custody::Free };
+        *io.custody.lock().unwrap() = Ok(held);
         let tasks = start_host(&harness, &io, &ready);
         polls(3).await;
         if custody {
-            let released = io.alarms.released();
-            assert!(
-                matches!(released.as_slice(), [(CHANNEL, detail)] if detail.contains("custody")),
-                "{released:?}"
-            );
-            assert_eq!(adoption(CHANNEL), Adoption::Released);
+            // Legacy's custody defers the adoption instead of ending it.
+            assert_eq!(adoption(CHANNEL), Adoption::Deferred);
+            assert_eq!(*io.alarms.0.lock().unwrap(), []);
             assert!(!harness.store.has_channel_dir(CHANNEL));
+            abort(tasks);
             continue;
         }
         assert_eq!(adoption(CHANNEL), Adoption::Committed);
@@ -1088,3 +1092,7 @@ async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logge
 
 #[path = "deferred_tests.rs"]
 mod deferred;
+
+#[cfg(unix)]
+#[path = "reclaim_tests.rs"]
+mod reclaim;

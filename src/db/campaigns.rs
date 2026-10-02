@@ -1,5 +1,5 @@
 //! Durable, revision-fenced campaign DAGs on the canonical PostgreSQL pool.
-//! This ledger records checkpoints; it does not dispatch or replay work.
+//! The server never writes node state; `auto_queue` lets auto-queue run ready nodes.
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
@@ -86,6 +86,9 @@ pub struct CampaignInput {
     pub round: u32,
     #[serde(default)]
     pub nodes: Vec<NodeInput>,
+    /// Hand ready nodes to auto-queue on every campaign event; omitted keeps the stored value.
+    #[serde(default)]
+    pub auto_queue: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -103,6 +106,8 @@ pub struct Campaign {
     pub status: CampaignStatus,
     pub round: u32,
     pub revision: i64,
+    #[serde(default)]
+    pub auto_queue: bool,
     pub nodes: Vec<Node>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -242,6 +247,9 @@ fn checkpoint(id: String, mut input: CampaignInput, previous: Option<&Campaign>)
         status: input.status,
         round: input.round,
         revision: previous.map_or(1, |p| p.revision + 1),
+        auto_queue: input
+            .auto_queue
+            .unwrap_or_else(|| previous.is_some_and(|p| p.auto_queue)),
         nodes: input
             .nodes
             .into_iter()
@@ -311,7 +319,7 @@ struct LiveRow {
 }
 
 /// `(owner/repo, issue number)` for a GitHub issue link.
-fn issue_ref(raw: &str) -> Option<(String, i64)> {
+pub(crate) fn issue_ref(raw: &str) -> Option<(String, i64)> {
     let url = normalize_github_issue_url(raw)?;
     let number = url.rsplit('/').next()?.parse().ok()?;
     Some((normalize_github_repo_id(&url)?, number))
@@ -390,6 +398,17 @@ pub async fn live_status(
         }
     }
     Ok(live)
+}
+
+/// Active campaigns that asked to hand their ready nodes to auto-queue.
+pub async fn list_auto_queue_active(pool: &PgPool) -> Result<Vec<Campaign>, CampaignError> {
+    let rows: Vec<Json<Campaign>> = sqlx::query_scalar(
+        "SELECT document FROM campaigns WHERE document->>'status' = 'active' \
+         AND document->>'auto_queue' = 'true' ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|v| v.0).collect())
 }
 
 /// Every revision snapshots the whole DAG, so long campaigns keep only the newest ones.

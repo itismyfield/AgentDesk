@@ -316,37 +316,61 @@ fn provider_cli_binary_name(provider: &ProviderKind) -> Option<&'static str> {
     }
 }
 
-#[cfg(all(unix, not(test)))]
-pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
-    #[allow(unsafe_code)]
-    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().to_string())
+/// The real SIGINT primitives; a test build sends them only on a thread that asks.
+#[cfg(unix)]
+mod signal {
+    pub(in super::super) fn send_sigint(pid: u32) -> Result<(), String> {
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().to_string())
+        }
+    }
+
+    pub(in super::super) fn send_sigint_to_process_group_or_pid(pid: u32) -> Result<(), String> {
+        #[allow(unsafe_code)]
+        unsafe {
+            let group_result = libc::kill(-(pid as libc::pid_t), libc::SIGINT);
+            if group_result == 0 {
+                return Ok(());
+            }
+            let group_error = std::io::Error::last_os_error();
+            let pid_result = libc::kill(pid as libc::pid_t, libc::SIGINT);
+            if pid_result == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "process_group_error={}; pid_error={}",
+                    group_error,
+                    std::io::Error::last_os_error()
+                ))
+            }
+        }
     }
 }
 
 #[cfg(all(unix, not(test)))]
-pub(super) fn send_sigint_to_process_group_or_pid(pid: u32) -> Result<(), String> {
-    #[allow(unsafe_code)]
-    unsafe {
-        let group_result = libc::kill(-(pid as libc::pid_t), libc::SIGINT);
-        if group_result == 0 {
-            return Ok(());
-        }
-        let group_error = std::io::Error::last_os_error();
-        let pid_result = libc::kill(pid as libc::pid_t, libc::SIGINT);
-        if pid_result == 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "process_group_error={}; pid_error={}",
-                group_error,
-                std::io::Error::last_os_error()
-            ))
+pub(super) use signal::{send_sigint, send_sigint_to_process_group_or_pid};
+
+#[cfg(all(unix, test))]
+thread_local! {
+    static REAL_SIGINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with this thread's SIGINTs sent for real as well as recorded.
+#[cfg(all(unix, test))]
+pub(super) fn with_real_sigint<T>(test: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REAL_SIGINT.with(|real| real.set(false));
         }
     }
+    REAL_SIGINT.with(|real| real.set(true));
+    let _restore = Restore;
+    test()
 }
 
 #[cfg(all(unix, test))]
@@ -355,12 +379,22 @@ pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .push(pid);
+    if REAL_SIGINT.with(std::cell::Cell::get) {
+        return signal::send_sigint(pid);
+    }
     Ok(())
 }
 
 #[cfg(all(unix, test))]
 pub(super) fn send_sigint_to_process_group_or_pid(pid: u32) -> Result<(), String> {
-    send_sigint(pid)
+    if !REAL_SIGINT.with(std::cell::Cell::get) {
+        return send_sigint(pid);
+    }
+    SIGINT_TEST_EVENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(pid);
+    signal::send_sigint_to_process_group_or_pid(pid)
 }
 
 #[cfg(not(unix))]

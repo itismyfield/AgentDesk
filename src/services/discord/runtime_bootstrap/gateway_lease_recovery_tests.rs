@@ -1139,7 +1139,7 @@ async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() 
         return;
     }
     use crate::services::tui_o::shadow::ShadowProvider::Claude;
-    use crate::services::tui_o::writer::host::HostIo;
+    use crate::services::tui_o::writer::host::{Custody, HostIo};
     let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
     let own = 6_470_011;
@@ -1155,7 +1155,15 @@ async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() 
         crate::services::tui_o::writer::activation::ActivationFacts::default(),
         "the configured id counts its own session before any id is published"
     );
-    assert_eq!(host.local_custody(own, Claude), Ok(false));
+    assert_eq!(host.local_custody(own, Claude), Ok(Custody::Free));
+    let rows = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
+    std::fs::create_dir_all(rows.join("claude")).unwrap();
+    std::fs::write(rows.join("claude").join(format!("{own}.json")), "{}").unwrap();
+    assert_eq!(
+        host.local_custody(own, Claude),
+        Ok(Custody::Row),
+        "an inflight row alone is a row"
+    );
     let pending = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
     std::fs::create_dir_all(&pending).unwrap();
     let record = serde_json::json!({"provider": "claude", "channel_id": own,
@@ -1165,8 +1173,8 @@ async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() 
     std::fs::write(pending.join("claude_6470011_1.json"), record.to_string()).unwrap();
     assert_eq!(
         host.local_custody(own, Claude),
-        Ok(true),
-        "a durable pending start holds"
+        Ok(Custody::Active),
+        "a durable pending start holds over the row"
     );
 
     crate::services::cluster::node_registry::SELF_INSTANCE_ID

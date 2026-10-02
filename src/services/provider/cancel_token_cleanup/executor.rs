@@ -30,6 +30,23 @@ pub(crate) struct CleanupRequest {
     pub(crate) hard_stop_target: Option<CapturedProcess>,
 }
 
+/// The binding a stop decided on; a destructive cleanup kills only while the token still names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpectedBinding<'a> {
+    /// The stop's own target: its `.host_kind` marker must still admit tmux.
+    Decided(Option<&'a str>),
+    /// A force-kill verdict's session, whose host, marker included, that verdict already read.
+    Approved(Option<&'a str>),
+}
+
+impl<'a> ExpectedBinding<'a> {
+    fn name(self) -> Option<&'a str> {
+        match self {
+            Self::Decided(name) | Self::Approved(name) => name,
+        }
+    }
+}
+
 /// Observable result of a cleanup request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CleanupOutcome {
@@ -60,7 +77,7 @@ impl CancelToken {
     pub(crate) fn request_cleanup_expecting(
         &self,
         request: CleanupRequest,
-        expected: Option<&str>,
+        expected: ExpectedBinding<'_>,
     ) -> CleanupOutcome {
         self.request_cleanup_inner(request, Some(expected))
     }
@@ -68,7 +85,7 @@ impl CancelToken {
     fn request_cleanup_inner(
         &self,
         request: CleanupRequest,
-        expected: Option<Option<&str>>,
+        expected: Option<ExpectedBinding<'_>>,
     ) -> CleanupOutcome {
         #[cfg(test)]
         REQUESTED_INTENTS.with(|intents| intents.borrow_mut().push(request.intent));
@@ -129,7 +146,7 @@ impl CancelToken {
         &self,
         request: CleanupRequest,
         binding: Option<TmuxBinding>,
-        expected: Option<Option<&str>>,
+        expected: Option<ExpectedBinding<'_>>,
         authorization: KillAuthorizationState,
         guard: Option<SessionKillGuard>,
     ) -> CleanupOutcome {
@@ -139,9 +156,13 @@ impl CancelToken {
         let name = binding.as_ref().map(TmuxBinding::name);
         // Checked before either claim, so a refused host leaves both kills untaken.
         let destructive = !matches!(request.intent, TmuxCleanupIntent::PreserveSession);
-        let moved = destructive && expected.is_some_and(|expected| expected != name);
+        let moved = destructive && expected.is_some_and(|expected| expected.name() != name);
+        // A force-kill's verdict judged the host once; every other cleanup reads the marker here.
+        let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
         let marker = crate::services::discord::admin_host_guard::marker_refusal;
-        let refusal = name.filter(|_| destructive && !moved).and_then(marker);
+        let refusal = name
+            .filter(|_| destructive && !moved && !judged)
+            .and_then(marker);
         if moved || refusal.is_some() {
             let source = &request.cancel_source;
             tracing::warn!(?name, ?expected, ?refusal, %source, "cleanup refused before any kill");
@@ -184,7 +205,7 @@ impl CancelToken {
                         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok();
                     if pid_claimed {
-                        pid_killed = self.kill_pid_tree_guarded(target);
+                        pid_killed = self.kill_pid_tree_guarded(target, name.is_none());
                         if !pid_killed {
                             self.pid_kill_claim.store(0, Ordering::Release);
                             pid_claimed = false;
@@ -262,10 +283,11 @@ impl CancelToken {
         }
     }
 
-    fn kill_pid_tree_guarded(&self, target: &CapturedProcess) -> bool {
+    /// With no tmux binding the target is a process-backend wrapper, whose CLI groups go too.
+    fn kill_pid_tree_guarded(&self, target: &CapturedProcess, wrapper: bool) -> bool {
         #[cfg(test)]
-        {
-            let _ = target;
+        if !REAL_PID_KILL.with(std::cell::Cell::get) {
+            let _ = wrapper;
             let barriers = PID_DISPATCH_BARRIERS.lock().unwrap().clone();
             if let Some((entered, release)) = barriers {
                 entered.wait();
@@ -274,8 +296,13 @@ impl CancelToken {
             PID_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
             return PID_KILL_SUCCEEDS.load(Ordering::Relaxed);
         }
-        #[cfg(not(test))]
-        match target.identity {
+        // Read while the wrapper still owns them: once it dies they belong to init.
+        let cli_groups = if wrapper {
+            crate::services::session_backend::owned_cli_groups(target.pid)
+        } else {
+            Vec::new()
+        };
+        let killed = match target.identity {
             Some(identity) => {
                 crate::services::process::kill_pid_tree_if_identity_matches(target.pid, identity)
             }
@@ -287,7 +314,11 @@ impl CancelToken {
                 crate::services::process::kill_pid_tree(target.pid);
                 true
             }
+        };
+        for (pid, identity) in cli_groups {
+            crate::services::process::kill_pid_tree_if_identity_matches(pid, identity);
         }
+        killed
     }
 
     fn tmux_cleanup_is_suppressed(&self, name: &str) -> bool {
@@ -377,6 +408,25 @@ static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static REQUESTED_INTENTS: std::cell::RefCell<Vec<TmuxCleanupIntent>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with this thread's PID kills sent for real instead of counted.
+#[cfg(test)]
+pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REAL_PID_KILL.with(|real| real.set(false));
+        }
+    }
+    REAL_PID_KILL.with(|real| real.set(true));
+    let _restore = Restore;
+    test()
 }
 
 /// The intents this thread has requested since the last call.

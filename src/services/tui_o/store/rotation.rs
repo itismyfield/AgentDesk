@@ -170,6 +170,18 @@ fn rejected(detail: String) -> StoreError {
 }
 
 impl OStore {
+    /// The channel's binding checkpoint read without opening the channel: nothing is swept or
+    /// recovered, and a checkpoint naming another channel is damage.
+    pub fn peek_binding_checkpoint(&self, channel: u64) -> Result<Option<u64>, StoreError> {
+        let path = self.channel_dir(channel).join(CHECKPOINT_FILE);
+        match durable::read_json::<Checkpoint>(&path)? {
+            Some(checkpoint) if checkpoint.channel != channel => {
+                Err(damage("binding checkpoint names another channel"))
+            }
+            read => Ok(read.map(|checkpoint| checkpoint.seq)),
+        }
+    }
+
     /// Appends an operator's start for a pending source to the ledger and fsyncs it, without
     /// opening the channel: nothing is swept or rewritten, and the writer applies it on start.
     pub fn record_boundary_resolved(

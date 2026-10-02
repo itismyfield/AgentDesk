@@ -507,6 +507,8 @@ src/
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
+│   │   ├── campaign_handoff.rs
+│   │   ├── campaign_handoff_tests.rs
 │   │   ├── cancel_run.rs
 │   │   ├── cleanup_tasks.rs
 │   │   ├── cleanup_tasks_pg_tests.rs
@@ -525,7 +527,6 @@ src/
 │   │   ├── query.rs
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
-│   │   ├── route_request_generate.rs
 │   │   ├── route_types.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
@@ -754,6 +755,8 @@ src/
 │   │   │   ├── exact_lease.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
+│   │   │   ├── herdr_agent_hint.rs
+│   │   │   ├── herdr_agent_hint_tests.rs
 │   │   │   ├── herdr_observation.rs
 │   │   │   ├── herdr_observation_tests.rs
 │   │   │   ├── herdr_report_order.rs
@@ -1060,6 +1063,7 @@ src/
 │   │   ├── relay_recovery/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
+│   │   │   │   ├── host_deferred.rs
 │   │   │   │   ├── incarnation_follow_up.rs
 │   │   │   │   ├── orphan_token_finish.rs
 │   │   │   │   └── unread_tail_seed.rs
@@ -1094,7 +1098,8 @@ src/
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── queue_effects.rs
-│   │   │   │   └── stale_turn.rs
+│   │   │   │   ├── stale_turn.rs
+│   │   │   │   └── stale_turn_host_tests.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── entrypoints.rs
@@ -1387,7 +1392,8 @@ src/
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
-│   │   │   │   └── stale_resume_retry_e2e.rs
+│   │   │   │   ├── stale_resume_retry_e2e.rs
+│   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
@@ -1511,6 +1517,7 @@ src/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
+│   │   │   │   ├── process_force_kill_tests.rs
 │   │   │   │   ├── process_table.rs
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
@@ -2088,10 +2095,12 @@ src/
 │   │   │   ├── host_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── reclaim_tests.rs
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
 │   │   │   └── writer_tests.rs

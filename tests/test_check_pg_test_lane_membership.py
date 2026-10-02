@@ -222,6 +222,56 @@ class NonPgFilterContract(unittest.TestCase):
         )
 
 
+    def test_pg_shards_must_partition_and_come_from_the_main_matrix(self) -> None:
+        main = self.root / ".github/workflows/ci-main.yml"
+        main.write_text(
+            main.read_text("utf-8")
+            + "  postgres:\n    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n"
+            + "    steps:\n      - run: just test-postgres-shard\n",
+            "utf-8",
+        )
+        (self.root / "justfile").write_text(
+            "test-postgres:\n    cargo test --lib\n\n"
+            "test-postgres-shard:\n    test \"$PG_INCLUDE_SHARD\" = 1 || just test-postgres\n",
+            "utf-8",
+        )
+        self.assertEqual(membership.non_pg_filter_contract_errors(self.root, self.jobs()), ())
+        cases = {
+            "dropped include": (
+                membership.NON_PG_FILTER_REL,
+                "PG_INCLUDE_ARGS_SHARD_1=(\n  _pg\n", "PG_INCLUDE_ARGS_SHARD_1=(\n",
+                "PG shards [] select",
+            ),
+            "duplicated selector": (
+                membership.NON_PG_FILTER_REL, "  --skip postgres\n)", ")", "PG shards [0, 1] select",
+            ),
+            "literal shard": (
+                Path(".github/workflows/ci-main.yml"), "${{ matrix.shard }}", "1",
+                "must be set once, from matrix.shard",
+            ),
+            "justfile sets shard": (
+                Path("justfile"), "    cargo test --lib\n", "    PG_INCLUDE_SHARD=0 cargo test --lib\n",
+                "justfile: PG_INCLUDE_SHARD is set",
+            ),
+            "nightly shard": (
+                Path(".github/workflows/ci-nightly.yml"),
+                "  postgres_full:\n", "  postgres_full:\n    env:\n      PG_INCLUDE_SHARD: 1\n",
+                "ci-nightly.yml: PG_INCLUDE_SHARD is used outside",
+            ),
+        }
+        for name, (rel, old, new, expected) in cases.items():
+            with self.subTest(name):
+                path = self.root / rel
+                original = path.read_text("utf-8")
+                self.assertEqual(original.count(old), 1)
+                path.write_text(original.replace(old, new), "utf-8")
+                try:
+                    errors = membership.non_pg_filter_contract_errors(self.root, self.jobs())
+                finally:
+                    path.write_text(original, "utf-8")
+                self.assertTrue(any(expected in error for error in errors), errors)
+
+
 class DetectionMutation(FixtureCase):
     def test_seed_detection_and_production_counterexample(self) -> None:
         self.fx.write_source(
