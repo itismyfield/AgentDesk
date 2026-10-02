@@ -27,21 +27,34 @@ env:
 
 jobs:
   full_non_pg:
+    # The whole non-PG library, adjudicated exactly as the PR `library_sweep`;
+    # fmt/clippy/policy JS run in the separate `lint` job.
     name: Full tests (ubuntu-latest)
     runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      # The id filters miss PG-dependent tests that carry no pg substring, so the
+      # sweep needs its own PostgreSQL and must fail rather than soft-skip.
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
+      # Test debuginfo pushes the lib test link past hosted-runner memory (exit 143).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
-          components: clippy, rustfmt
-
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just@1.51.0
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -60,6 +73,57 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Library sweep (selection-set gated)
+        timeout-minutes: 45
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
+          run_non_pg_filter_replay
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  lint:
+    # The rest of `just check`: fmt, clippy (covers `cargo check`), policy JS, and
+    # the non-lib `test-non-pg` lines. The env matches the PR `Lint runner`.
+    name: Main lint and non-lib tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+          components: clippy, rustfmt
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.51.0
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # See `full_non_pg` for rationale.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -68,25 +132,29 @@ jobs:
       - name: Policy JS unit tests
         run: npm run test:policies
 
-      # `just check` wraps fmt, staged clippy, cargo check, and the targeted
-      # non-PG subset. PR CI runs only the compile/policy portion to keep its
-      # critical path short; this main-push lane retains the test coverage.
-      # The same non-PG filters apply to every cargo test command since this
-      # lane has no Postgres service. PR #1306 (#1237) made production routes
-      # PG-only, so an `--all-targets` non-PG sweep panics in 169 SQLite-fixture
-      # tests that haven't been ported to PG fixtures yet. The PG migration is
-      # tracked under #1238; once the bulk of the migration lands, this
-      # lane can broaden again.
-      - name: just check
-        run: just check
+      - name: just fmt-check
+        run: just fmt-check
+
+      - name: just lint
+        run: just lint
+
+      # The library sweep covers the lib side of the `--all-targets` filters; this
+      # runs their non-lib side and the ClaudeBinary compile-fail doctests.
+      - name: Non-lib tests and doctests
+        shell: bash
         env:
-          RUST_BACKTRACE: 1
-          # #4245: both main test lanes die with SIGTERM (exit 143) during the
-          # `--all-targets` test build/link phase — hosted-runner memory kill.
-          # Strip debuginfo from test builds to cut link memory/time; symbol-less
-          # backtraces are an accepted CI trade-off.
-          CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --bins --test '*' transition -- "${NON_PG_SKIP_ARGS[@]}" --test-threads=1
+          cargo test --bins --test '*' auto_queue -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --test '*' cancel -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --test '*' review_decision -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --test '*' stall_recovery -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --test '*' routines -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test invariant --bins --test '*' -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --doc ClaudeBinary
 
       - name: sccache stats
         if: always()
@@ -151,7 +219,8 @@ jobs:
           resource_sample > "$RUNNER_TEMP/pg-resource-samples.log" 2>&1 &
 
       - name: just test-postgres
-        timeout-minutes: 30
+        # Same budget as ci-pr.yml; main hit 30 min at 25–27 min typical runtime.
+        timeout-minutes: 40
         run: just test-postgres
         env:
           # #4245: see Full tests lane — keep test debuginfo off so the build
@@ -173,11 +242,8 @@ jobs:
 
   high-risk-recovery:
     name: High-risk recovery (main)
-    # #5232 R3: deliberately UNCONDITIONAL here, unlike ci-pr.yml. ci-main has
-    # no library sweep to catch a path-filter miss, so the filter would have to
-    # be exhaustive to be safe; a main push pays this lane once per merge, so it
-    # just runs. The `changes` job that gated it was the filter's only consumer
-    # and is removed with it rather than left as dead configuration.
+    # Unconditional, unlike ci-pr.yml: the main library sweep skips
+    # `high_risk_recovery`, so this lane is main's only runner for those tests.
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
@@ -218,10 +284,8 @@ jobs:
       - name: High-risk recovery lane
         run: "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 
-      # #5147: the self-watchdog forensics guards. Adding them to the path
-      # filter alone would have changed nothing on main -- this job ran exactly
-      # one target, so the filter had no test to select. `just check` does not
-      # reach these either; `test-non-pg` is a curated list, not a lib sweep.
+      # Serial runs of the watchdog forensics guards; the parallel library sweep
+      # in `full_non_pg` also runs them.
       - name: Watchdog hang-forensics guards
         run: |
           cargo test --lib services::hang_forensics::tests -- --test-threads=1

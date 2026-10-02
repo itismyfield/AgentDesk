@@ -341,6 +341,7 @@ jobs:
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/streaming_baseline_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/herdr_source_tests.rs'
               - 'src/services/discord/tui_prompt_relay/rehydration.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
@@ -536,8 +537,8 @@ jobs:
             # compile-existence half (check_fast, which compiles the
             # `relay_state_contract_refs` blocks so a renamed/removed contract
             # symbol fails to compile) MUST run even for doc-only changes.
-            # Keep this list in sync with REFERENCE_SOURCE_MODULES in
-            # scripts/check_contract_symbol_refs.py.
+            # Mirrors REFERENCE_SOURCE_MODULES in scripts/check_contract_symbol_refs.py;
+            # RelayContractPathFilterTest fails when the two sets differ.
             relay_contract:
               - 'docs/relay-state-contract.md'
               - 'scripts/check_contract_symbol_refs.py'
@@ -546,6 +547,10 @@ jobs:
               - 'src/services/discord/turn_bridge/terminal_delivery.rs'
               - 'src/services/discord/tmux_watcher/liveness.rs'
               - 'src/services/discord/router/message_handler/watchdog.rs'
+              - 'src/services/discord/mailbox_finish.rs'
+              - 'src/services/discord/session_relay_sink.rs'
+              - 'src/services/discord/formatting.rs'
+              - 'src/services/discord/outbound/delivery_record.rs'
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
@@ -1537,10 +1542,8 @@ jobs:
   # "check the service", not as "the sweep got slower".
   #
   # Boundaries and why they are here rather than wider:
-  #   * `--lib` only. `full_non_pg` in ci-main.yml documents that an
-  #     `--all-targets` non-PG sweep panics in ~169 SQLite-fixture tests that
-  #     still await the #1238 PostgreSQL migration; pulling them in would force
-  #     either a huge isolation ledger or a re-narrowed filter.
+  #   * `--lib` only: an `--all-targets` non-PG sweep panics in SQLite-fixture
+  #     tests that still await their PostgreSQL migration.
   #   * The id-filtered PostgreSQL suite keeps its existing home in `test_fast`
   #     / `just test-postgres`: that lane runs it `--test-threads=1` under its
   #     own container. This lane provisions its own container for the 55
@@ -2040,7 +2043,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=844d56591392855efb9492658a595d84e06a9337d18f4cea1810ab582614dd1b
+          expected=d972dbd5bcf7b502618a28d900aff37262f1f08e0d860511801522a39fbeac9d
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2255,7 +2258,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=844d56591392855efb9492658a595d84e06a9337d18f4cea1810ab582614dd1b
+          expected=d972dbd5bcf7b502618a28d900aff37262f1f08e0d860511801522a39fbeac9d
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -142,6 +142,22 @@ impl HostIo for GatewayHost {
     fn legacy(&self) -> Arc<dyn LegacyView> {
         Arc::new(LegacyRelay::new(Arc::clone(&self.shared)))
     }
+
+    /// An active turn, a queued intervention or a dispatch not yet started.
+    fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
+        let shared = Arc::clone(&self.shared);
+        async move {
+            let mailbox = super::super::mailbox_snapshot(&shared, ChannelId::new(channel)).await;
+            mailbox.cancel_token.is_some()
+                || !mailbox.intervention_queue.is_empty()
+                || mailbox.pending_user_dispatch.is_some()
+        }
+    }
+
+    fn relaying(&self, channel: u64) -> bool {
+        self.shared
+            .relay_emission_in_flight(ChannelId::new(channel))
+    }
 }
 
 /// Starts the writer host for this provider's gateway runtime; it never waits on the gateway.

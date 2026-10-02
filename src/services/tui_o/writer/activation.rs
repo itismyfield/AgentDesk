@@ -1,6 +1,5 @@
-//! First activation of a selected channel that has no O store yet. Its `init` (and the era, on a
-//! fresh store) is created only while the channel is still pending adoption. A check that fails
-//! before any store write releases the channel to Legacy; after a failed write the store decides.
+//! First activation of a selected channel with no O store: its `init` is written only while pending
+//! or deferred. A failed check releases only a pending one; after a failed write the store decides.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
@@ -25,15 +24,22 @@ pub struct ActivationFacts {
 
 impl ActivationFacts {
     fn blocker(&self) -> Option<String> {
-        if self.open_intake != 0 {
-            return Some(format!("{} open intake rows", self.open_intake));
-        }
+        self.transient_blocker().or_else(|| self.final_blocker())
+    }
+
+    /// What keeps the channel off this node for good: sessions on another node or an override.
+    pub fn final_blocker(&self) -> Option<String> {
         if self.runner_sessions != 0 {
             return Some(format!("{} sessions on another node", self.runner_sessions));
         }
         self.node_override
             .as_ref()
             .map(|node| format!("node override to {node}"))
+    }
+
+    /// What may clear while the channel waits: open intake rows.
+    pub fn transient_blocker(&self) -> Option<String> {
+        (self.open_intake != 0).then(|| format!("{} open intake rows", self.open_intake))
     }
 }
 
@@ -112,7 +118,7 @@ fn adopt(
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
     spent: &mut Spent,
 ) -> Result<(), String> {
-    if *adoption != Adoption::Pending {
+    if !matches!(*adoption, Adoption::Pending | Adoption::Deferred) {
         return Err(format!("adoption is already {adoption:?}"));
     }
     let at = Instant::now();
@@ -127,7 +133,10 @@ fn adopt(
     let sources = match checked {
         Ok(sources) => sources,
         Err(detail) => {
-            *adoption = Adoption::Released;
+            // A deferred channel stays deferred: its host decides whether the refusal is final.
+            if *adoption == Adoption::Pending {
+                *adoption = Adoption::Released;
+            }
             return Err(detail);
         }
     };
@@ -215,7 +224,7 @@ fn create(store: &OStore, channel: u64, sources: Vec<InitSource>) -> Result<(), 
 fn empty_sources<B: BindingEvents>(bindings: &B, channel: u64) -> Result<Vec<InitSource>, String> {
     let events = bindings.binding_events_since(channel, 0);
     let events = events.map_err(|error| format!("binding log: {error}"))?;
-    let (bound, named) = logged(&events)?;
+    let (bound, named) = logged(&events).map_err(|refused| refused.to_string())?;
     for source in bound.iter().chain(&named) {
         still_empty(source)?;
     }

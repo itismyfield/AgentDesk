@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 91
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 95
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -104,6 +104,10 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs:33` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:515` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs:19` |  |
+| `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs:20` (+1 more) |  |
+| `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs:22` (+1 more) | Test seam: a child process stops at this create stage until stdin yields a line. |
+| `AGENTDESK_TEST_PG_RECLAIM_SERVER` | `src/db/postgres/test_db_reclaim.rs:18` |  |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1014` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs:144` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |

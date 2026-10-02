@@ -674,7 +674,7 @@ async fn unit_after_the_recheck() {
     let activation = std::thread::spawn(move || {
         let events = log.binding_events_since(A, 0)?;
         let snapshot = held::pin(&*legacy, &events, A)?;
-        let sources = || snapshot.recheck(&*legacy, &*log, A);
+        let sources = || snapshot.recheck(&*legacy, &*log, A).map_err(String::from);
         let facts = Ok(Default::default());
         let asked = Instant::now();
         let result = activation::activate_with(&store, A, facts, || Ok(false), &adopting, sources);

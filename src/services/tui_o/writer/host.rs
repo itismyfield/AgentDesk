@@ -11,8 +11,9 @@ use tokio::task::JoinHandle;
 
 use super::activation::{self, ActivationFacts};
 use super::actor;
-use super::adoption::{self, LegacyView};
+use super::adoption::{self, Hold, LegacyView};
 use super::binding::BindingEvents;
+use super::deferred;
 use super::deliver::ChannelWriter;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -44,6 +45,10 @@ pub trait HostIo: Send + Sync + 'static {
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<bool, String>;
     /// Legacy's relay state, asked only for a Claude channel whose sources already hold output.
     fn legacy(&self) -> Arc<dyn LegacyView>;
+    /// Whether Legacy's mailbox for the channel holds a turn, an intervention or a pending dispatch.
+    fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send;
+    /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
+    fn relaying(&self, channel: u64) -> bool;
 }
 
 /// Channels with a hosted actor and those ready to take work.
@@ -184,16 +189,16 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
 }
 
 /// A channel not adopted before its first `init` stays Legacy's for this process.
-fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
+pub(super) fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
     let detail = format!("adoption held: {detail}");
     stop(candidate, alarms, channel, &detail);
 }
 
-/// Names a stop by the adoption it left: a released channel's output is Legacy's, so only an
-/// owned or undecided channel is held.
-fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
-    if candidate.peek() != Adoption::Released {
+/// Names a stop by the adoption it left: a released or deferred channel's output is Legacy's, so
+/// only an owned or undecided channel is held.
+pub(super) fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
+    if !matches!(candidate.peek(), Adoption::Released | Adoption::Deferred) {
         return hold(alarms, channel, detail);
     }
     tracing::warn!(
@@ -252,21 +257,54 @@ async fn host_channel<I: HostIo>(
             let mut abandoned = None;
             let created = match legacy {
                 None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
-                Some(legacy) => {
+                Some(legacy) => 'held: {
+                    // Sessions on another node or an override end it before an open turn defers it.
+                    let last = facts.as_ref().ok().and_then(ActivationFacts::final_blocker);
+                    if let Some(detail) = last {
+                        return release(&candidate, &alarms, channel, &detail);
+                    }
                     let events = log.binding_events_since(channel, 0);
                     let events = events.map_err(|error| format!("binding log: {error}"));
-                    // Pinning reads whole transcripts, so it stays off the runtime's threads.
-                    let view = Arc::clone(&legacy);
-                    let pinned = tokio::task::spawn_blocking(move || {
-                        adoption::pin(&*view, &events?, channel)
-                    });
-                    let pinned = pinned.await.map_err(|error| format!("pin task: {error}"));
-                    let snapshot = match pinned.and_then(|pinned| pinned) {
+                    let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
+                    let current = events.as_deref().ok().and_then(adoption::current);
+                    let pinned = deferred::pin(Arc::clone(&legacy), events, channel).await;
+                    let snapshot = match pinned {
                         Ok(snapshot) => snapshot,
-                        Err(detail) => return release(&candidate, &alarms, channel, &detail),
+                        Err(refused) if matches!(refused.hold, Hold::OpenTurn(_)) => {
+                            let detail = refused.to_string();
+                            let Some((source, _)) = current else {
+                                return release(&candidate, &alarms, channel, &detail);
+                            };
+                            if !candidate.defer(channel) {
+                                return release(&candidate, &alarms, channel, &detail);
+                            }
+                            tracing::info!(channel, %refused, "[tui_o] adoption waits for Legacy");
+                            let waiting = deferred::Waiting {
+                                io: &*io,
+                                channel,
+                                provider,
+                                candidate: &candidate,
+                                gate: &*gate,
+                                store: &fresh,
+                                log: &**log,
+                                legacy,
+                                bound: (source, seq),
+                            };
+                            if !deferred::retry(waiting, refused, seq).await {
+                                return;
+                            }
+                            break 'held Ok(());
+                        }
+                        Err(refused) => {
+                            return release(&candidate, &alarms, channel, &refused.to_string());
+                        }
                     };
                     abandoned = snapshot.abandoned();
-                    let sources = || snapshot.recheck(&*legacy, &**log, channel);
+                    let sources = || {
+                        snapshot
+                            .recheck(&*legacy, &**log, channel)
+                            .map_err(String::from)
+                    };
                     activation::activate_with(&fresh, channel, facts, local, &candidate, sources)
                 }
             };
@@ -308,7 +346,7 @@ async fn host_channel<I: HostIo>(
 }
 
 /// Returns once the gate is Owned; a gate not yet acquired at startup is waited on, not held.
-async fn until_owned(gate: &OwnershipGate) {
+pub(super) async fn until_owned(gate: &OwnershipGate) {
     let mut watch = gate.subscribe();
     while !matches!(*watch.borrow_and_update(), GatewayOwnership::Owned { .. }) {
         if watch.changed().await.is_err() {
@@ -482,6 +520,9 @@ pub(crate) mod test_io {
         pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
         /// Legacy's custody of a channel as the gateway reads it; none when unset.
         pub(crate) custody: Mutex<Option<fn(u64) -> bool>>,
+        /// Legacy's mailbox work and watcher emission for every channel; idle by default.
+        pub(crate) busy: std::sync::atomic::AtomicBool,
+        pub(crate) relaying: std::sync::atomic::AtomicBool,
     }
 
     impl TestHost {
@@ -495,6 +536,8 @@ pub(crate) mod test_io {
                 legacy: Mutex::default(),
                 sessions: Mutex::default(),
                 custody: Mutex::default(),
+                busy: Default::default(),
+                relaying: Default::default(),
             })
         }
     }
@@ -567,6 +610,14 @@ pub(crate) mod test_io {
         fn legacy(&self) -> Arc<dyn LegacyView> {
             let set = locked(&self.legacy).clone();
             set.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
+        }
+
+        fn legacy_busy(&self, _: u64) -> impl Future<Output = bool> + Send {
+            std::future::ready(self.busy.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn relaying(&self, _: u64) -> bool {
+            self.relaying.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 }

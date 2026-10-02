@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "844d56591392855efb9492658a595d84e06a9337d18f4cea1810ab582614dd1b"
+    "d972dbd5bcf7b502618a28d900aff37262f1f08e0d860511801522a39fbeac9d"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -814,8 +814,49 @@ class FastCheckCiWiringTests(unittest.TestCase):
             EXPECTED_TEST_NON_PG_COMMANDS,
         )
 
-        main_job = job_block(MAIN_WORKFLOW.read_text(encoding="utf-8"), "full_non_pg")
-        self.assertIn("- name: just check\n        run: just check", main_job)
+        # Main runs the PR library sweep step verbatim, so both adjudicate the
+        # same manifest-derived selection; fmt/clippy/policy JS move to `lint`.
+        main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        pr_jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        sweep_step = "Library sweep (selection-set gated)"
+
+        def named(job: dict, name: str) -> list[dict]:
+            return [step for step in job["steps"] if step.get("name") == name]
+
+        self.assertEqual(
+            named(main_jobs["full_non_pg"], sweep_step),
+            named(pr_jobs["library_sweep"], sweep_step),
+        )
+        self.assertEqual(len(named(main_jobs["full_non_pg"], sweep_step)), 1)
+        # Every non-`--lib` line of `test-non-pg` still runs on main: the sweep
+        # covers the lib, so `--all-targets` lines run on the non-lib targets
+        # under the canonical non-PG filter that ci-main must source.
+        recipe = just_recipe_commands(justfile, "test-non-pg")
+        non_lib = [
+            command.replace(" --all-targets", " --bins --test '*'").replace(
+                "-- --skip _pg --skip pg_ --skip postgres",
+                '-- "${NON_PG_SKIP_ARGS[@]}"',
+            )
+            for command in recipe
+            if "cargo test --lib " not in command
+        ]
+        self.assertIn("cargo test --doc ClaudeBinary", non_lib)
+        self.assertEqual(
+            [
+                line.strip()
+                for step in main_jobs["lint"]["steps"]
+                for line in str(step.get("run", "")).splitlines()
+                if line.strip()
+            ],
+            [
+                "npm run test:policies",
+                "just fmt-check",
+                "just lint",
+                "source scripts/ci/non-pg-test-filter.sh",
+                *non_lib,
+                "sccache --show-stats || true",
+            ],
+        )
 
         nightly = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
         for job_name in ("full_macos", "full_windows"):

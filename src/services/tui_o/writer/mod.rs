@@ -6,6 +6,7 @@ pub mod actor;
 pub mod adoption;
 pub mod binding;
 pub mod confirm;
+mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod pieces;

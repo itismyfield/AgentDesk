@@ -144,13 +144,13 @@ impl Channel {
     }
 
     fn pin(&self) -> Result<Snapshot, String> {
-        pin(&self.legacy, &self.log.0, self.channel)
+        pin(&self.legacy, &self.log.0, self.channel).map_err(String::from)
     }
 
     /// The host's first activation over `snapshot`, with no gateway or local blocker.
     fn activate(&self, store: &OStore, snapshot: &Snapshot) -> Result<(), String> {
         let (legacy, log, channel) = (&self.legacy, &self.log, self.channel);
-        let sources = || snapshot.recheck(legacy, log, channel);
+        let sources = || snapshot.recheck(legacy, log, channel).map_err(String::from);
         let facts = Ok(ActivationFacts::default());
         activation::activate_with(
             store,
