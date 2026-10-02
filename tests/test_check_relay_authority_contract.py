@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -404,6 +405,135 @@ class ManifestContract(unittest.TestCase):
         with temporary:
             with self.assertRaisesRegex(contract.ManifestError, "integer >= 1"):
                 contract.load_active_lanes(path)
+
+
+RELAY_C1_LANE = "t5-c1-rowless-terminal-ledger-and-lease"
+CENSUS_COMMAND = (
+    "          env -u AGENTDESK_ROOT_DIR cargo test --lib "
+    "services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1"
+)
+
+
+def replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"{old!r} occurs {text.count(old)} times in {path}"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def entry(payload: dict, path: str) -> dict:
+    return next(item for item in payload["authority_surface"] if item["path"] == path)
+
+
+def add_undeclared_row(payload: dict, root: Path) -> None:
+    payload["condition3_mutations"].append({
+        "name": "new-row", "file": "src/services/discord/inflight.rs",
+        "target": "services::discord::inflight::tests::x", "judge": "src/services/discord/inflight.rs",
+    })
+
+
+def add_script_only_file(payload: dict, root: Path) -> None:
+    script = root / contract.CONDITION3_MUTATION_SCRIPT
+    replace_once(script, '  "$DESTRUCTIVE_CANCEL_GATE"\n', '  "$DESTRUCTIVE_CANCEL_GATE"\n  "$NEW_AUTHORITY"\n')
+    replace_once(script, "readonly -a MUTATION_FILES=(", 'readonly NEW_AUTHORITY="src/new_authority.rs"\nreadonly -a MUTATION_FILES=(')
+
+
+def add_undeclared_lane(payload: dict, root: Path) -> None:
+    payload["lanes"].append(active_lane(
+        command=["cargo", "test", "--lib", "services::discord::inflight"], minimum=1,
+    ) | {"name": "new-lane"})
+    replace_once(root / contract.PR_WORKFLOW, CENSUS_COMMAND,
+                 CENSUS_COMMAND + "\n          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight -- --test-threads=1")
+
+
+def drop_entry(path: str):
+    return lambda payload, root: payload["authority_surface"].remove(entry(payload, path))
+
+
+def set_field(path: str, key: str, value: object):
+    return lambda payload, root: entry(payload, path).__setitem__(key, value)
+
+
+def move_row_guard(payload: dict, root: Path) -> None:
+    entry(payload, "src/services/discord/destructive_cancel_gate.rs")["guards"] = ["known_gap:#1"]
+    entry(payload, "src/services/discord/relay_recovery.rs")["guards"].append("mutation_row:S4-m6")
+
+
+def drop_filter_judge(payload: dict, root: Path) -> None:
+    replace_once(root / contract.PR_WORKFLOW, "              - 'src/services/discord/relay_recovery/tests.rs'\n", "")
+
+
+class AuthoritySurfaceContract(unittest.TestCase):
+    """Drive `--check-manifest` over a copy of the real manifest, script, workflow and sources,
+    so every declaration is graded against the files the gate actually reads."""
+
+    def check(self, mutate=None) -> tuple[int, str]:
+        payload = json.loads((REPO_ROOT / contract.DEFAULT_MANIFEST).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copied = {contract.DEFAULT_MANIFEST.as_posix(), contract.CONDITION3_MUTATION_SCRIPT.as_posix(),
+                      contract.PR_WORKFLOW.as_posix(), contract.LIB_TEST_INVENTORY.as_posix()}
+            copied |= {item["path"] for item in payload["authority_surface"]}
+            copied |= {row["judge"] for row in payload["condition3_mutations"]}
+            for relative in copied:
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO_ROOT / relative, root / relative)
+            if mutate is not None:
+                mutate(payload, root)
+            (root / contract.DEFAULT_MANIFEST).write_text(json.dumps(payload), encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = contract.main(["--repo-root", str(root), "--check-manifest"])
+        return rc, stdout.getvalue() + stderr.getvalue()
+
+    def test_checked_in_surface_passes_the_declaration_check(self) -> None:
+        rc, output = self.check()
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"surface=[1-9][0-9]* ")
+
+    def test_an_undeclared_or_unresolvable_authority_declaration_fails(self) -> None:
+        rowless = "src/services/discord/tmux_watcher/rowless_delivery_authority.rs"
+        cases = (
+            ("new mutation row not declared", add_undeclared_row, "declare every condition3 mutation row"),
+            ("new file in the script array only", add_script_only_file, "MUTATION_FILES must equal"),
+            ("new active lane not declared", add_undeclared_lane, "does not declare active lanes ['new-lane']"),
+            ("mutation row declaration deleted", drop_entry("src/services/discord/tmux_watcher_registry/fences.rs"),
+             "declare every condition3 mutation row"),
+            ("named target declaration deleted", drop_entry("src/services/discord/relay_recovery.rs"),
+             "does not declare active lanes ['t4-single-actor-recovery-decision']"),
+            ("surface section deleted", lambda payload, root: payload.pop("authority_surface"),
+             "non-empty authority_surface"),
+            ("declared path moved", set_field(rowless, "path", rowless.replace(".rs", "_moved.rs")),
+             "is not a regular file"),
+            ("entry test renamed", set_field("src/services/discord/catch_up.rs", "guards",
+                                             ["entry_test:services::discord::catch_up::no_such_test"]),
+             "is not in scripts/lib_test_inventory_manifest.txt"),
+            ("known gap without an issue", set_field("src/server/routes/health_api.rs", "guards", ["known_gap:5996"]),
+             "must cite an issue"),
+            ("unknown guard kind", set_field(rowless, "guards", ["reviewed:yes"]), "unknown guard"),
+            ("mutation row moved to a file it does not mutate", move_row_guard,
+             "mutation row S4-m6 does not mutate it"),
+            ("row without a judge", lambda payload, root: payload["condition3_mutations"][0].pop("judge"),
+             "must name an existing judge file"),
+            ("path filter drops a judge", drop_filter_judge, "mutation path filter must select"),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(case=name):
+                rc, output = self.check(mutate)
+                self.assertEqual(rc, 2, output)
+                self.assertIn(message, output)
+
+    def test_checked_in_surface_states_why_rowless_delivery_is_not_a_mutation_row(self) -> None:
+        """The rowless soft-terminal authority sits outside MUTATION_FILES; its files must stay
+        declared under the named target that guards them, with the reason recorded."""
+        payload = json.loads((REPO_ROOT / contract.DEFAULT_MANIFEST).read_text(encoding="utf-8"))
+        for path in (
+            "src/services/discord/tmux_watcher/rowless_delivery_authority.rs",
+            "src/services/discord/tmux_watcher/terminal_relay_plan.rs",
+            "src/services/discord/tmux_watcher/turn_identity/soft_terminal_authority.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"named_target:{RELAY_C1_LANE}", entry(payload, path)["guards"])
+        self.assertTrue(entry(payload, "src/services/discord/tmux_watcher/rowless_delivery_authority.rs")["note"])
 
 
 class SelectionContract(unittest.TestCase):
