@@ -1540,10 +1540,8 @@ jobs:
   # "check the service", not as "the sweep got slower".
   #
   # Boundaries and why they are here rather than wider:
-  #   * `--lib` only. `full_non_pg` in ci-main.yml documents that an
-  #     `--all-targets` non-PG sweep panics in ~169 SQLite-fixture tests that
-  #     still await the #1238 PostgreSQL migration; pulling them in would force
-  #     either a huge isolation ledger or a re-narrowed filter.
+  #   * `--lib` only: an `--all-targets` non-PG sweep panics in SQLite-fixture
+  #     tests that still await their PostgreSQL migration.
   #   * The id-filtered PostgreSQL suite keeps its existing home in `test_fast`
   #     / `just test-postgres`: that lane runs it `--test-threads=1` under its
   #     own container. This lane provisions its own container for the 55
@@ -2043,7 +2041,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=844d56591392855efb9492658a595d84e06a9337d18f4cea1810ab582614dd1b
+          expected=d972dbd5bcf7b502618a28d900aff37262f1f08e0d860511801522a39fbeac9d
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2258,7 +2256,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=844d56591392855efb9492658a595d84e06a9337d18f4cea1810ab582614dd1b
+          expected=d972dbd5bcf7b502618a28d900aff37262f1f08e0d860511801522a39fbeac9d
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -1347,6 +1347,76 @@ RUBY
 }
 validate_main_script_check_shards
 
+# Main's full sweep runs with the PR sweep's PostgreSQL and debuginfo-free env;
+# no step of it or of lint may be skipped or fail open, except always() cleanup.
+validate_main_full_sweep() {
+  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+require "yaml"
+main_path, pr_path = ARGV
+main_jobs = YAML.load_file(main_path).fetch("jobs", {})
+pr_sweep = YAML.load_file(pr_path).dig("jobs", "library_sweep")
+errors = []
+sweep_name = "Library sweep (selection-set gated)"
+lint_tests_name = "Non-lib tests and doctests"
+cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
+{"full_non_pg" => "Full tests (ubuntu-latest)", "lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
+  job = main_jobs[job_id]
+  unless job.is_a?(Hash)
+    errors << "job #{job_id} is missing"
+    next
+  end
+  errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
+  errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+  %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
+  Array(job["steps"]).each do |step|
+    next unless step.is_a?(Hash)
+    label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
+    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
+    errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
+  end
+end
+lint = main_jobs["lint"]
+if lint.is_a?(Hash)
+  lint_steps = Array(lint["steps"]).select { |step| step.is_a?(Hash) }
+  ["Policy JS unit tests", "just fmt-check", "just lint", lint_tests_name].each do |name|
+    errors << "job lint must have exactly one #{name.inspect} step" unless lint_steps.count { |step| step["name"] == name } == 1
+  end
+  tests = lint_steps.find { |step| step["name"] == lint_tests_name }
+  %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
+    errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
+  end
+end
+job = main_jobs["full_non_pg"]
+if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
+  env = job["env"] || {}
+  errors << "job full_non_pg env must equal #{pr_path} library_sweep env" unless env == pr_sweep["env"]
+  { "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0", "AGENTDESK_REQUIRE_PG" => "1" }.each do |key, value|
+    errors << "job full_non_pg env must set #{key}=#{value}" unless env[key] == value
+  end
+  steps = Array(job["steps"])
+  index = ->(pred) { steps.index { |step| step.is_a?(Hash) && pred.(step) } }
+  start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start" && !step.key?("if") })
+  sweep = index.(->(step) { step["name"] == sweep_name })
+  stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" && step["if"] == "always()" })
+  errors << "job full_non_pg must start PostgreSQL, sweep, then stop PostgreSQL under always()" unless start && sweep && stop && start < sweep && sweep < stop
+  if sweep
+    step = steps[sweep]
+    %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
+      errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
+    end
+  end
+else
+  errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
+end
+errors.each { |message| warn "#{main_path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must run the full non-PG sweep unconditionally with PostgreSQL and debuginfo stripped"
+  fi
+}
+validate_main_full_sweep
+
 # The main-only Windows warm job must save the cache keys the PR Windows jobs
 # restore: same workflow/job env, setup steps, rust-cache inputs and compile.
 validate_main_windows_cache_warm() {

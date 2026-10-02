@@ -39,10 +39,12 @@ NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
 NON_PG_FILTER_WORKFLOWS = (
     Path(".github/workflows/ci-pr.yml"),
+    Path(".github/workflows/ci-main.yml"),
     Path(".github/workflows/ci-nightly.yml"),
 )
 NON_PG_FILTER_REQUIRED_JOBS = frozenset({
     ".github/workflows/ci-pr.yml:library_sweep",
+    ".github/workflows/ci-main.yml:full_non_pg",
     ".github/workflows/ci-nightly.yml:full_macos",
     ".github/workflows/ci-nightly.yml:full_windows",
 })
@@ -1398,12 +1400,12 @@ def load_lib_test_inventory(repo_root: Path) -> set[str]:
 def non_pg_filter_contract_errors(
     repo_root: Path, jobs: Iterable[Job]
 ) -> tuple[str, ...]:
-    """Require both workflows to consume one filter in the same run scalar.
+    """Require every filter workflow to consume one filter in the same run scalar.
 
     This is a wiring contract, not a classifier-quality claim. It proves that
-    the named PR/nightly jobs source and use the canonical arrays, that replay
+    the named PR/main/nightly jobs source and use the canonical arrays, that replay
     ids still exist, and that no second literal ``--skip`` definition has
-    appeared in either workflow. The literal duplicate scan only understands
+    appeared in any of those workflows. The literal duplicate scan only understands
     ``--skip`` spellings; the source/use and assignment checks separately pin
     the two array expansions but do not interpret arbitrary shell transforms.
     The PG membership rules remain responsible for what the resulting
@@ -1576,7 +1578,7 @@ def check_non_pg_filter_contract(repo_root: Path) -> int:
         print(f"FAIL: [non-pg-filter-contract] {error}", file=sys.stderr)
     if errors:
         print(
-            "FAIL: PR and nightly filter lanes must source one canonical filter; "
+            "FAIL: PR, main and nightly filter lanes must source one canonical filter; "
             "a literal or missing consumer would recreate divergent definitions.",
             file=sys.stderr,
         )
