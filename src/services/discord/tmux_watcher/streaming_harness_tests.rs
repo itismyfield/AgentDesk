@@ -24,6 +24,10 @@ mod o_delegated_watcher_tests;
 #[path = "post_stream_exit_host_tests.rs"]
 mod post_stream_exit_host_tests;
 
+#[cfg(test)]
+#[path = "judged_stop_harness_tests.rs"]
+mod judged_stop_harness_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());

@@ -1313,6 +1313,7 @@ src/
 │   │   │   ├── entry.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── jsonl_rotation.rs
+│   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
