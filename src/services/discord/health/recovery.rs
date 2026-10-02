@@ -349,6 +349,21 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
 ) -> Option<RuntimeTurnStopResult> {
     let provider = ProviderKind::from_str(provider_name)?;
     let shared = shared_for_provider(registry, &provider, channel_id).await?;
+    let stop = stop_channel_runtime(&shared, &provider, channel_id, reason, cleanup_policy, None);
+    Some(stop.await)
+}
+
+/// A turn stop on `shared`'s channel; a force-kill passes the session its verdict approved
+/// (`Some(None)`: a process turn) so the stop never judges the host again.
+pub(crate) async fn stop_channel_runtime(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &str,
+    cleanup_policy: discord::TmuxCleanupPolicy,
+    approved: Option<Option<&str>>,
+) -> RuntimeTurnStopResult {
+    let (shared, provider) = (shared.clone(), provider.clone());
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();
     let should_clear_persistent_inflight = cleanup_policy.should_clear_inflight();
     let persistent_inflight_was_present = should_clear_persistent_inflight
@@ -373,7 +388,14 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
             skipped_idle_provider_interrupt = true;
             false
         } else if !result.already_stopping || cleanup_requested {
-            discord::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason).await
+            discord::turn_bridge::stop_approved_turn(
+                &provider,
+                token,
+                approved,
+                cleanup_policy,
+                reason,
+            )
+            .await
         } else {
             false
         };
@@ -384,7 +406,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
             } else {
                 false
             };
-            return Some(RuntimeTurnStopResult {
+            return RuntimeTurnStopResult {
                 lifecycle_path: "canonical",
                 had_active_turn: true,
                 queue_depth: snapshot.intervention_queue.len(),
@@ -400,7 +422,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
                 // canonical exit, which is the only path that never needed a
                 // zombie release in the first place.
                 mailbox_foreground_free: snapshot.cancel_token.is_none(),
-            });
+            };
         }
     }
 
@@ -425,9 +447,14 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
             );
             skipped_idle_provider_interrupt = true;
         } else {
-            termination_recorded =
-                discord::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason)
-                    .await;
+            termination_recorded = discord::turn_bridge::stop_approved_turn(
+                &provider,
+                token,
+                approved,
+                cleanup_policy,
+                reason,
+            )
+            .await;
         }
     }
     apply_runtime_hard_stop_cleanup(
@@ -488,14 +515,14 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         queue_depth
     };
 
-    Some(RuntimeTurnStopResult {
+    RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
         had_active_turn: finish.removed_token.is_some() || release.released,
         queue_depth,
         persistent_inflight_cleared,
         termination_recorded,
         mailbox_foreground_free,
-    })
+    }
 }
 
 pub async fn force_kill_provider_channel_runtime(
@@ -1051,24 +1078,6 @@ fn revalidate_and_clear_explicit_background_inflight(
         finalizer_turn_id,
         claim_snapshot,
     }
-}
-
-pub async fn hard_stop_runtime_turn(
-    registry: Option<&HealthRegistry>,
-    provider_name: Option<&str>,
-    channel_id: Option<u64>,
-    tmux_name: Option<&str>,
-    stop_source: &'static str,
-) -> HardStopRuntimeResult {
-    runtime_turn_cleanup_by_lookup(
-        registry,
-        provider_name,
-        channel_id,
-        tmux_name,
-        stop_source,
-        true,
-    )
-    .await
 }
 
 pub async fn clear_idle_tmux_stale_turn(

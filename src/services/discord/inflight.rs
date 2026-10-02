@@ -13,7 +13,7 @@ mod host_locator;
 mod host_recovery_guard;
 #[cfg(test)]
 pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
-    seed_session_row, seed_session_row_keyed,
+    seed_session_row, seed_session_row_hashed, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
     KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup,
@@ -98,12 +98,14 @@ mod removal;
 #[cfg(test)]
 pub(in crate::services::discord) use self::removal::custody_notice_text;
 pub(crate) use self::removal::invalidate_stale_generation;
-pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;
 pub(in crate::services::discord) use self::removal::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use self::removal::{
     invalidate_stale_generation_in_root, set_test_tmux_alive_override, stale_removal_reason,
+};
+pub(in crate::services::discord) use self::removal::{
+    load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 
@@ -481,49 +483,6 @@ pub(super) fn inflight_state_file_exists(provider: &ProviderKind, channel_id: u6
     inflight_state_path(&root, provider, channel_id).exists()
 }
 
-pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
-    let Some(root) = inflight_runtime_root() else {
-        return false;
-    };
-
-    let provider_dir = inflight_provider_dir(&root, provider);
-    let Ok(entries) = fs::read_dir(&provider_dir) else {
-        return false;
-    };
-
-    let mut cleared = false;
-    for entry in entries.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(_lock) = lock_inflight_state_path(&path) else {
-            continue;
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
-            continue;
-        };
-        if state.tmux_session_name.as_deref() != Some(tmux_name) {
-            continue;
-        }
-        log_inflight_remove(
-            provider,
-            state.channel_id,
-            state.user_msg_id,
-            "clear_inflight_by_tmux_name",
-            &path,
-        );
-        if fs::remove_file(&path).is_ok() {
-            cleared = true;
-        }
-    }
-
-    cleared
-}
-
 pub(super) fn mark_all_inflight_states_restart_mode(
     provider: &ProviderKind,
     restart_mode: InflightRestartMode,
@@ -572,7 +531,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
 /// Re-reads the CURRENT on-disk state (so a delivery frontier that a concurrent
 /// draining watcher advanced between the unlocked enumeration and this write is
 /// preserved) and persists it with only `restart_mode` / `restart_generation`
-/// changed. Mirrors the lock-then-read pattern of `clear_inflight_by_tmux_name`.
+/// changed, under the same lock-then-read pattern as the other row clears.
 /// Returns whether the row was rewritten. Deliberately does NOT route through
 /// `save_inflight_state_in_root` (which writes the *caller's* snapshot): the
 /// whole point is to keep the on-disk frontier rather than carry a stale one.

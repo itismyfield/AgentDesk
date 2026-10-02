@@ -32,6 +32,17 @@ pub(in crate::services::discord) async fn seed_session_row_keyed(
     channel_id: u64,
     raw: Option<Value>,
 ) {
+    seed_session_row_hashed(pool, key, channel_id, TOKEN, raw).await;
+}
+
+/// [`seed_session_row_keyed`] with the channel identity of bot hash `hash`.
+pub(in crate::services::discord) async fn seed_session_row_hashed(
+    pool: &PgPool,
+    key: &str,
+    channel_id: u64,
+    hash: &str,
+    raw: Option<Value>,
+) {
     let channel = channel_id.to_string();
     let params = HookSessionUpsert {
         session_key: key,
@@ -53,7 +64,7 @@ pub(in crate::services::discord) async fn seed_session_row_keyed(
     };
     let identity = CanonicalSessionIdentity {
         kind: SessionIdentityKind::DiscordChannel,
-        discord_token_hash: TOKEN,
+        discord_token_hash: hash,
         channel_id: &channel,
     };
     upsert_hook_session_with_identity_pg(pool, params, Some(identity))

@@ -1,5 +1,5 @@
-//! The host a stop acts on, decided once from the token and shared by the interrupt, the
-//! cooperative cancel and the hard stop. Only a confirmed legacy tmux name reaches tmux.
+//! The host a stop acts on, decided once (from the token, or by a force-kill verdict) and shared
+//! by the interrupt, the cooperative cancel and the hard stop. Only legacy tmux reaches tmux.
 
 use std::sync::Arc;
 
@@ -7,6 +7,7 @@ use super::TmuxCleanupPolicy;
 use super::interrupt_policy::ProviderTurnInterruptOutcome;
 #[cfg(test)]
 use crate::services::claude_tui::host_input::MutationGate;
+use crate::services::provider::cancel_token_cleanup::executor::ExpectedBinding;
 use crate::services::provider::{CancelToken, ProviderKind};
 #[cfg(test)]
 use crate::services::session_host::HostKind;
@@ -17,13 +18,17 @@ use crate::services::session_host::ResolvedSessionTarget;
 #[cfg(test)]
 use crate::services::session_host::TargetHost;
 
-/// A tmux name whose `.host_kind` marker is absent or tmux when the stop began.
+/// A tmux name whose `.host_kind` marker is absent or tmux when the stop began, or that a
+/// force-kill verdict `approved` after reading its host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LegacyTmuxName(String);
+pub(super) struct LegacyTmuxName {
+    name: String,
+    approved: bool,
+}
 
 impl LegacyTmuxName {
     pub(super) fn as_str(&self) -> &str {
-        &self.0
+        &self.name
     }
 }
 
@@ -31,6 +36,8 @@ impl LegacyTmuxName {
 pub(super) enum StopRefusal {
     /// The token's `.host_kind` marker is not tmux; `local_tmux` logs what it holds.
     Marker,
+    /// The token names a session other than the one the force-kill verdict approved.
+    NotApproved,
     #[cfg(test)]
     Unknown,
     #[cfg(test)]
@@ -78,10 +85,28 @@ impl StopTarget {
             return Self::Process;
         };
         if crate::services::discord::host_liveness::local_tmux(&name, None) {
-            return Self::LegacyTmux(LegacyTmuxName(name));
+            return Self::LegacyTmux(LegacyTmuxName {
+                name,
+                approved: false,
+            });
         }
         let refusal = StopRefusal::Marker;
         Self::Refused { name, refusal }
+    }
+
+    /// The target a force-kill verdict approved; its host evidence, marker included, was read then.
+    pub(super) fn approved(token: &CancelToken, approved: Option<&str>) -> Self {
+        match token.tmux_session_name() {
+            None => Self::Process,
+            Some(name) if Some(name.as_str()) == approved => Self::LegacyTmux(LegacyTmuxName {
+                name,
+                approved: true,
+            }),
+            Some(name) => {
+                let refusal = StopRefusal::NotApproved;
+                Self::Refused { name, refusal }
+            }
+        }
     }
 
     /// Resolved host evidence for a Herdr turn; Unknown and Conflict never become tmux.
@@ -129,14 +154,16 @@ impl StopTarget {
         matches!(self, Self::Process | Self::LegacyTmux(_))
     }
 
-    /// The binding the executor must still hold for a destructive cleanup of this stop.
-    pub(super) fn expected_binding(&self) -> Option<&str> {
+    /// The binding the executor must still hold for a destructive cleanup of this stop; an
+    /// approved name carries its verdict so the executor does not judge its host again.
+    pub(super) fn expected_binding(&self) -> ExpectedBinding<'_> {
         match self {
-            Self::Process => None,
-            Self::LegacyTmux(name) => Some(name.as_str()),
+            Self::Process => ExpectedBinding::Decided(None),
+            Self::LegacyTmux(name) if name.approved => ExpectedBinding::Approved(Some(&name.name)),
+            Self::LegacyTmux(name) => ExpectedBinding::Decided(Some(&name.name)),
             #[cfg(test)]
-            Self::Herdr(target) => Some(&target.session),
-            Self::Refused { name, .. } => Some(name),
+            Self::Herdr(target) => ExpectedBinding::Decided(Some(&target.session)),
+            Self::Refused { name, .. } => ExpectedBinding::Decided(Some(name)),
         }
     }
 

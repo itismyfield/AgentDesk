@@ -8,7 +8,10 @@ use std::sync::Arc;
 use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::discord::health::{HealthRegistry, clear_provider_channel_runtime};
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
+use crate::services::turn_lifecycle::{
+    ForceKillRow, TurnLifecycleStopResult, TurnLifecycleTarget, force_kill_turn,
+    force_kill_turn_for_row,
+};
 
 use super::agent_executor::routine_agent_session_name;
 use super::store::RoutineRecord;
@@ -115,23 +118,18 @@ impl RoutineSessionController {
                 }
             }
             RoutineSessionCommand::Kill => {
-                let lifecycle = force_kill_turn(
-                    self.health_registry.as_deref(),
-                    &TurnLifecycleTarget {
-                        provider: Some(target.provider.clone()),
-                        channel_id: Some(target.channel_id),
-                        tmux_name: target.tmux_session.clone(),
-                    },
-                    reason,
-                    "routine_session_kill",
-                )
-                .await;
+                let lifecycle = self
+                    .force_kill(&target, reason, "routine_session_kill")
+                    .await;
                 tmux_killed = lifecycle.tmux_killed;
                 inflight_cleared = lifecycle.inflight_cleared;
                 lifecycle_path = lifecycle.lifecycle_path;
                 queued_remaining = lifecycle.queue_depth;
                 queue_preserved = lifecycle.queue_preserved;
-                disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
+                // A kill the host guard keeps changed nothing, so the session rows stay too.
+                if !lifecycle.host_guard_kept() {
+                    disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
+                }
             }
         }
 
@@ -164,18 +162,14 @@ impl RoutineSessionController {
         let target = self.resolve_fresh_target(routine, result_json).await?;
         let provider_clear_behavior = provider_clear_behavior(&target.provider);
 
-        let lifecycle = force_kill_turn(
-            self.health_registry.as_deref(),
-            &TurnLifecycleTarget {
-                provider: Some(target.provider.clone()),
-                channel_id: Some(target.channel_id),
-                tmux_name: target.tmux_session.clone(),
-            },
-            reason,
-            "routine_fresh_session_teardown",
-        )
-        .await;
-        let disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
+        let lifecycle = self
+            .force_kill(&target, reason, "routine_fresh_session_teardown")
+            .await;
+        let disconnected_sessions = if lifecycle.host_guard_kept() {
+            0
+        } else {
+            self.disconnect_matching_sessions(&target).await?
+        };
 
         Ok(RoutineSessionControlResult {
             action: "fresh_teardown",
@@ -290,20 +284,16 @@ impl RoutineSessionController {
             None
         } else {
             Some(
-                force_kill_turn(
-                    self.health_registry.as_deref(),
-                    &TurnLifecycleTarget {
-                        provider: Some(target.provider.clone()),
-                        channel_id: Some(target.channel_id),
-                        tmux_name: target.tmux_session.clone(),
-                    },
-                    reason,
-                    "routine_fresh_session_teardown",
-                )
-                .await,
+                self.force_kill(&target, reason, "routine_fresh_session_teardown")
+                    .await,
             )
         };
-        let disconnected_sessions = self.disconnect_sessions_by_tmux(&target).await?;
+        let kept = lifecycle.as_ref().is_some_and(|l| l.host_guard_kept());
+        let disconnected_sessions = if kept {
+            0
+        } else {
+            self.disconnect_sessions_by_tmux(&target).await?
+        };
 
         Ok(RoutineSessionControlResult {
             action: "fresh_teardown",
@@ -681,6 +671,31 @@ impl RoutineSessionController {
             })
         })
         .transpose()
+    }
+
+    /// Force-kills the target's session, judged on the row the target was resolved from.
+    async fn force_kill(
+        &self,
+        target: &RoutineSessionTarget,
+        reason: &str,
+        code: &'static str,
+    ) -> TurnLifecycleStopResult {
+        let lifecycle_target = TurnLifecycleTarget {
+            provider: Some(target.provider.clone()),
+            channel_id: Some(target.channel_id),
+            tmux_name: target.tmux_session.clone(),
+        };
+        let registry = self.health_registry.as_deref();
+        let Some(session_key) = target.session_key.as_deref() else {
+            return force_kill_turn(registry, &lifecycle_target, reason, code).await;
+        };
+        let (pool, stored_provider) = (self.pool.as_ref(), Some(target.provider.as_str()));
+        let row = ForceKillRow {
+            pool,
+            session_key,
+            stored_provider,
+        };
+        force_kill_turn_for_row(registry, &lifecycle_target, row, reason, code).await
     }
 
     /// Disconnects only the single session row resolved for the owned tmux

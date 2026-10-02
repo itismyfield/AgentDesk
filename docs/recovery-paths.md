@@ -110,8 +110,7 @@ contract for the finalizer:
 
 1. Transition mailbox state to `FinishingTurn` (exclusive).
 2. Persist final DB row (`turns`) with recovered response + token usage.
-3. Delete inflight file via the **SSoT** `clear_inflight_by_tmux_name`
-   (or the per-channel `clear_inflight_state`).
+3. Delete the channel's inflight file via the per-channel `clear_inflight_state`.
 4. Clear watchdog deadline override.
 5. Emit `turn_completed` / `recovery_fired` observability events.
 6. Decrement global active counter; check deferred restart.
@@ -161,18 +160,9 @@ the diagnostic.
 
 ## Inflight Cleanup SSoT
 
-**Canonical owner**: `src/services/discord/inflight.rs`
-(`pub(super) fn clear_inflight_by_tmux_name`).
-
-Public wrappers:
-
-- `src/services/discord/mod.rs` — re-exports as `pub(crate) fn`.
-- `src/services/turn_lifecycle.rs` — thin wrapper that forwards to the discord
-  wrapper (no private directory scan).
-
-Invariant: **exactly one** `std::fs::remove_file` call graph for inflight JSON
-files keyed by tmux session. If you add a new caller, route through the
-discord or turn-lifecycle wrapper. Do not re-implement the directory scan.
+**Canonical owner**: `src/services/discord/inflight.rs`. Inflight JSON files are
+deleted by channel key (`clear_inflight_state` and its identity-checked variants),
+never by a tmux-name directory scan: another runtime's row may carry the same name.
 
 ## Discord Adapter Boundary
 
