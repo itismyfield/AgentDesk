@@ -271,7 +271,9 @@ async fn replaced_nonce_refuses_stale_launch_without_consuming_the_current_launc
     let worker = tc::with_tmux_source_authority(pane.tmux, |_| {
         let worker = std::thread::spawn(move || {
             p5::set_test_root(Some(&log_root));
-            started.send(()).unwrap();
+            tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || started.send(()).unwrap()));
+            });
             dedupe::pane_registration::register_launched_claude_pane(
                 "o-superseded-pane",
                 CHANNEL,
