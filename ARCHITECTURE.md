@@ -1059,6 +1059,7 @@ src/
 │   │   ├── relay_recovery/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
+│   │   │   │   ├── host_deferred.rs
 │   │   │   │   ├── incarnation_follow_up.rs
 │   │   │   │   ├── orphan_token_finish.rs
 │   │   │   │   └── unread_tail_seed.rs
@@ -1093,7 +1094,8 @@ src/
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── queue_effects.rs
-│   │   │   │   └── stale_turn.rs
+│   │   │   │   ├── stale_turn.rs
+│   │   │   │   └── stale_turn_host_tests.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── entrypoints.rs
@@ -1386,7 +1388,8 @@ src/
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
-│   │   │   │   └── stale_resume_retry_e2e.rs
+│   │   │   │   ├── stale_resume_retry_e2e.rs
+│   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
