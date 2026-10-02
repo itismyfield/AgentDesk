@@ -197,15 +197,117 @@ async fn force_kill_turn_with_cancel_event(
     termination_reason_code: &'static str,
     emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
+    let verdict = force_kill_verdict(health_registry, target, row).await;
+    let code = termination_reason_code;
+    let emit = emit_cancel_observability;
+    force_kill_on_verdict(health_registry, verdict, reason, code, emit).await
+}
+
+/// A force-kill's host verdict with the target and tmux name it judged, taken before the
+/// caller changes anything; the kill it admits runs on these values without judging again.
+#[must_use]
+pub(crate) struct ForceKillVerdict {
+    target: TurnLifecycleTarget,
+    observed: Option<String>,
+    backfill: bool,
+    host: ForceKillHost,
+}
+
+impl ForceKillVerdict {
+    /// The host guard keeps the session: the caller must change nothing for this kill.
+    pub(crate) fn kept(&self) -> bool {
+        matches!(self.host, ForceKillHost::Gate(ChannelTeardown::Kept))
+    }
+}
+
+/// The host verdict a force-kill of `target` gets, read without writing anything.
+pub(crate) async fn force_kill_verdict(
+    health_registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    row: Option<ForceKillRow<'_>>,
+) -> ForceKillVerdict {
+    let (observed, backfill) = match guard_observed(health_registry, target).await {
+        Ok(observed) => observed,
+        Err(error) => {
+            tracing::warn!(
+                error,
+                "host guard kept a force-kill whose inflight is unreadable"
+            );
+            let host = ForceKillHost::Gate(ChannelTeardown::Kept);
+            let (target, observed, backfill) = (target.clone(), None, false);
+            return ForceKillVerdict {
+                target,
+                observed,
+                backfill,
+                host,
+            };
+        }
+    };
+    let name = observed.clone().filter(|name| !name.is_empty());
+    let name = name.unwrap_or_else(|| target.tmux_name.clone());
+    let host = force_kill_host_gate(health_registry, target, row, &name).await;
+    let target = target.clone();
+    ForceKillVerdict {
+        target,
+        observed,
+        backfill,
+        host,
+    }
+}
+
+/// [`force_kill_verdict`] for a sessions row read as stored: its raw provider and thread.
+pub(crate) async fn force_kill_row_verdict(
+    registry: Option<&HealthRegistry>,
+    pool: &sqlx::PgPool,
+    stored_provider: Option<&str>,
+    channel_id: Option<&str>,
+    session_key: &str,
+    tmux_name: &str,
+) -> ForceKillVerdict {
+    let channel_id = channel_id.and_then(|raw| raw.parse::<u64>().ok());
+    let target = TurnLifecycleTarget {
+        provider: stored_provider.and_then(ProviderKind::from_str),
+        channel_id: channel_id.map(ChannelId::new),
+        tmux_name: tmux_name.to_string(),
+    };
+    let row = ForceKillRow {
+        pool,
+        session_key,
+        stored_provider,
+    };
+    force_kill_verdict(registry, &target, Some(row)).await
+}
+
+/// [`force_kill_turn`] of the target `verdict` judged, run on that verdict.
+pub(crate) async fn force_kill_turn_with_verdict(
+    health_registry: Option<&HealthRegistry>,
+    verdict: ForceKillVerdict,
+    reason: &str,
+    termination_reason_code: &'static str,
+) -> TurnLifecycleStopResult {
+    let code = termination_reason_code;
+    force_kill_on_verdict(health_registry, verdict, reason, code, true).await
+}
+
+async fn force_kill_on_verdict(
+    health_registry: Option<&HealthRegistry>,
+    verdict: ForceKillVerdict,
+    reason: &str,
+    termination_reason_code: &'static str,
+    emit_cancel_observability: bool,
+) -> TurnLifecycleStopResult {
+    let target = verdict.target.clone();
+    let policy = crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+        termination_reason_code: Some(termination_reason_code),
+    };
+    let emit = emit_cancel_observability;
     stop_turn_with_policy(
         health_registry,
-        target,
-        row,
+        &target,
+        Some(verdict),
         reason,
-        crate::services::discord::TmuxCleanupPolicy::CleanupSession {
-            termination_reason_code: Some(termination_reason_code),
-        },
-        emit_cancel_observability,
+        policy,
+        emit,
     )
     .await
 }
@@ -213,7 +315,7 @@ async fn force_kill_turn_with_cancel_event(
 async fn stop_turn_with_policy(
     health_registry: Option<&HealthRegistry>,
     target: &TurnLifecycleTarget,
-    row: Option<ForceKillRow<'_>>,
+    verdict: Option<ForceKillVerdict>,
     reason: &str,
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
     emit_cancel_observability: bool,
@@ -223,37 +325,19 @@ async fn stop_turn_with_policy(
     // response and the cancel observability event both want
     // post-fact-accurate fields, not the hardcoded "queue_preserved=true"
     // contract that masked the 2026-05-04 ch-dd queue-loss incident.
-    // A force-kill reads the name without writing, so its guard refuses before any change.
-    let guarded = cleanup_policy.should_cleanup_tmux();
-    let (tmux_session_observed, backfill) = if guarded {
-        match guard_observed(health_registry, target).await {
-            Ok(observed) => observed,
-            Err(error) => {
-                tracing::warn!(
-                    error,
-                    "host guard kept a force-kill whose inflight is unreadable"
-                );
-                return kept_by_host_guard(None);
-            }
+    // A force-kill runs on the verdict taken before it, so nothing here judges the host again.
+    let (tmux_session_observed, backfill, host) = match verdict {
+        Some(verdict) => (verdict.observed, verdict.backfill, verdict.host),
+        None if cleanup_policy.should_cleanup_tmux() => return kept_by_host_guard(None),
+        None => {
+            let observed = resolve_tmux_session_observed(health_registry, target).await;
+            (observed, false, ForceKillHost::NotKill)
         }
-    } else {
-        (
-            resolve_tmux_session_observed(health_registry, target).await,
-            false,
-        )
     };
     let probe_session_owned = tmux_session_observed
         .clone()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| target.tmux_name.clone());
-    let host = force_kill_host_gate(
-        health_registry,
-        target,
-        row,
-        &probe_session_owned,
-        cleanup_policy,
-    );
-    let host = host.await;
     if matches!(host, ForceKillHost::Gate(ChannelTeardown::Kept)) {
         return kept_by_host_guard(tmux_session_observed);
     }
@@ -786,11 +870,7 @@ async fn force_kill_host_gate(
     target: &TurnLifecycleTarget,
     row: Option<ForceKillRow<'_>>,
     tmux_name: &str,
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
 ) -> ForceKillHost {
-    if !cleanup_policy.should_cleanup_tmux() {
-        return ForceKillHost::NotKill;
-    }
     let caller = "turn_lifecycle_force_kill";
     match (registry, target.provider.as_ref(), target.channel_id) {
         (Some(registry), Some(provider), Some(channel)) if tmux_name.is_empty() => {

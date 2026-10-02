@@ -58,6 +58,11 @@ pub(crate) async fn runtime(pool: &PgPool) -> (Arc<SharedData>, Arc<HealthRegist
     (shared, registry)
 }
 
+/// Limits `shared` to the `allowed` channels; an empty list lets it take any channel.
+pub(crate) async fn allow_channels(shared: &SharedData, allowed: &[u64]) {
+    shared.settings.write().await.allowed_channel_ids = allowed.to_vec();
+}
+
 /// The key the channel's turns write for `tmux_name`.
 pub(crate) fn channel_key(shared: &SharedData, tmux_name: &str) -> String {
     let provider = ProviderKind::Claude;

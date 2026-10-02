@@ -131,7 +131,10 @@ impl RoutineSessionController {
                 lifecycle_path = lifecycle.lifecycle_path;
                 queued_remaining = lifecycle.queue_depth;
                 queue_preserved = lifecycle.queue_preserved;
-                disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
+                // A kill the host guard keeps changed nothing, so the session rows stay too.
+                if !lifecycle.host_guard_kept() {
+                    disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
+                }
             }
         }
 
@@ -175,7 +178,11 @@ impl RoutineSessionController {
             "routine_fresh_session_teardown",
         )
         .await;
-        let disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
+        let disconnected_sessions = if lifecycle.host_guard_kept() {
+            0
+        } else {
+            self.disconnect_matching_sessions(&target).await?
+        };
 
         Ok(RoutineSessionControlResult {
             action: "fresh_teardown",
@@ -303,7 +310,12 @@ impl RoutineSessionController {
                 .await,
             )
         };
-        let disconnected_sessions = self.disconnect_sessions_by_tmux(&target).await?;
+        let kept = lifecycle.as_ref().is_some_and(|l| l.host_guard_kept());
+        let disconnected_sessions = if kept {
+            0
+        } else {
+            self.disconnect_sessions_by_tmux(&target).await?
+        };
 
         Ok(RoutineSessionControlResult {
             action: "fresh_teardown",
