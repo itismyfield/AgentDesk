@@ -36,11 +36,17 @@ MUTATION_FILES = (
 MUTATION_COUNT = 7
 MUTATION_NAMES = ("M10", "M6", "M8", "anchor-drop", "S4-m5", "S4-m6", "S4-m7")
 PR_WORKFLOW = Path(".github/workflows/ci-pr.yml")
+NIGHTLY_WORKFLOW = Path(".github/workflows/ci-nightly.yml")
 MUTATION_JOB = "relay_authority_mutations"
+NIGHTLY_MUTATION_JOB = "relay_authority_mutations_full"
 MUTATION_STEP = "Require relay-authority mutations to be killed"
 FILTER_ID = "mutation_paths"
 FILTER_NAME = "mutation_sources"
-STEP_CONDITION = f"steps.{FILTER_ID}.outputs.{FILTER_NAME} != 'false'"
+WIRING_ID = "mutation_wiring"
+WIRING_SCRIPT = "scripts/relay_mutation_wiring_digest.py"
+FILTER_CONDITION = f"steps.{FILTER_ID}.outputs.{FILTER_NAME} != 'false'"
+WIRING_CONDITION = f"steps.{WIRING_ID}.outputs.wiring_changed != 'false'"
+STEP_CONDITION = f"{FILTER_CONDITION} || {WIRING_CONDITION}"
 # The file that DEFINES each row's judging test. Six of the seven rows are
 # judged from a file they do not mutate, so #5997's CI filter has to select
 # these as well: a diff that only weakens a judge must still run the gate.
@@ -53,8 +59,9 @@ JUDGE_FILES = {
     "S4-m6": "src/services/discord/destructive_cancel_gate.rs",
     "S4-m7": "src/services/discord/tmux_watcher_registry_restore_tests.rs",
 }
-# The gate's own wiring: editing either can change what the step proves.
-WIRING_FILES = ("scripts/run_relay_authority_mutations.sh", ".github/workflows/ci-pr.yml")
+# The gate's own wiring: editing either can change what the step proves. ci-pr.yml
+# itself is judged by the digest step, which compares only the relay jobs' resolved YAML.
+WIRING_FILES = ("scripts/run_relay_authority_mutations.sh", WIRING_SCRIPT)
 # A judge's fixtures reach it through `use super::*` (its own parent module) or
 # `use super::<mod>::` (a sibling module); either can empty a judgment while
 # JUDGE_FILES and MUTATION_FILES both stay untouched, so the filter has to
@@ -882,6 +889,7 @@ class MutationPathFilterContractTests(unittest.TestCase):
             | set(WIRING_FILES),
         )
         self.assertEqual(len(self.patterns), len(set(self.patterns)))
+        self.assertNotIn(PR_WORKFLOW.as_posix(), self.patterns)
 
     def test_the_fixture_owners_are_read_off_the_judges_not_restated(self) -> None:
         """The equality above is only a real comparison while this derivation
@@ -938,8 +946,26 @@ class MutationPathFilterContractTests(unittest.TestCase):
             "Cache Cargo dependencies": STEP_CONDITION,
             "Fetch Cargo dependencies": STEP_CONDITION,
             MUTATION_STEP: STEP_CONDITION,
-            "sccache stats": f"always() && {STEP_CONDITION}",
+            "sccache stats": f"always() && ({STEP_CONDITION})",
         })
+
+    def test_the_wiring_digest_runs_unconditionally_before_any_gated_step(self) -> None:
+        """The digest output is only half the condition; a skipped, failure-tolerant
+        or late digest step would leave it absent, which runs the gate every time."""
+        job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
+            MUTATION_JOB
+        ]
+        steps = job["steps"]
+        digests = [index for index, step in enumerate(steps) if step.get("id") == WIRING_ID]
+        self.assertEqual(len(digests), 1)
+        digest = steps[digests[0]]
+        self.assertEqual(digest["run"].strip(), f"python3 {WIRING_SCRIPT}")
+        self.assertNotIn("if", digest)
+        self.assertNotIn("continue-on-error", digest)
+        first_gated = min(index for index, step in enumerate(steps) if WIRING_ID in str(step.get("if", "")))
+        self.assertLess(digests[0], first_gated)
+        # HEAD^1 is the base side the digest reads; a depth-1 checkout has no parent.
+        self.assertGreaterEqual(steps[0]["with"]["fetch-depth"], 2)
 
     def test_the_condition_runs_the_gate_unless_the_filter_said_unrelated(self) -> None:
         """The negative form is load-bearing: a missing or empty filter output
@@ -950,7 +976,39 @@ class MutationPathFilterContractTests(unittest.TestCase):
             MUTATION_JOB
         ]
         step = next(s for s in job["steps"] if s.get("name") == MUTATION_STEP)
-        self.assertTrue(str(step["if"]).endswith("!= 'false'"), step.get("if"))
+        self.assertEqual(
+            str(step["if"]).split(" || "),
+            [
+                "steps.mutation_paths.outputs.mutation_sources != 'false'",
+                "steps.mutation_wiring.outputs.wiring_changed != 'false'",
+            ],
+        )
+
+
+class NightlyMutationBackstopTests(unittest.TestCase):
+    """The PR gate skips when neither filter nor digest fires, so a judge weakened from
+    a file outside the filter is caught only by this unfiltered nightly run on main."""
+
+    def test_nightly_runs_every_row_unfiltered_and_fails_loudly(self) -> None:
+        jobs = {
+            path: yaml.safe_load((REPO_ROOT / path).read_text(encoding="utf-8"))["jobs"]
+            for path in (PR_WORKFLOW, NIGHTLY_WORKFLOW)
+        }
+        nightly = jobs[NIGHTLY_WORKFLOW][NIGHTLY_MUTATION_JOB]
+        pr = jobs[PR_WORKFLOW][MUTATION_JOB]
+        for key in ("if", "needs", "continue-on-error"):
+            self.assertNotIn(key, nightly)
+        self.assertEqual(nightly["strategy"], pr["strategy"])
+        for key in ("RELAY_AUTHORITY_MUTATION_SHARD_INDEX", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"):
+            self.assertEqual(nightly["env"][key], pr["env"][key])
+        runs = [step for step in nightly["steps"] if step.get("run", "").strip() == "bash " + MUTATION_SCRIPT.as_posix()]
+        self.assertEqual(len(runs), 1)
+        for step in nightly["steps"]:
+            with self.subTest(step=step.get("name") or step.get("uses")):
+                self.assertFalse(step.get("continue-on-error"))
+                self.assertNotIn("paths-filter", str(step.get("uses", "")))
+                if step.get("name") != "sccache stats":
+                    self.assertNotIn("if", step)
 
 
 if __name__ == "__main__":

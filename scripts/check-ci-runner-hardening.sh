@@ -1040,18 +1040,18 @@ targets = {
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "1cad90577d2118651ea88b3de4c650afd4bc5777d7228a90f588da5b58e012e4",
+    "job_sha256" => "7ed760c569ffc63346a63cf6572c81f7c51806806a77a633fe36390cedbf97cb",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
         "commands" => ["cargo fetch --locked"],
         "timeout_minutes" => 10,
-        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
       },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,
-        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
       },
     },
   },

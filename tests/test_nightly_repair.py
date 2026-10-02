@@ -13,7 +13,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 NIGHTLY = ROOT / ".github/workflows/ci-nightly.yml"
 DEBUG_JOBS = ("full_macos", "full_windows", "postgres_full",
-              "multinode_regression", "high_risk_recovery_full")
+              "multinode_regression", "high_risk_recovery_full",
+              "relay_authority_mutations_full")
 DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (PostgreSQL bootstrap and routes)"
 WINDOWS_STEP = "Discord thread-create cross-process lock"
