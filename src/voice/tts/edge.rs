@@ -62,9 +62,7 @@ impl EdgeTtsBackend {
         Self { config, runner }
     }
 
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_runner(config: EdgeTtsConfig, runner: EdgeTtsCommandRunner) -> Self {
         Self { config, runner }
     }

@@ -219,23 +219,6 @@ impl TtsRuntime {
         })
     }
 
-    /// Re-read voice config after a voice-change command mutates backend
-    /// settings, rebinding the backend and progress cache target together.
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
-    pub(crate) fn rebind_from_voice_config(&mut self, config: &VoiceConfig) -> Result<()> {
-        *self = Self::from_voice_config(config)?;
-        Ok(())
-    }
-
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
-    pub(crate) fn cache_key_parts(&self) -> Vec<String> {
-        self.backend.cache_key_parts()
-    }
-
     pub(crate) async fn synthesize(
         &self,
         text: &str,
@@ -728,27 +711,6 @@ mod tests {
         assert_ne!(first.cache_status, second.cache_status);
         assert!([first.cache_status, second.cache_status].contains(&ProgressTtsCacheStatus::Miss));
         assert!([first.cache_status, second.cache_status].contains(&ProgressTtsCacheStatus::Hit));
-    }
-
-    #[test]
-    fn runtime_rebinds_backend_voice_from_config() {
-        let mut config = VoiceConfig::default();
-        config.tts.edge.voice = "ko-KR-SunHiNeural".to_string();
-        let mut runtime = TtsRuntime::from_voice_config(&config).unwrap();
-        assert!(
-            runtime
-                .cache_key_parts()
-                .contains(&"ko-KR-SunHiNeural".to_string())
-        );
-
-        config.tts.edge.voice = "ko-KR-InJoonNeural".to_string();
-        runtime.rebind_from_voice_config(&config).unwrap();
-
-        assert!(
-            runtime
-                .cache_key_parts()
-                .contains(&"ko-KR-InJoonNeural".to_string())
-        );
     }
 
     fn set_mtime(path: &Path, time: SystemTime) {
