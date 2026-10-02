@@ -506,6 +506,8 @@ src/
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
+│   │   ├── campaign_handoff.rs
+│   │   ├── campaign_handoff_tests.rs
 │   │   ├── cancel_run.rs
 │   │   ├── cleanup_tasks.rs
 │   │   ├── cleanup_tasks_pg_tests.rs

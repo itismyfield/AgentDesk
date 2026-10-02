@@ -83,6 +83,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests
   --skip services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests
   --skip services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
+  --skip services::auto_queue::route::campaign_handoff::tests
   --skip services::auto_queue::route::command::reset_run_scope_pg_tests
   --skip services::auto_queue::route::command::tests
   --skip services::auto_queue::route::dispatch_query::generate_conflict_tests
@@ -224,6 +225,7 @@ NON_PG_FILTER_REPLAY=(
   db::automation_candidates::verdict_tests::parses_metric_direction_aliases
   db::automation_candidates::verdict_tests::simplification_always_keeps
   db::automation_candidates::verdict_tests::timeout_always_discards
+  db::campaigns::tests::campaign_checkpoint_keeps_auto_queue_when_a_writer_omits_it
   db::campaigns::tests::campaign_checkpoint_keeps_unchanged_node_time_and_resume_context
   db::campaigns::tests::campaign_checkpoint_normalizes_optional_groups_without_inference
   db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_identity
@@ -731,6 +733,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests
   services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests
   services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
+  services::auto_queue::route::campaign_handoff::tests
   services::auto_queue::route::command::reset_run_scope_pg_tests
   services::auto_queue::route::command::tests
   services::auto_queue::route::dispatch_query::generate_conflict_tests
