@@ -1454,6 +1454,7 @@ start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start
 tests = steps.each_index.select { |i| steps[i]["run"].to_s.strip == "just test-postgres" }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
 errors << "job postgres must run just test-postgres in exactly one step" unless tests.length == 1
+errors << "job postgres must not gate PostgreSQL start or just test-postgres with if" if [start, *tests].compact.any? { |i| steps[i].key?("if") }
 errors << "job postgres must start PostgreSQL, run just test-postgres, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
