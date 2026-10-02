@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { setCampaignAutoQueue, type Campaign, type CampaignHandoff } from "../../api/campaigns";
+import { getCampaign, isRejectedSave, setCampaignAutoQueue, type Campaign, type CampaignHandoff } from "../../api/campaigns";
 import type { Tr } from "./campaignPresentation";
 
 const WAITING_REASONS: Record<string, [string, string]> = {
@@ -27,20 +27,33 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved }: { cam
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const toggle = async () => {
+    const enabled = !campaign.auto_queue;
     setBusy(true); setMessage(null);
     try {
-      const result = await setCampaignAutoQueue(campaign, !campaign.auto_queue);
+      const result = await setCampaignAutoQueue(campaign, enabled);
       onSaved(result.campaign);
       if (result.handoffError) setMessage(tr("켰지만 자동큐로 넘기지 못했습니다: ", "Turned on, but the handoff failed: ") + result.handoffError);
       else if (result.handoff) setMessage(handoffSummary(result.handoff, tr));
       else if (result.campaign.auto_queue) setMessage(tr("캠페인이 진행 중 상태가 되면 넘기기 시작합니다.", "Tasks are sent once the campaign is active."));
+      else setMessage(tr("새 작업을 넘기는 것만 멈췄습니다. 이미 넘긴 작업은 자동큐에서 계속 실행됩니다.", "Stopped sending new tasks. Tasks already sent keep running in auto-queue."));
     } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : tr("저장하지 못했습니다.", "Could not save."));
+      const reason = cause instanceof Error ? cause.message : tr("저장하지 못했습니다.", "Could not save.");
+      if (isRejectedSave(cause)) { setMessage(reason); return; }
+      // A timeout or bad response can hide a save that went through, so show what the server has now.
+      try {
+        const latest = await getCampaign(campaign.id);
+        onSaved(latest);
+        setMessage(latest.auto_queue === enabled
+          ? tr(`저장됐지만 응답을 받지 못했습니다 (${reason}). 넘긴 작업은 노드 상태에서 확인하세요.`, `Saved, but the response was lost (${reason}). Check the nodes for what was sent.`)
+          : tr(`저장되지 않았습니다: ${reason}`, `Not saved: ${reason}`));
+      } catch {
+        setMessage(tr(`저장 결과를 확인하지 못했습니다 (${reason}). 새로고침해 확인하세요.`, `Could not confirm the save (${reason}). Reload to check.`));
+      }
     } finally { setBusy(false); }
   };
   return <>
     <button type="button" className="campaign-auto-queue" aria-pressed={campaign.auto_queue} disabled={busy} onClick={() => void toggle()}
-      title={tr("켜면 선행 작업이 끝난 작업을 자동큐가 차례로 실행합니다.", "When on, auto-queue runs each task as soon as its prerequisites are done.")}>
+      title={tr("켜면 선행 작업이 끝난 작업을 자동큐가 차례로 실행합니다. 끄면 새로 넘기는 것만 멈춥니다.", "When on, auto-queue runs each task as soon as its prerequisites are done. Turning it off only stops sending new tasks.")}>
       {campaign.auto_queue ? tr("자동 진행 켜짐", "Auto-run on") : tr("자동 진행 꺼짐", "Auto-run off")}
     </button>
     {message && <p className="campaign-handoff-result" role="status">{message}</p>}

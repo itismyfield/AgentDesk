@@ -2,11 +2,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { setCampaignAutoQueue } from "../../api/campaigns";
+import { getCampaign, setCampaignAutoQueue } from "../../api/campaigns";
+import { ApiRequestError } from "../../api/httpClient";
 import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
 import { makeLargeCampaign } from "./campaignTestFixtures";
 
-vi.mock("../../api/campaigns", () => ({ setCampaignAutoQueue: vi.fn() }));
+vi.mock("../../api/campaigns", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/campaigns")>()),
+  setCampaignAutoQueue: vi.fn(),
+  getCampaign: vi.fn(),
+}));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -14,7 +19,11 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.mocked(setCampaignAutoQueue).mockReset(); });
+afterEach(async () => {
+  await act(async () => root.unmount()); container.remove();
+  vi.mocked(setCampaignAutoQueue).mockReset(); vi.mocked(getCampaign).mockReset();
+});
+const statusText = () => container.querySelector("[role=status]")?.textContent;
 
 it("turns auto-run on and says what was sent and why the rest is held back", async () => {
   const campaign = makeLargeCampaign();
@@ -41,11 +50,37 @@ it("turns auto-run on and says what was sent and why the rest is held back", asy
 it("shows a rejected save, such as a stale revision, instead of pretending it switched", async () => {
   const campaign = { ...makeLargeCampaign(), auto_queue: true };
   const onSaved = vi.fn();
-  vi.mocked(setCampaignAutoQueue).mockRejectedValue(new Error("campaign revision conflict; reload before retrying"));
+  vi.mocked(setCampaignAutoQueue).mockRejectedValue(
+    new ApiRequestError("campaign revision conflict; reload before retrying", { status: 409 }),
+  );
   await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={onSaved} />));
   await act(async () => container.querySelector("button")!.click());
   expect(setCampaignAutoQueue).toHaveBeenCalledWith(campaign, false);
   expect(onSaved).not.toHaveBeenCalled();
   expect(container.querySelector("button")?.textContent).toBe("Auto-run on");
-  expect(container.querySelector("[role=status]")?.textContent).toContain("revision conflict");
+  expect(statusText()).toContain("revision conflict");
+  expect(getCampaign).not.toHaveBeenCalled();
+});
+
+it("says turning it off only stops new handoffs", async () => {
+  const campaign = { ...makeLargeCampaign(), auto_queue: true };
+  vi.mocked(setCampaignAutoQueue).mockResolvedValue({ campaign: { ...campaign, auto_queue: false }, handoff: null, handoffError: null });
+  await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={vi.fn()} />));
+  await act(async () => container.querySelector("button")!.click());
+  expect(statusText()).toBe("Stopped sending new tasks. Tasks already sent keep running in auto-queue.");
+});
+
+it("reloads the campaign when the save times out, since it may have gone through", async () => {
+  const campaign = makeLargeCampaign();
+  const onSaved = vi.fn();
+  vi.mocked(setCampaignAutoQueue).mockRejectedValue(new Error("Request timeout: /api/campaigns/x"));
+  vi.mocked(getCampaign).mockResolvedValueOnce({ ...campaign, auto_queue: true, revision: 6 });
+  await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={onSaved} />));
+  await act(async () => container.querySelector("button")!.click());
+  expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ auto_queue: true, revision: 6 }));
+  expect(statusText()).toContain("Saved, but the response was lost");
+
+  vi.mocked(getCampaign).mockRejectedValueOnce(new Error("offline"));
+  await act(async () => container.querySelector("button")!.click());
+  expect(statusText()).toContain("Could not confirm the save");
 });

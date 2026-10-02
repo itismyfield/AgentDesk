@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { request } from "./httpClient";
+import { ApiRequestError, request } from "./httpClient";
 
 const campaignStatusSchema = z.enum(["planned", "active", "paused", "completed", "cancelled"]);
 const campaignNodeStatusSchema = z.enum(["pending", "running", "blocked", "completed", "failed", "skipped"]);
@@ -103,6 +103,7 @@ const campaignHandoffSchema = z.looseObject({
   queued: z.array(z.looseObject({ node_id: z.string(), card_id: z.string(), run_id: z.string() })).default([]),
   waiting: z.array(z.looseObject({ node_id: z.string(), reason: z.string(), detail: z.string().nullable().optional() })).default([]),
 });
+const campaignGetResponseSchema = z.looseObject({ campaign: campaignSchema });
 const campaignSaveResponseSchema = z.looseObject({
   campaign: campaignSchema,
   handoff: campaignHandoffSchema.optional(),
@@ -133,13 +134,24 @@ export async function getCampaigns(): Promise<{
   }
 }
 
+export async function getCampaign(id: string): Promise<Campaign> {
+  const result = await request(`/api/campaigns/${encodeURIComponent(id)}`, { suppressErrorToast: true }, campaignGetResponseSchema);
+  return result.campaign;
+}
+
+/** True when the server answered with a refusal, so the save is known not to have happened. */
+export function isRejectedSave(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status < 500;
+}
+
 // Omitting auto_queue keeps the stored value, so node edits never switch it.
-function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>) {
+function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>, timeoutMs?: number) {
   return request(
     `/api/campaigns/${encodeURIComponent(campaign.id)}`,
     {
       method: "PUT",
       suppressErrorToast: true,
+      timeoutMs,
       body: JSON.stringify({
         expected_revision: campaign.revision,
         title: campaign.title,
@@ -159,8 +171,8 @@ export async function updateCampaignNode(campaign: Campaign, updated: CampaignNo
   return result.campaign;
 }
 
-/** Turning it on also queues the tasks that are ready now; the server reports what it did. */
+/** Turning it on also queues the tasks that are ready now, so the save waits longer than the default. */
 export async function setCampaignAutoQueue(campaign: Campaign, enabled: boolean) {
-  const result = await saveCampaign(campaign, { auto_queue: enabled });
+  const result = await saveCampaign(campaign, { auto_queue: enabled }, 60_000);
   return { campaign: result.campaign, handoff: result.handoff ?? null, handoffError: result.handoff_error ?? null };
 }
