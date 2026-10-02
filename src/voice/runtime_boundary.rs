@@ -1,57 +1,10 @@
-//! Serializable command/event contracts for moving voice runtime work across a
-//! process boundary.
-
-// reason: out-of-process voice runtime boundary; the whole protocol surface is
-// wired only once the voice runtime process is enabled, which no compile target
-// exercises today. See #3034.
-#![allow(dead_code)]
+//! Serializable voice control commands and the voice config snapshot.
 
 use serde::{Deserialize, Serialize};
 
 use crate::voice::barge_in::BargeInSensitivity;
 use crate::voice::commands::{VoiceCommand, WakeWordCommand};
 use crate::voice::config::VoiceConfig;
-
-pub(crate) const VOICE_RUNTIME_PROTOCOL_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct VoiceRuntimeCommandEnvelope {
-    pub protocol_version: u16,
-    pub command_id: String,
-    pub command: VoiceRuntimeCommand,
-}
-
-impl VoiceRuntimeCommandEnvelope {
-    pub(crate) fn new(command_id: impl Into<String>, command: VoiceRuntimeCommand) -> Self {
-        Self {
-            protocol_version: VOICE_RUNTIME_PROTOCOL_VERSION,
-            command_id: command_id.into(),
-            command,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum VoiceRuntimeCommand {
-    Configure {
-        config: VoiceRuntimeConfigSnapshot,
-    },
-    ApplyControl {
-        channel_id: Option<u64>,
-        control: VoiceRuntimeControlCommand,
-    },
-    RegisterVoiceGuild {
-        guild_id: u64,
-        channel_id: u64,
-    },
-    UnregisterVoiceGuild {
-        guild_id: u64,
-    },
-    Shutdown {
-        reason: Option<String>,
-    },
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -169,70 +122,10 @@ impl From<&VoiceConfig> for VoiceRuntimeConfigSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct VoiceRuntimeEventEnvelope {
-    pub protocol_version: u16,
-    pub sequence: u64,
-    pub event: VoiceRuntimeEvent,
-}
-
-impl VoiceRuntimeEventEnvelope {
-    pub(crate) fn new(sequence: u64, event: VoiceRuntimeEvent) -> Self {
-        Self {
-            protocol_version: VOICE_RUNTIME_PROTOCOL_VERSION,
-            sequence,
-            event,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum VoiceRuntimeEvent {
-    Ready,
-    ConfigChanged {
-        config: VoiceRuntimeConfigSnapshot,
-    },
-    ControlApplied {
-        command_id: String,
-    },
-    Progress {
-        channel_id: u64,
-        label: String,
-        playback_id: Option<u64>,
-    },
-    Error {
-        command_id: Option<String>,
-        message: String,
-    },
-    Stopped {
-        reason: Option<String>,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::voice::config::DEFAULT_EDGE_TTS_VOICE;
-
-    #[test]
-    fn command_envelope_serializes_with_protocol_version() {
-        let envelope = VoiceRuntimeCommandEnvelope::new(
-            "cmd-1",
-            VoiceRuntimeCommand::ApplyControl {
-                channel_id: Some(42),
-                control: VoiceRuntimeControlCommand::VerboseProgress { enabled: true },
-            },
-        );
-
-        let json = serde_json::to_value(&envelope).unwrap();
-
-        assert_eq!(json["protocol_version"], VOICE_RUNTIME_PROTOCOL_VERSION);
-        assert_eq!(json["command_id"], "cmd-1");
-        assert_eq!(json["command"]["type"], "apply_control");
-        assert_eq!(json["command"]["control"]["type"], "verbose_progress");
-        assert_eq!(json["command"]["control"]["enabled"], true);
-    }
 
     #[test]
     fn config_snapshot_is_minimal_and_serializable() {
@@ -266,16 +159,5 @@ mod tests {
         let restored = VoiceCommand::from(boundary);
 
         assert_eq!(restored, command);
-    }
-
-    #[test]
-    fn event_envelope_uses_same_protocol_version() {
-        let envelope = VoiceRuntimeEventEnvelope::new(7, VoiceRuntimeEvent::Ready);
-
-        let json = serde_json::to_value(&envelope).unwrap();
-
-        assert_eq!(json["protocol_version"], VOICE_RUNTIME_PROTOCOL_VERSION);
-        assert_eq!(json["sequence"], 7);
-        assert_eq!(json["event"]["type"], "ready");
     }
 }

@@ -649,10 +649,6 @@ NON_PG_FILTER_REPLAY=(
   voice::announce_meta::tests::handoff_store_round_trips_typed_metadata
   voice::announce_meta::tests::pending_handoff_reservation_binds_to_message_id
   voice::announce_meta::tests::pending_handoff_reservation_can_win_before_message_bind
-  voice::announce_meta::tests::refresh_handoff_deadline_extends_ttl_when_entry_has_short_remaining
-  voice::announce_meta::tests::refresh_handoff_deadline_preserves_meta_content
-  voice::announce_meta::tests::refresh_handoff_deadline_returns_false_when_absent
-  voice::announce_meta::tests::refresh_handoff_deadline_returns_false_when_ttl_already_at_max
   voice::announce_meta::tests::store_distinguishes_accepted_replay_entries
   voice::announce_meta::tests::store_is_one_shot
   voice::turn_link::tests::advisory_lock_key_is_stable

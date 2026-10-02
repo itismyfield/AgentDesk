@@ -117,13 +117,6 @@ impl VoiceConfig {
             .and_then(|value| value.parse::<u64>().ok())
     }
 
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
-    pub(crate) fn is_lobby_channel(&self, channel_id: u64) -> bool {
-        self.lobby_channel_id_u64() == Some(channel_id)
-    }
-
     pub(crate) fn active_agent_context_ttl(&self) -> Duration {
         Duration::from_secs(match self.active_agent_ttl_seconds {
             0 => DEFAULT_ACTIVE_AGENT_TTL_SECS,
@@ -538,7 +531,6 @@ spoken_result:
             config.lobby_channel_id,
             Some("1509999999999999999".to_string())
         );
-        assert!(config.is_lobby_channel(1_509_999_999_999_999_999));
         assert_eq!(config.active_agent_context_ttl(), Duration::from_secs(240));
         assert_eq!(config.auto_join_channel_ids, vec!["1500000000000000000"]);
         assert_eq!(
