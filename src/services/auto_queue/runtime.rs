@@ -175,13 +175,22 @@ pub async fn clear_slot_threads_for_slot_pg(
             .collect::<Vec<_>>();
         tokio::spawn(async move {
             for runtime_target in runtime_targets {
-                crate::services::discord::health::clear_provider_channel_runtime(
+                let thread = runtime_target.thread_channel_id;
+                // A refusal changes nothing here; its guard already logged it.
+                let reset = crate::services::discord::health::clear_provider_channel_runtime(
                     &registry,
                     &runtime_target.provider_name,
-                    poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
+                    poise::serenity_prelude::ChannelId::new(thread),
                     runtime_target.session_key.as_deref(),
                 )
                 .await;
+                #[cfg(test)]
+                RUNTIME_CLEARS
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push((thread, reset));
+                #[cfg(not(test))]
+                let _ = reset;
             }
         });
     }
@@ -394,6 +403,15 @@ async fn filter_safe_slot_thread_reset_targets(
     }
     Ok(safe_to_reset)
 }
+
+/// Each spawned slot-thread runtime clear, in order, for the tests that wait on it.
+#[cfg(test)]
+pub(crate) static RUNTIME_CLEARS: std::sync::Mutex<
+    Vec<(
+        u64,
+        Option<crate::services::discord::admin_host_guard::ManagedReset>,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 #[path = "runtime/clear_slot_sessions_pg_tests.rs"]

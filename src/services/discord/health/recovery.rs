@@ -6,6 +6,7 @@ use poise::serenity_prelude as serenity;
 use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
+use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::discord::inflight::opt_message_id;
 use crate::services::discord::mailbox_finish::legacy_restitution_refusal;
 use crate::services::discord::mailbox_probe::wait_for_turn_end;
@@ -305,6 +306,9 @@ fn preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
     let Some(tmux_session) = cancel_token_tmux_session(token) else {
         return false;
     };
+    if !discord::host_liveness::local_tmux(&tmux_session, None) {
+        return false;
+    }
     let tmux_ready_for_input = watchdog_decisions::idle_tmux_repair_ready_for_input(
         provider,
         channel_id.get(),
@@ -1391,16 +1395,15 @@ async fn runtime_turn_cleanup_by_lookup(
 
 /// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.
 /// Used by auto-queue slot recycling so pooled unified-thread slots start the next group fresh
-/// without killing the shared thread itself.
+/// without killing the shared thread itself. `None` when the provider or its runtime is absent;
+/// a session not confirmed on legacy tmux is refused before anything changes.
 pub async fn clear_provider_channel_runtime(
     registry: &HealthRegistry,
     provider_name: &str,
     channel_id: ChannelId,
     session_key: Option<&str>,
-) -> bool {
-    let Some(provider) = ProviderKind::from_str(provider_name) else {
-        return false;
-    };
+) -> Option<ManagedReset> {
+    let provider = ProviderKind::from_str(provider_name)?;
 
     let shared = {
         let providers = registry.providers.lock().await;
@@ -1409,9 +1412,7 @@ pub async fn clear_provider_channel_runtime(
             .find(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
             .map(|entry| entry.shared.clone())
     };
-    let Some(shared) = shared else {
-        return false;
-    };
+    let shared = shared?;
 
     let tmux_name = {
         let data = shared.core.lock().await;
@@ -1421,6 +1422,10 @@ pub async fn clear_provider_channel_runtime(
             .map(|channel_name| provider.build_tmux_session_name(channel_name))
             .or_else(|| session_key.and_then(tmux_name_from_session_key))
     };
+    let refusal = discord::admin_host_guard::managed_reset_refusal;
+    if let Some(reason) = refusal(&shared, &provider, channel_id, true, false, session_key).await {
+        return Some(ManagedReset::Refused(reason));
+    }
 
     let cleared = discord::mailbox_clear_channel(&shared, &provider, channel_id).await;
     if let Some(token) = cleared.removed_token {
@@ -1446,13 +1451,13 @@ pub async fn clear_provider_channel_runtime(
     }
 
     #[cfg(unix)]
-    if let Some(name) = tmux_name {
+    if let Some(name) = tmux_name.as_deref() {
         if provider.uses_managed_tmux_backend() {
-            discord::commands::reset_managed_process_session(&name);
+            discord::commands::reset_managed_process_session(name);
         }
     }
 
-    true
+    Some(ManagedReset::Applied(tmux_name))
 }
 
 /// #896: Handle `POST /api/inflight/rebind` — rebind a live tmux session to
