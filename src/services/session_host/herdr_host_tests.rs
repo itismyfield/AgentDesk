@@ -1414,6 +1414,8 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/herdr_launch.rs", 2),
         // Dormant restart reconcile: reads the marker beside the stored pane, never a host.
         (RECONCILE, 1),
+        // Dormant source attach: takes the caller's reader, never constructs or routes to a host.
+        ("src/services/discord/tui_prompt_relay/herdr_source.rs", 0),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",

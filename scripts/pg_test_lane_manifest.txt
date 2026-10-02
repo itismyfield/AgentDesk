@@ -126,6 +126,7 @@ src/services/discord/terminal_ui_obligation.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
 src/services/discord/tmux_watcher/streaming_baseline_tests.rs
+src/services/discord/tui_prompt_relay/herdr_source_tests.rs
 src/services/discord/tui_prompt_relay/rehydration.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
@@ -304,6 +305,7 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
 services::discord::tmux_reaper::host_guard_tests
+services::discord::tui_prompt_relay::herdr_source::tests
 services::discord::tui_prompt_relay::rehydration::tests::host_defer
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
@@ -1106,6 +1108,10 @@ services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_t
 services::discord::tmux_reaper::host_guard_tests::orphan_cleanup_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg
+services::discord::tui_prompt_relay::herdr_source::tests::a_refused_restart_attach_withholds_hook_switches_until_a_match_pg
+services::discord::tui_prompt_relay::herdr_source::tests::herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source_pg
+services::discord::tui_prompt_relay::herdr_source::tests::herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_pg
+services::discord::tui_prompt_relay::herdr_source::tests::the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg
 services::discord::tui_prompt_relay::rehydration::tests::host_defer::a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session

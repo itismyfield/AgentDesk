@@ -1408,6 +1408,8 @@ src/
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_tests.rs
+│   │   │   ├── herdr_source.rs
+│   │   │   ├── herdr_source_tests.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
@@ -1506,7 +1508,9 @@ src/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
-│   │   │   │   └── process_table.rs
+│   │   │   │   ├── process_table.rs
+│   │   │   │   ├── stop_host.rs
+│   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
