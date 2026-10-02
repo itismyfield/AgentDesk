@@ -9722,6 +9722,7 @@ services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
 services::tui_o::channel_policy::tests::a_committed_channel_left_out_of_the_selection_stays_o_on_the_home
+services::tui_o::channel_policy::tests::a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_releases_it
 services::tui_o::channel_policy::tests::a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it
 services::tui_o::channel_policy::tests::a_placement_never_waits_on_another_channels_adoption_in_progress
 services::tui_o::channel_policy::tests::a_selected_channel_starts_committed_only_over_a_readable_init
@@ -9855,6 +9856,18 @@ services::tui_o::writer::tests::actor::host_start::a_resume_the_log_keeps_unchan
 services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
+services::tui_o::writer::tests::actor::host_start::deferred::a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved
+services::tui_o::writer::tests::actor::host_start::deferred::a_busy_legacy_keeps_the_adoption_deferred_and_one_read_serves_the_open_turn
+services::tui_o::writer::tests::actor::host_start::deferred::a_cursor_that_catches_up_without_a_write_lets_the_adoption_through
+services::tui_o::writer::tests::actor::host_start::deferred::a_final_reason_ends_the_adoption_even_behind_an_open_turn
+services::tui_o::writer::tests::actor::host_start::deferred::a_record_past_legacys_frontier_waits_until_the_frontier_covers_it
+services::tui_o::writer::tests::actor::host_start::deferred::a_source_bound_while_waiting_leaves_the_channel_to_legacy
+services::tui_o::writer::tests::actor::host_start::deferred::a_unit_written_after_the_cursor_caught_up_is_read_again_before_adoption
+services::tui_o::writer::tests::actor::host_start::deferred::a_unit_written_after_the_recheck_goes_to_o_while_a_legacy_body_waits_on_the_lock
+services::tui_o::writer::tests::actor::host_start::deferred::a_unit_written_before_the_retry_takes_the_lock_waits_for_legacy_to_read_it
+services::tui_o::writer::tests::actor::host_start::deferred::an_emission_that_starts_before_the_lock_is_seen_under_it
+services::tui_o::writer::tests::actor::host_start::deferred::an_open_turn_defers_the_adoption_and_its_close_adopts_it_without_a_restart
+services::tui_o::writer::tests::actor::host_start::deferred::legacy_taking_the_channel_during_the_first_read_leaves_nothing_to_retry
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound

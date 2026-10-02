@@ -62,6 +62,8 @@ struct TestIo {
     /// The gateway never comes up.
     port_down: std::sync::atomic::AtomicBool,
     legacy: Mutex<Option<Arc<dyn LegacyView>>>,
+    busy: std::sync::atomic::AtomicBool,
+    relaying: std::sync::atomic::AtomicBool,
 }
 
 impl TestIo {
@@ -76,6 +78,8 @@ impl TestIo {
             on_facts: Mutex::default(),
             port_down: Default::default(),
             legacy: Mutex::default(),
+            busy: Default::default(),
+            relaying: Default::default(),
         })
     }
 
@@ -136,6 +140,15 @@ impl HostIo for TestIo {
     fn legacy(&self) -> Arc<dyn LegacyView> {
         let legacy = self.legacy.lock().unwrap().clone();
         legacy.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
+    }
+
+    fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
+        self.calls.lock().unwrap().push(("busy", channel));
+        std::future::ready(self.busy.load(Ordering::SeqCst))
+    }
+
+    fn relaying(&self, _: u64) -> bool {
+        self.relaying.load(Ordering::SeqCst)
     }
 }
 
@@ -1072,3 +1085,6 @@ async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logge
     assert!(retired(&b_source), "[P21:clear_proves_b]");
     halt(stop, task).await;
 }
+
+#[path = "deferred_tests.rs"]
+mod deferred;

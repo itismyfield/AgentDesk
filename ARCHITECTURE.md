@@ -2072,6 +2072,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── confirm.rs
+│   │   │   ├── deferred.rs
 │   │   │   ├── deliver.rs
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_tests.rs

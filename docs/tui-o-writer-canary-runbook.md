@@ -137,6 +137,25 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
 - Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
   response tail runs for the session.
 
+An open last turn does not end the adoption, unless the channel also has sessions on another node
+or a node override (those release it first). The channel stays on Legacy, logged as
+`adoption waits for Legacy`, and its writer host looks again every 5 seconds without a restart. It
+reads the transcript again only once the reason it waited on may have cleared: the transcript
+changed, Legacy's cursor reached its end, the frontier moved or the binding log moved. It adopts
+once all of these hold, logged as `deferred adoption committed`:
+
+- The transcript has not changed for 10 seconds.
+- Legacy holds no inflight row, custody, pending start, response tail, mailbox turn, queued
+  intervention or pending dispatch for the channel, and is not emitting a terminal delivery.
+- Every check above passes, and in addition nothing past Legacy's frontier is left undelivered:
+  a deferred adoption abandons nothing. While a record is past the frontier it keeps waiting.
+
+A deferred channel is released for good, with `adoption held: <reason>`, if the reason is final
+(sessions on another node, a node override, a non-authoritative delivery record, the budget) or if
+the binding log bound another transcript while it waited (`was bound while the adoption
+waited`), since Legacy may still owe output it read from that one. A channel whose debt never clears stays on Legacy
+until the next restart, which adopts it as above.
+
 Before editing the list, run both cross-node checks below by hand and keep their output in the lane
 log. If either fails, stop the expansion; neither may be skipped.
 

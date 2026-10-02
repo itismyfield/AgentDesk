@@ -1,5 +1,6 @@
 //! Whether this process may still adopt a selected channel into O. A state changes only under the
-//! channel's own lock and at most once; it cancels or records an adoption, never a delivery.
+//! channel's own lock and is decided once from Pending or Deferred; it cancels or records an
+//! adoption, never a delivery.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -20,6 +21,9 @@ pub(crate) enum Adoption {
     Held,
     /// Legacy keeps the channel for the rest of this process.
     Released,
+    /// Legacy keeps the channel while its writer host waits for a turn to close and retries;
+    /// only that host sets or leaves it, and a Legacy body does not.
+    Deferred,
 }
 
 impl Adoption {
@@ -56,7 +60,7 @@ impl Candidate {
     }
 
     /// Whether O owns the channel for a body Legacy would otherwise send; a pending adoption is
-    /// released first, so O never starts under a body Legacy already took.
+    /// released first, and a deferred one later adopts only past what Legacy delivered.
     pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
         let mut state = self.lock();
         if *state == Adoption::Pending {
@@ -68,12 +72,30 @@ impl Candidate {
         state.owned()
     }
 
-    /// Leaves a pending adoption to Legacy for the rest of this process; a decided one is kept.
+    /// Leaves a pending or deferred adoption to Legacy for the rest of this process; a decided
+    /// one is kept.
     pub(crate) fn release(&self, channel: u64) {
         let mut state = self.lock();
-        if *state == Adoption::Pending {
+        if matches!(*state, Adoption::Pending | Adoption::Deferred) {
             *state = Adoption::Released;
             tracing::info!(channel, "[tui_o] adoption released before the first init");
+        }
+    }
+
+    /// Leaves a pending adoption to Legacy until its host retries; true while it is deferred.
+    pub(crate) fn defer(&self, channel: u64) -> bool {
+        let mut state = self.lock();
+        match *state {
+            Adoption::Pending => {
+                *state = Adoption::Deferred;
+                tracing::info!(
+                    channel,
+                    "[tui_o] adoption deferred until Legacy's turn closes"
+                );
+                true
+            }
+            Adoption::Deferred => true,
+            Adoption::Committed | Adoption::Held | Adoption::Released => false,
         }
     }
 
