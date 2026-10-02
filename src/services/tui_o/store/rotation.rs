@@ -2,8 +2,8 @@
 //! Both files are replaced atomically; a decided boundary changes only by `BoundaryResolved`.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -191,6 +191,27 @@ impl OStore {
         from: &ResolveFrom,
         operator: &str,
     ) -> Result<(SourceId, u64), StoreError> {
+        self.record_boundary_resolved_with_append(
+            channel,
+            source,
+            from,
+            operator,
+            ledger::append_to,
+        )
+    }
+
+    pub(super) fn record_boundary_resolved_with_append(
+        &self,
+        channel: u64,
+        source: &str,
+        from: &ResolveFrom,
+        operator: &str,
+        append: impl FnOnce(&mut File, DateTime<Utc>, &LedgerEntry) -> Result<(), StoreError>,
+    ) -> Result<(SourceId, u64), StoreError> {
+        let path = self.channel_dir(channel).join(LEDGER_FILE);
+        let mut file = OpenOptions::new().read(true).append(true).open(&path)?;
+        // Hold the existing ledger lock across validation and the durable operator append.
+        file.try_lock().map_err(io::Error::from)?;
         if self.read_init(channel)?.is_none() {
             return Err(rejected(format!("channel {channel} has no O store")));
         }
@@ -212,8 +233,7 @@ impl OStore {
         if !matches!(link.boundary, Boundary::Pending { .. }) {
             return Err(rejected(format!("the boundary of {source} is not pending")));
         }
-        let path = dir.join(LEDGER_FILE);
-        if let Some(recorded) = ledger::resolution(&path, &link.source)? {
+        if let Some(recorded) = ledger::resolution(&mut file, &link.source)? {
             let detail = format!("{source} is already resolved at {recorded}; restart the writer");
             return Err(rejected(detail));
         }
@@ -226,7 +246,7 @@ impl OStore {
             operator,
             at,
         };
-        ledger::append(&path, at, &entry)?;
+        append(&mut file, at, &entry)?;
         Ok((link.source.clone(), from))
     }
 }
