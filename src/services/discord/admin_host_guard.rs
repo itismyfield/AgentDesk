@@ -1,6 +1,8 @@
 //! Host check for admin commands, HTTP routes and diagnostics that reach a session by its
 //! tmux name: another or unknown host is reported as such, never probed or changed as tmux.
 
+use std::sync::Arc;
+
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -98,19 +100,21 @@ pub(super) async fn managed_reset_refusal(
     if !(kills || recreate_tmux) {
         return None;
     }
-    let reason = reset_refusal(shared, provider, channel_id, explicit_session_key).await?;
+    let name = session_channel_name(shared, channel_id).await;
+    let reason = reset_refusal(shared, provider, channel_id, explicit_session_key, name).await?;
     let channel_id = channel_id.get();
     tracing::warn!(channel_id, %reason, "managed session reset refused");
     Some(reason)
 }
 
-/// The in-memory name first, then the registered fallback name; with neither, only the
-/// channel's own row admits the reset.
+/// The in-memory `channel_name` first, then the registered fallback name; with neither, only
+/// the channel's own row admits the reset.
 async fn reset_refusal(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     explicit_session_key: Option<&str>,
+    channel_name: Option<String>,
 ) -> Option<String> {
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
     #[cfg(test)]
@@ -130,11 +134,6 @@ async fn reset_refusal(
             return Some(format!("`{name}`: {reason}"));
         }
     }
-    let channel_name = {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel_id);
-        session.and_then(|session| session.channel_name.clone())
-    };
     if let Some(name) = channel_name {
         let tmux_name = provider.build_tmux_session_name(&name);
         return channel_refusal(shared, provider, channel_id.get(), &tmux_name).await;
@@ -143,6 +142,109 @@ async fn reset_refusal(
     deferred(shared, provider, channel_id.get())
         .await
         .then(|| "채널 이름이 없어 세션 호스트를 legacy tmux로 확인하지 못했어요".to_string())
+}
+
+async fn session_channel_name(shared: &SharedData, channel_id: ChannelId) -> Option<String> {
+    let data = shared.core.lock().await;
+    let session = data.sessions.get(&channel_id);
+    session.and_then(|session| session.channel_name.clone())
+}
+
+/// A provider-state reset of one channel judged once, read only, on the runtime, channel name
+/// and key it acts on; [`ManagedResetVerdict::apply`] runs on that target without judging again.
+#[must_use]
+pub(crate) struct ManagedResetVerdict {
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    channel_name: Option<String>,
+    tmux_name: Option<String>,
+    refusal: Option<String>,
+}
+
+/// The verdict a runtime clear reaches for these inputs, taken before the caller's first write;
+/// `None` when no runtime is registered for the provider, so there is nothing to clear.
+pub(crate) async fn managed_reset_verdict(
+    registry: &super::health::HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+    session_key: Option<&str>,
+) -> Option<ManagedResetVerdict> {
+    let provider = ProviderKind::from_str(provider_name)?;
+    let shared = registry.shared_for_provider(&provider).await?;
+    let channel_name = session_channel_name(&shared, channel_id).await;
+    let by_key = || session_key.and_then(super::session_identity::tmux_name_from_session_key);
+    let named = channel_name.as_deref();
+    let tmux_name = named.map(|name| provider.build_tmux_session_name(name));
+    let tmux_name = tmux_name.or_else(by_key);
+    let refusal = match provider.uses_managed_tmux_backend() {
+        true => {
+            reset_refusal(
+                &shared,
+                &provider,
+                channel_id,
+                session_key,
+                channel_name.clone(),
+            )
+            .await
+        }
+        false => None,
+    };
+    Some(ManagedResetVerdict {
+        shared,
+        provider,
+        channel_id,
+        channel_name,
+        tmux_name,
+        refusal,
+    })
+}
+
+impl ManagedResetVerdict {
+    pub(crate) fn channel_id(&self) -> ChannelId {
+        self.channel_id
+    }
+
+    pub(crate) fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
+    }
+
+    /// Clears the approved channel's turn, provider session and managed process. A refusal, or a
+    /// channel whose session name changed since the verdict, changes nothing.
+    pub(crate) async fn apply(self) -> ManagedReset {
+        if let Some(reason) = self.refusal {
+            return ManagedReset::Refused(reason);
+        }
+        let (shared, provider, channel_id) = (self.shared, self.provider, self.channel_id);
+        if session_channel_name(&shared, channel_id).await != self.channel_name {
+            let reason = "the channel's session changed after its reset was approved";
+            return ManagedReset::Refused(reason.to_string());
+        }
+        let cleared = super::mailbox_clear_channel(&shared, &provider, channel_id).await;
+        if let Some(token) = cleared.removed_token {
+            let policy = super::TmuxCleanupPolicy::PreserveSession;
+            let stop = super::turn_bridge::stop_active_turn;
+            stop(&provider, &token, policy, "auto-queue slot clear").await;
+            super::saturating_decrement_global_active(&shared);
+        }
+        {
+            let mut data = shared.core.lock().await;
+            if let Some(session) = data.sessions.get_mut(&channel_id) {
+                super::settings::cleanup_channel_uploads(channel_id);
+                session.clear_provider_session();
+                session.history.clear();
+                session.pending_uploads.clear();
+                session.cleared = true;
+            }
+        }
+        #[cfg(unix)]
+        if let Some(name) = self.tmux_name.as_deref() {
+            if provider.uses_managed_tmux_backend() {
+                super::commands::reset_managed_process_session(name);
+            }
+        }
+        ManagedReset::Applied(self.tmux_name)
+    }
 }
 
 /// Why a stale or orphan turn may not release its mailbox and counters: its session, named by

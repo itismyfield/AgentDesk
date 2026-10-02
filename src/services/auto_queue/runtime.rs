@@ -6,6 +6,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
+use crate::services::discord::admin_host_guard::{ManagedResetVerdict, managed_reset_verdict};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::row_host_refusal;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
@@ -187,37 +188,26 @@ pub async fn clear_slot_threads_for_slot_pg(
     slot_index: i64,
 ) -> Result<usize, String> {
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
-    let safe_to_clear_thread_ids = filter_safe_slot_thread_reset_targets(pool, &target).await?;
+    let registry = health_registry.as_deref();
+    let (safe_to_clear_thread_ids, verdicts) =
+        filter_safe_slot_thread_reset_targets(pool, registry, &target).await?;
     let cleared = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
 
-    if let Some(registry) = health_registry {
-        let safe_to_clear: std::collections::HashSet<u64> =
-            safe_to_clear_thread_ids.iter().copied().collect();
-        let runtime_targets = target
-            .runtime_targets
-            .into_iter()
-            .filter(|target| safe_to_clear.contains(&target.thread_channel_id))
-            .collect::<Vec<_>>();
+    if health_registry.is_some() {
         #[cfg(test)]
         let slot_threads = target.thread_channel_ids.clone();
         tokio::spawn(async move {
-            for runtime_target in runtime_targets {
-                let thread = runtime_target.thread_channel_id;
-                // A refusal changes nothing here; its guard already logged it.
-                let reset = crate::services::discord::health::clear_provider_channel_runtime(
-                    &registry,
-                    &runtime_target.provider_name,
-                    poise::serenity_prelude::ChannelId::new(thread),
-                    runtime_target.session_key.as_deref(),
-                )
-                .await;
+            for verdict in verdicts {
+                let thread = verdict.channel_id().get();
+                // Runs on the target approved before the sessions update; nothing is judged again.
+                let reset = verdict.apply().await;
                 #[cfg(test)]
                 RUNTIME_CLEARS
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
-                    .push((thread, reset));
+                    .push((thread, Some(reset)));
                 #[cfg(not(test))]
-                let _ = reset;
+                let _ = (thread, reset);
             }
             #[cfg(test)]
             RUNTIME_CLEARS_DONE
@@ -317,7 +307,8 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
     }
 
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
-    let safe_to_clear_thread_ids = filter_safe_slot_thread_reset_targets(pool, &target).await?;
+    let (safe_to_clear_thread_ids, _) =
+        filter_safe_slot_thread_reset_targets(pool, None, &target).await?;
     let archived_threads = archive_slot_threads(&safe_to_clear_thread_ids).await?;
     let cleared_sessions = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
     let cleared_bindings = if safe_to_clear_thread_ids.len() == target.thread_channel_ids.len() {
@@ -410,19 +401,37 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
     Ok(archived)
 }
 
+/// The threads a reset may change and, with a registry, the runtime-clear verdict of each; every
+/// check only reads and finishes before the caller's first write.
 async fn filter_safe_slot_thread_reset_targets(
     pool: &PgPool,
+    registry: Option<&HealthRegistry>,
     target: &SlotClearTarget,
-) -> Result<Vec<u64>, String> {
-    let mut safe_to_reset = Vec::new();
+) -> Result<(Vec<u64>, Vec<ManagedResetVerdict>), String> {
+    let (mut safe_to_reset, mut verdicts) = (Vec::new(), Vec::new());
     for thread_channel_id in &target.thread_channel_ids {
         let thread_id = thread_channel_id.to_string();
         let selected = target
             .selected_rows
             .iter()
             .find(|row| row.thread_channel_id == *thread_channel_id);
-        // The host check only reads; it runs first because the defer probe can rewrite inflight rows.
         if let Some(reason) = slot_thread_host_refusal(pool, &thread_id, selected).await {
+            tracing::warn!(
+                "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
+            );
+            continue;
+        }
+        let runtime_target = (target.runtime_targets.iter())
+            .find(|runtime| runtime.thread_channel_id == *thread_channel_id);
+        let verdict = match (registry, runtime_target) {
+            (Some(registry), Some(runtime)) => {
+                let channel = poise::serenity_prelude::ChannelId::new(*thread_channel_id);
+                let key = runtime.session_key.as_deref();
+                managed_reset_verdict(registry, &runtime.provider_name, channel, key).await
+            }
+            _ => None,
+        };
+        if let Some(reason) = verdict.as_ref().and_then(ManagedResetVerdict::refusal) {
             tracing::warn!(
                 "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
             );
@@ -435,7 +444,10 @@ async fn filter_safe_slot_thread_reset_targets(
                     "[auto-queue] skipping slot thread reset for {thread_channel_id}: active turn or fresh inflight still present"
                 );
             }
-            Ok(false) => safe_to_reset.push(*thread_channel_id),
+            Ok(false) => {
+                safe_to_reset.push(*thread_channel_id);
+                verdicts.extend(verdict);
+            }
             Err(err) => {
                 tracing::warn!(
                     "[auto-queue] skipping slot thread reset for {thread_channel_id}: active-check failed: {err}"
@@ -443,7 +455,7 @@ async fn filter_safe_slot_thread_reset_targets(
             }
         }
     }
-    Ok(safe_to_reset)
+    Ok((safe_to_reset, verdicts))
 }
 
 /// Why a slot thread may not be reset: every row the reset idles and the row its runtime
