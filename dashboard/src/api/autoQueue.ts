@@ -175,8 +175,8 @@ export async function getAutoQueueStatus(
   if (repo) params.set("repo", repo);
   if (agentId) params.set("agent_id", agentId);
   const qs = params.toString();
-  // A signal opts out of sharing an in-flight GET that started earlier.
-  const fresh = opts?.fresh ? { signal: new AbortController().signal } : undefined;
+  // fresh never joins an in-flight GET that started earlier.
+  const fresh = opts?.fresh ? { shareInflight: false } : undefined;
   return request(`/api/queue/status${qs ? `?${qs}` : ""}`, fresh);
 }
 

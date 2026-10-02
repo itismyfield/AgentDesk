@@ -250,6 +250,8 @@ async fn enqueue_candidates(
 enum PickedRun {
     Active(String),
     Paused(String),
+    /// Generated or pending: the agent's next queue is not started yet.
+    Unstarted(String),
     /// Finished while this waited for its token; retry in a fresh transaction.
     Gone,
 }
@@ -262,19 +264,26 @@ async fn pick_run(
     agent: &str,
 ) -> Result<PickedRun, String> {
     let db = |error: sqlx::Error| format!("campaign handoff: {error}");
-    let live: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM auto_queue_runs
-         WHERE status IN ('active', 'paused')
+    lock_run_creation_on_pg_tx(tx).await?;
+    // A started run is joined; else an unstarted one in scope holds the node, as it blocks generate.
+    let live: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, status FROM auto_queue_runs
+         WHERE status IN ('generated', 'pending', 'active', 'paused')
            AND (repo = $1 OR repo IS NULL OR repo = '')
            AND (agent_id = $2 OR agent_id IS NULL OR agent_id = '')
-         ORDER BY created_at DESC, id DESC LIMIT 1",
+         ORDER BY status IN ('active', 'paused') DESC, created_at DESC, id DESC LIMIT 1",
     )
     .bind(repo)
     .bind(agent)
     .fetch_optional(&mut **tx)
     .await
     .map_err(db)?;
-    let Some(run_id) = live else {
+    if let Some((run_id, status)) = &live
+        && matches!(status.as_str(), "generated" | "pending")
+    {
+        return Ok(PickedRun::Unstarted(run_id.clone()));
+    }
+    let Some((run_id, _)) = live else {
         let run_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO auto_queue_runs (id, repo, agent_id, review_mode, status,
@@ -346,6 +355,12 @@ async fn enqueue_group(
             PickedRun::Paused(run_id) => {
                 for member in members {
                     report.wait(member.node_id, "run_paused", Some(run_id.clone()));
+                }
+                return Ok(());
+            }
+            PickedRun::Unstarted(run_id) => {
+                for member in members {
+                    report.wait(member.node_id, "queue_not_started", Some(run_id.clone()));
                 }
                 return Ok(());
             }
@@ -453,3 +468,23 @@ pub(crate) async fn hand_off_auto_campaigns_pg(
 #[cfg(test)]
 #[path = "campaign_handoff_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod minute_tick_wiring_tests {
+    /// The minute tick hands off before OnTick1min, which catches cards GitHub sync closed.
+    #[test]
+    fn the_minute_tick_hands_off_campaigns_before_the_auto_queue_tick() {
+        let server = include_str!("../../server/mod.rs");
+        let tier = server
+            .split("// ── 1min tier")
+            .nth(1)
+            .expect("the policy tick has a 1min tier");
+        let handoff = tier
+            .find("hand_off_auto_campaigns_pg(")
+            .expect("the 1min tier hands off campaigns");
+        let tick = tier
+            .find("\"OnTick1min\"")
+            .expect("the 1min tier fires OnTick1min");
+        assert!(handoff < tick, "the handoff runs before OnTick1min");
+    }
+}

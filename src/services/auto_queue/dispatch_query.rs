@@ -65,8 +65,8 @@ pub(super) async fn resolve_dispatch_cards_with_pg(
 
 /// Runs that block a new generate in the same scope. A run not started yet
 /// counts too, so a repeated generate cannot leave a second unstarted queue.
-pub(super) async fn find_matching_active_run_id_pg(
-    pool: &sqlx::PgPool,
+pub(super) async fn find_matching_active_run_id_pg<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     repo: Option<&str>,
     agent_id: Option<&str>,
 ) -> Result<Vec<(String, String)>, String> {
@@ -80,7 +80,7 @@ pub(super) async fn find_matching_active_run_id_pg(
     )
     .bind(repo.map(str::trim).filter(|value| !value.is_empty()))
     .bind(agent_id.map(str::trim).filter(|value| !value.is_empty()))
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|err| format!("query live runs: {err}"))?;
 
@@ -92,6 +92,18 @@ pub(super) async fn find_matching_active_run_id_pg(
             ))
         })
         .collect()
+}
+
+/// Generate and campaign handoff create runs under this one lock, held until commit.
+/// It is global because a run with no repo or agent conflicts with every scope.
+pub(super) async fn lock_run_creation_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), String> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run_create'))")
+        .execute(&mut **tx)
+        .await
+        .map_err(|err| format!("lock auto-queue run creation: {err}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
