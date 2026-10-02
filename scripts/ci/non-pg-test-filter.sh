@@ -231,6 +231,13 @@ NON_PG_FILTER_REPLAY=(
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_malformed_json
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_non_object_context
   db::intake_outbox_delivery_proof::tests::stale_reader_projects_exactly_id
+  db::postgres::test_db_reclaim::tests::reclaim_classify_owner_identity
+  db::postgres::test_db_reclaim::tests::reclaim_classify_real_process_identity
+  db::postgres::test_db_reclaim::tests::reclaim_execute_rechecks_before_drop
+  db::postgres::test_db_reclaim::tests::reclaim_execute_stops_on_log_failure
+  db::postgres::test_db_reclaim::tests::reclaim_gate_decision
+  db::postgres::test_db_reclaim::tests::reclaim_plan_caps_per_process_oldest_first
+  db::postgres::test_db_reclaim::tests::reclaim_protected_names_abort_sweep
   db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
   db::postgres::tests::background_backpressure_disabled_when_reserve_zero
   db::postgres::tests::background_backpressure_saturating_boundaries
