@@ -68,7 +68,7 @@ pub(super) fn card_lifecycle_ops_body() -> Value {
                     {
                         "scenario": "Bulk push N issues into the auto-queue",
                         "single_call": "POST /api/queue/generate with {\"issue_numbers\": [...]}",
-                        "notes": "Bulk only — never use to restart a single card that already has an active dispatch (it will silent-skip and surface skipped_due_to_active_dispatch). Inspect skipped_due_to_active_dispatch / skipped_due_to_filter."
+                        "notes": "Bulk only — never use to restart a single card that already has an active dispatch (it will silent-skip and surface skipped_due_to_active_dispatch). Inspect skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter."
                     },
                     {
                         "scenario": "Trigger the next dispatch from an existing run",
@@ -124,7 +124,7 @@ pub(super) fn card_lifecycle_ops_body() -> Value {
                 "how_it_is_prevented_now": [
                     "#1442 added new_dispatch_id and cancelled_dispatch_id(s) to /redispatch, /retry, and /transition responses, plus a per-endpoint follow-up signal: /redispatch and /retry return `next_action` (a fixed marker such as 'none_required' or 'assign_agent_then_call_redispatch'); /transition returns `next_action_hint` (a free-form sentence naming the exact follow-up). On the success path both are 'none_required' / point at no further action — if a caller sees that and still chains another mutation, it is a caller bug, not a missing signal.",
                     "#1444 added a 409 Conflict guard on /transition status:ready when an active dispatch exists. Callers must explicitly opt in via force=true (or legacy cancel_dispatches=true) to override.",
-                    "#1444 also made /queue/generate surface structured skips (skipped_due_to_active_dispatch / skipped_due_to_filter) instead of silently dropping the entry, so even a misuse is observable from the response. Note: /dispatch-next does NOT return these arrays — it only reports `dispatched`, `count`, `active_groups`, and `pending_groups`."
+                    "#1444 also made /queue/generate surface structured skips (skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter) instead of silently dropping the entry, so even a misuse is observable from the response. Note: /dispatch-next does NOT return these arrays — it only reports `dispatched`, `count`, `active_groups`, and `pending_groups`."
                 ],
                 "right_pattern": "Pick ONE row from Section 1 and call it ONCE. Inspect new_dispatch_id, cancelled_dispatch_id(s), next_action / next_action_hint, and (for /generate) skipped_due_to_*. Do NOT call a second mutation unless next_action / next_action_hint says so."
             },
@@ -165,6 +165,11 @@ pub(super) fn card_lifecycle_ops_body() -> Value {
                         "field": "skipped_due_to_active_dispatch",
                         "source": "/queue/generate (NOT /dispatch-next)",
                         "notes": "Array of {issue_number, existing_dispatch_id} entries that were silently skipped because the card already had a live dispatch."
+                    },
+                    {
+                        "field": "skipped_due_to_dependency",
+                        "source": "/queue/generate (NOT /dispatch-next)",
+                        "notes": "Array of {issue_number, unresolved_deps[]} entries skipped because issues listed in the card's metadata depends_on / dependencies were not yet done. Issue bodies are not read."
                     },
                     {
                         "field": "skipped_due_to_filter",

@@ -83,6 +83,9 @@ pub(super) fn normalize_generate_entries(
         if batch_phase < 0 {
             return Err("batch_phase must be >= 0".to_string());
         }
+        if entry.thread_group.is_some_and(|lane| lane < 0) {
+            return Err("thread_group must be >= 0".to_string());
+        }
         if !seen.insert(entry.issue_number) {
             return Err(format!(
                 "duplicate issue_number in entries payload: {}",
@@ -175,6 +178,18 @@ mod phase_gate_generate_validation_tests {
             .expect("valid") // agentdesk-audit: allow-unwrap — test assertion for legacy omitted kind
             .expect("entries"); // agentdesk-audit: allow-unwrap — fixture always supplies entries
         assert!(legacy[0].phase_gate_kind.is_none());
+    }
+
+    #[test]
+    fn negative_thread_group_is_rejected() {
+        let mut negative = body(None);
+        if let Some(entries) = negative.entries.as_mut() {
+            entries[0].thread_group = Some(-1);
+        }
+        assert_eq!(
+            normalize_generate_entries(&negative).unwrap_err(),
+            "thread_group must be >= 0"
+        );
     }
 }
 

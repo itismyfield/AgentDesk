@@ -665,7 +665,7 @@ AgentDesk exposes 270 REST API endpoints. Key groups:
 | Group | Endpoints | Description |
 |-------|-----------|-------------|
 | `/api/agents` | CRUD + signal, skills, timeline | Agent management |
-| `/api/kanban-cards` | CRUD + assign, `/transition`, `/retry`, `/redispatch`, `/rereview`, `/reopen`, batch actions | Work item management. `/transition`, `/retry`, `/redispatch`, and `/queue/generate` are **single-call complete** — do not chain them (#1442). Response fields differ per endpoint: `/retry` and `/redispatch` return `new_dispatch_id` + `next_action`; `/transition` returns `cancelled_dispatch_ids`, `created_dispatch_id`, and `next_action_hint` (and requires `force=true` when an active dispatch exists, #1444); `/queue/generate` returns `run`, `entries`, and the `skipped_due_to_active_dispatch` / `skipped_due_to_filter` arrays. |
+| `/api/kanban-cards` | CRUD + assign, `/transition`, `/retry`, `/redispatch`, `/rereview`, `/reopen`, batch actions | Work item management. `/transition`, `/retry`, `/redispatch`, and `/queue/generate` are **single-call complete** — do not chain them (#1442). Response fields differ per endpoint: `/retry` and `/redispatch` return `new_dispatch_id` + `next_action`; `/transition` returns `cancelled_dispatch_ids`, `created_dispatch_id`, and `next_action_hint` (and requires `force=true` when an active dispatch exists, #1444); `/queue/generate` returns `run`, `entries`, and the `skipped_due_to_active_dispatch` / `skipped_due_to_dependency` / `skipped_due_to_filter` arrays. |
 | `/api/dispatches` | CRUD + cancel | Task assignment tracking |
 | `/api/queue` | Generate, dispatch-next, reorder, status, slots | Batch-phased work queuing |
 | `/api/sessions` | List, update, cleanup | Agent runtime sessions |

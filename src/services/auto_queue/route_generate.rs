@@ -5,25 +5,60 @@ use super::*;
 fn assign_lanes(
     issue_numbers: impl Iterator<Item = Option<i64>>,
     requested: &HashMap<i64, (usize, i64, Option<i64>, Option<String>)>,
-) -> Vec<(i64, i64, i64)> {
+) -> Result<Vec<(i64, i64, i64)>, String> {
     let mut next_lane = requested
         .values()
         .filter_map(|(_, _, lane, _)| *lane)
         .max()
-        .map_or(0, |max| max + 1);
+        .map_or(Some(0), |max| max.checked_add(1));
     let mut lane_lengths: HashMap<i64, i64> = HashMap::new();
     issue_numbers
         .map(|issue_number| {
             let meta = issue_number.and_then(|number| requested.get(&number));
-            let lane = meta.and_then(|(_, _, lane, _)| *lane).unwrap_or_else(|| {
-                let lane = next_lane;
-                next_lane += 1;
-                lane
-            });
+            let lane = match meta.and_then(|(_, _, lane, _)| *lane) {
+                Some(lane) => lane,
+                None => {
+                    let lane = next_lane.ok_or_else(|| {
+                        "thread_group is too large to number lanes for the other cards".to_string()
+                    })?;
+                    next_lane = lane.checked_add(1);
+                    lane
+                }
+            };
             let rank = lane_lengths.entry(lane).or_insert(0);
             *rank += 1;
-            (lane, *rank - 1, meta.map_or(0, |(_, phase, _, _)| *phase))
+            Ok((lane, *rank - 1, meta.map_or(0, |(_, phase, _, _)| *phase)))
         })
+        .collect()
+}
+
+/// Issue numbers a card's metadata names under `depends_on` / `dependencies`.
+/// Issue bodies are not read: prerequisites are declared, not guessed.
+fn declared_dependencies(metadata: Option<&str>, self_issue: Option<i64>) -> Vec<i64> {
+    fn collect(value: &Value, out: &mut std::collections::BTreeSet<i64>) {
+        match value {
+            Value::Number(number) => out.extend(number.as_i64()),
+            Value::String(raw) => out.extend(
+                raw.split(|ch: char| ch == ',' || ch.is_whitespace())
+                    .filter_map(|token| token.trim_start_matches('#').parse::<i64>().ok()),
+            ),
+            Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
+            _ => {}
+        }
+    }
+    let Some(Value::Object(object)) = metadata.and_then(|raw| serde_json::from_str(raw).ok())
+    else {
+        return Vec::new();
+    };
+    let mut numbers = std::collections::BTreeSet::new();
+    for (key, value) in &object {
+        if key.eq_ignore_ascii_case("depends_on") || key.eq_ignore_ascii_case("dependencies") {
+            collect(value, &mut numbers);
+        }
+    }
+    numbers
+        .into_iter()
+        .filter(|number| *number > 0 && Some(*number) != self_issue)
         .collect()
 }
 
@@ -32,11 +67,13 @@ fn assign_lanes(
 /// Creates a queue run from ready cards. Auto-queue does not plan: cards keep
 /// the order given (`entries`, else priority then age), a requested
 /// `thread_group` keeps its lane, and every other card gets a lane of its own.
+/// A card whose declared prerequisites are not done is held back.
 ///
 /// This endpoint is single-call complete. Do NOT chain /redispatch, /retry,
 /// or /transition after it for the same card — that creates duplicate
 /// dispatches (see #1442 incident). The response surfaces structured skip
-/// breakdowns (`skipped_due_to_active_dispatch`, `skipped_due_to_filter`) so
+/// breakdowns (`skipped_due_to_active_dispatch`, `skipped_due_to_dependency`,
+/// `skipped_due_to_filter`) so
 /// callers can make follow-up decisions without guessing.
 pub async fn generate(
     State(state): State<AppState>,
@@ -281,6 +318,58 @@ pub async fn generate(
         }
     }
 
+    // The issue-creation API writes `depends_on`; a card waits until those issues are done.
+    let mut dependency_skips: Vec<serde_json::Value> = Vec::new();
+    {
+        let mut status_cache: HashMap<i64, Option<String>> = HashMap::new();
+        let mut retained = Vec::with_capacity(cards.len());
+        for card in cards.into_iter() {
+            let mut unresolved = Vec::new();
+            for dependency in
+                declared_dependencies(card.metadata.as_deref(), card.github_issue_number)
+            {
+                let status = match status_cache.get(&dependency) {
+                    Some(status) => status.clone(),
+                    None => {
+                        let status = sqlx::query_scalar::<_, String>(
+                            "SELECT status FROM kanban_cards
+                             WHERE github_issue_number::BIGINT = $1 AND ($2::TEXT IS NULL OR repo_id = $2)
+                             ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC
+                             LIMIT 1",
+                        )
+                        .bind(dependency)
+                        .bind(body.repo.as_deref())
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|error| {
+                            AppError::internal(format!(
+                                "dependency lookup failed for #{dependency}: {error}"
+                            ))
+                            .with_code(ErrorCode::AutoQueue)
+                        })?;
+                        status_cache.insert(dependency, status.clone());
+                        status
+                    }
+                };
+                if status.as_deref() != Some("done") {
+                    unresolved.push(format!(
+                        "#{dependency}:{}",
+                        status.as_deref().unwrap_or("missing")
+                    ));
+                }
+            }
+            if unresolved.is_empty() {
+                retained.push(card);
+            } else if let Some(issue_number) = card.github_issue_number {
+                dependency_skips.push(json!({
+                    "issue_number": issue_number,
+                    "unresolved_deps": unresolved,
+                }));
+            }
+        }
+        cards = retained;
+    }
+
     if cards.is_empty() {
         let statuses: Vec<String> = crate::pipeline::try_get()
             .map(|pipeline| {
@@ -324,6 +413,7 @@ pub async fn generate(
                 "hint": "Move cards to a dispatchable state before generating a queue.",
                 "counts": counts_map,
                 "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
+                "skipped_due_to_dependency": dependency_skips,
                 "skipped_due_to_filter": skip_breakdown.filter,
             })),
         ));
@@ -332,7 +422,8 @@ pub async fn generate(
     let planned = assign_lanes(
         cards.iter().map(|card| card.github_issue_number),
         &requested_entry_meta,
-    );
+    )
+    .map_err(|error| AppError::bad_request(error).with_code(ErrorCode::AutoQueue))?;
     let thread_group_count = planned
         .iter()
         .map(|(lane, _, _)| *lane)
@@ -445,6 +536,7 @@ pub async fn generate(
             "run": run,
             "entries": entries,
             "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
+            "skipped_due_to_dependency": dependency_skips,
             "skipped_due_to_filter": skip_breakdown.filter,
         })),
     ))
@@ -604,7 +696,28 @@ mod lane_assignment_tests {
             (3, (2, 1, None, None)),
         ]);
         let lanes = assign_lanes([Some(1), Some(2), Some(3), None].into_iter(), &requested);
-        assert_eq!(lanes, vec![(2, 0, 0), (2, 1, 1), (3, 0, 1), (4, 0, 0)]);
+        assert_eq!(lanes, Ok(vec![(2, 0, 0), (2, 1, 1), (3, 0, 1), (4, 0, 0)]));
+    }
+
+    #[test]
+    fn the_largest_lane_is_kept_and_only_extra_lanes_overflow() {
+        let requested = HashMap::from([(1, (0, 0, Some(i64::MAX), None))]);
+        assert_eq!(
+            assign_lanes([Some(1)].into_iter(), &requested),
+            Ok(vec![(i64::MAX, 0, 0)])
+        );
+        assert!(assign_lanes([Some(1), Some(2)].into_iter(), &requested).is_err());
+    }
+
+    #[test]
+    fn dependencies_come_from_metadata_only() {
+        let metadata = r##"{"depends_on":[7, "#42", "8, #9"],"Dependencies":7,"labels":"#5"}"##;
+        assert_eq!(
+            declared_dependencies(Some(metadata), Some(9)),
+            vec![7, 8, 42]
+        );
+        assert!(declared_dependencies(Some("depends on #7"), None).is_empty());
+        assert!(declared_dependencies(None, None).is_empty());
     }
 }
 
@@ -653,7 +766,7 @@ mod deploy_gate_request_rejection_tests {
         }
     }
 
-    fn state_with_postgres(pg_pool: Option<sqlx::PgPool>) -> AppState {
+    pub(super) fn state_with_postgres(pg_pool: Option<sqlx::PgPool>) -> AppState {
         let config = crate::config::Config::default();
         let broadcast_tx = crate::eventbus::new_broadcast();
         let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
@@ -726,5 +839,54 @@ mod deploy_gate_request_rejection_tests {
             pool.close().await;
             pg_db.drop().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod dependency_hold_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_card_waits_until_its_declared_prerequisite_is_done() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status) VALUES ('agent-dep', 'Dep', 'codex', 'idle')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, assigned_agent_id, github_issue_number, metadata)
+             VALUES ('card-100', 'dep/repo', 'Prerequisite', 'in_progress', 'agent-dep', 100, NULL),
+                    ('card-101', 'dep/repo', 'Dependent', 'ready', 'agent-dep', 101, '{\"depends_on\":[100]}'::jsonb),
+                    ('card-102', 'dep/repo', 'Free', 'ready', 'agent-dep', 102, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed cards"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let body: GenerateBody = serde_json::from_value(json!({
+            "repo": "dep/repo",
+            "agent_id": "agent-dep",
+        }))
+        .expect("generate body"); // agentdesk-audit: allow-unwrap — static test fixture
+        let state =
+            super::deploy_gate_request_rejection_tests::state_with_postgres(Some(pool.clone()));
+        let (_, Json(response)) = generate(State(state), Json(body))
+            .await
+            .expect("generate succeeds"); // agentdesk-audit: allow-unwrap — test assertion
+
+        assert_eq!(
+            response["skipped_due_to_dependency"],
+            json!([{ "issue_number": 101, "unresolved_deps": ["#100:in_progress"] }])
+        );
+        let queued: Vec<String> = sqlx::query_scalar(
+            "SELECT kanban_card_id FROM auto_queue_entries ORDER BY kanban_card_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list entries"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        assert_eq!(queued, vec!["card-102".to_string()]);
     }
 }

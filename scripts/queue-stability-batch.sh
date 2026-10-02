@@ -155,7 +155,7 @@ GENERATE_RESULT=$(api_post_json "/api/queue/generate" "$GENERATE_BODY")
 RUN_ID=$(printf '%s' "$GENERATE_RESULT" | jq -r '.run.id // ""')
 if [ -z "$RUN_ID" ]; then
     log "x Generate failed"
-    printf '%s\n' "$GENERATE_RESULT" | jq -c '{message, skipped_due_to_active_dispatch, skipped_due_to_filter}' 2>/dev/null || true
+    printf '%s\n' "$GENERATE_RESULT" | jq -c '{message, skipped_due_to_active_dispatch, skipped_due_to_dependency, skipped_due_to_filter}' 2>/dev/null || true
     exit 1
 fi
 log "> Generated run: $RUN_ID"
@@ -167,6 +167,7 @@ if [ "$GENERATED_COUNT" -lt "${#ALL_ISSUES[@]}" ]; then
         | jq -r '
             [
               (.skipped_due_to_active_dispatch[]? | "active_dispatch #" + (.issue_number|tostring)),
+              (.skipped_due_to_dependency[]? | "dependency #" + (.issue_number|tostring) + " " + ((.unresolved_deps // [])|join(","))),
               (.skipped_due_to_filter[]? | "filter #" + (.issue_number|tostring) + " " + (.reason // ""))
             ] | .[]' \
         || true
