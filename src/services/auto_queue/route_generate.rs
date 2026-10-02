@@ -72,26 +72,30 @@ fn collect_references(text: &str, out: &mut std::collections::BTreeSet<Prerequis
 /// Fenced code blocks are skipped, so examples in them are not read.
 fn dependency_section_lines(description: &str) -> impl Iterator<Item = &str> {
     let mut inside = false;
-    let mut fence: Option<&str> = None;
+    let mut fence: Option<(char, usize)> = None;
     description.lines().filter(move |line| {
         let trimmed = line.trim();
-        if let Some(marker) = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m)) {
-            match fence {
-                None => fence = Some(marker),
-                Some(open) if open == marker => fence = None,
-                Some(_) => {}
+        let marker = trimmed.chars().next().filter(|ch| matches!(ch, '`' | '~'));
+        let run = marker.map_or(0, |ch| trimmed.chars().take_while(|c| *c == ch).count());
+        match (fence, marker) {
+            (None, Some(ch)) if run >= 3 => fence = Some((ch, run)),
+            // Only a bare run of the same character, at least as long, closes a fence.
+            (Some((open, len)), Some(ch))
+                if ch == open && run >= len && trimmed[run..].trim().is_empty() =>
+            {
+                fence = None
             }
-            return false;
+            (Some(_), _) => {}
+            _ => {
+                let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+                if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+                    inside = trimmed[hashes..].trim() == "의존성";
+                    return false;
+                }
+                return inside;
+            }
         }
-        if fence.is_some() {
-            return false;
-        }
-        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
-        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-            inside = trimmed[hashes..].trim() == "의존성";
-            return false;
-        }
-        inside
+        false
     })
 }
 
@@ -855,7 +859,7 @@ mod lane_assignment_tests {
 
     #[test]
     fn examples_in_code_fences_are_not_read() {
-        let body = "## 배경\n```md\n## 의존성\n- #999\n```\n\n## 의존성\n- #100\n~~~\n- #998\n```\n- #997\n~~~\n- #101";
+        let body = "````md\n```\n## 의존성\n- #996\n```\n````\n## 배경\n```md\n## 의존성\n- #999\n```\n\n## 의존성\n- #100\n~~~\n- #998\n```\n- #997\n~~~\n- #101";
         assert_eq!(
             declared_dependencies(None, Some(body), None),
             vec![own(100), own(101)]
