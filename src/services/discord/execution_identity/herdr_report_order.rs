@@ -25,20 +25,21 @@ pub(crate) enum ReportSeq {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportOrder {
     Accepted,
-    /// At or below the last accepted seq: a duplicate or a late report.
+    /// At or below the source's last accepted seq: a duplicate or a late report.
     Stale,
-    /// The last accepted seq with another payload; the accepted one stays.
+    /// The source's last accepted seq with another payload; the accepted one stays.
     Diverged,
-    /// Not the source the scope followed; the scope is dropped so the pane is read again.
+    /// Not the source the scope followed; nothing is accepted until the pane is read again.
     SourceChanged,
+    /// The scope lost its source and waits for [`ReportOrderFilter::refollow`] after a fresh read.
+    AwaitingRecheck,
     /// No verified seq: a diagnostic, never ordered and never a reset.
     Unordered,
     /// Read on a connection older than the filter's.
     OldConnection,
 }
 
-struct Accepted {
-    source: String,
+struct Last {
     seq: u64,
     payload: u64,
 }
@@ -47,10 +48,23 @@ struct Accepted {
 #[derive(Default)]
 pub(crate) struct ReportOrderFilter {
     generation: u64,
-    last: HashMap<ReportScope, Accepted>,
+    /// The source each scope follows; `None` after a switch until a fresh read names one.
+    followed: HashMap<ReportScope, Option<String>>,
+    /// Each source's last accepted report, kept across a switch so its late reports stay stale.
+    last: HashMap<(ReportScope, String), Last>,
 }
 
 impl ReportOrderFilter {
+    /// Whether `generation` is current; a newer one drops everything the older one ordered.
+    fn on_connection(&mut self, generation: u64) -> bool {
+        if generation > self.generation {
+            self.generation = generation;
+            self.followed.clear();
+            self.last.clear();
+        }
+        generation == self.generation
+    }
+
     /// One report read on connection `generation`; `payload` is what the seq orders.
     pub(crate) fn observe(
         &mut self,
@@ -60,12 +74,8 @@ impl ReportOrderFilter {
         seq: ReportSeq,
         payload: &impl Hash,
     ) -> ReportOrder {
-        if generation < self.generation {
+        if !self.on_connection(generation) {
             return ReportOrder::OldConnection;
-        }
-        if generation > self.generation {
-            self.generation = generation;
-            self.last.clear();
         }
         let ReportSeq::Verified(seq) = seq else {
             return ReportOrder::Unordered;
@@ -73,28 +83,37 @@ impl ReportOrderFilter {
         let mut hasher = DefaultHasher::new();
         payload.hash(&mut hasher);
         let payload = hasher.finish();
-        let Some(last) = self.last.get_mut(scope) else {
-            let source = source.to_string();
-            let first = Accepted {
-                source,
-                seq,
-                payload,
-            };
-            self.last.insert(scope.clone(), first);
-            return ReportOrder::Accepted;
-        };
-        if last.source != source {
-            self.last.remove(scope);
-            return ReportOrder::SourceChanged;
+        let key = (scope.clone(), source.to_string());
+        if let Some(last) = self.last.get(&key) {
+            if seq < last.seq || (seq == last.seq && payload == last.payload) {
+                return ReportOrder::Stale;
+            }
+            if seq == last.seq {
+                return ReportOrder::Diverged;
+            }
         }
-        if seq > last.seq {
-            (last.seq, last.payload) = (seq, payload);
-            return ReportOrder::Accepted;
+        match self.followed.get(scope) {
+            Some(None) => return ReportOrder::AwaitingRecheck,
+            Some(Some(followed)) if followed != source => {
+                self.followed.insert(scope.clone(), None);
+                return ReportOrder::SourceChanged;
+            }
+            _ => {}
         }
-        if seq == last.seq && payload != last.payload {
-            return ReportOrder::Diverged;
+        self.followed.insert(scope.clone(), Some(key.1.clone()));
+        self.last.insert(key, Last { seq, payload });
+        ReportOrder::Accepted
+    }
+
+    /// A fresh read of the pane named `source` as its reporter; an older connection's read
+    /// changes nothing.
+    pub(crate) fn refollow(&mut self, generation: u64, scope: &ReportScope, source: &str) -> bool {
+        if !self.on_connection(generation) {
+            return false;
         }
-        ReportOrder::Stale
+        self.followed
+            .insert(scope.clone(), Some(source.to_string()));
+        true
     }
 }
 

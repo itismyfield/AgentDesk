@@ -583,6 +583,7 @@ NON_PG_FILTER_REPLAY=(
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries
   services::dispatches::wait_queue::tests::wake_query_preserves_fifo_ordering
   services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
+  services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
   services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
   services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::no_pg_is_noop_even_with_managed_orphans
   services::message_outbox::postgres_source_contract_tests::typed_outbox_core_preserves_cancel_at_the_observation_site

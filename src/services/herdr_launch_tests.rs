@@ -541,3 +541,85 @@ async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
         db.drop().await;
     }
 }
+
+/// Every path under `root` with its bytes; a directory reads as empty.
+fn store_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut tree = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            tree.push((path, Vec::new()));
+        } else {
+            tree.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    tree.sort();
+    tree
+}
+
+// Only a channel O owns, whose writer accepts work and whose existing store holds a binding
+// checkpoint reaches Herdr; reading that evidence creates, sweeps and rewrites nothing.
+#[test]
+fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store() {
+    use crate::services::tui_o::cutover::test_override::{
+        force_candidates, force_channels, force_foreign,
+    };
+    use crate::services::tui_o::store::STORE_DIR_NAME;
+    use crate::services::tui_o::store::rotation::CHECKPOINT_FILE;
+    let (owned, other, misnamed, garbled) = (7, 8, 9, 10);
+    let channels: Vec<_> = [owned, other, misnamed, garbled]
+        .map(|channel| (channel, RuntimeHandoffKind::ClaudeTui))
+        .into();
+    let root = tempfile::tempdir().unwrap();
+    let ready = |channel| o_ready_at(Some(root.path()), channel);
+    let _gate = force_launch_gate(true, Some(true));
+    let (store, era) = o_store_for_test(root.path(), &[owned]);
+    {
+        let _owned = force_channels(&channels);
+        assert!(
+            !ready(owned),
+            "a store without a checkpoint has no baseline"
+        );
+    }
+    let mut opened = store.open_channel(&era, owned).unwrap().unwrap();
+    opened.set_binding_checkpoint(5).unwrap();
+    let dir = |channel: u64| root.path().join(STORE_DIR_NAME).join(channel.to_string());
+    for channel in [misnamed, garbled] {
+        std::fs::create_dir_all(dir(channel)).unwrap();
+    }
+    let checkpoint = dir(owned).join(CHECKPOINT_FILE);
+    std::fs::copy(&checkpoint, dir(misnamed).join(CHECKPOINT_FILE)).unwrap();
+    std::fs::write(dir(garbled).join(CHECKPOINT_FILE), b"{").unwrap();
+    let before = store_tree(root.path());
+
+    {
+        let _owned = force_channels(&channels);
+        assert!(ready(owned), "owned, accepting and checkpointed");
+        assert!(!ready(other), "the channel has no store");
+        assert!(!ready(misnamed), "the checkpoint names another channel");
+        assert!(!ready(garbled), "the checkpoint is unreadable");
+        assert!(!o_ready_at(None, owned), "no runtime root");
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!o_ready_at(Some(empty.path()), owned), "no O store at all");
+        assert!(
+            store_tree(empty.path()).len() == 1,
+            "the empty root gains nothing"
+        );
+        let _refusing = force_launch_gate(true, Some(false));
+        assert!(!ready(owned), "the writer does not accept work");
+    }
+    {
+        let _pending = force_candidates(&channels);
+        assert!(!ready(owned), "the adoption is still pending");
+    }
+    {
+        let _foreign = force_foreign(&channels, "another-node");
+        assert!(!ready(owned), "another node is the O home");
+    }
+    assert_eq!(
+        store_tree(root.path()),
+        before,
+        "the gate only reads the store"
+    );
+}

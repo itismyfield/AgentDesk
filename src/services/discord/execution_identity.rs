@@ -32,6 +32,8 @@ use crate::config::ExecutionIdentityMode;
 use super::tmux_session_files::read_spawn_nonce;
 
 // Herdr executions compare the stored hosted record, not a `.spawn_nonce` marker.
+#[path = "execution_identity/herdr_agent_hint.rs"]
+pub(crate) mod herdr_agent_hint;
 #[path = "execution_identity/herdr_observation.rs"]
 pub(crate) mod herdr_observation;
 #[path = "execution_identity/herdr_report_order.rs"]
