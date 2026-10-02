@@ -57,6 +57,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/execution_identity/herdr_observation_tests.rs",
         "src/services/discord/execution_identity/herdr_report_order_tests.rs",
         "src/services/discord/recovery_engine/host_reconcile_tests.rs",
+        "src/services/discord/tui_prompt_relay/herdr_source_tests.rs",
         "src/services/discord/tmux_output_stream/tests/compact_summary_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests/compact_summary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/compact_summary_tests.rs",
@@ -304,6 +305,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/cutover/channel_gate/tests.rs",
         "src/services/tui_prompt_dedupe/prompt_identity_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
+        "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
     }
 )
 

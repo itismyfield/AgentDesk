@@ -10,7 +10,7 @@ pub(crate) use codex_hook::{
     codex_tail_source_retired, observe_codex_hook, publish_unless_codex_tail_retired,
 };
 pub(crate) mod pane_registration;
-pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
+pub(crate) use adopt_skip::*;
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,

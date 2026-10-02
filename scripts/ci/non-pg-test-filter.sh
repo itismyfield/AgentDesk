@@ -151,6 +151,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
   --skip services::discord::tmux_reaper::host_guard_tests
+  --skip services::discord::tui_prompt_relay::herdr_source::tests
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   --skip services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
@@ -561,6 +562,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::resume_pin_tests::c1_same_synthetic_and_handoff_pin_resume_without_clearing_marker
   services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
   services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
+  services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_marker_wins_over_reverse_lookup_disagreement
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_refuses_legacy_prefix_without_marker
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_refuses_marker_with_wrong_background_channel

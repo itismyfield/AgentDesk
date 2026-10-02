@@ -5,6 +5,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
+use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::discord::health::{HealthRegistry, clear_provider_channel_runtime};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
@@ -98,17 +99,18 @@ impl RoutineSessionController {
         match command {
             RoutineSessionCommand::Reset => {
                 if let Some(registry) = self.health_registry.as_deref() {
-                    runtime_cleared = clear_provider_channel_runtime(
+                    let reset = clear_provider_channel_runtime(
                         registry,
                         target.provider.as_str(),
                         target.channel_id,
                         target.session_key.as_deref(),
                     )
                     .await;
-                    lifecycle_path = if runtime_cleared {
-                        "runtime-clear"
-                    } else {
-                        "runtime-clear-unavailable"
+                    runtime_cleared = matches!(reset, Some(ManagedReset::Applied(_)));
+                    lifecycle_path = match reset {
+                        Some(ManagedReset::Applied(_)) => "runtime-clear",
+                        Some(ManagedReset::Refused(_)) => "runtime-clear-refused",
+                        None => "runtime-clear-unavailable",
                     };
                 }
             }

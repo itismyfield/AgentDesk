@@ -1279,7 +1279,73 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
-ruby -ryaml -e 'j=YAML.load_file(ARGV[0]).fetch("jobs").fetch("scripts"); r=j.fetch("steps").find{|s|s["name"]=="Run script checks"}; u=j.fetch("steps").find{|s|s["name"]=="Upload giant-file progress evidence"}; abort unless r.fetch("env")=={"GFP_EVENT_NAME"=>"${{ github.event_name }}","GFP_REPOSITORY"=>"${{ github.repository }}","GFP_CANDIDATE_SHA"=>"${{ github.sha }}","TEST_LANE_BASELINE_REF"=>"HEAD"} && u=={"name"=>"Upload giant-file progress evidence","if"=>"always()","uses"=>"actions/upload-artifact@v4","with"=>{"path"=>"target/giant-file-progress/evidence.json"}}' "$main_workflow" || error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring"
+# Main pushes run every ci-script-checks.sh shard in its own job; each keeps the
+# main-only selector env, and only the cargo shard uploads giant-file evidence.
+validate_main_script_check_shards() {
+  if ! ruby - "$main_workflow" <<'RUBY'
+require "yaml"
+path = ARGV.fetch(0)
+document = YAML.load_file(path)
+jobs = document.fetch("jobs", {})
+errors = []
+expected_shards = {
+  "scripts" => ["cargo", "Main script checks"],
+  "scripts_guards" => ["guards", "Main script checks (guards)"],
+  "scripts_contracts" => ["contracts", "Main script checks (contracts)"],
+}
+base_env = {
+  "GFP_EVENT_NAME" => "${{ github.event_name }}",
+  "GFP_REPOSITORY" => "${{ github.repository }}",
+  "GFP_CANDIDATE_SHA" => "${{ github.sha }}",
+  "TEST_LANE_BASELINE_REF" => "HEAD",
+}
+selector_key = ->(key) { key.to_s.start_with?("SCRIPT_CHECK_", "GFP_", "TEST_LANE_") }
+errors << "workflow env must not set script-check selector variables" if (document["env"] || {}).keys.any?(&selector_key)
+runners = jobs.select do |_, job|
+  job.is_a?(Hash) && Array(job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.include?("ci-script-checks.sh") }
+end
+errors << "jobs running ci-script-checks.sh must be exactly #{expected_shards.keys.sort}, found #{runners.keys.sort}" unless runners.keys.sort == expected_shards.keys.sort
+expected_shards.each do |job_id, (shard, name)|
+  job = jobs[job_id]
+  label = "job #{job_id}"
+  unless job.is_a?(Hash)
+    errors << "#{label} is missing"
+    next
+  end
+  errors << "#{label} must be named #{name.inspect}" unless job["name"] == name
+  errors << "#{label} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+  %w[if needs continue-on-error].each { |key| errors << "#{label} must not set #{key}" if job.key?(key) }
+  errors << "#{label} job env must not set script-check selector variables" if (job["env"] || {}).keys.any?(&selector_key)
+  steps = Array(job["steps"])
+  checkout = steps.first
+  errors << "#{label} must check out full history first" unless checkout.is_a?(Hash) && checkout["uses"] == "actions/checkout@v4" && checkout["with"] == {"fetch-depth" => 0}
+  runs = steps.select { |step| step.is_a?(Hash) && step["run"].to_s.include?("ci-script-checks.sh") }
+  run = runs.first
+  unless runs.length == 1 && run["name"] == "Run script checks" && run["run"] == "./scripts/ci-script-checks.sh"
+    errors << "#{label} must run ./scripts/ci-script-checks.sh in exactly one Run script checks step"
+    next
+  end
+  %w[if continue-on-error].each { |key| errors << "#{label} Run script checks must not set #{key}" if run.key?(key) }
+  expected_env = base_env.merge("SCRIPT_CHECK_SHARD" => shard)
+  errors << "#{label} Run script checks env must equal #{expected_env}" unless run["env"] == expected_env
+end
+uploads = jobs.flat_map do |job_id, job|
+  next [] unless job.is_a?(Hash)
+  Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }.map { |step| [job_id, step] }
+end
+evidence = uploads.select { |_, step| step["name"] == "Upload giant-file progress evidence" }
+unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]]
+  errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
+end
+errors << "artifact uploads must stay in the cargo shard job" unless uploads.all? { |job_id, _| job_id == "scripts" }
+errors.each { |message| warn "#{path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring across every script-check shard"
+  fi
+}
+validate_main_script_check_shards
 
 # The main-only Windows warm job must save the cache keys the PR Windows jobs
 # restore: same workflow/job env, setup steps, rust-cache inputs and compile.
