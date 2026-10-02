@@ -1,9 +1,6 @@
 //! Chunked TTS playback with synthesis prefetch.
 
-use super::{
-    TtsRuntime, TtsSynthesisKind,
-    chunks::{IncrementalTtsChunkQueue, split_for_tts},
-};
+use super::{TtsRuntime, TtsSynthesisKind, chunks::split_for_tts};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use songbird::{
@@ -38,57 +35,6 @@ struct SynthesizedChunk {
     index: usize,
     path: PathBuf,
     synthesis_elapsed: Duration,
-}
-
-// reason: streaming TTS playback is wired only when voice config is enabled; no
-// compile target exercises it. See #3034.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct StreamingTtsChunkSender {
-    queue: IncrementalTtsChunkQueue,
-    tx: mpsc::Sender<String>,
-}
-
-// reason: streaming TTS playback is wired only when voice config is enabled; no
-// compile target exercises it. See #3034.
-#[allow(dead_code)]
-impl StreamingTtsChunkSender {
-    pub(crate) async fn push_text(&mut self, text: &str) -> Result<()> {
-        self.queue.push_text(text);
-        self.flush_ready().await
-    }
-
-    pub(crate) async fn finish(mut self) -> Result<()> {
-        self.queue.finish();
-        self.flush_ready().await
-    }
-
-    async fn flush_ready(&mut self) -> Result<()> {
-        while let Some(chunk) = self.queue.pop_ready() {
-            self.tx
-                .send(chunk)
-                .await
-                .map_err(|_| anyhow::anyhow!("streaming TTS playback receiver dropped"))?;
-        }
-        Ok(())
-    }
-}
-
-// reason: streaming TTS playback is wired only when voice config is enabled; no
-// compile target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) fn streaming_tts_chunk_channel_with_capacity(
-    max_chars: usize,
-    capacity: usize,
-) -> (StreamingTtsChunkSender, mpsc::Receiver<String>) {
-    let (tx, rx) = mpsc::channel(capacity.max(1));
-    (
-        StreamingTtsChunkSender {
-            queue: IncrementalTtsChunkQueue::new(max_chars),
-            tx,
-        },
-        rx,
-    )
 }
 
 pub(crate) async fn play_chunked_with_prefetch<F>(
@@ -375,21 +321,5 @@ mod tests {
 
         assert!(!first.exists());
         assert!(!second.exists());
-    }
-
-    #[tokio::test]
-    async fn streaming_tts_chunk_sender_flushes_sentence_boundaries() {
-        let (mut tx, mut rx) = streaming_tts_chunk_channel_with_capacity(80, 2);
-
-        tx.push_text("첫 문장입니다. 아직").await.unwrap();
-        assert_eq!(rx.recv().await.as_deref(), Some("첫 문장입니다."));
-        assert!(rx.try_recv().is_err());
-
-        tx.push_text(" 끝나지 않음").await.unwrap();
-        assert!(rx.try_recv().is_err());
-
-        tx.finish().await.unwrap();
-        assert_eq!(rx.recv().await.as_deref(), Some("아직 끝나지 않음"));
-        assert!(rx.recv().await.is_none());
     }
 }

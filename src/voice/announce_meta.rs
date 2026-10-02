@@ -92,7 +92,7 @@ impl VoiceAnnouncementMetaStore {
         }
     }
 
-    #[allow(dead_code)] // only tests call this. See #3034
+    #[cfg(test)]
     pub(crate) fn take(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
         self.take_with_acceptance(message_id)
             .map(|(announcement, _)| announcement)
@@ -119,7 +119,7 @@ impl VoiceAnnouncementMetaStore {
             .map(|stored| (stored.announcement, stored.accepted_replay))
     }
 
-    #[allow(dead_code)] // only tests call this. See #3034
+    #[cfg(test)]
     pub(crate) fn contains(&self, message_id: MessageId) -> bool {
         let mut entries = match self.entries.write() {
             Ok(entries) => entries,
@@ -130,7 +130,7 @@ impl VoiceAnnouncementMetaStore {
         entries.contains_key(&message_id.get())
     }
 
-    #[allow(dead_code)] // only tests call this. See #3034
+    #[cfg(test)]
     pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
         self.insert_handoff_with_remaining_ttl(message_id, meta, HANDOFF_META_TTL);
     }
@@ -271,26 +271,6 @@ impl VoiceAnnouncementMetaStore {
         let now = Instant::now();
         prune_pending_handoff_expired_locked(&mut entries, now);
         entries.remove(correlation_id).map(|stored| stored.meta)
-    }
-
-    /// Extend a bound marker to a fresh `HANDOFF_META_TTL` window, never shortening it.
-    /// Returns `true` only if the entry existed and its expiry moved later.
-    pub(crate) fn refresh_handoff_deadline(&self, message_id: MessageId) -> bool {
-        let Ok(mut entries) = self.handoff_entries.write() else {
-            return false;
-        };
-        let now = Instant::now();
-        prune_handoff_expired_locked(&mut entries, now);
-        let Some(stored) = entries.get_mut(&message_id.get()) else {
-            return false;
-        };
-        let new_expires_at = now + HANDOFF_META_TTL;
-        if new_expires_at > stored.expires_at {
-            stored.expires_at = new_expires_at;
-            true
-        } else {
-            false
-        }
     }
 
     /// Non-consuming read, so intake-gate queue paths can carry the payload inside the
@@ -470,68 +450,6 @@ mod tests {
         assert!(store.take_handoff(MessageId::new(999)).is_none());
     }
 
-    #[test]
-    fn refresh_handoff_deadline_returns_false_when_absent() {
-        let store = VoiceAnnouncementMetaStore::default();
-        assert!(
-            !store.refresh_handoff_deadline(MessageId::new(998)),
-            "refresh on absent entry must return false"
-        );
-    }
-
-    #[test]
-    fn refresh_handoff_deadline_extends_ttl_when_entry_has_short_remaining() {
-        let store = VoiceAnnouncementMetaStore::default();
-        let message_id = MessageId::new(997);
-        let meta = handoff_meta(500, 400, None);
-
-        store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), Duration::from_secs(1));
-
-        assert!(
-            store.refresh_handoff_deadline(message_id),
-            "refresh on an existing short-TTL entry must return true"
-        );
-
-        assert_eq!(
-            store.get_handoff(message_id),
-            Some(meta),
-            "entry must survive after TTL refresh"
-        );
-    }
-
-    #[test]
-    fn refresh_handoff_deadline_returns_false_when_ttl_already_at_max() {
-        let store = VoiceAnnouncementMetaStore::default();
-        let message_id = MessageId::new(996);
-        let meta = handoff_meta(501, 401, None);
-
-        store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), HANDOFF_META_TTL);
-
-        // The result depends on sub-millisecond timing; only survival is asserted.
-        let _ = store.refresh_handoff_deadline(message_id);
-
-        assert!(
-            store.get_handoff(message_id).is_some(),
-            "entry must remain after no-op refresh"
-        );
-    }
-
-    #[test]
-    fn refresh_handoff_deadline_preserves_meta_content() {
-        let store = VoiceAnnouncementMetaStore::default();
-        let message_id = MessageId::new(995);
-        let meta = handoff_meta(502, 402, Some("project-agentdesk"));
-
-        store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), Duration::from_secs(1));
-        store.refresh_handoff_deadline(message_id);
-
-        assert_eq!(
-            store.get_handoff(message_id),
-            Some(meta),
-            "meta payload must be unchanged after TTL refresh"
-        );
-    }
-
     fn handoff_meta(
         voice: u64,
         background: u64,
@@ -681,56 +599,6 @@ mod tests {
         pg_db.drop().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn durable_voice_announcement_concurrent_takes_yield_exactly_one_claim() {
-        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let channel_id = ChannelId::new(91_003);
-        let message_id = MessageId::new(82_003);
-        let pending_key =
-            durable_voice_announcement_pending_key("voice:1:91003:utt-1", "announce:generation:1");
-        let content = "🎙️ \"동시에 처리해줘\"";
-        let expected = announcement();
-
-        persist_voice_announcement_reservation_durable(
-            &pool,
-            &pending_key,
-            channel_id,
-            content,
-            &expected,
-        )
-        .await
-        .expect("persist durable voice announcement reservation");
-        assert!(
-            bind_voice_announcement_durable_message_id(&pool, &pending_key, message_id)
-                .await
-                .expect("bind message id")
-        );
-
-        let pool_a = pool.clone();
-        let pool_b = pool.clone();
-        let task_a = tokio::spawn(async move {
-            take_voice_announcement_durable(&pool_a, message_id)
-                .await
-                .unwrap()
-        });
-        let task_b = tokio::spawn(async move {
-            take_voice_announcement_durable(&pool_b, message_id)
-                .await
-                .unwrap()
-        });
-        let (result_a, result_b) =
-            tokio::try_join!(task_a, task_b).expect("join concurrent consumers");
-        let winners = [&result_a, &result_b]
-            .iter()
-            .filter(|result| result.is_some())
-            .count();
-        assert_eq!(winners, 1, "exactly one atomic durable consumer must win");
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn durable_voice_announcement_pending_key_disambiguates_same_content() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -830,67 +698,6 @@ mod tests {
             .await
             .expect("correct-channel bind"),
             Some(expected)
-        );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_voice_announcement_pending_key_take_consumes_without_bind_race() {
-        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let channel_id = ChannelId::new(91_008);
-        let message_id = MessageId::new(82_008);
-        let pending_key =
-            durable_voice_announcement_pending_key("voice:1:91008:utt-1", "announce:generation:1");
-        let content = "🎙️ \"바로 처리해\"";
-        let expected = announcement();
-
-        assert!(
-            persist_voice_announcement_reservation_durable(
-                &pool,
-                &pending_key,
-                channel_id,
-                content,
-                &expected,
-            )
-            .await
-            .expect("persist durable voice announcement reservation")
-        );
-
-        assert_eq!(
-            take_pending_voice_announcement_by_key_durable(
-                &pool,
-                &pending_key,
-                channel_id,
-                message_id,
-            )
-            .await
-            .expect("take pending by key"),
-            Some(expected)
-        );
-        assert!(
-            take_pending_voice_announcement_by_key_durable(
-                &pool,
-                &pending_key,
-                channel_id,
-                message_id,
-            )
-            .await
-            .expect("second take pending by key")
-            .is_none(),
-            "pending-key consume must be one-shot"
-        );
-        assert!(
-            !bind_voice_announcement_durable_message_id(
-                &pool,
-                &pending_key,
-                MessageId::new(82_009),
-            )
-            .await
-            .expect("late bind after pending consume"),
-            "late bind must not resurrect a consumed pending row"
         );
 
         pool.close().await;
@@ -1223,85 +1030,6 @@ mod tests {
                 .is_none(),
             "post-gc load must observe no row"
         );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refresh_handoff_ttl_durable_resets_expires_at() {
-        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let message_id = MessageId::new(81_401);
-        let expected = handoff_meta(704, 604, None);
-
-        persist_handoff_durable(&pool, message_id, &expected)
-            .await
-            .expect("persist durable handoff");
-
-        // Shrink expires_at so the refresh has something to extend.
-        sqlx::query(
-            "UPDATE voice_background_handoff_meta
-             SET expires_at = NOW() + INTERVAL '10 seconds'
-             WHERE message_id = $1",
-        )
-        .bind(message_id.get().to_string())
-        .execute(&pool)
-        .await
-        .expect("shrink expires_at for refresh test");
-
-        let refreshed = refresh_handoff_ttl_durable(&pool, message_id)
-            .await
-            .expect("refresh durable ttl");
-        assert!(refreshed, "refresh must return true for a live row");
-
-        let remaining_secs: f64 = sqlx::query_scalar(
-            "SELECT EXTRACT(EPOCH FROM (expires_at - NOW()))::float8
-             FROM voice_background_handoff_meta
-             WHERE message_id = $1",
-        )
-        .bind(message_id.get().to_string())
-        .fetch_one(&pool)
-        .await
-        .expect("read expires_at after refresh");
-
-        // Should be ≈ DURABLE_HANDOFF_META_TTL_SECS (24 h), definitely > 1 h.
-        assert!(
-            remaining_secs > 3600.0,
-            "expires_at after refresh must be > 1 h from now (got {remaining_secs:.0} s)"
-        );
-
-        // The row should still be loadable (not consumed).
-        assert_eq!(
-            load_handoff_durable(&pool, message_id)
-                .await
-                .expect("load after refresh"),
-            Some(expected)
-        );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refresh_handoff_ttl_durable_is_noop_on_consumed_row() {
-        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let message_id = MessageId::new(81_402);
-        let expected = handoff_meta(705, 605, None);
-
-        persist_handoff_durable(&pool, message_id, &expected)
-            .await
-            .expect("persist durable handoff");
-        take_handoff_durable(&pool, message_id)
-            .await
-            .expect("consume row")
-            .expect("row found");
-
-        let refreshed = refresh_handoff_ttl_durable(&pool, message_id)
-            .await
-            .expect("refresh consumed row must not error");
-        assert!(!refreshed, "refresh of consumed row must return false");
 
         pool.close().await;
         pg_db.drop().await;

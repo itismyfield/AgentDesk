@@ -307,6 +307,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/cutover/channel_gate/tests.rs",
         "src/services/tui_prompt_dedupe/prompt_identity_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/claim_entry_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
     }
 )
@@ -344,6 +345,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/catch_up_pagination_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/discord_mock.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/queue_recovery_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/stale_resume_retry_e2e.rs",
         "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",

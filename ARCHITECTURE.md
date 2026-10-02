@@ -1385,11 +1385,13 @@ src/
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
+│   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
 │   │   │   │   └── stale_resume_retry_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
+│   │   │   │   ├── claim_entry_tests.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── compact_summary_tests.rs

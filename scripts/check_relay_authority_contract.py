@@ -23,8 +23,11 @@ RELAY_AUTHORITY_MUTATIONS_JOB = "relay_authority_mutations"
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
 RELAY_TARGET_STEP = "Run named relay-authority contract targets"
-# An absent filter output must run mutations; only an explicit false skips them.
-CONDITION3_MUTATION_IF = "steps.mutation_paths.outputs.mutation_sources != 'false'"
+# An absent filter or wiring output must run mutations; only two explicit falses skip them.
+CONDITION3_MUTATION_IF = (
+    "steps.mutation_paths.outputs.mutation_sources != 'false'"
+    " || steps.mutation_wiring.outputs.wiring_changed != 'false'"
+)
 TEST_ID_SUFFIX = ": test"
 
 

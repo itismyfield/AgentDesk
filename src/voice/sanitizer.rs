@@ -2,9 +2,7 @@
 
 pub(crate) const DEFAULT_SPOKEN_RESULT_CHAR_LIMIT: usize = 900;
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn spoken_result_only(answer: &str, language: &str) -> String {
     spoken_result_only_with_limit(answer, language, DEFAULT_SPOKEN_RESULT_CHAR_LIMIT)
 }
