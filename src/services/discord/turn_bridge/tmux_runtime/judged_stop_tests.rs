@@ -79,8 +79,8 @@ async fn mailbox_holds(shared: &SharedData, channel: ChannelId, token: &Arc<Canc
         .is_some_and(|held| Arc::ptr_eq(&held, token))
 }
 
-// A preserve stop on another host's turn is kept before its first write on every tmux
-// condition: no tombstone, cancel, inflight backfill or tmux call; a legacy turn is stopped.
+// A preserve stop on another host's turn, named or found by its row, is kept before any write
+// on every tmux condition: no tombstone, cancel, backfill or tmux call; a legacy turn stops.
 #[test]
 fn a_preserve_stop_keeps_a_turn_on_another_host_before_any_write() {
     let fx = Fixture::new();
@@ -89,7 +89,8 @@ fn a_preserve_stop_keeps_a_turn_on_another_host_before_any_write() {
         let mut n = 0;
         for server in SERVERS {
             fx.serve(server);
-            for host in NOT_TMUX.into_iter().chain([Mark::Absent]) {
+            let hosts = NOT_TMUX.into_iter().chain([Mark::Absent]);
+            for (host, named) in hosts.flat_map(|host| [(host, true), (host, false)]) {
                 n += 1;
                 let channel = ChannelId::new(5_340_610_000 + n * 10);
                 let name = format!("AgentDesk-claude-p6asb-tl-{n}");
@@ -102,12 +103,12 @@ fn a_preserve_stop_keeps_a_turn_on_another_host_before_any_write() {
                 let target = TurnLifecycleTarget {
                     provider: Some(ProviderKind::Claude),
                     channel_id: Some(channel),
-                    tmux_name: name.clone(),
+                    tmux_name: if named { name.clone() } else { String::new() },
                 };
                 let stop = crate::services::turn_lifecycle::stop_turn_preserving_queue;
                 let result = stop(Some(&registry), &target, "p6asb").await;
 
-                let case = format!("{server:?} {host:?}");
+                let case = format!("{server:?} {host:?} named={named}");
                 let legacy = matches!(host, Mark::Absent);
                 assert_eq!(result.host_guard_kept(), !legacy, "{case}");
                 assert_eq!(token.cancelled.load(Ordering::SeqCst), legacy, "{case}");

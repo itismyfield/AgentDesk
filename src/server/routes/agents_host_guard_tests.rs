@@ -259,34 +259,39 @@ async fn stop_routes_keep_a_runtime_turn_on_another_host_pg() {
 
         let (status, Json(stop)) =
             super::stop_agent_turn(State(state.clone()), Path(agent.clone())).await;
-        let service = crate::services::queue::QueueService::new(Some(pool.clone()));
-        let cancel = service.cancel_dispatch(Some(&registry), &dispatch).await;
-
         let what = format!("other_host={other_host}");
-        let dispatch_status: String =
-            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
-                .bind(&dispatch)
-                .fetch_one(&pool)
-                .await
-                .expect("dispatch status");
-        let cancelled = token.cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        let cancelled = || token.cancelled.load(std::sync::atomic::Ordering::SeqCst);
         if other_host {
-            let error = cancel.expect_err("the dispatch cancel is refused");
-            assert_eq!(error.status(), StatusCode::CONFLICT, "{what}: {error:?}");
-            assert_eq!(dispatch_status, "dispatched", "{what}");
             assert_eq!(status, StatusCode::CONFLICT, "{what}: {stop}");
             assert_eq!(
                 stop["unsupported"], "session_host_not_tmux",
                 "{what}: {stop}"
             );
             assert_eq!(row_status(&pool, id).await, "turn_active", "{what}");
-            assert!(!cancelled, "{what}: the turn runs on");
+            assert!(!cancelled(), "{what}: the turn runs on");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{what}: {stop}");
+            assert_eq!(row_status(&pool, id).await, "disconnected", "{what}");
+            assert!(cancelled(), "{what}");
+        }
+
+        let service = crate::services::queue::QueueService::new(Some(pool.clone()));
+        let cancel = service.cancel_dispatch(Some(&registry), &dispatch).await;
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(&dispatch)
+                .fetch_one(&pool)
+                .await
+                .expect("dispatch status");
+        if other_host {
+            let error = cancel.expect_err("the dispatch cancel is refused");
+            assert_eq!(error.status(), StatusCode::CONFLICT, "{what}: {error:?}");
+            assert_eq!(dispatch_status, "dispatched", "{what}");
+            assert_eq!(row_status(&pool, id).await, "turn_active", "{what}");
+            assert!(!cancelled(), "{what}: the turn runs on");
         } else {
             assert!(cancel.is_ok(), "{what}: {cancel:?}");
             assert_eq!(dispatch_status, "cancelled", "{what}");
-            assert_eq!(status, StatusCode::OK, "{what}: {stop}");
-            assert_eq!(row_status(&pool, id).await, "disconnected", "{what}");
-            assert!(cancelled, "{what}");
         }
     }
     db.drop().await;
