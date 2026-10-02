@@ -567,6 +567,32 @@ fn relock(
     }
 }
 
+/// One channel's row as the probe scan shows it, without the finalizer backfill a scan writes
+/// into every row it reads; `Err` when the row exists but could not be read.
+pub(in crate::services::discord) fn load_channel_inflight_for_probe(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<Option<InflightTurnState>, String> {
+    let Some(root) = super::inflight_runtime_root() else {
+        return Ok(None);
+    };
+    let path = super::inflight_state_path(&root, provider, channel_id);
+    match fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    let allocation = crate::services::discord::runtime_store::process_generation_binding();
+    match classify_inflight_row(&path, provider, allocation) {
+        RowVerdict::Keep(state, _) | RowVerdict::KeepGateRefused(state, _) => Ok(Some(state)),
+        RowVerdict::Skip(true) => Err(format!("inflight row unreadable: {}", path.display())),
+        RowVerdict::Skip(false)
+        | RowVerdict::HideStale(..)
+        | RowVerdict::HideForeign(..)
+        | RowVerdict::HideMalformed(..) => Ok(None),
+    }
+}
+
 fn classify_inflight_row(
     path: &Path,
     provider: &ProviderKind,
@@ -1206,6 +1232,41 @@ mod nondestructive_loader_tests {
         let out = run();
         BEFORE_ROW_LOCK.with(|slot| *slot.borrow_mut() = None);
         out
+    }
+
+    // The archive-defer probe of one thread saves no other thread's row, even one a full scan
+    // would backfill; an unreadable row of the probed thread defers it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_defer_probe_reads_only_the_probed_thread() {
+        let env = Env::new();
+        let mut other = row(5_996_101, Some("AgentDesk-claude-p4r-b"));
+        other.born_generation = G;
+        let other = env.seed(&other, 0);
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(&other).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("finalizer_turn_id");
+        fs::write(&other, raw.to_string()).unwrap();
+        let before = snapshot(&other);
+        let defer = crate::services::discord::should_defer_thread_archive_pg;
+        assert_eq!(defer(None, "5996100").await, Ok(false));
+        assert_eq!(
+            snapshot(&other),
+            before,
+            "another thread's row is not saved"
+        );
+        assert_eq!(defer(None, "5996101").await, Ok(true), "a fresh row defers");
+        assert_eq!(
+            snapshot(&other),
+            before,
+            "nor is the probed thread's own row"
+        );
+        let unreadable = inflight_state_path(&env.dir(), &CLAUDE, 5_996_102);
+        fs::create_dir_all(unreadable).unwrap();
+        assert_eq!(
+            defer(None, "5996102").await,
+            Ok(true),
+            "an unreadable row defers"
+        );
     }
 
     // R1-R4: every production read wrapper hides the rows it used to unlink.

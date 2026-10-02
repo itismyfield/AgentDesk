@@ -530,6 +530,8 @@ pub(crate) fn inflight_state_allows_idle_tmux_repair_for_channel(
     inflight::inflight_state_allows_idle_tmux_repair(provider, channel_id)
 }
 
+/// Reads only `channel_id`'s rows and writes nothing, so probing one thread never saves another
+/// thread's row; a row that cannot be read counts as fresh.
 pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     let now_unix_secs = chrono::Local::now().timestamp();
     [
@@ -540,16 +542,21 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
         ProviderKind::Qwen,
     ]
     .iter()
-    .flat_map(load_inflight_states)
-    .any(|state| {
-        !state.rebind_origin
-            && state.channel_id == channel_id
-            && !inflight::inflight_state_is_stale(
-                &state,
-                now_unix_secs,
-                inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
-            )
-    })
+    .any(
+        |provider| match inflight::load_channel_inflight_for_probe(provider, channel_id) {
+            Err(_) => true,
+            Ok(None) => false,
+            Ok(Some(state)) => {
+                !state.rebind_origin
+                    && state.channel_id == channel_id
+                    && !inflight::inflight_state_is_stale(
+                        &state,
+                        now_unix_secs,
+                        inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
+                    )
+            }
+        },
+    )
 }
 
 async fn has_active_session_for_thread_pg(
