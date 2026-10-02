@@ -122,7 +122,7 @@ pub(crate) struct VoiceReceiver {
 }
 
 impl VoiceReceiver {
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[cfg(test)]
     pub(crate) fn new(config: VoiceReceiverConfig) -> Self {
         Self::new_with_hook(config, None)
     }
@@ -141,7 +141,7 @@ impl VoiceReceiver {
         }
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[cfg(test)]
     pub(crate) fn from_voice_config(config: &VoiceConfig) -> Self {
         Self::new(VoiceReceiverConfig::from_voice_config(config))
     }
@@ -215,7 +215,7 @@ impl VoiceReceiver {
             .await
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[cfg(test)]
     pub(crate) async fn flush_all(&self) -> Vec<CompletedUtterance> {
         self.inner.flush_all().await
     }
@@ -232,7 +232,7 @@ impl VoiceReceiver {
             .await
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[cfg(test)]
     pub(crate) async fn take_pending(&self) -> Vec<CompletedUtterance> {
         self.inner.take_pending().await
     }
@@ -658,7 +658,7 @@ impl ReceiverState {
         Ok(Some(completed))
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[cfg(test)]
     async fn flush_all(self: &Arc<Self>) -> Vec<CompletedUtterance> {
         let pending_after_wait = self.wait_for_pending_io_to_clear(|_, _| true).await;
         if pending_after_wait > 0 {
@@ -779,7 +779,7 @@ impl ReceiverState {
         completed
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[cfg(test)]
     async fn take_pending(&self) -> Vec<CompletedUtterance> {
         std::mem::take(&mut *self.pending.lock().await)
     }
