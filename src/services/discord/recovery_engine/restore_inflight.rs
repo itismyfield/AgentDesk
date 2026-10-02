@@ -715,7 +715,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         let watcher_claimed = {
                             #[cfg(unix)]
                             {
-                                let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
+                                let host = super::tmux::watch_host_of(
+                                    shared,
+                                    provider,
+                                    channel_id.get(),
+                                    tmux_session_name,
+                                )
+                                .await;
+                                let claim = super::tmux::claim_or_reuse_watcher_for_host(
                                     &shared.tmux_watchers,
                                     channel_id,
                                     handle,
@@ -726,8 +733,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                                         state.logical_channel_id,
                                         state.thread_id,
                                     ),
+                                    host,
                                 );
-                                claim.should_spawn()
+                                claim.is_ok_and(|claim| claim.should_spawn())
                             }
                             #[cfg(not(unix))]
                             {
@@ -1867,7 +1875,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 let watcher_claimed = {
                     #[cfg(unix)]
                     {
-                        let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
+                        let host = super::tmux::watch_host_of(
+                            shared,
+                            provider,
+                            channel_id.get(),
+                            &tmux_session_name,
+                        )
+                        .await;
+                        let claim = super::tmux::claim_or_reuse_watcher_for_host(
                             &shared.tmux_watchers,
                             channel_id,
                             handle,
@@ -1878,8 +1893,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                                 state.logical_channel_id,
                                 state.thread_id,
                             ),
+                            host,
                         );
-                        claim.should_spawn()
+                        claim.is_ok_and(|claim| claim.should_spawn())
                     }
                     #[cfg(not(unix))]
                     {

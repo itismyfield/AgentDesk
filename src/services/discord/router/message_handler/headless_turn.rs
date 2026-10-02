@@ -907,7 +907,8 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         "turn_start_headless",
         early_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
         &mut inflight_state,
-    );
+    )
+    .await;
     let (tx, rx) = mpsc::channel();
     let session_id_clone = session_id.clone();
     let current_path_clone = current_path.clone();

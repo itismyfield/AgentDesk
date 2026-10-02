@@ -53,7 +53,7 @@ pub(super) use self::liveness::*;
 
 #[path = "lifecycle/watch_host.rs"]
 mod watch_host;
-pub(super) use self::watch_host::{HostSnapshot, WatchHost};
+pub(in crate::services::discord) use self::watch_host::{HostSnapshot, WatchHost, watch_host_of};
 
 #[path = "lifecycle/restore_support.rs"]
 mod restore_support;
@@ -82,13 +82,12 @@ pub(super) use self::output_policy::*;
 mod claims;
 #[rustfmt::skip]
 #[cfg(test)]
-pub(in crate::services::discord) use self::claims::{claim_cross_channel_tmux_watcher_for_test, evict_claim_before_adoption_for_test};
+pub(in crate::services::discord) use self::claims::{claim_cross_channel_tmux_watcher_for_test, claim_or_replace_watcher, claim_or_reuse_watcher, evict_claim_before_adoption_for_test};
 pub(super) use self::claims::*;
 pub(in crate::services::discord) use self::claims::{
-    ThreadFollowUpParent, WatcherClaimIncarnation, claim_or_replace_watcher,
-    claim_or_replace_watcher_with_thread_parent, claim_or_reuse_watcher,
-    claim_or_reuse_watcher_with_thread_parent, thread_follow_up_parent_channel_id,
-    thread_follow_up_parent_from_live, try_claim_watcher_with_thread_parent,
+    ThreadFollowUpParent, WatchWithheld, WatcherClaimIncarnation,
+    claim_or_replace_watcher_for_host, claim_or_reuse_watcher_for_host,
+    thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
 };
 
 #[path = "lifecycle/restore.rs"]

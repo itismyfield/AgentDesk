@@ -118,6 +118,7 @@ src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
+src/services/discord/router/message_handler/watchdog_host_tests.rs
 src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
@@ -129,6 +130,7 @@ src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/terminal_delivery_custody/pg_tests.rs
 src/services/discord/terminal_ui_obligation.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
+src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
 src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
 src/services/discord/tmux_watcher/streaming_baseline_tests.rs
 src/services/discord/tui_prompt_relay/herdr_source_tests.rs
@@ -302,6 +304,7 @@ services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+services::discord::router::message_handler::watchdog::host_tests
 services::discord::runtime_bootstrap::gateway_handback_integration_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
@@ -312,6 +315,7 @@ services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::tests
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
@@ -1057,6 +1061,7 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
+services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg
@@ -1131,6 +1136,7 @@ services::discord::task_notification_delivery::tests::watcher_primary_key_blocks
 services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_take_the_keyed_host_verdict_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg

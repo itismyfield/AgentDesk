@@ -27,7 +27,7 @@ pub(crate) enum WatchHost {
 }
 
 /// The host of `name` on the runtime's own key: local evidence first, then the sessions row.
-async fn watch_host(
+pub(crate) async fn watch_host_of(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: u64,
@@ -92,7 +92,7 @@ impl HostSnapshot {
         channel_id: ChannelId,
         name: &str,
     ) -> Arc<Self> {
-        let host = watch_host(shared, provider, channel_id.get(), name).await;
+        let host = watch_host_of(shared, provider, channel_id.get(), name).await;
         Arc::new(Self::new(host))
     }
 

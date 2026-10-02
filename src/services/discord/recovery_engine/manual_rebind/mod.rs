@@ -802,6 +802,15 @@ async fn rebind_inflight_for_channel_inner(
         state
     };
 
+    // Read before the episode lock is taken, so the lock never waits on the sessions row.
+    #[cfg(unix)]
+    let host = super::tmux::watch_host_of(
+        shared,
+        provider,
+        discord_channel_id.get(),
+        &tmux_session_name,
+    )
+    .await;
     let (locked_episode, finish_mailbox_on_completion) =
         episode_handoff::commit_episode_side_effects(
             shared,
@@ -853,6 +862,7 @@ async fn rebind_inflight_for_channel_inner(
                     recovered_state_for_session.logical_channel_id,
                     recovered_state_for_session.thread_id,
                 ),
+                host,
             );
             if watcher_should_spawn {
                 if let Some(PendingCodexTuiRebindRelay {

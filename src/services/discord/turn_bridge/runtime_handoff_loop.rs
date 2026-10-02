@@ -273,11 +273,18 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     watcher_claim_replaced_existing,
                     owner_changed_after_claim,
                     watcher_claim_incarnation,
-                ) = {
+                ) = 'claim: {
                     // #1135: Reuse a live watcher for the same
                     // tmux session; replace only stale or
                     // different-session incumbents.
-                    let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
+                    let host = super::tmux::watch_host_of(
+                        &shared_owned,
+                        &provider,
+                        channel_id.get(),
+                        &tmux_session_name,
+                    )
+                    .await;
+                    let claim = super::tmux::claim_or_reuse_watcher_for_host(
                         &shared_owned.tmux_watchers,
                         channel_id,
                         handle,
@@ -288,7 +295,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             inflight_state.logical_channel_id,
                             inflight_state.thread_id,
                         ),
+                        host,
                     );
+                    // A withheld Herdr pane gets no watcher, owner or relay, as a failed save.
+                    let Ok(claim) = claim else {
+                        break 'claim (false, false, false, None);
+                    };
                     watcher_owner_channel_id = claim.owner_channel_id();
                     let owner_changed =
                         inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
@@ -318,10 +330,15 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                         "turn_bridge::runtime_handoff_loop::tmux_ready_claim_owner",
                     ));
                 }
-                let claim_persisted = matches!(
-                    tmux_ready_guarded_save_outcome,
-                    Some(crate::services::discord::inflight::GuardedSaveOutcome::Saved)
-                );
+                #[cfg(unix)]
+                let claim_withheld = watcher_claim_incarnation.is_none();
+                #[cfg(not(unix))]
+                let claim_withheld = false;
+                let claim_persisted = !claim_withheld
+                    && matches!(
+                        tmux_ready_guarded_save_outcome,
+                        Some(crate::services::discord::inflight::GuardedSaveOutcome::Saved)
+                    );
                 if !claim_persisted && watcher_claimed {
                     cancel_provisional_watcher_claim_if_matches(
                         shared_owned.as_ref(),
@@ -633,6 +650,27 @@ pub(super) async fn handle_runtime_handoff_loop_message(
         }
         RuntimeHandoffLoopMessage::RuntimeReady { handoff } => {
             terminal_control_ready_observed = true;
+            #[cfg(unix)]
+            let host = match &handoff {
+                RuntimeHandoff::LegacyTmuxWrapper {
+                    tmux_session_name, ..
+                }
+                | RuntimeHandoff::ClaudeTui {
+                    tmux_session_name, ..
+                }
+                | RuntimeHandoff::CodexTui {
+                    tmux_session_name, ..
+                } => {
+                    let read = super::tmux::watch_host_of(
+                        &shared_owned,
+                        &provider,
+                        channel_id.get(),
+                        tmux_session_name,
+                    );
+                    read.await
+                }
+                _ => super::tmux::WatchHost::Legacy,
+            };
             match handoff {
                 RuntimeHandoff::LegacyTmuxWrapper {
                     output_path,
@@ -652,6 +690,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             session_id: None,
                             last_offset,
                             done,
+                            #[cfg(unix)]
+                            host,
                         },
                         WatcherRuntimeHandoffState {
                             inflight_state,
@@ -686,6 +726,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             session_id: None,
                             last_offset,
                             done,
+                            #[cfg(unix)]
+                            host,
                         },
                         WatcherRuntimeHandoffState {
                             inflight_state,
@@ -721,6 +763,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             session_id: thread_id,
                             last_offset,
                             done,
+                            #[cfg(unix)]
+                            host,
                         },
                         WatcherRuntimeHandoffState {
                             inflight_state,
