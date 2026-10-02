@@ -150,8 +150,8 @@ async fn session_channel_name(shared: &SharedData, channel_id: ChannelId) -> Opt
     session.and_then(|session| session.channel_name.clone())
 }
 
-/// A provider-state reset of one channel judged once, read only, on the runtime, channel name
-/// and key it acts on; [`ManagedResetVerdict::apply`] runs on that target without judging again.
+/// A provider-state reset of one channel judged once, read only, on the runtime, channel name,
+/// key and turn it acts on; [`ManagedResetVerdict::apply`] runs on that target without judging again.
 #[must_use]
 pub(crate) struct ManagedResetVerdict {
     shared: Arc<SharedData>,
@@ -177,19 +177,13 @@ pub(crate) async fn managed_reset_verdict(
     let named = channel_name.as_deref();
     let tmux_name = named.map(|name| provider.build_tmux_session_name(name));
     let tmux_name = tmux_name.or_else(by_key);
-    let refusal = match provider.uses_managed_tmux_backend() {
-        true => {
-            reset_refusal(
-                &shared,
-                &provider,
-                channel_id,
-                session_key,
-                channel_name.clone(),
-            )
-            .await
-        }
-        false => None,
-    };
+    let name = channel_name.clone();
+    let mut refusal = reset_refusal(&shared, &provider, channel_id, session_key, name).await;
+    // The turn this reset stops must run the judged session: its token, watcher and inflight row.
+    let holds = super::host_teardown_gate::runtime_target_holds;
+    if refusal.is_none() && !holds(&shared, &provider, channel_id, tmux_name.as_deref()).await {
+        refusal = Some("the channel's runtime holds a session other than the judged one".into());
+    }
     Some(ManagedResetVerdict {
         shared,
         provider,
@@ -210,21 +204,33 @@ impl ManagedResetVerdict {
     }
 
     /// Clears the approved channel's turn, provider session and managed process. A refusal, or a
-    /// channel whose session name changed since the verdict, changes nothing.
+    /// runtime whose session changed since the verdict, changes nothing.
     pub(crate) async fn apply(self) -> ManagedReset {
         if let Some(reason) = self.refusal {
             return ManagedReset::Refused(reason);
         }
         let (shared, provider, channel_id) = (self.shared, self.provider, self.channel_id);
-        if session_channel_name(&shared, channel_id).await != self.channel_name {
+        let approved = self.tmux_name.as_deref();
+        // An identity fence on the approved names only; the host is not judged again.
+        let holds = super::host_teardown_gate::runtime_target_holds;
+        if session_channel_name(&shared, channel_id).await != self.channel_name
+            || !holds(&shared, &provider, channel_id, approved).await
+        {
             let reason = "the channel's session changed after its reset was approved";
             return ManagedReset::Refused(reason.to_string());
         }
         let cleared = super::mailbox_clear_channel(&shared, &provider, channel_id).await;
         if let Some(token) = cleared.removed_token {
             let policy = super::TmuxCleanupPolicy::PreserveSession;
-            let stop = super::turn_bridge::stop_active_turn;
-            stop(&provider, &token, policy, "auto-queue slot clear").await;
+            let stop = super::turn_bridge::stop_approved_turn;
+            stop(
+                &provider,
+                &token,
+                Some(approved),
+                policy,
+                "auto-queue slot clear",
+            )
+            .await;
             super::saturating_decrement_global_active(&shared);
         }
         {
