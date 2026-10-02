@@ -3,12 +3,14 @@ use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 mod adopt_skip;
 mod claude_source;
 #[cfg(test)]
-pub(crate) use claude_source::{AFTER_CHECK, after_check};
+pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
 pub(crate) use claude_source::{Persisted, Record};
 mod codex_hook;
-pub(crate) use codex_hook::{codex_tail_source_retired, observe_codex_hook};
+pub(crate) use codex_hook::{
+    codex_tail_source_retired, observe_codex_hook, publish_unless_codex_tail_retired,
+};
 pub(crate) mod pane_registration;
-pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
+pub(crate) use adopt_skip::*;
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -673,9 +675,8 @@ pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
 /// addresses the old UUID while stdin carries the new one.  This update is
 /// deliberately limited to an existing ClaudeTui binding reached through the
 /// command UUID and to the payload's own transcript, which must pass the Claude
-/// source check under the bound transcript's projects root. For a second or later
-/// continuation hop, the candidate must also be newer than the transcript
-/// currently bound to that pane, unless that is a restored one not written yet.
+/// source check under the bound transcript's projects root; a session the pane
+/// left comes back only on a hook published after the pane's last transition.
 pub(crate) fn adopt_claude_continuation_session(
     command_session_id: &str,
     payload_session_id: &str,

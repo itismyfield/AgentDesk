@@ -276,6 +276,26 @@ else
     fail "the timeout diagnostic runs unconditionally, so a marker or head timeout names health reasons"
 fi
 
+echo "§10f a TUI O channel released to Legacy is not a deploy blocker; a halted one is"
+
+expect_ready "released channels alone verify" \
+    "$(body '["tui_o:released:1479671298497183835","tui_o:released:7"]' true)"
+expect_ready "a released channel mixes with an accepted reason" \
+    "$(body '["relay_verdict_unknown_codex_c1","tui_o:released:7"]' true)"
+expect_blocked "a halted channel blocks alongside released ones" \
+    "$(body '["tui_o:released:7","tui_o:halted:8"]' true)"
+expect_blocked "a halted channel blocks on its own" "$(body '["tui_o:halted:8"]' true)"
+expect_blocked "a released reason without a channel id is not accepted" \
+    "$(body '["tui_o:released:"]' true)"
+named=$(_health_json_deploy_blocking_reasons \
+    "$(body '["tui_o:released:7","tui_o:halted:8"]' true)" \
+    "$(_health_json_deploy_nonblocking_ere 1 1 0)")
+if [ "$named" = "tui_o:halted:8" ]; then
+    pass "only the halted channel is named ($named)"
+else
+    fail "expected 'tui_o:halted:8', got '$named'"
+fi
+
 echo "§11 the jq and no-jq paths agree on every shape above"
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -284,7 +304,8 @@ else
     for shape in "$INCIDENT" '["relay_verdict_unknown_codex_c1","db_unavailable"]' \
         '["a_reason_this_script_has_never_seen"]' '["provider:codex:pending_queue_depth:4"]' \
         '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]' \
-        '["relay_verdict_unknown_codex_c1",""]' '["provider:a,b:pending_queue_depth:4"]'; do
+        '["relay_verdict_unknown_codex_c1",""]' '["provider:a,b:pending_queue_depth:4"]' \
+        '["tui_o:released:7"]' '["tui_o:released:7","tui_o:halted:8"]'; do
         b="$(body "$shape" true)"
         with_jq=0; ready "$b" || with_jq=1
         # Force the fallback by making the detector answer no, not by breaking PATH.

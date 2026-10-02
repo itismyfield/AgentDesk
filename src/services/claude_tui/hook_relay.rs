@@ -17,6 +17,7 @@ use crate::services::claude_tui::memento_feedback;
 
 mod ordered_queue;
 mod response_window;
+mod transport_retry;
 pub(crate) use ordered_queue::OrderedHookRelayRecoveryOwner;
 #[cfg(all(test, unix))]
 use ordered_queue::relay_queue_dir;

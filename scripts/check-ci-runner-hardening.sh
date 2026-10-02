@@ -1040,18 +1040,18 @@ targets = {
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "1cad90577d2118651ea88b3de4c650afd4bc5777d7228a90f588da5b58e012e4",
+    "job_sha256" => "06c4f7b845152711cba75deb7bd02ac019fb863a0a10aef7722e3ec5bc4a7712",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
         "commands" => ["cargo fetch --locked"],
         "timeout_minutes" => 10,
-        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
       },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,
-        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
       },
     },
   },
@@ -1279,7 +1279,143 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
-ruby -ryaml -e 'j=YAML.load_file(ARGV[0]).fetch("jobs").fetch("scripts"); r=j.fetch("steps").find{|s|s["name"]=="Run script checks"}; u=j.fetch("steps").find{|s|s["name"]=="Upload giant-file progress evidence"}; abort unless r.fetch("env")=={"GFP_EVENT_NAME"=>"${{ github.event_name }}","GFP_REPOSITORY"=>"${{ github.repository }}","GFP_CANDIDATE_SHA"=>"${{ github.sha }}","TEST_LANE_BASELINE_REF"=>"HEAD"} && u=={"name"=>"Upload giant-file progress evidence","if"=>"always()","uses"=>"actions/upload-artifact@v4","with"=>{"path"=>"target/giant-file-progress/evidence.json"}}' "$main_workflow" || error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring"
+# Main pushes run every ci-script-checks.sh shard in its own job; each keeps the
+# main-only selector env, and only the cargo shard uploads giant-file evidence.
+validate_main_script_check_shards() {
+  if ! ruby - "$main_workflow" <<'RUBY'
+require "yaml"
+path = ARGV.fetch(0)
+document = YAML.load_file(path)
+jobs = document.fetch("jobs", {})
+errors = []
+expected_shards = {
+  "scripts" => ["cargo", "Main script checks"],
+  "scripts_guards" => ["guards", "Main script checks (guards)"],
+  "scripts_contracts" => ["contracts", "Main script checks (contracts)"],
+}
+base_env = {
+  "GFP_EVENT_NAME" => "${{ github.event_name }}",
+  "GFP_REPOSITORY" => "${{ github.repository }}",
+  "GFP_CANDIDATE_SHA" => "${{ github.sha }}",
+  "TEST_LANE_BASELINE_REF" => "HEAD",
+}
+selector_key = ->(key) { key.to_s.start_with?("SCRIPT_CHECK_", "GFP_", "TEST_LANE_") }
+errors << "workflow env must not set script-check selector variables" if (document["env"] || {}).keys.any?(&selector_key)
+runners = jobs.select do |_, job|
+  job.is_a?(Hash) && Array(job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.include?("ci-script-checks.sh") }
+end
+errors << "jobs running ci-script-checks.sh must be exactly #{expected_shards.keys.sort}, found #{runners.keys.sort}" unless runners.keys.sort == expected_shards.keys.sort
+expected_shards.each do |job_id, (shard, name)|
+  job = jobs[job_id]
+  label = "job #{job_id}"
+  unless job.is_a?(Hash)
+    errors << "#{label} is missing"
+    next
+  end
+  errors << "#{label} must be named #{name.inspect}" unless job["name"] == name
+  errors << "#{label} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+  %w[if needs continue-on-error].each { |key| errors << "#{label} must not set #{key}" if job.key?(key) }
+  errors << "#{label} job env must not set script-check selector variables" if (job["env"] || {}).keys.any?(&selector_key)
+  steps = Array(job["steps"])
+  checkout = steps.first
+  errors << "#{label} must check out full history first" unless checkout.is_a?(Hash) && checkout["uses"] == "actions/checkout@v4" && checkout["with"] == {"fetch-depth" => 0}
+  runs = steps.select { |step| step.is_a?(Hash) && step["run"].to_s.include?("ci-script-checks.sh") }
+  run = runs.first
+  unless runs.length == 1 && run["name"] == "Run script checks" && run["run"] == "./scripts/ci-script-checks.sh"
+    errors << "#{label} must run ./scripts/ci-script-checks.sh in exactly one Run script checks step"
+    next
+  end
+  %w[if continue-on-error].each { |key| errors << "#{label} Run script checks must not set #{key}" if run.key?(key) }
+  expected_env = base_env.merge("SCRIPT_CHECK_SHARD" => shard)
+  errors << "#{label} Run script checks env must equal #{expected_env}" unless run["env"] == expected_env
+end
+uploads = jobs.flat_map do |job_id, job|
+  next [] unless job.is_a?(Hash)
+  Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }.map { |step| [job_id, step] }
+end
+evidence = uploads.select { |_, step| step["name"] == "Upload giant-file progress evidence" }
+unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]]
+  errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
+end
+errors << "artifact uploads must stay in the cargo shard job" unless uploads.all? { |job_id, _| job_id == "scripts" }
+errors.each { |message| warn "#{path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring across every script-check shard"
+  fi
+}
+validate_main_script_check_shards
+
+# Main's full sweep runs with the PR sweep's PostgreSQL and debuginfo-free env;
+# no step of it or of lint may be skipped or fail open, except always() cleanup.
+validate_main_full_sweep() {
+  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+require "yaml"
+main_path, pr_path = ARGV
+main_jobs = YAML.load_file(main_path).fetch("jobs", {})
+pr_sweep = YAML.load_file(pr_path).dig("jobs", "library_sweep")
+errors = []
+sweep_name = "Library sweep (selection-set gated)"
+lint_tests_name = "Non-lib tests and doctests"
+cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
+{"full_non_pg" => "Full tests (ubuntu-latest)", "lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
+  job = main_jobs[job_id]
+  unless job.is_a?(Hash)
+    errors << "job #{job_id} is missing"
+    next
+  end
+  errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
+  errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+  %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
+  Array(job["steps"]).each do |step|
+    next unless step.is_a?(Hash)
+    label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
+    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
+    errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
+  end
+end
+lint = main_jobs["lint"]
+if lint.is_a?(Hash)
+  lint_steps = Array(lint["steps"]).select { |step| step.is_a?(Hash) }
+  ["Policy JS unit tests", "just fmt-check", "just lint", lint_tests_name].each do |name|
+    errors << "job lint must have exactly one #{name.inspect} step" unless lint_steps.count { |step| step["name"] == name } == 1
+  end
+  tests = lint_steps.find { |step| step["name"] == lint_tests_name }
+  %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
+    errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
+  end
+end
+job = main_jobs["full_non_pg"]
+if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
+  env = job["env"] || {}
+  errors << "job full_non_pg env must equal #{pr_path} library_sweep env" unless env == pr_sweep["env"]
+  { "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0", "AGENTDESK_REQUIRE_PG" => "1" }.each do |key, value|
+    errors << "job full_non_pg env must set #{key}=#{value}" unless env[key] == value
+  end
+  steps = Array(job["steps"])
+  index = ->(pred) { steps.index { |step| step.is_a?(Hash) && pred.(step) } }
+  start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start" && !step.key?("if") })
+  sweep = index.(->(step) { step["name"] == sweep_name })
+  stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" && step["if"] == "always()" })
+  errors << "job full_non_pg must start PostgreSQL, sweep, then stop PostgreSQL under always()" unless start && sweep && stop && start < sweep && sweep < stop
+  if sweep
+    step = steps[sweep]
+    %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
+      errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
+    end
+  end
+else
+  errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
+end
+errors.each { |message| warn "#{main_path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must run the full non-PG sweep unconditionally with PostgreSQL and debuginfo stripped"
+  fi
+}
+validate_main_full_sweep
 
 # The main-only Windows warm job must save the cache keys the PR Windows jobs
 # restore: same workflow/job env, setup steps, rust-cache inputs and compile.

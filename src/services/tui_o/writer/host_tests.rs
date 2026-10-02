@@ -2,11 +2,14 @@ use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{self, test_override};
 use crate::services::tui_o::writer::activation::ActivationFacts;
+use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{HostIo, HostParts, Readiness, start};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
+#[cfg(unix)]
+use chrono::{DateTime, TimeDelta};
 
 const OTHER: u64 = 8;
 
@@ -29,6 +32,15 @@ impl Raised {
         halted.collect()
     }
 
+    fn released(&self) -> Vec<(u64, String)> {
+        let raised = self.0.lock().unwrap();
+        let released = raised.iter().filter_map(|(channel, alarm)| match alarm {
+            WriterAlarm::Released { detail } => Some((*channel, detail.clone())),
+            _ => None,
+        });
+        released.collect()
+    }
+
     fn has(&self, channel: u64, wanted: &WriterAlarm) -> bool {
         let raised = self.0.lock().unwrap();
         raised
@@ -47,6 +59,11 @@ struct TestIo {
     custody: Mutex<Result<bool, String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The gateway never comes up.
+    port_down: std::sync::atomic::AtomicBool,
+    legacy: Mutex<Option<Arc<dyn LegacyView>>>,
+    busy: std::sync::atomic::AtomicBool,
+    relaying: std::sync::atomic::AtomicBool,
 }
 
 impl TestIo {
@@ -59,6 +76,10 @@ impl TestIo {
             facts: Mutex::new(Ok(ActivationFacts::default())),
             custody: Mutex::new(Ok(false)),
             on_facts: Mutex::default(),
+            port_down: Default::default(),
+            legacy: Mutex::default(),
+            busy: Default::default(),
+            relaying: Default::default(),
         })
     }
 
@@ -76,7 +97,13 @@ impl HostIo for TestIo {
     fn port(&self) -> impl Future<Output = Arc<FakePort>> + Send {
         self.calls.lock().unwrap().push(("port", 0));
         let port = Arc::clone(&self.port);
-        async move { port }
+        let down = self.port_down.load(Ordering::SeqCst);
+        async move {
+            if down {
+                std::future::pending::<()>().await;
+            }
+            port
+        }
     }
 
     fn lease(&self) -> Arc<FakeLease> {
@@ -110,8 +137,18 @@ impl HostIo for TestIo {
         self.custody.lock().unwrap().clone()
     }
 
-    fn legacy(&self) -> Arc<dyn crate::services::tui_o::writer::adoption::LegacyView> {
-        Arc::new(crate::services::tui_o::writer::adoption::NoLegacy)
+    fn legacy(&self) -> Arc<dyn LegacyView> {
+        let legacy = self.legacy.lock().unwrap().clone();
+        legacy.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
+    }
+
+    fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
+        self.calls.lock().unwrap().push(("busy", channel));
+        std::future::ready(self.busy.load(Ordering::SeqCst))
+    }
+
+    fn relaying(&self, _: u64) -> bool {
+        self.relaying.load(Ordering::SeqCst)
     }
 }
 
@@ -321,6 +358,31 @@ async fn without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o(
     assert!(!ready.is_ready(CHANNEL));
     let owned = cutover::o_owns_tui_output_for_channel(CHANNEL, Some(ClaudeTui));
     assert_eq!(owned, Ok(true), "Legacy does not take the body back");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down() {
+    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
+    let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
+        panic!("piece not posted");
+    };
+    drop(writer);
+    let _restart = deliver::forget_posted_for_tests(CHANNEL);
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.port_down.store(true, Ordering::SeqCst);
+    let tasks = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert_eq!(
+        io.calls(),
+        [("port", 0)],
+        "the actor still waits for its gateway"
+    );
+    assert!(deliver::last_posted(CHANNEL) >= Some(posted));
+    abort(tasks);
 }
 
 fn p5_log(root: &Path, channel: u64, line: &[u8]) {
@@ -555,11 +617,18 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
         let ready = Arc::new(Readiness::default());
         host(&harness, &io, pg, &ready);
         polls(3).await;
-        let halted = io.alarms.halted();
+        // A released channel's output stays with Legacy, so only an undecided one is held.
+        let (halted, released) = (io.alarms.halted(), io.alarms.released());
+        let (named, other) = if pg {
+            (released, halted)
+        } else {
+            (halted, released)
+        };
         assert!(
-            matches!(halted.as_slice(), [(CHANNEL, detail)] if detail.contains(why)),
-            "{why}: {halted:?}"
+            matches!(named.as_slice(), [(CHANNEL, detail)] if detail.contains(why)),
+            "{why}: {named:?}"
         );
+        assert_eq!(other, [], "{why}");
         assert_eq!(harness.store.read_era().unwrap(), None, "{why}");
         assert!(!harness.store.has_channel_dir(CHANNEL), "{why}");
         assert!(!io.calls().iter().any(|(call, _)| *call == "port"), "{why}");
@@ -601,6 +670,7 @@ async fn missing_or_damaged_store_state_holds_instead_of_a_first_init() {
     assert!(held(CHANNEL, "era channel has no init"), "{halted:?}");
     assert!(held(OTHER, "store files but no init"), "{halted:?}");
     assert_eq!(adoption(OTHER), Adoption::Held, "store files keep O's hold");
+    assert_eq!(io.alarms.released(), [], "a held channel is not released");
     assert!(!init_path(&harness, CHANNEL).exists() && !orphan.exists());
     assert!(
         !io.calls().contains(&("facts", CHANNEL)),
@@ -684,3 +754,337 @@ async fn a_gate_lost_while_activation_facts_are_read_creates_nothing_until_owned
     assert!(ready.accepts(CHANNEL));
     assert_eq!(io.alarms.halted(), []);
 }
+
+/// Legacy holding its cursor at `cursor` on `path`, with its delivered frontier at `frontier`.
+struct Cursor {
+    path: PathBuf,
+    cursor: u64,
+    frontier: u64,
+}
+
+impl LegacyView for Cursor {
+    fn started(&self) -> bool {
+        true
+    }
+
+    fn cursor(&self, _: &str) -> LegacyCursor {
+        let (path, offset) = (self.path.clone(), self.cursor);
+        LegacyCursor::Bound { path, offset }
+    }
+
+    fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+        Some(self.frontier)
+    }
+
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_closed_turn_legacy_never_delivered_is_adopted_past_and_never_posted() {
+    let closed = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
+    let debt = [row("m0", "undelivered"), format!("{closed}\n").into_bytes()].concat();
+    for custody in [true, false] {
+        let (harness, path) = fresh(startup);
+        append(&path, &debt);
+        harness.gate.acquired();
+        let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        let cursor = debt.len() as u64;
+        let legacy = Cursor {
+            path: path.clone(),
+            cursor,
+            frontier: 0,
+        };
+        *io.legacy.lock().unwrap() = Some(Arc::new(legacy));
+        *io.custody.lock().unwrap() = Ok(custody);
+        let tasks = start_host(&harness, &io, &ready);
+        polls(3).await;
+        if custody {
+            let released = io.alarms.released();
+            assert!(
+                matches!(released.as_slice(), [(CHANNEL, detail)] if detail.contains("custody")),
+                "{released:?}"
+            );
+            assert_eq!(adoption(CHANNEL), Adoption::Released);
+            assert!(!harness.store.has_channel_dir(CHANNEL));
+            continue;
+        }
+        assert_eq!(adoption(CHANNEL), Adoption::Committed);
+        let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
+        let starts: Vec<_> = init.sources.iter().map(|s| s.delivery_start).collect();
+        assert_eq!(starts, [cursor], "O starts at Legacy's cursor");
+        let source = init.sources[0].source_id.clone();
+        let abandoned = WriterAlarm::Abandoned {
+            source,
+            from: 0,
+            to: cursor,
+        };
+        assert_eq!(*io.alarms.0.lock().unwrap(), [(CHANNEL, abandoned)]);
+        append(&path, &row("m1", "after"));
+        polls(3).await;
+        assert_eq!(harness.port.posts(), ["after"]);
+
+        abort(tasks);
+        polls(2).await;
+        let written = std::fs::read(init_path(&harness, CHANNEL)).unwrap();
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        let _tasks = start_host(&harness, &io, &ready);
+        append(&path, &row("m2", "again"));
+        polls(3).await;
+        assert!(
+            !io.calls().contains(&("facts", CHANNEL)),
+            "a restart recovers"
+        );
+        assert_eq!(io.alarms.0.lock().unwrap().as_slice(), []);
+        assert_eq!(
+            std::fs::read(init_path(&harness, CHANNEL)).unwrap(),
+            written
+        );
+        assert_eq!(harness.port.posts(), ["after", "again"]);
+    }
+}
+
+/// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
+#[cfg(unix)]
+struct ProducerPane {
+    tmux: &'static str,
+    a: String,
+    base: DateTime<Utc>,
+    _root: tempfile::TempDir,
+    _env: (tempfile::TempDir, [crate::config::TestEnvVarGuard; 2]),
+    _rotations: std::sync::MutexGuard<'static, ()>,
+    _state: std::sync::MutexGuard<'static, ()>,
+    _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+}
+
+#[cfg(unix)]
+impl ProducerPane {
+    fn launch(a: &str, a_path: &Path) -> Self {
+        use crate::services::tui_prompt_dedupe as dedupe;
+        let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        let rotations = dedupe::lock_claude_session_rotations_for_tests();
+        dedupe::reset_state_for_tests();
+        // An earlier pane's hooks may still wait in the adoption queue this pane shares by name.
+        crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests();
+        let root = tempfile::tempdir().unwrap();
+        p5::set_test_root(Some(root.path()));
+        let tmux = "o-superseded-pane";
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let marker = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+        std::fs::write(marker, nonce).unwrap();
+        dedupe::register_tmux_channel(tmux, CHANNEL);
+        dedupe::register_provider_session("claude", a, tmux);
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: ClaudeTui,
+            output_path: a_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(a.to_owned()),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        dedupe::register_launched_tmux_runtime_binding(tmux, binding);
+        Self {
+            tmux,
+            a: a.to_owned(),
+            base: Utc::now(),
+            _root: root,
+            _env: env,
+            _rotations: rotations,
+            _state: state,
+            _env_lock: env_lock,
+        }
+    }
+
+    /// Sends hook `event` naming `session`'s transcript, published `secs` after the launch.
+    fn send(&self, event: &str, source: Option<&str>, session: &str, path: &Path, secs: i64) {
+        use crate::services::claude_tui::hook_server::adoption_retry::adopt_from_hook;
+        let payload = serde_json::json!({ "source": source, "transcript_path": path });
+        let hook = p5::HookSignal {
+            published_at: Some(self.base + TimeDelta::seconds(secs)),
+            ..p5::HookSignal::from_payload(event, &payload)
+        };
+        // Delivery drains each rotation before the next hook, as a settled pane does.
+        crate::services::tui_prompt_dedupe::clear_claude_session_rotation(self.tmux);
+        adopt_from_hook(&self.a, session, &hook);
+    }
+
+    fn bound(&self) -> Option<String> {
+        let binding =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(self.tmux);
+        binding.and_then(|binding| binding.session_id)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProducerPane {
+    fn drop(&mut self) {
+        p5::set_test_root(None);
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    }
+}
+
+#[cfg(unix)]
+fn session_row(session: &str) -> Vec<u8> {
+    let row = serde_json::json!({"type": "mode", "sessionId": session});
+    let mut line = serde_json::to_vec(&row).unwrap();
+    line.push(b'\n');
+    line
+}
+
+/// The log the real judgment writes for A → Pending B (clear) → C → resume B → Pending D (clear)
+/// resolved, read as O reads it: the superseded Pending B is passed by evidence in the log.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
+    use super::super::binding::BindingLog;
+    let [a, b, c, d] = [(); 4].map(|_| uuid::Uuid::new_v4().to_string());
+    let mut bound_a = None;
+    let harness = Harness::build(|runtime| {
+        let path = runtime.join(format!("{a}.jsonl"));
+        let body = session_row(&a);
+        std::fs::write(&path, &body).unwrap();
+        let source_id = source_id_for(&a, &path).unwrap();
+        bound_a = Some(path);
+        let delivery_start = body.len() as u64;
+        let prefix_hash = hex::encode(Sha256::digest(&body));
+        vec![InitSource {
+            source_id,
+            delivery_start,
+            prefix_hash,
+        }]
+    });
+    harness.gate.acquired();
+    let a_path = bound_a.unwrap();
+    let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
+    let pane = ProducerPane::launch(&a, &a_path);
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    append(&a_path, &row("m1", "a tail"));
+    let prompt = "user_prompt_submit";
+    pane.send("session_start", Some("clear"), &b, &path(&b), 10);
+    std::fs::write(path(&c), session_row(&c)).unwrap();
+    pane.send(prompt, None, &c, &path(&c), 20);
+    std::fs::write(path(&b), session_row(&b)).unwrap();
+    pane.send("session_start", Some("resume"), &b, &path(&b), 30);
+    pane.send("session_start", Some("clear"), &d, &path(&d), 40);
+    std::fs::write(path(&d), session_row(&d)).unwrap();
+    pane.send(prompt, None, &d, &path(&d), 41);
+    append(&path(&d), &row("n1", "d out"));
+    assert_eq!(pane.bound().as_deref(), Some(d.as_str()), "[O:binding_d]");
+    let events = bindings.binding_events_since(CHANNEL, 0).unwrap();
+    let last = events.last().unwrap().seq;
+    let pending = |e: &&BindingEvent| {
+        matches!(
+            &e.record,
+            BindingRecord::Bound {
+                new: BindingTarget::Pending { .. },
+                ..
+            }
+        )
+    };
+    // The only Resolved names D, so B's Pending was passed, not resolved.
+    let resolved = |e: &&BindingEvent| matches!(&e.record, BindingRecord::Resolved { source, .. } if source.session_id == d);
+    let any = |e: &&BindingEvent| matches!(&e.record, BindingRecord::Resolved { .. });
+    let counts = (
+        events.iter().filter(pending).count(),
+        events.iter().filter(any).count(),
+        events.iter().filter(resolved).count(),
+    );
+    assert_eq!(
+        counts,
+        (2, 1, 1),
+        "[O:pendings] only D's is resolved {events:#?}"
+    );
+    polls(6).await;
+    let store = harness.channel();
+    assert_eq!(
+        store.binding_checkpoint().unwrap(),
+        Some(last),
+        "[O:checkpoint]"
+    );
+    let d_source = source_id_for(&d, &path(&d)).unwrap();
+    assert!(store.cursor(&d_source).is_some(), "[O:d_reader]");
+    assert_eq!(harness.port.posts(), ["a tail", "d out"], "[O:posts]");
+    let stalled = |alarm: &WriterAlarm| matches!(alarm, WriterAlarm::BindingPending { .. });
+    assert!(!harness.alarms.taken().iter().any(stalled), "[O:no_wait]");
+    let (bound, _) = super::super::adoption::logged(&events).expect("[O:fresh] adoptable");
+    assert_eq!(bound.last().map(|s| &s.session_id), Some(&d), "[O:fresh]");
+
+    // A restart of O and of the log writer reads the same log to the same place.
+    halt(stop, task).await;
+    p5::forget_channel_for_tests(CHANNEL);
+    append(&path(&d), &row("n2", "d after restart"));
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(6).await;
+    let posts = harness.port.posts();
+    assert_eq!(posts, ["a tail", "d out", "d after restart"], "[O:restart]");
+    assert_eq!(
+        harness.channel().binding_checkpoint().unwrap(),
+        Some(last),
+        "[O:restart]"
+    );
+    assert!(!harness.alarms.taken().iter().any(stalled), "[O:restart]");
+    halt(stop, task).await;
+}
+
+/// The real judgment logs no record for a resume of the session the pane already holds verified,
+/// so that hook proves no old source; a /clear it does log proves every hop of the pane.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logged_clear_retires_it()
+{
+    use super::super::binding::BindingLog;
+    let [a, b, d] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
+    let mut bound_a = None;
+    let harness = Harness::build(|runtime| {
+        let path = runtime.join(format!("{a}.jsonl"));
+        let body = session_row(&a);
+        std::fs::write(&path, &body).unwrap();
+        let source_id = source_id_for(&a, &path).unwrap();
+        bound_a = Some(path);
+        let delivery_start = body.len() as u64;
+        let prefix_hash = hex::encode(Sha256::digest(&body));
+        vec![InitSource {
+            source_id,
+            delivery_start,
+            prefix_hash,
+        }]
+    });
+    harness.gate.acquired();
+    let a_path = bound_a.unwrap();
+    let a_source = source_id_for(&a, &a_path).unwrap();
+    let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
+    let pane = ProducerPane::launch(&a, &a_path);
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    std::fs::write(path(&b), session_row(&b)).unwrap();
+    pane.send("user_prompt_submit", None, &b, &path(&b), 10);
+    assert_eq!(pane.bound().as_deref(), Some(b.as_str()), "[P21:bound_b]");
+    let before = bindings.binding_events_since(CHANNEL, 0).unwrap();
+    pane.send("session_start", Some("resume"), &b, &path(&b), 20);
+    let after = bindings.binding_events_since(CHANNEL, 0).unwrap();
+    assert_eq!(after, before, "[P21:unchanged]");
+    polls(15).await;
+    let retired = |source: &SourceId| harness.channel().cursor(source).unwrap().retired;
+    assert!(!retired(&a_source), "[P21:unproven]");
+
+    pane.send("session_start", Some("clear"), &d, &path(&d), 30);
+    std::fs::write(path(&d), session_row(&d)).unwrap();
+    pane.send("user_prompt_submit", None, &d, &path(&d), 31);
+    assert_eq!(pane.bound().as_deref(), Some(d.as_str()), "[P21:bound_d]");
+    polls(15).await;
+    let b_source = source_id_for(&b, &path(&b)).unwrap();
+    assert!(retired(&a_source), "[P21:clear_proves_a]");
+    assert!(retired(&b_source), "[P21:clear_proves_b]");
+    halt(stop, task).await;
+}
+
+#[path = "deferred_tests.rs"]
+mod deferred;

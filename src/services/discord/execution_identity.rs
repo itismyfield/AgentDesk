@@ -34,6 +34,8 @@ use super::tmux_session_files::read_spawn_nonce;
 // Herdr executions compare the stored hosted record, not a `.spawn_nonce` marker.
 #[path = "execution_identity/herdr_observation.rs"]
 pub(crate) mod herdr_observation;
+#[path = "execution_identity/herdr_report_order.rs"]
+pub(crate) mod herdr_report_order;
 
 /// #5399: re-exported here because `tmux_session_files` is private to `tmux`,
 /// while the fence whose reads it tallies lives in `tmux_watcher_registry`.

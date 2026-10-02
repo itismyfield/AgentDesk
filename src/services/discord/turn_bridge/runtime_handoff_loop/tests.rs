@@ -98,6 +98,7 @@ async fn dispatch_process_handoff_with_pin(
             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
             tmux_handed_off: &mut tmux_handed_off,
             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+            watcher_adopted_after_done: &mut false,
             state_dirty,
             terminal_control_drain_until: &mut terminal_control_drain_until,
             last_activity_heartbeat_at: &mut last_activity_heartbeat_at,

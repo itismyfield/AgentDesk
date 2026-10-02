@@ -255,6 +255,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
+              - 'src/server/routes/agents_host_guard_tests.rs'
               - 'src/server/routes/agents_turn_deliver.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
@@ -274,6 +275,7 @@ jobs:
               - 'src/services/agent_recovery/durable/postgres_tests.rs'
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/activate_command.rs'
+              - 'src/services/auto_queue/campaign_handoff_tests.rs'
               - 'src/services/auto_queue/cancel_run.rs'
               - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
               - 'src/services/auto_queue/command.rs'
@@ -297,8 +299,11 @@ jobs:
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
               - 'src/services/cluster/intake_worker/o_route_tests.rs'
               - 'src/services/cluster/machine_resources/store.rs'
+              - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
               - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/restart.rs'
+              - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
@@ -311,11 +316,14 @@ jobs:
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
+              - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
+              - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
+              - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
@@ -330,6 +338,9 @@ jobs:
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
               - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
+              - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
+              - 'src/services/discord/tmux_watcher/streaming_baseline_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/herdr_source_tests.rs'
               - 'src/services/discord/tui_prompt_relay/rehydration.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
@@ -525,8 +536,8 @@ jobs:
             # compile-existence half (check_fast, which compiles the
             # `relay_state_contract_refs` blocks so a renamed/removed contract
             # symbol fails to compile) MUST run even for doc-only changes.
-            # Keep this list in sync with REFERENCE_SOURCE_MODULES in
-            # scripts/check_contract_symbol_refs.py.
+            # Mirrors REFERENCE_SOURCE_MODULES in scripts/check_contract_symbol_refs.py;
+            # RelayContractPathFilterTest fails when the two sets differ.
             relay_contract:
               - 'docs/relay-state-contract.md'
               - 'scripts/check_contract_symbol_refs.py'
@@ -535,6 +546,10 @@ jobs:
               - 'src/services/discord/turn_bridge/terminal_delivery.rs'
               - 'src/services/discord/tmux_watcher/liveness.rs'
               - 'src/services/discord/router/message_handler/watchdog.rs'
+              - 'src/services/discord/mailbox_finish.rs'
+              - 'src/services/discord/session_relay_sink.rs'
+              - 'src/services/discord/formatting.rs'
+              - 'src/services/discord/outbound/delivery_record.rs'
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
@@ -623,6 +638,7 @@ jobs:
               # compiles them, so they cannot break the lane. This block also
               # covers the inflight std::fs::File advisory-lock owners and the
               # restart-v2 per-platform fs backend, listed by hand until now.
+              - 'src/services/discord/admin_host_guard.rs'
               - 'src/services/discord/catch_up/**'
               - 'src/services/discord/commands/**'
               - 'src/services/discord/delivery_lease_cell.rs'
@@ -1525,10 +1541,8 @@ jobs:
   # "check the service", not as "the sweep got slower".
   #
   # Boundaries and why they are here rather than wider:
-  #   * `--lib` only. `full_non_pg` in ci-main.yml documents that an
-  #     `--all-targets` non-PG sweep panics in ~169 SQLite-fixture tests that
-  #     still await the #1238 PostgreSQL migration; pulling them in would force
-  #     either a huge isolation ledger or a re-narrowed filter.
+  #   * `--lib` only: an `--all-targets` non-PG sweep panics in SQLite-fixture
+  #     tests that still await their PostgreSQL migration.
   #   * The id-filtered PostgreSQL suite keeps its existing home in `test_fast`
   #     / `just test-postgres`: that lane runs it `--test-threads=1` under its
   #     own container. This lane provisions its own container for the 55
@@ -2028,7 +2042,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=0c74038bd577000c29893a97a21e423c6ee79dbc89bd40bdc20a26785be17ad7
+          expected=c2bf965d89ee2587303e2aef7de23defee29b82d36740aa3143764695537f8f1
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2147,7 +2161,10 @@ jobs:
       matrix:
         shard: [0, 1, 2]
     steps:
+      # Depth 2 keeps HEAD^1, the base side the wiring digest compares against.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # Filter mutation setup and execution; a missing output still runs the gate.
       - name: Detect relay-authority mutation sources
@@ -2167,20 +2184,28 @@ jobs:
               - 'src/services/discord/relay_recovery.rs'
               - 'src/services/discord/relay_recovery/tests.rs'
               - 'scripts/run_relay_authority_mutations.sh'
-              - '.github/workflows/ci-pr.yml'
+              - 'scripts/relay_mutation_wiring_digest.py'
+
+      # ci-pr.yml counts only when the relay jobs' resolved YAML changed; doubt reports true.
+      # PyYAML is installed only if missing, and a failed install leaves the digest to report true.
+      - name: Detect relay-authority mutation wiring
+        id: mutation_wiring
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --disable-pip-version-check --break-system-packages pyyaml || echo "::warning::PyYAML unavailable; the wiring digest reports true"
+          python3 scripts/relay_mutation_wiring_digest.py
 
       - name: Install Rust toolchain
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache Cargo dependencies
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
@@ -2189,7 +2214,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Fetch Cargo dependencies
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -2199,7 +2224,7 @@ jobs:
         run: cargo fetch --locked
 
       - name: Require relay-authority mutations to be killed
-        if: steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -2209,7 +2234,7 @@ jobs:
         run: bash scripts/run_relay_authority_mutations.sh
 
       - name: sccache stats
-        if: always() && steps.mutation_paths.outputs.mutation_sources != 'false'
+        if: always() && (steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false')
         run: sccache --show-stats || true
 
   # Pin the result helper and gate before mirroring both independent runners.
@@ -2243,7 +2268,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=0c74038bd577000c29893a97a21e423c6ee79dbc89bd40bdc20a26785be17ad7
+          expected=c2bf965d89ee2587303e2aef7de23defee29b82d36740aa3143764695537f8f1
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -195,6 +195,10 @@ pub(in crate::services::discord) fn tui_structurally_idle(
     else {
         return true;
     };
+    // Another host's session is never read as idle from a tmux probe.
+    if !super::host_liveness::local_tmux(&tmux_session, None) {
+        return false;
+    }
     let runtime_kind =
         crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session);
     let output_path =

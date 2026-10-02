@@ -715,9 +715,44 @@ pub(super) fn stale_foreign_inflight_is_reclaimable_at(
         && state.user_msg_id == record.anchor_message_id;
     !is_own_anchor
         && state.tmux_session_name.as_deref() == Some(record.tmux_session_name.as_str())
-        && state.effective_relay_owner_kind() != inflight::RelayOwnerKind::SessionBoundRelay
+        && (state.effective_relay_owner_kind() != inflight::RelayOwnerKind::SessionBoundRelay
+            || inflight_output_is_headless_sdk(state))
         && !state.terminal_delivery_committed
         && stale_foreign_inflight_age_permits_reclaim(state, now_unix_secs)
+}
+
+/// A TUI channel row whose transcript is a headless SDK session's was never this pane's turn, so
+/// its session-bound owner does not shield it. Unknown transcripts keep the shield.
+fn inflight_output_is_headless_sdk(state: &inflight::InflightTurnState) -> bool {
+    state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .is_some_and(|path| {
+            crate::services::claude_tui::transcript_tail::claude_transcript_is_headless_sdk(
+                std::path::Path::new(path),
+            )
+        })
+}
+
+/// The gate probe for a reclaimable stale foreign row, marking a headless SDK transcript so
+/// the gate does not read that session's turn state as the pane's readiness.
+pub(super) fn stale_foreign_probe(
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+    mailbox_active_user_msg_id: Option<u64>,
+    channel: poise::serenity_prelude::ChannelId,
+) -> super::super::destructive_cancel_gate::DestructiveCancelProbeSnapshot {
+    let mut probe =
+        super::super::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
+            shared,
+            state,
+            mailbox_active_user_msg_id,
+            channel,
+        );
+    probe.output_is_headless_sdk = inflight_output_is_headless_sdk(state);
+    probe
 }
 
 pub(super) fn stale_foreign_cancel_finalize_context() -> turn_finalizer::FinalizeContext {

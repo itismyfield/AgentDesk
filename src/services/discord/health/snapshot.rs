@@ -39,7 +39,8 @@ use crate::services::discord::relay_health::{
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use relay_probe::{
-    detail_executor_witness, reachability_ledger_operand_exists, relay_verdict_probe_operands,
+    detail_executor_witness, o_owned_output_channels, reachability_ledger_operand_exists,
+    relay_verdict_probe_operands,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -814,6 +815,8 @@ pub(super) async fn build_health_snapshot_with_options(
     #[cfg(unix)]
     let composite_governs_polarity = relay_verdict_source().governs_health_polarity();
     #[cfg(unix)]
+    let o_owned_channels = o_owned_output_channels();
+    #[cfg(unix)]
     let observe_channels = include_mailbox_details || composite_governs_polarity;
     #[cfg(not(unix))]
     let observe_channels = include_mailbox_details;
@@ -944,8 +947,11 @@ pub(super) async fn build_health_snapshot_with_options(
                 })
             };
             #[cfg(unix)]
+            let verdict_governs =
+                composite_governs_polarity && !o_owned_channels.contains(&channel.get());
+            #[cfg(unix)]
             apply_relay_verdict_polarity(
-                composite_governs_polarity,
+                verdict_governs,
                 &relay_verdict,
                 &entry.name,
                 channel.get(),
@@ -988,8 +994,7 @@ pub(super) async fn build_health_snapshot_with_options(
                     registry.started_at_unix(),
                 );
                 #[cfg(unix)]
-                let reachability =
-                    RelayVerdictReport::of(&relay_verdict, composite_governs_polarity);
+                let reachability = RelayVerdictReport::of(&relay_verdict, verdict_governs);
                 let relay_stall_state = RelayStallClassifier::classify(&relay_health);
                 trace_relay_health_classification(&relay_health, relay_stall_state);
                 mailbox_entries.push(MailboxHealthSnapshot {
@@ -1412,6 +1417,76 @@ mod tests {
                 "the retired axis_b_observation block must never resurface"
             );
         });
+    }
+
+    /// O posts an owned channel's body, so no Legacy receipt covers it: the composed verdict stays
+    /// published there but must not degrade health. A channel released to Legacy keeps it.
+    #[cfg(unix)]
+    #[test]
+    fn an_o_owned_channel_keeps_the_legacy_relay_verdict_off_health() {
+        use crate::services::tui_o::cutover::{boot_ownership, test_override};
+
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let _source_guard = set_relay_verdict_source_for_tests(RelayVerdictSource::Composite);
+        let owned = NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed);
+        let released = NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed);
+        let tui = RuntimeHandoffKind::ClaudeTui;
+        let _boot = test_override::force_candidates(&[(owned, tui), (released, tui)]);
+        for (channel, _, candidate) in boot_ownership() {
+            let candidate = candidate.expect("selected channel on the home");
+            if channel == owned {
+                assert!(candidate.confirm_store());
+            } else {
+                candidate.release(channel);
+            }
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let registry = HealthRegistry::new();
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let provider = ProviderKind::Claude.as_str();
+                registry
+                    .register(provider.to_string(), shared.clone())
+                    .await;
+                shared.mailboxes.handle(ChannelId::new(owned));
+                shared.mailboxes.handle(ChannelId::new(released));
+
+                let detail = build_health_snapshot(&registry).await;
+                let public = build_public_health_snapshot(&registry).await;
+                for (build, reasons) in [
+                    ("detail", &detail.degraded_reasons),
+                    ("public", &public.degraded_reasons),
+                ] {
+                    let verdict_for = |channel: u64| {
+                        let suffix = format!("_{provider}_{channel}");
+                        reasons
+                            .iter()
+                            .any(|r| r.starts_with("relay_verdict_") && r.ends_with(&suffix))
+                    };
+                    assert!(
+                        !verdict_for(owned),
+                        "{build}: O channel degraded: {reasons:?}"
+                    );
+                    assert!(
+                        verdict_for(released),
+                        "{build}: released channel lost: {reasons:?}"
+                    );
+                }
+                let owned_entry = detail
+                    .mailboxes
+                    .iter()
+                    .find(|entry| entry.channel_id == owned)
+                    .expect("the O channel's verdict stays published");
+                assert!(!owned_entry.reachability.governs_health_polarity);
+                assert_ne!(owned_entry.reachability.verdict, "reachable");
+            });
     }
 
     /// #5736 r2: a health poll OBSERVES the in-flight row, it does not rewrite it.

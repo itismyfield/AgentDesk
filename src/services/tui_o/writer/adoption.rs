@@ -1,5 +1,5 @@
 //! Adoption of a selected Claude channel that already holds output: O starts at Legacy's own
-//! cursor when every record past Legacy's delivered frontier is a turn end or TUI bookkeeping.
+//! cursor after a closed turn. Records Legacy left undelivered before it are reported, not posted.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
@@ -58,10 +59,132 @@ pub async fn legacy_started(legacy: &dyn LegacyView) -> bool {
     true
 }
 
+/// Why a pin or its recheck did not take the channel, with the line it is logged as.
+#[derive(Debug)]
+pub struct Refused {
+    pub hold: Hold,
+    detail: String,
+}
+
+/// What a refusal waits on. A first attempt defers only an open turn; any other refusal is final.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// The last turn before Legacy's cursor is open in the file as it was read.
+    OpenTurn(ReadVersion),
+    /// Legacy's cursor is not yet bound at the end of the current source.
+    Cursor { tmux: String, path: PathBuf },
+    /// A bind is pending or the log moved; any later log entry may clear it.
+    Binding,
+    /// Legacy's delivered frontier has not reached the cursor on a record end.
+    Delivery {
+        read: ReadVersion,
+        tmux: String,
+        frontier: u64,
+    },
+    /// A read that may pass later, with nothing cheaper to wait on.
+    Retry,
+    /// Refused for the rest of this process.
+    Final,
+}
+
+impl Refused {
+    pub(super) fn new(hold: Hold, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        Self { hold, detail }
+    }
+
+    pub(super) fn retry(detail: impl Into<String>) -> Self {
+        Self::new(Hold::Retry, detail)
+    }
+
+    /// Whether what refused may have changed since; false only while it surely still holds.
+    pub fn may_pass(&self, legacy: &dyn LegacyView, channel: u64) -> bool {
+        match &self.hold {
+            Hold::OpenTurn(read) => read.moved(),
+            Hold::Cursor { tmux, path } => match legacy.cursor(tmux) {
+                LegacyCursor::Bound { path: at, offset } => {
+                    at == *path && len_of(path).is_ok_and(|len| len == offset)
+                }
+                LegacyCursor::Unbound => false,
+                LegacyCursor::NoPane => true,
+            },
+            Hold::Binding => false,
+            Hold::Delivery {
+                read,
+                tmux,
+                frontier,
+            } => read.moved() || legacy.frontier(channel, tmux, read.len) != Some(*frontier),
+            Hold::Retry | Hold::Final => true,
+        }
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl From<Refused> for String {
+    fn from(refused: Refused) -> Self {
+        refused.detail
+    }
+}
+
+/// A source file as one read opened it: identity, length and modification time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadVersion {
+    path: PathBuf,
+    identity: (u64, u64),
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl ReadVersion {
+    /// The file at `path` as it stands now.
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            identity: file_identity(&meta),
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+
+    fn moved(&self) -> bool {
+        Self::of(&self.path).as_ref() != Some(self)
+    }
+}
+
+/// Whether `later` supersedes the Pending bind `pending`: the writer drops a waiting Pending once a
+/// hook on the same pane adopts another session, so that Pending is never resolved.
+pub(super) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
+    let BindingRecord::Bound {
+        old,
+        new: BindingTarget::Source(source),
+        evidence,
+        ..
+    } = &later.record
+    else {
+        return false;
+    };
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("o-supersede-off") {
+        return false;
+    }
+    let moved = old
+        .as_ref()
+        .is_none_or(|old| old.session_id != source.session_id);
+    let same_pane = later.tmux_session == pending.tmux_session;
+    let claude = later.provider == ShadowProvider::Claude;
+    later.seq > pending.seq && same_pane && claude && !evidence.hook_event.is_empty() && moved
+}
+
 /// The sources a binding log names: every bound one in seq order, and those only named as an old
-/// or parent source. A bind still pending refuses the log.
-pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&SourceId>), String> {
-    let (mut bound, mut named, mut pending) = (Vec::new(), Vec::new(), Vec::new());
+/// or parent source. A bind still pending refuses the log; a superseded one does not.
+pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&SourceId>), Refused> {
+    let (mut bound, mut named, mut pending) = (Vec::new(), Vec::new(), Vec::<&BindingEvent>::new());
     for event in events {
         match &event.record {
             BindingRecord::Bound {
@@ -72,25 +195,31 @@ pub(super) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
             } => {
                 named.extend(old.iter().chain(parent_hint));
                 match new {
-                    BindingTarget::Source(source) => bound.push(source),
-                    BindingTarget::Pending { .. } => pending.push(event.seq),
+                    BindingTarget::Source(source) => {
+                        pending.retain(|waiting| !supersedes(waiting, event));
+                        bound.push(source);
+                    }
+                    BindingTarget::Pending { .. } => pending.push(event),
                 }
             }
             BindingRecord::Resolved {
                 resolves_seq,
                 source,
             } => {
-                pending.retain(|seq| seq != resolves_seq);
+                pending.retain(|waiting| waiting.seq != *resolves_seq);
                 bound.push(source);
             }
             BindingRecord::Rejected { .. } => {}
         }
     }
-    if let Some(seq) = pending.iter().min() {
-        return Err(format!("bind {seq} is still pending"));
+    if let Some(seq) = pending.iter().map(|waiting| waiting.seq).min() {
+        return Err(Refused::new(
+            Hold::Binding,
+            format!("bind {seq} is still pending"),
+        ));
     }
     if bound.is_empty() {
-        return Err("no source is bound".into());
+        return Err(Refused::new(Hold::Final, "no source is bound"));
     }
     named.retain(|source| !bound.contains(source));
     Ok((bound, named))
@@ -136,6 +265,15 @@ impl Pinned {
         Ok(())
     }
 
+    fn version(&self) -> ReadVersion {
+        ReadVersion {
+            path: self.source.path.clone(),
+            identity: (self.source.dev, self.source.ino),
+            len: self.len,
+            modified: self.modified,
+        }
+    }
+
     fn init(&self) -> InitSource {
         InitSource {
             source_id: self.source.clone(),
@@ -153,8 +291,7 @@ struct Turns {
     open: bool,
     /// Whether the frontier is 0 or ends a record.
     frontier_on_line: bool,
-    output_past: Option<u64>,
-    prompt_past: Option<u64>,
+    undelivered: Option<u64>,
 }
 
 /// What neither Legacy nor O posts: turn ends and the TUI's own bookkeeping. Anything else
@@ -181,8 +318,7 @@ impl Turns {
             closed_at: 0,
             open: false,
             frontier_on_line: frontier == 0,
-            output_past: None,
-            prompt_past: None,
+            undelivered: None,
         }
     }
 
@@ -210,29 +346,33 @@ impl Turns {
             .any(|fact| !opens(fact) && !matches!(fact, RecordFact::Idle(_)));
         let user = record.as_ref().and_then(|r| r.get("type")) == Some(&Value::from("user"));
         let prompts = user || facts.iter().any(opens);
-        let past = match record {
-            Some(_) if !posts && prompts => &mut self.prompt_past,
-            Some(record) if !posts && quiet(&record) => return,
-            _ => &mut self.output_past,
-        };
-        past.get_or_insert(start);
+        if !posts && !prompts && record.as_ref().is_some_and(quiet) {
+            return;
+        }
+        self.undelivered.get_or_insert(start);
     }
 }
 
+/// Why a read of `0..len` failed: the file did not end at `len` as a record end, or anything else.
+enum Unread {
+    Short(String),
+    Other(String),
+}
+
 /// Reads `0..len` of `source` once: its hash, and for the current source its turns.
-fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned, String> {
+fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned, Unread> {
     let path = source.path.display();
-    let io = |error: std::io::Error| format!("source {path}: {error}");
+    let io = |error: std::io::Error| Unread::Other(format!("source {path}: {error}"));
     let file = File::open(&source.path).map_err(io)?;
     let meta = file.metadata().map_err(io)?;
     if file_identity(&meta) != (source.dev, source.ino) {
-        return Err(format!("source {path} was replaced"));
+        return Err(Unread::Other(format!("source {path} was replaced")));
     }
     if meta.len() != len {
-        return Err(format!(
-            "source {path} holds {} bytes, not {len}",
-            meta.len()
-        ));
+        let held = meta.len();
+        return Err(Unread::Short(format!(
+            "source {path} holds {held} bytes, not {len}"
+        )));
     }
     let (mut hasher, mut reader) = (Sha256::new(), BufReader::new(file.take(len)));
     let (mut at, mut line, mut turns) = (0, Vec::new(), turns);
@@ -246,14 +386,18 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
         let start = at;
         at += read as u64;
         if line.last() != Some(&b'\n') {
-            return Err(format!("source {path} ends inside a line at {at}"));
+            return Err(Unread::Short(format!(
+                "source {path} ends inside a line at {at}"
+            )));
         }
         if let Some(turns) = turns.as_deref_mut() {
             turns.record(&line, start, at);
         }
     }
     if at != len {
-        return Err(format!("source {path} ended at {at} while read to {len}"));
+        return Err(Unread::Other(format!(
+            "source {path} ended at {at} while read to {len}"
+        )));
     }
     Ok(Pinned {
         source: source.clone(),
@@ -271,78 +415,138 @@ pub struct Snapshot {
     /// The current source first, then the ones bound before it.
     pinned: Vec<Pinned>,
     named: Vec<SourceId>,
+    /// The first record past Legacy's delivered frontier that is not quiet.
+    undelivered: Option<u64>,
+    frontier: u64,
 }
 
 /// Pins every source the channel's `events` bind; the current one starts at Legacy's cursor, after
-/// a closed turn and with only quiet records past Legacy's delivered frontier.
+/// a closed turn and with Legacy's delivered frontier on a record at or before it.
 pub fn pin(
     legacy: &dyn LegacyView,
     events: &[BindingEvent],
     channel: u64,
-) -> Result<Snapshot, String> {
+) -> Result<Snapshot, Refused> {
     #[cfg(test)]
-    super::activation::test_hook::run(channel, super::activation::test_hook::Step::Snapshot)?;
+    super::activation::test_hook::run(channel, super::activation::test_hook::Step::Snapshot)
+        .map_err(Refused::retry)?;
     let (bound, named) = logged(events)?;
     let seq = events.last().map_or(0, |event| event.seq);
-    let current = bound.last().copied().ok_or("no source is bound")?;
+    let current = bound
+        .last()
+        .copied()
+        .ok_or(Refused::new(Hold::Final, "no source is bound"))?;
     let tmux = events
         .iter()
         .rev()
         .find(|event| event_binds(event, current))
         .map(|event| event.tmux_session.clone())
-        .ok_or("no event binds the current source")?;
+        .ok_or(Refused::retry("no event binds the current source"))?;
+    let waiting = |detail: String| {
+        let (tmux, path) = (tmux.clone(), current.path.clone());
+        Refused::new(Hold::Cursor { tmux, path }, detail)
+    };
     let start = match legacy.cursor(&tmux) {
         LegacyCursor::Bound { path, offset } if path == current.path => offset,
         LegacyCursor::Bound { path, .. } => {
-            return Err(format!("Legacy reads {} instead", path.display()));
+            return Err(waiting(format!("Legacy reads {} instead", path.display())));
         }
-        LegacyCursor::Unbound => return Err("legacy cursor not established".into()),
-        LegacyCursor::NoPane => len_of(&current.path)?,
+        LegacyCursor::Unbound => return Err(waiting("legacy cursor not established".into())),
+        LegacyCursor::NoPane => len_of(&current.path).map_err(Refused::retry)?,
     };
     let frontier = legacy.frontier(channel, &tmux, start);
-    let frontier = frontier.ok_or("the delivery record is not authoritative")?;
+    let not_authority = || Refused::new(Hold::Final, "the delivery record is not authoritative");
+    let frontier = frontier.ok_or_else(not_authority)?;
     let mut turns = Turns::new(frontier);
-    let head = read(current, start, Some(&mut turns))?;
+    let head = match read(current, start, Some(&mut turns)) {
+        Ok(head) => head,
+        Err(Unread::Short(detail)) => return Err(waiting(detail)),
+        Err(Unread::Other(detail)) => return Err(Refused::retry(detail)),
+    };
     if turns.open {
-        return Err(format!("a turn after {} is still open", turns.closed_at));
+        let detail = format!("a turn after {} is still open", turns.closed_at);
+        return Err(Refused::new(Hold::OpenTurn(head.version()), detail));
     }
     if !turns.frontier_on_line || frontier > start {
-        return Err(format!(
-            "frontier {frontier} ends no record within ..={start}"
-        ));
-    }
-    if let Some(at) = turns.output_past {
-        return Err(format!(
-            "a record at {at} past frontier {frontier} may post"
-        ));
-    }
-    if let Some(at) = turns.prompt_past {
-        return Err(format!("a prompt at {at} is past frontier {frontier}"));
+        let (read, tmux) = (head.version(), tmux.clone());
+        let detail = format!("frontier {frontier} ends no record within ..={start}");
+        let hold = Hold::Delivery {
+            read,
+            tmux,
+            frontier,
+        };
+        return Err(Refused::new(hold, detail));
     }
     let mut pinned = vec![head];
-    let mut past: Vec<&SourceId> = Vec::new();
-    for &source in bound.iter().rev() {
-        if source != current && !past.contains(&source) {
-            past.push(source);
-        }
-    }
+    let past = past_of(&bound);
     let lens = past.iter().map(|source| len_of(&source.path));
-    let lens: Vec<u64> = lens.collect::<Result<_, _>>()?;
+    let lens: Vec<u64> = lens.collect::<Result<_, _>>().map_err(Refused::retry)?;
     if past.len() > PAST_BUDGET_SOURCES || lens.iter().sum::<u64>() > PAST_BUDGET_BYTES {
-        return Err("past sources exceed budget".into());
+        return Err(Refused::new(Hold::Final, "past sources exceed budget"));
     }
     for (source, len) in past.into_iter().zip(lens) {
-        pinned.push(read(source, len, None)?);
+        match read(source, len, None) {
+            Ok(read) => pinned.push(read),
+            Err(Unread::Short(detail) | Unread::Other(detail)) => {
+                return Err(Refused::retry(detail));
+            }
+        }
     }
     for source in &named {
-        super::activation::still_empty(source)?;
+        let still = super::activation::still_empty(source);
+        still.map_err(|detail| Refused::new(Hold::Final, detail))?;
     }
     Ok(Snapshot {
         seq,
         tmux,
         pinned,
         named: named.into_iter().cloned().collect(),
+        undelivered: turns.undelivered,
+        frontier,
     })
+}
+
+/// The sources bound before the current one, newest first and each once.
+fn past_of<'a>(bound: &[&'a SourceId]) -> Vec<&'a SourceId> {
+    let Some(&current) = bound.last() else {
+        return Vec::new();
+    };
+    let mut past: Vec<&SourceId> = Vec::new();
+    for &source in bound.iter().rev() {
+        if source != current && !past.contains(&source) {
+            past.push(source);
+        }
+    }
+    past
+}
+
+/// A source other than `current` that the log bound after `seq`; Legacy may still owe output
+/// from it, read while it was current.
+pub fn rotated<'a>(
+    events: &'a [BindingEvent],
+    seq: u64,
+    current: &SourceId,
+) -> Option<&'a SourceId> {
+    let bound = |event: &'a BindingEvent| match &event.record {
+        BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            ..
+        }
+        | BindingRecord::Resolved { source, .. } => Some(source),
+        _ => None,
+    };
+    let later = events.iter().filter(|event| event.seq > seq);
+    later.filter_map(bound).find(|source| *source != current)
+}
+
+/// The source a binding log binds now and its tmux session; none while the log refuses.
+pub fn current(events: &[BindingEvent]) -> Option<(SourceId, String)> {
+    let current = *logged(events).ok()?.0.last()?;
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| event_binds(event, current))?;
+    Some((current.clone(), event.tmux_session.clone()))
 }
 
 fn event_binds(event: &BindingEvent, source: &SourceId) -> bool {
@@ -370,22 +574,27 @@ impl Snapshot {
         legacy: &dyn LegacyView,
         bindings: &B,
         channel: u64,
-    ) -> Result<Vec<InitSource>, String> {
+    ) -> Result<Vec<InitSource>, Refused> {
         let events = bindings.binding_events_since(channel, 0);
-        let events = events.map_err(|error| format!("binding log: {error}"))?;
+        let events = events.map_err(|error| Refused::retry(format!("binding log: {error}")))?;
         if events.last().map_or(0, |event| event.seq) != self.seq {
-            return Err(format!("the binding log moved past seq {}", self.seq));
+            let detail = format!("the binding log moved past seq {}", self.seq);
+            return Err(Refused::new(Hold::Binding, detail));
         }
-        let (current, past) = self.pinned.split_first().ok_or("nothing is pinned")?;
-        current.unchanged()?;
+        let (current, past) = self
+            .pinned
+            .split_first()
+            .ok_or(Refused::retry("nothing is pinned"))?;
+        current.unchanged().map_err(Refused::retry)?;
         if legacy.tail_running(&self.tmux) {
-            return Err("a Legacy response tail is running".into());
+            return Err(Refused::retry("a Legacy response tail is running"));
         }
         for pinned in past {
-            pinned.unchanged()?;
+            pinned.unchanged().map_err(Refused::retry)?;
         }
         for source in &self.named {
-            super::activation::still_empty(source)?;
+            let still = super::activation::still_empty(source);
+            still.map_err(|detail| Refused::new(Hold::Final, detail))?;
         }
         Ok(self.pinned.iter().map(Pinned::init).collect())
     }
@@ -393,6 +602,30 @@ impl Snapshot {
     /// Where O starts on the current source.
     pub fn start(&self) -> u64 {
         self.pinned.first().map_or(0, |pinned| pinned.len)
+    }
+
+    /// Why a runtime adoption must wait: a record past Legacy's frontier that Legacy may still send.
+    pub fn owed(&self) -> Option<Refused> {
+        let current = self.pinned.first()?;
+        let from = self.undelivered?;
+        let (read, tmux, frontier) = (current.version(), self.tmux.clone(), self.frontier);
+        let detail = format!("a record at {from} is past frontier {frontier}");
+        let hold = Hold::Delivery {
+            read,
+            tmux,
+            frontier,
+        };
+        Some(Refused::new(hold, detail))
+    }
+
+    /// The records Legacy left undelivered before O's start; neither writer posts them.
+    pub fn abandoned(&self) -> Option<WriterAlarm> {
+        let current = self.pinned.first()?;
+        Some(WriterAlarm::Abandoned {
+            source: current.source.clone(),
+            from: self.undelivered?,
+            to: current.len,
+        })
     }
 }
 

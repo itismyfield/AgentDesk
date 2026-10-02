@@ -163,10 +163,10 @@ where
 /// composer, and composer → interrupt-registry stays strictly one-directional.
 /// Generic over the delivery so the lock routing is unit-testable without a live
 /// tmux pane.
-fn deliver_tui_escape_under_composer_lock(
+fn deliver_tui_escape_under_composer_lock<R>(
     session_name: &str,
-    run_under_composer: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    run_under_composer: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         session_name,
         run_under_composer,
@@ -183,13 +183,13 @@ fn deliver_tui_escape_under_composer_lock(
 /// fence stays atomic: the generation check and the provider write both run under
 /// the registry guard held inside `deliver_claimed_claude_stop`, so no newer turn
 /// can publish its generation between the check and the write.
-fn deliver_claimed_claude_stop_under_lock_order(
+fn deliver_claimed_claude_stop_under_lock_order<R>(
     token: &CancelToken,
     session_name: &str,
     delivery: ClaudeTurnInterruptDelivery,
     transcript_identity: Option<&ClaudeStopTurnIdentity>,
-    write: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    write: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
     match delivery {
         ClaudeTurnInterruptDelivery::TuiEscape => {
             deliver_tui_escape_under_composer_lock(session_name, || {
@@ -593,6 +593,96 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         fallback_sigint_pid: None,
         missing_tmux_session: false,
         sigint_target_missing: false,
+    }
+}
+
+/// The Herdr pane stop, test-only until a Herdr turn carries its verified target to the stop.
+#[cfg(test)]
+pub(super) mod herdr {
+    use super::super::stop_host::{HerdrStopTarget, HerdrStopWrite, not_sent};
+    use super::*;
+    use crate::services::session_host::{HostMutation, HostSessionRef};
+
+    /// Escape on a verified Herdr pane behind the legacy claim, composer, generation and
+    /// transcript fences, then the mutation gate. No outcome escalates to a signal or kill.
+    pub(in super::super) async fn interrupt_claude_turn_on_herdr(
+        token: &Arc<CancelToken>,
+        target: &HerdrStopTarget,
+        reason: &str,
+    ) -> ProviderTurnInterruptOutcome {
+        if reason == ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON {
+            return not_sent();
+        }
+        let Some(reservation) = ClaudeStopDeliveryReservation::claim(token) else {
+            return not_sent();
+        };
+        let (token_for_task, task_target) = (Arc::clone(token), target.clone());
+        let result = tokio::task::spawn_blocking(move || {
+            let target = &task_target;
+            let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                &target.session,
+            )
+            .ok_or_else(|| "no runtime binding for the Herdr turn".to_string())?;
+            let structured = crate::services::tui_turn_state::runtime_binding_turn_state(
+                &ProviderKind::Claude,
+                &binding,
+            );
+            let identity = ClaudeStopTurnIdentity::capture(&binding.output_path);
+            let pane_ref = HostSessionRef::herdr_pane(&target.pane);
+            let pane = target.host.capture_screen(pane_ref, -160).ok();
+            let shows = |indicates: fn(&str) -> bool| pane.as_deref().is_some_and(indicates);
+            use crate::services::tmux_common as screen;
+            let ready = shows(screen::tmux_capture_indicates_claude_tui_ready_for_input)
+                || shows(screen::tmux_capture_indicates_claude_tui_prompt_draft);
+            let active = shows(screen::tmux_capture_indicates_claude_tui_actively_streaming);
+            let phase = classify_tui_interrupt_phase(structured, ready, active);
+            let escape = ClaudeTurnInterruptDelivery::TuiEscape;
+            let decision = decide_claimed_claude_stop_delivery(escape, phase);
+            if decision != ClaudeStopDeliveryDecision::Deliver(escape) {
+                return Err(format!(
+                    "phase {} decision {}",
+                    phase.as_str(),
+                    decision.as_str()
+                ));
+            }
+            let session = target.session.as_str();
+            let write = || herdr_escape(target);
+            deliver_claimed_claude_stop_under_lock_order(
+                token_for_task.as_ref(),
+                session,
+                escape,
+                identity.as_ref(),
+                write,
+            )
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("join error: {error}")));
+        drop(reservation);
+        let (session, pane) = (&target.session, &target.pane);
+        tracing::info!(
+            session,
+            pane,
+            reason,
+            ?result,
+            "claude herdr stop interrupt"
+        );
+        ProviderTurnInterruptOutcome {
+            sent_keys: matches!(result, Ok(HerdrStopWrite::Confirmed)),
+            ..not_sent()
+        }
+    }
+
+    /// Only a write that surely sent nothing is an error, so only that rolls the claim back.
+    fn herdr_escape(target: &HerdrStopTarget) -> Result<HerdrStopWrite, String> {
+        let gate = target.gate.admit(&target.session);
+        gate.map_err(|refusal| format!("mutation gate refused: {refusal:?}"))?;
+        let pane = HostSessionRef::herdr_pane(&target.pane);
+        match target.host.send_keys(pane, &["Escape"]) {
+            Ok(HostMutation::Confirmed) => Ok(HerdrStopWrite::Confirmed),
+            Ok(HostMutation::Indeterminate(detail)) => Ok(HerdrStopWrite::Indeterminate(detail)),
+            Ok(HostMutation::Refused(refusal)) => Err(format!("herdr refused Escape: {refusal:?}")),
+            Err(error) => Err(format!("herdr Escape not sent: {error:?}")),
+        }
     }
 }
 

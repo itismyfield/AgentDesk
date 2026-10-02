@@ -346,6 +346,10 @@ window updates messages by Discord id during final re-fetches, so assertions see
 the final edited body rather than only the first placeholder/chrome body.
 `completion_chrome_after_body` checks ordering by default and can set
 `required: true` when a scenario wants to fail on missing completion chrome.
+It judges ordering on the channel's final state: completion chrome that a later
+re-fetch no longer returns (a panel moved below the body and deleted) is ignored,
+and while surviving chrome is still above the body the runner re-fetches for up
+to 35s after the body was first seen, covering the O-channel panel move window.
 Latency budgets use the first prompt timestamp to make
 `relay_latency_within` meaningful even for one-response scenarios. If a prompt
 timestamp exists but no later timestamped relay body is observed, the assertion

@@ -11,6 +11,7 @@ use super::super::binding::{
 };
 use super::super::round_trip::{RoundTrip, cases, round_trip};
 use super::*;
+use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
@@ -96,7 +97,7 @@ fn bound(
     parent_hint: Option<&SourceId>,
 ) -> BindingEvent {
     let evidence = BindingEvidence {
-        hook_event: "SessionStart".into(),
+        hook_event: HookEventKind::SessionStart.as_str().into(),
         received_at: Utc::now(),
     };
     let record = BindingRecord::Bound {

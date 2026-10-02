@@ -81,6 +81,7 @@ async fn run_from_postloop_with_source_advance(
             standby_relay_owns_output: false,
             watcher_owns_assistant_relay: false,
             watcher_relay_available_for_turn: false,
+            watcher_adopted_after_done: false,
             bridge_entry_watcher_owner_epoch_current: true,
             response_sent_offset: state.response_sent_offset,
             tmux_last_offset: ctx.tmux_last_offset,

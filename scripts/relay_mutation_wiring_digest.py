@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Report whether HEAD changed the resolved relay mutation wiring in ci-pr.yml vs HEAD^1.
+
+Only subtrees that change what the gate runs are compared; any doubt reports true."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+WORKFLOW = ".github/workflows/ci-pr.yml"
+MUTATION_JOB = "relay_authority_mutations"
+MIRROR_JOB = "relay-authority-contract"
+# Workflow-level keys every job inherits; absent on both sides compares equal.
+TOP_LEVEL_KEYS = ("env", "defaults", "permissions", "concurrency")
+_ABSENT = object()
+
+
+class WiringUnknown(Exception):
+    """The comparison cannot be made, so the gate must run."""
+
+
+class RawScalar(str):
+    """A scalar kept as its text plus tag and quoting, since YAML 1.1 and GitHub's 1.2 type it differently."""
+
+    kind = ""
+
+
+def _raw_scalar_loader() -> type:
+    import yaml  # Imported here so a missing PyYAML also fails closed.
+
+    class RawScalarLoader(yaml.SafeLoader):
+        pass
+
+    def construct(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> str:
+        scalar = RawScalar(node.value)
+        scalar.kind = f"{node.tag}|{'plain' if node.style is None else 'quoted'}"
+        return scalar
+
+    # Anchors, aliases and merge keys still resolve; only scalar typing is skipped.
+    for tag in ("bool", "int", "float", "null", "timestamp", "str"):
+        RawScalarLoader.add_constructor(f"tag:yaml.org,2002:{tag}", construct)
+    return RawScalarLoader
+
+
+def _canonical(value: object) -> object:
+    # Every real value canonicalizes to a list, so the bare string marks an absent key.
+    if value is _ABSENT:
+        return "absent"
+    if isinstance(value, dict):
+        return sorted([json.dumps(_canonical(key)), _canonical(item)] for key, item in value.items())
+    if isinstance(value, list):
+        return [_canonical(item) for item in value]
+    if isinstance(value, RawScalar):
+        return ["scalar", value.kind, str(value)]
+    return [type(value).__name__, value if isinstance(value, (bool, int, float, str, type(None))) else str(value)]
+
+
+def _load(repo: Path, rev: str) -> dict:
+    shown = subprocess.run(["git", "show", f"{rev}:{WORKFLOW}"], cwd=repo,
+                           capture_output=True, text=True)
+    if shown.returncode != 0:
+        raise WiringUnknown(f"git show {rev}:{WORKFLOW} failed: {shown.stderr.strip()}")
+    import yaml
+
+    document = yaml.load(shown.stdout, Loader=_raw_scalar_loader())
+    if not isinstance(document, dict):
+        raise WiringUnknown(f"{rev}:{WORKFLOW} is not a mapping")
+    return document
+
+
+def wiring_subtrees(document: dict) -> dict[str, object]:
+    """Every subtree whose resolved value the mutation gate depends on."""
+    trigger = document.get("on", _ABSENT)
+    jobs = document.get("jobs")
+    if trigger is _ABSENT or not isinstance(jobs, dict):
+        raise WiringUnknown("workflow lacks `on` or `jobs`")
+    subtrees: dict[str, object] = {"on": trigger}
+    for key in TOP_LEVEL_KEYS:
+        subtrees[key] = document.get(key, _ABSENT)
+    for job in (MUTATION_JOB, MIRROR_JOB):
+        if not isinstance(jobs.get(job), dict):
+            raise WiringUnknown(f"jobs.{job} is missing")
+        subtrees[f"jobs.{job}"] = jobs[job]
+    return subtrees
+
+
+def digest(subtree: object) -> str:
+    payload = json.dumps(_canonical(subtree), separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def wiring_changed(repo: Path, base: str = "HEAD^1", head: str = "HEAD") -> bool:
+    try:
+        before = {key: digest(value) for key, value in wiring_subtrees(_load(repo, base)).items()}
+        after = {key: digest(value) for key, value in wiring_subtrees(_load(repo, head)).items()}
+    except Exception as error:  # noqa: BLE001 - every failure must run the gate.
+        print(f"WIRING_UNKNOWN reason={type(error).__name__}: {error}", flush=True)
+        return True
+    for key in after:
+        print(f"WIRING_SUBTREE key={key} base={before[key][:12]} head={after[key][:12]}"
+              f" changed={str(before[key] != after[key]).lower()}", flush=True)
+    return before != after
+
+
+def main() -> int:
+    line = f"wiring_changed={str(wiring_changed(Path.cwd())).lower()}"
+    print(line, flush=True)
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

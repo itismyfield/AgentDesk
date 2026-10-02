@@ -16,6 +16,8 @@ mod catch_up_pagination_e2e;
 mod discord_mock;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
+mod queue_recovery_e2e;
+mod registered_bootstrap_e2e;
 mod stale_resume_retry_e2e;
 
 use std::path::PathBuf;
@@ -98,6 +100,12 @@ pub(super) enum ProviderStub {
     StaleResumeThenSuccess,
 }
 
+/// One line per provider launch the stand-in served, `--version` probes aside.
+const PROVIDER_STARTS_FILE: &str = "claude-stub-starts";
+/// Each launch's arguments and stdin, preceded by [`PROVIDER_INPUT_SEPARATOR`].
+const PROVIDER_INPUTS_FILE: &str = "claude-stub-inputs";
+const PROVIDER_INPUT_SEPARATOR: &str = "=== claude-stub launch ===";
+
 fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = root.join("claude-stub");
@@ -108,8 +116,14 @@ fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
              echo 'No conversation found with session ID' >&2; exit 1;; esac\n"
         }
     };
+    let starts = root.join(PROVIDER_STARTS_FILE);
+    let starts = starts.display();
+    let inputs = root.join(PROVIDER_INPUTS_FILE);
+    let inputs = inputs.display();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.0.0 (stub)'; exit 0; fi\ncat >/dev/null\n{stale}\
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.0.0 (stub)'; exit 0; fi\n\
+         echo start >> '{starts}'\n\
+         {{ echo '{PROVIDER_INPUT_SEPARATOR}'; printf '%s\\n' \"$*\"; cat; echo; }} >> '{inputs}'\n{stale}\
          echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{SESSION_UUID}\"}}'\n\
          echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"{SESSION_UUID}\"}}'\n"
     );
@@ -144,22 +158,47 @@ pub(super) struct RelayE2eHarness {
     root: tempfile::TempDir,
 }
 
+impl Drop for RelayE2eHarness {
+    /// A synthetic start left pending in this root would block the next harness's kickoff.
+    fn drop(&mut self) {
+        let pending = crate::services::discord::tui_direct_pending_start::load_all();
+        for record in pending
+            .iter()
+            .filter(|record| record.channel_id == CHANNEL_ID)
+        {
+            crate::services::discord::tui_direct_pending_start::delete(record);
+        }
+    }
+}
+
 impl RelayE2eHarness {
     pub(super) async fn start() -> Self {
         Self::start_with_provider(ProviderStub::Success).await
     }
 
     pub(super) async fn start_with_provider(stub: ProviderStub) -> Self {
-        Self::start_inner(stub, false).await
+        Self::start_inner(stub, false, std::future::ready(None)).await
+    }
+
+    /// A runtime on the pool `storage` opens once the env lock is held; no session is bound.
+    pub(super) async fn start_unbound_on(
+        storage: impl std::future::Future<Output = sqlx::PgPool>,
+    ) -> Self {
+        let storage = async { Some(storage.await) };
+        Self::start_inner(ProviderStub::Success, false, storage).await
     }
 
     /// Adds a health registry, the source of the utility bots SSH-direct
     /// announcements post through.
     pub(super) async fn start_with_health_registry() -> Self {
-        Self::start_inner(ProviderStub::Success, true).await
+        Self::start_inner(ProviderStub::Success, true, std::future::ready(None)).await
     }
 
-    async fn start_inner(stub: ProviderStub, with_health_registry: bool) -> Self {
+    async fn start_inner(
+        stub: ProviderStub,
+        with_health_registry: bool,
+        storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
+    ) -> Self {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -189,7 +228,10 @@ impl RelayE2eHarness {
         let mock = discord_mock::DiscordMockState::new();
         let (proxy, gateway_url, server) = discord_mock::start(mock.clone()).await;
         let ctx = discord_mock::serenity_context(proxy.clone(), gateway_url).await;
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        // Storage opens after the shared test-env lock, the canonical lock order.
+        let pool = storage.await;
+        let unbound = pool.is_some();
+        let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
         let health_registry = with_health_registry.then(|| {
             let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
             Arc::get_mut(&mut shared)
@@ -212,14 +254,17 @@ impl RelayE2eHarness {
         };
         let channel_id = ChannelId::new(CHANNEL_ID);
         let cwd = root.path().to_str().expect("utf8 test root").to_string();
-        crate::services::discord::rebind_channel_session(
-            &shared,
-            &ProviderKind::Claude,
-            channel_id,
-            &cwd,
-            SESSION_UUID,
-        )
-        .await;
+        if !unbound {
+            let rebind = crate::services::discord::rebind_channel_session;
+            rebind(
+                &shared,
+                &ProviderKind::Claude,
+                channel_id,
+                &cwd,
+                SESSION_UUID,
+            )
+            .await;
+        }
 
         Self {
             data,
@@ -332,6 +377,23 @@ impl RelayE2eHarness {
 
     pub(super) fn subscribe_completions(&self) -> Receiver<TurnCompletionEvent> {
         subscribe_turn_completion_events(&self.shared)
+    }
+
+    /// Provider launches the `claude` stand-in has served so far.
+    pub(super) fn provider_starts(&self) -> usize {
+        let starts = self.root.path().join(PROVIDER_STARTS_FILE);
+        std::fs::read_to_string(starts).map_or(0, |starts| starts.lines().count())
+    }
+
+    /// What each provider launch received (arguments, then stdin), in launch order.
+    pub(super) fn provider_inputs(&self) -> Vec<String> {
+        let inputs = self.root.path().join(PROVIDER_INPUTS_FILE);
+        let inputs = std::fs::read_to_string(inputs).unwrap_or_default();
+        inputs
+            .split(PROVIDER_INPUT_SEPARATOR)
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Placeholder POSTs seen by the mock: the harness' dispatch witness.

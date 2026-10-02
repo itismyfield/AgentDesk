@@ -323,22 +323,32 @@ pub(super) async fn run_pre_emit_guard(
         if let Some(ref sid) = stale_sid {
             let _ = crate::services::discord::internal_api::clear_stale_session_id(sid).await;
         }
-        crate::services::termination_audit::record_termination_for_tmux(
+        if host_gate::admits_teardown(
+            shared,
+            watcher_provider,
+            channel_id,
             tmux_session_name,
-            None,
-            "tmux_watcher",
             "stale_resume_retry",
-            Some("stale session resume detected — forcing fresh session before auto-retry"),
-            None,
-        );
-        record_tmux_exit_reason(
-            tmux_session_name,
-            "stale session resume detected — forcing fresh session before auto-retry",
-        );
-        crate::services::platform::tmux::kill_session(
-            tmux_session_name,
-            "stale session resume detected — forcing fresh session before auto-retry",
-        );
+        )
+        .await
+        {
+            crate::services::termination_audit::record_termination_for_tmux(
+                tmux_session_name,
+                None,
+                "tmux_watcher",
+                "stale_resume_retry",
+                Some("stale session resume detected — forcing fresh session before auto-retry"),
+                None,
+            );
+            record_tmux_exit_reason(
+                tmux_session_name,
+                "stale session resume detected — forcing fresh session before auto-retry",
+            );
+            crate::services::platform::tmux::kill_session(
+                tmux_session_name,
+                "stale session resume detected — forcing fresh session before auto-retry",
+            );
+        }
         // Replace placeholder with recovery notice (don't delete — avoids visual gap)
         if let Some(msg_id) = placeholder_msg_id {
             let _ = crate::services::discord::http::edit_channel_message(

@@ -117,34 +117,45 @@ pub(super) async fn handle_terminal_abort_exits(
     // Handle prompt-too-long: kill session so next message creates a fresh one
     if locals.is_prompt_too_long {
         clear_provider_overload_retry_state(channel_id);
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
-        );
-        *state.prompt_too_long_killed = true;
-
-        let sess = (*tmux_session_name).clone();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || {
-                crate::services::termination_audit::record_termination_for_tmux(
-                    &sess,
-                    None,
-                    "tmux_watcher",
-                    "prompt_too_long",
-                    Some("watcher cleanup: prompt too long"),
-                    None,
-                );
-                record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                crate::services::platform::tmux::kill_session(
-                    &sess,
-                    "watcher cleanup: prompt too long",
-                );
-            }),
+        let notice = if host_gate::admits_teardown(
+            shared,
+            watcher_provider,
+            channel_id,
+            tmux_session_name,
+            "prompt_too_long",
         )
-        .await;
+        .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
+            );
+            *state.prompt_too_long_killed = true;
 
-        let notice = "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다.";
+            let sess = (*tmux_session_name).clone();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        "prompt_too_long",
+                        Some("watcher cleanup: prompt too long"),
+                        None,
+                    );
+                    record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
+                    crate::services::platform::tmux::kill_session(
+                        &sess,
+                        "watcher cleanup: prompt too long",
+                    );
+                }),
+            )
+            .await;
+            "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다."
+        } else {
+            "⚠️ 컨텍스트 한도를 초과했습니다. 세션 호스트가 tmux로 확인되지 않아 세션을 초기화하지 않았습니다."
+        };
         match locals.placeholder_msg_id {
             Some(msg_id) => {
                 rate_limit_wait(shared, channel_id).await;

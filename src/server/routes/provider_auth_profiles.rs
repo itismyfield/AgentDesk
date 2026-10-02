@@ -201,6 +201,8 @@ pub async fn login_start(
         }
     };
 
+    let session = login_tmux_session_name(&kind, &profile_id);
+    refuse_non_auth_target(&session)?;
     let home = create_empty_profile_home(&kind, &profile_id).map_err(profile_error)?;
     let overlay = overlay_for_home(kind.clone(), &profile_id, &home);
     let argv = vendor_login_argv(&kind).ok_or_else(|| {
@@ -209,7 +211,6 @@ pub async fn login_start(
         ))
     })?;
     let script = write_login_script(&home, &overlay, argv).map_err(profile_error)?;
-    let session = login_tmux_session_name(&kind, &profile_id);
     spawn_login_tmux(&session, &home, &script).map_err(|error| {
         AppError::new(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, error)
     })?;
@@ -319,6 +320,8 @@ pub async fn remove_profile(
     let kind = intern_provider(&provider).map_err(profile_error)?;
     let profile_id = profile_id.trim();
     validate_profile_id(profile_id).map_err(profile_error)?;
+    let session = login_tmux_session_name(&kind, profile_id);
+    refuse_non_auth_target(&session)?;
     org_writer::remove_provider_auth_profile(profile_id, kind.as_str()).map_err(|error| {
         let status = if error.contains("not found") {
             StatusCode::NOT_FOUND
@@ -329,7 +332,6 @@ pub async fn remove_profile(
         };
         AppError::new(status, ErrorCode::Config, error)
     })?;
-    let session = login_tmux_session_name(&kind, profile_id);
     if crate::services::platform::tmux::has_session(&session) {
         let _ =
             crate::services::platform::tmux::kill_session(&session, "provider-auth-profile-unlink");
@@ -497,6 +499,20 @@ fn spawn_login_tmux(
     }
     crate::services::platform::tmux::set_option(session, "remain-on-exit", "on");
     Ok(())
+}
+
+/// Only an auth-only tmux login session is killed or created here; a session another
+/// host's marker claims is refused before any profile or tmux change.
+fn refuse_non_auth_target(session: &str) -> Result<(), AppError> {
+    let refusal = crate::services::discord::admin_host_guard::auth_login_refusal;
+    match refusal(session) {
+        Some(reason) => Err(AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Config,
+            reason,
+        )),
+        None => Ok(()),
+    }
 }
 
 fn profile_error(error: AuthProfileError) -> AppError {

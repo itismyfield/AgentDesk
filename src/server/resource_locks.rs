@@ -243,6 +243,8 @@ mod resource_locks_pg_tests {
     use uuid::Uuid;
 
     struct TestPostgresDb {
+        // Serializes this fixture's whole lifetime with the other PG fixtures in the process.
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_url: String,
         database_name: String,
@@ -261,6 +263,7 @@ mod resource_locks_pg_tests {
         /// this fixture connect to whatever Postgres happened to listen on the
         /// developer's loopback and create/drop databases there (#5218).
         async fn create() -> Option<Self> {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
             let base = crate::db::postgres::postgres_test_database_url_base()?;
             let database_name = format!("agentdesk_resource_locks_{}", Uuid::new_v4().simple());
             let admin_url = format!("{base}/postgres");
@@ -272,6 +275,7 @@ mod resource_locks_pg_tests {
             .await
             .expect("create resource_locks postgres test database");
             Some(Self {
+                _lifecycle: lifecycle,
                 admin_url,
                 database_url: format!("{base}/{database_name}"),
                 database_name,

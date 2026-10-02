@@ -113,6 +113,10 @@ mod o_recovery_cut_tests;
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
+// Unix only, like the `tmux::execution_identity` comparison it calls.
+#[cfg(unix)]
+#[path = "recovery_engine/host_reconcile.rs"]
+pub(in crate::services::discord) mod host_reconcile;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome
 // handling before restart-path watcher spawn into a leaf module.
 #[path = "recovery_engine/restore_persist_outcome.rs"]

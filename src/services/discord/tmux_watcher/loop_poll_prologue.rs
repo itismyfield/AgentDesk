@@ -208,7 +208,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         match tmux_liveness_decision(
             cancel.load(Ordering::Relaxed),
             shared.restart.shutting_down.load(Ordering::Relaxed),
-            probe_tmux_session_liveness(tmux_session_name).await,
+            host_gate::tmux_alive(tmux_session_name, channel_id).await,
         ) {
             TmuxLivenessDecision::Continue => {
                 // #2441 (H1) — graduate the fixed 200ms paused-loop
@@ -314,7 +314,7 @@ pub(super) async fn poll_watcher_output_or_continue(
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                probe_tmux_session_liveness(tmux_session_name).await,
+                host_gate::tmux_alive(tmux_session_name, channel_id).await,
             ) {
                 TmuxLivenessDecision::Continue => {
                     // #2441 (H1) — notify-backed wake-up for the
@@ -374,7 +374,7 @@ pub(super) async fn poll_watcher_output_or_continue(
             Some(tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                probe_tmux_session_liveness(tmux_session_name).await,
+                host_gate::tmux_alive(tmux_session_name, channel_id).await,
             )),
         )
     } else {

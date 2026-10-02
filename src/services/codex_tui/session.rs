@@ -100,6 +100,16 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
     rollout_start_offset: Option<u64>,
 ) -> Result<(), String> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        if crate::services::codex::codex_direct_tui_hook_overrides_enabled()
+            && hook_retired(authority, rollout_path, session_id)
+        {
+            tracing::info!(
+                tmux_session_name,
+                rollout_path = %rollout_path.display(),
+                "Codex rollout marker not moved back to a source a hook retired"
+            );
+            return Ok(());
+        }
         write_codex_tui_rollout_marker_under_source_authority(
             authority,
             rollout_path,
@@ -139,6 +149,24 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
         .map_err(|error| format!("failed to write Codex TUI rollout marker: {error}"))
 }
 
+/// Whether hook history shows `rollout_path` already replaced, or cannot be read with hooks on.
+fn hook_retired(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    rollout_path: &Path,
+    session_id: Option<&str>,
+) -> bool {
+    let claim = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: rollout_path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: session_id.map(str::to_owned),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    crate::services::tui_prompt_dedupe::codex_tail_source_retired(authority, &claim)
+}
+
 pub(crate) fn install_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,
@@ -167,10 +195,13 @@ fn install_binding(
     let rollout_path = PathBuf::from(&binding.output_path);
     let session_id = binding.session_id.clone();
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        if launched && dedupe::codex_tail_source_retired(authority, &binding) {
+        // A recovery install with hooks on gets the same check; its reader keeps the old source.
+        if (launched || crate::services::codex::codex_direct_tui_hook_overrides_enabled())
+            && dedupe::codex_tail_source_retired(authority, &binding)
+        {
             tracing::info!(
                 tmux_session_name,
-                "Codex tail source already retired by a hook"
+                "Codex tail source retired by a hook or held on an unreadable hook history"
             );
             return false;
         }
@@ -688,16 +719,46 @@ mod tests {
             }
         }
         let hooks = std::env::var_os("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+        let switch = |value: Option<&str>| {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value),
+                    None => std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS"),
+                }
+            }
+            crate::services::codex::codex_direct_tui_hook_overrides_enabled()
+        };
+        let verdicts: Vec<_> = [
+            None,
+            Some(""),
+            Some("1"),
+            Some("0"),
+            Some(" OFF "),
+            Some("false"),
+            Some("no"),
+        ]
+        .into_iter()
+        .map(|value| (value, switch(value)))
+        .collect();
         unsafe {
-            std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
-        }
-        let hooks_off = !crate::services::codex::codex_direct_tui_hook_overrides_enabled();
-        unsafe {
-            if let Some(value) = hooks {
-                std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value);
+            match hooks {
+                Some(value) => std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value),
+                None => std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS"),
             }
         }
-        assert!(hooks_off, "direct hooks remain opt-in");
+        assert_eq!(
+            verdicts,
+            [
+                (None, true),
+                (Some(""), true),
+                (Some("1"), true),
+                (Some("0"), false),
+                (Some(" OFF "), false),
+                (Some("false"), false),
+                (Some("no"), false)
+            ],
+            "direct hooks are on unless the kill switch names an off value"
+        );
         let _home = RestoreHome(std::env::var_os("CODEX_HOME"));
         unsafe {
             std::env::set_var("CODEX_HOME", root.join("custom-home"));

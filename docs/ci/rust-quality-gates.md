@@ -5,7 +5,7 @@ repository is already clippy-clean.
 
 ## Entrypoints
 
-- `just check`: local/CI aggregate for `just fmt-check`, staged clippy,
+- `just check`: local aggregate for `just fmt-check`, staged clippy,
   `cargo check --workspace --all-features --all-targets`, the existing
   non-Postgres test subset, and the targeted `ClaudeBinary` compile-fail
   doctest guard.
@@ -32,11 +32,14 @@ production-only, test-aware, or repo-wide before adding hard gates.
 
 ## Non-Postgres Test Scope
 
-`just test-non-pg` preserves the targeted non-Postgres subset already used by
-CI on `main`: `ci-main.yml` runs it through `just check`, while the nightly
-macOS and Windows lanes run their broader non-Postgres sweeps. The required PR
-`check_fast` lane runs policy tests plus `just cargo-check` only, so this
-longer subset does not remain on the PR critical path.
+`just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
+CI no longer runs it: on every `main` push `ci-main.yml` `full_non_pg` runs the
+same adjudicated whole-library sweep as the PR `library_sweep` (non-PG `--lib`
+minus `scripts/ci/non-pg-test-filter.sh`, with its own PostgreSQL), and the
+`lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
+recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
+compile-fail doctests. The nightly macOS and Windows lanes run their
+`--all-targets` non-Postgres sweeps.
 
 A broader sweep was attempted with:
 
@@ -59,7 +62,7 @@ semantics, while that lane is meant to provide cross-OS compile and targeted
 test signal. It also stays default-feature-only with `cargo check --workspace
 --all-targets`: the retired SQLite-only feature is no longer declared in
 `Cargo.toml`, and Windows remains a default-feature compile/test signal. The
-Ubuntu `just check` and `lint` jobs are the authoritative format, clippy, and
+Ubuntu lint jobs (PR `Lint runner`, main `Main lint`) are the authoritative format, clippy, and
 full workspace gates until remaining Unix-only tmux tests are made portable or
 cfg-guarded.
 `ci-nightly.yml` has the same Windows boundary today: its Windows lane runs

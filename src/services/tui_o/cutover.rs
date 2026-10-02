@@ -13,9 +13,9 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 mod channel_gate;
 pub(crate) mod intake_route;
 pub(crate) use channel_gate::{
-    BodyClaim, BodySend, IdentityError, claim_then_send, o_owns_tui_output_for_channel,
-    o_owns_tui_output_for_channel_tmux, peek_o_owns_tui_output_for_channel,
-    peek_o_owns_tui_output_for_channel_tmux,
+    BodyClaim, BodySend, IdentityError, claim_then_send, o_keeps_body,
+    o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
+    peek_o_owns_tui_output_for_channel, peek_o_owns_tui_output_for_channel_tmux,
 };
 
 /// Whether the writer switch is on; test builds may turn it on or off per thread.
@@ -231,6 +231,12 @@ pub(crate) mod test_override {
         home: &str,
     ) -> ChannelsGuard {
         force_snapshot(unadopted(channels).foreign(home))
+    }
+
+    /// This thread's forced channels for another thread, over the same candidate locks.
+    pub(crate) fn shared_channels() -> impl FnOnce() -> ChannelsGuard + Send + 'static {
+        let snapshot = CHANNELS.with(|cell| cell.borrow().clone());
+        move || force_snapshot(snapshot.expect("channels are forced on this thread"))
     }
 
     fn force_snapshot(snapshot: BootChannels) -> ChannelsGuard {

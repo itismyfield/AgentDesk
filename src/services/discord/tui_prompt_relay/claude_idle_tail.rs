@@ -341,24 +341,26 @@ pub(super) async fn run_claude_idle_response_tail(
         tokio::sync::oneshot::channel::<Result<claude_idle_bridge::IdleReaderCompletion, String>>();
     let generation_mtime_ns =
         super::super::turn_bridge::tmux_generation_file_mtime_ns(&tmux_session_name);
-    let transcript_for_reader = transcript_path.clone();
-    let tmux_for_reader = tmux_session_name.clone();
+    let transcript_string = transcript_path.display().to_string();
+    // Only a local tmux session is probed; another host keeps the tail on its transcript.
+    let tmux = crate::services::discord::host_liveness::local_tmux(&tmux_session_name, None)
+        .then_some(tmux_session_name.as_str());
+    let probe = crate::services::claude::host_gate::host_poll_probe(
+        tmux,
+        ProviderKind::Claude,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+        &transcript_string,
+    );
     std::thread::Builder::new()
         .name("claude_idle_response_tail_reader".to_string())
         .spawn(move || {
-            let transcript_string = transcript_for_reader.display().to_string();
             let read_result =
                 crate::services::session_backend::read_output_file_until_result_with_harvest(
                     &transcript_string,
                     start_offset,
                     reader_tx,
                     None,
-                    crate::services::provider::SessionProbe::tmux_with_structured_output(
-                        tmux_for_reader,
-                        ProviderKind::Claude,
-                        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-                        transcript_string.clone(),
-                    ),
+                    probe,
                 );
             let offset_result = read_result
                 .map(|(result, stats)| {
@@ -378,21 +380,9 @@ pub(super) async fn run_claude_idle_response_tail(
     // `has_boundary` includes an empty Done: its recovery guidance must use the
     // same source admission and terminal receipt as prose. We hand the live
     // `reader_rx` back to drain the remainder into the bridge.
-    let buffered = tokio::task::spawn_blocking(move || {
-        let mut prefix: Vec<StreamMessage> = Vec::new();
-        let mut has_boundary = false;
-        while let Ok(message) = reader_rx.recv() {
-            let is_content = idle_stream_message_is_content(&message);
-            let is_terminal = matches!(message, StreamMessage::Done { .. });
-            prefix.push(message);
-            if is_content || is_terminal {
-                has_boundary = true;
-                break;
-            }
-        }
-        (prefix, has_boundary, reader_rx)
-    })
-    .await;
+    let tool_opens = idle_tail_tool_opens(channel_id, &tmux_session_name);
+    let buffered =
+        tokio::task::spawn_blocking(move || buffer_idle_prefix(reader_rx, tool_opens)).await;
 
     let (prefix, has_boundary, reader_rx) = match buffered {
         Ok(buffered) => buffered,
@@ -441,3 +431,14 @@ pub(super) async fn run_claude_idle_response_tail(
         );
     }
 }
+
+/// A live pane of a local tmux session; a session marked for another host never reads live.
+#[cfg(unix)]
+pub(super) fn local_tmux_pane_live(tmux_session_name: &str) -> bool {
+    crate::services::discord::host_liveness::local_tmux(tmux_session_name, None)
+        && crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+}
+
+#[cfg(test)]
+#[path = "claude_idle_tail_host_tests.rs"]
+mod host_tests;

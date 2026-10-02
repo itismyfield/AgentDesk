@@ -1313,7 +1313,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
-/// Created through `test_db_reclaim`, which sweeps what killed processes leaked.
+/// Created through `test_db_reclaim`, whose first-create sweep reclaims databases of provably dead test processes.
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,

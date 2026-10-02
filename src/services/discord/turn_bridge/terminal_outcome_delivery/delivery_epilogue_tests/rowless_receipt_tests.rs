@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod o_after_done_chain_tests;
 #[cfg(test)]
 mod pg_tests;
 mod preloop_cleanup_tests;
@@ -425,55 +426,115 @@ async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_ancho
 // settlement run through the production caller.
 #[rustfmt::skip]
 async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, footer: bool, cancelled: bool) {
+    run_postlude_for_owner(driver, output, footer, cancelled, None).await;
+}
+
+async fn run_postlude_for_owner(
+    driver: &TerminalDeliveryDriver,
+    output: TerminalOutcomeDeliveryOutput,
+    footer: bool,
+    cancelled: bool,
+    owner: Option<super::super::super::BridgeOutputOwner>,
+) {
     use super::super::super::{completion_postlude as postlude, guards};
     let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
     let (_, rx) = std::sync::mpsc::channel();
     let fence = tokio::sync::OnceCell::new();
-    let _ = super::super::super::capture_bridge_clear_fence(&driver.shared, channel_id, rx, &fence).await;
+    let _ = super::super::super::capture_bridge_clear_fence(&driver.shared, channel_id, rx, &fence)
+        .await;
     let user_id = output.inflight_state.user_msg_id;
-    let is_external_input_tui_direct = output.inflight_state.turn_source == inflight::TurnSource::ExternalInput;
-    let mut completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, user_id);
+    let is_external_input_tui_direct =
+        output.inflight_state.turn_source == inflight::TurnSource::ExternalInput;
+    let mut completion_guard =
+        guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, user_id);
     output.handoff_completion_authority(&mut completion_guard);
-    let inflight_guard = guards::InflightCleanupGuard::for_completion_test(&output.inflight_state, driver.shared.token_hash.clone());
+    let inflight_guard = guards::InflightCleanupGuard::for_completion_test(
+        &output.inflight_state,
+        driver.shared.token_hash.clone(),
+    );
     let ctx = postlude::CompletionPostludeContext {
-        shared_owned: output.shared_owned, gateway: output.gateway, channel_id,
-        provider: output.provider, cancel_token: output.cancel_token,
-        user_msg_id: (user_id != 0).then(|| MessageId::new(user_id)), turn_id: output.turn_id,
-        request_owner_name: String::new(), final_session_status: "idle", status_panel_started_at: 0,
-        has_queued_turns: false, defer_watcher_resume: true, can_chain_locally: true,
-        single_message_panel_footer_mode: footer, is_external_input_tui_direct,
-        context_window_tokens: 0, context_compact_percent: 0,
-        clear_fence: fence.into_inner().unwrap(), turn_start: output.turn_start,
+        shared_owned: output.shared_owned,
+        gateway: output.gateway,
+        channel_id,
+        provider: output.provider,
+        cancel_token: output.cancel_token,
+        user_msg_id: (user_id != 0).then(|| MessageId::new(user_id)),
+        turn_id: output.turn_id,
+        request_owner_name: String::new(),
+        final_session_status: "idle",
+        status_panel_started_at: 0,
+        has_queued_turns: false,
+        defer_watcher_resume: true,
+        can_chain_locally: true,
+        single_message_panel_footer_mode: footer,
+        is_external_input_tui_direct,
+        context_window_tokens: 0,
+        context_compact_percent: 0,
+        clear_fence: fence.into_inner().unwrap(),
+        turn_start: output.turn_start,
     };
     let state = postlude::CompletionPostludeState {
         watcher_delivery_pin: driver.parts().0.watcher_delivery_pin,
-        full_response: output.full_response, user_text_owned: output.user_text_owned,
-        role_binding: None, adk_session_key: None, adk_session_name: None, adk_session_info: None,
-        adk_cwd: None, dispatch_id: None, dispatch_kind: None, new_session_id: None,
+        full_response: output.full_response,
+        user_text_owned: output.user_text_owned,
+        role_binding: None,
+        adk_session_key: None,
+        adk_session_name: None,
+        adk_session_info: None,
+        adk_cwd: None,
+        dispatch_id: None,
+        dispatch_kind: None,
+        new_session_id: None,
         new_raw_provider_session_id: None,
         status_panel_terminal_committed: output.status_panel_terminal_committed,
         bridge_should_emit_completion: output.bridge_should_emit_completion,
         current_msg_id: MessageId::new(DRIVER_CURRENT_MSG_ID),
-        status_panel_msg_id: Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+        status_panel_msg_id: Some(MessageId::new(
+            output
+                .inflight_state
+                .status_message_id
+                .unwrap_or(DRIVER_CURRENT_MSG_ID),
+        )),
         last_status_panel_text: "working".into(),
         completion_footer_terminal_text: output.completion_footer_terminal_text,
-        busy_requeue_outcome: output.busy_requeue_outcome, spin_idx: 0, status_panel_generation: 0,
+        busy_requeue_outcome: output.busy_requeue_outcome,
+        spin_idx: 0,
+        status_panel_generation: 0,
         preserve_inflight_for_cleanup_retry: output.preserve_inflight_for_cleanup_retry,
-        tmux_last_offset: Some(64), watcher_owner_channel_id: channel_id,
-        bridge_relay_delegated_to_watcher: false, is_prompt_too_long: false,
-        resume_failure_detected: false, auto_retry: output.auto_retry, recovery_retry: false, rx_disconnected: false,
-        tmux_handed_off: false, bridge_output_owner: None,
+        tmux_last_offset: Some(64),
+        watcher_owner_channel_id: channel_id,
+        bridge_relay_delegated_to_watcher: owner.is_some(),
+        is_prompt_too_long: false,
+        resume_failure_detected: false,
+        auto_retry: output.auto_retry,
+        recovery_retry: false,
+        rx_disconnected: false,
+        tmux_handed_off: false,
+        bridge_output_owner: owner,
         terminal_delivery_committed: output.terminal_delivery_committed,
-        terminal_session_reset_required: false, transcript_events: Vec::new(),
-        accumulated_input_tokens: 0, accumulated_cache_create_tokens: 0,
-        accumulated_cache_read_tokens: 0, accumulated_output_tokens: 0,
-        accumulated_memory_input_tokens: 0, accumulated_memory_output_tokens: 0,
-        transport_error: false, api_friction_reports: Vec::new(), cancelled,
+        terminal_session_reset_required: false,
+        transcript_events: Vec::new(),
+        accumulated_input_tokens: 0,
+        accumulated_cache_create_tokens: 0,
+        accumulated_cache_read_tokens: 0,
+        accumulated_output_tokens: 0,
+        accumulated_memory_input_tokens: 0,
+        accumulated_memory_output_tokens: 0,
+        transport_error: false,
+        api_friction_reports: Vec::new(),
+        cancelled,
         restart_followup_pending: None,
         bridge_skip_holder_owns_inflight: output.bridge_skip_holder_owns_inflight,
-        completion_guard, inflight_guard, inflight_state: output.inflight_state,
+        completion_guard,
+        inflight_guard,
+        inflight_state: output.inflight_state,
     };
-    tokio::time::timeout(DRIVER_TIMEOUT, postlude::run_completion_postlude(ctx, state)).await.unwrap();
+    tokio::time::timeout(
+        DRIVER_TIMEOUT,
+        postlude::run_completion_postlude(ctx, state),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1280,4 +1341,65 @@ async fn only_a_foreign_custody_that_posts_ends_a_pending_adoption() {
         let seen = (driver.completed_publications(), check.adoption());
         assert_eq!(seen, expected, "acknowledged={acknowledged}");
     }
+}
+
+/// The real postlude, after its two-message completion edit on O's channel, moves the completed
+/// panel below a body O posts once the turn has closed.
+#[tokio::test]
+async fn the_postlude_moves_a_completed_o_panel_below_a_later_o_post() {
+    use crate::services::discord::status_panel_singleton_store as singleton;
+    use crate::services::tui_o::{cutover::test_override, writer::deliver};
+    use RuntimeHandoffKind::ClaudeTui;
+    const PANEL: u64 = 4_000_000;
+    const LATE_BODY: u64 = 4_500_000;
+    struct SeparatePanel;
+    impl Drop for SeparatePanel {
+        fn drop(&mut self) {
+            crate::services::discord::turn_bridge::single_message_footer::SEPARATE_PANEL_FOR_TESTS
+                .set(false);
+        }
+    }
+    crate::services::discord::turn_bridge::single_message_footer::SEPARATE_PANEL_FOR_TESTS
+        .set(true);
+    let _separate = SeparatePanel;
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let ui = &mut Arc::get_mut(&mut driver.shared).expect("fresh driver").ui;
+    (ui.status_panel_v2_enabled, ui.two_message_panel_enabled) = (true, true);
+    (
+        driver.inflight.runtime_kind,
+        driver.inflight.status_message_id,
+    ) = (Some(ClaudeTui), Some(PANEL));
+    inflight::save_inflight_state(&driver.inflight).expect("seed the two-message row");
+    let token = driver.shared.token_hash.clone();
+    let channel = DRIVER_CHANNEL_ID;
+    singleton::bind_if_owned(&ProviderKind::Claude, &token, channel, PANEL, None).unwrap();
+    let _mailbox = driver.shared.mailbox(ChannelId::new(channel));
+    let _o = test_override::force_channels(&[(channel, ClaudeTui)]);
+    let _posted = deliver::forget_posted_for_tests(channel);
+
+    let (ctx, state) = driver.parts();
+    let output = run(ctx, state).await;
+    assert!(output.terminal_delivery_committed);
+    run_postlude(&driver, output, false, false).await;
+    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
+    let _ = std::fs::remove_file(inflight::inflight_state_path(
+        &root,
+        &ProviderKind::Claude,
+        channel,
+    ));
+    deliver::note_posted_for_tests(channel, LATE_BODY);
+
+    let panel =
+        || singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while panel() == Some(PANEL) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let moved = panel().expect("a singleton panel");
+    assert!(
+        moved > LATE_BODY,
+        "panel {moved} stays above O's body {LATE_BODY}"
+    );
+    // Let the follow's window end while this test still holds the runtime root.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 }

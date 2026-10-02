@@ -44,6 +44,54 @@ serializes create/drop operations; holding a lifecycle mutex for longer does
 not make cleanup run after process death. Neither a name prefix nor the old
 census identifies a current orphan.
 
+## Two tiers
+
+**Tier A — automatic fixture reclaim** (`src/db/postgres/test_db_reclaim.rs`).
+The first fixture CREATE of every test process lists databases that carry the
+fixture COMMENT marker (or a reserved `agentdesk_pending_*` name) and have no
+session. It drops a database only when all of these hold:
+
+- the marker is v2 and names an owner process on this host, and that process
+  is provably gone or its pid was reused (start time differs). Age is never a
+  substitute: v1 markers, unmarked pending names, other hosts and unreadable
+  identities are kept, whatever their age;
+- the server's `system_identifier` equals `AGENTDESK_TEST_PG_RECLAIM_SERVER`
+  exactly. Without that opt-in every server is dry-run only;
+- the server is not the canonical one (built-in sysid list plus
+  `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS`), and hosts no database named
+  `agentdesk` or `memento`, marker or not;
+- no protected name (`postgres`, `template0`, `template1`, `agentdesk`,
+  `memento`) or template appears among the candidates; one aborts the sweep;
+- an intent line was appended whole under the file lock, flushed and synced
+  to the audit log (`AGENTDESK_TEST_PG_RECLAIM_LOG`, default
+  `$TMPDIR/agentdesk-pg-reclaim-<sysid>.jsonl`) before the DROP, and the
+  database still has the same oid, owner role and marker just before it.
+
+Drops are plain `DROP DATABASE`, oldest first, at most 8 per test process and
+no new DROP after 20 seconds. The cap is per process, not per server: N test
+processes may drop up to 8N databases. Fixture names are never reused; the
+recheck relies on that. Opting a server in is a standing approval of this
+rule, not approval of a reviewed list. To opt in a shared test server:
+
+1. Read its `system_identifier`; confirm it is not the canonical server and
+   hosts no `agentdesk` or `memento` database.
+2. Run `cargo test --lib pg_reclaim_dry_run -- --ignored --nocapture` against
+   it and review every row.
+3. Set `AGENTDESK_TEST_PG_RECLAIM_SERVER=<sysid>` only in the environment that
+   runs fixtures against that server. Unset it to stop.
+
+If the canonical server is re-initialised or an operational database is
+renamed, update the constants in that file; until then add the new sysid to
+`AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS`.
+
+**Tier B — this manual procedure.** Everything tier A keeps: unmarked
+databases, v1 markers, unmarked pending names, other hosts, unreadable owners,
+servers that are not opted in, and the canonical server. Throwaway clusters
+that the reclaim tests initialise under `$TMPDIR/agentdesk-pg-reclaim-test/`
+and that were left running by a killed test run are also cleaned up by hand
+(`pg_ctl -D <dir>/data stop`, then remove the directory); nothing removes
+another run's cluster automatically.
+
 ## Safeguards — all four are mandatory
 
 ### (a) Dry-run is the default and the only default
@@ -121,5 +169,6 @@ the first unexpected error rather than continuing down the list.
   disconnects a session.
 - Any sweep driven by a `LIKE` pattern without the per-database owner, age, and
   connection checks in (c).
-- Running the sweep as a scheduled job. Every run is human-initiated and
-  human-confirmed until the population stops regrowing.
+- Running this manual sweep as a scheduled job. Every run is human-initiated
+  and human-confirmed until the population stops regrowing. Tier A is the only
+  automatic path, bounded as described above.

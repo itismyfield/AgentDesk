@@ -88,8 +88,9 @@ channel lost its TUI binding. Restore the binding; do not delete the store to ge
   `<runtime_root>/o_store/<channel>/init` exists and lists the current transcript with
   `delivery_start` at Legacy's cursor: 0 for an empty transcript, its length at the restart after
   a warm-up.
-- The release log has no `[tui_o] writer host held the channel` line for the channel, and
-  `/api/health` has no `tui_o:halted:<channel>` reason. `tui_o:paused_no_gateway:<channel>` is
+- The release log has no `[tui_o] writer host held the channel` or `left the channel to Legacy`
+  line for the channel, and `/api/health` has no `tui_o:halted:<channel>` or
+  `tui_o:released:<channel>` reason. `tui_o:paused_no_gateway:<channel>` is
   expected only until the gateway lease is owned.
 - The next restart logs no new init line: the stored init is recovered, never written again.
 
@@ -98,14 +99,15 @@ lost are read again once it is owned. With clustering it uses `cluster.instance_
 the cluster bootstrap published another id; without clustering it waits up to 10 seconds for the
 published id and stops with `this node's instance id is not published yet` otherwise.
 
-When activation stops, the log line and `tui_o:halted:<channel>` name the reason, for example
+When activation stops, the log line and the health reason name why, for example
 `first activation: 1 open intake rows`, `adoption held: <reason>` (§3.1) or, for Codex,
 `first activation: source ... already holds N bytes`.
-A stop before any store write releases the channel: Legacy keeps its output for this process. A
-stop after a store write holds it: output stays withheld and Legacy does not take it over. Do not
-delete store files or edit the list to retry. Leave the channel in the list. A Claude channel
-released before any store write is judged again at the next restart (§3.1); otherwise start again
-with another new channel.
+A stop before any store write releases the channel as `tui_o:released:<channel>`: Legacy keeps
+its output for this process and the deploy health gate does not block on it. A stop after a store
+write holds it as `tui_o:halted:<channel>`: output stays withheld, Legacy does not take it over,
+and deploys block. Do not delete store files or edit the list to retry. Leave the channel in the
+list. A Claude channel released before any store write is judged again at the next restart (§3.1);
+otherwise start again with another new channel.
 
 A held store is never initialized again: an era channel whose `init` is missing or damaged, an
 `init` without `o_era`, or a channel directory without `init` all hold.
@@ -114,8 +116,10 @@ A held store is never initialized again: an era channel whose `init` is missing 
 
 A Claude TUI channel whose transcript already holds output, the warm-up canary included, is added
 the same way. Codex channels with output are not adopted: they stay on Legacy. O starts at the
-cursor Legacy reads that transcript from in the new process, so neither writer skips or repeats a
-byte. Every check of §1 still applies; in addition all of these must hold after the restart, or the
+cursor Legacy reads that transcript from in the new process, so neither writer repeats a byte.
+Records Legacy left undelivered before that cursor are posted by neither: the adoption reports
+their range once as `tui_o:abandoned:<channel>` (`Abandoned { source, from, to }`). Every check of
+§1 still applies; in addition all of these must hold after the restart, or the
 channel stays on Legacy for that process with `adoption held: <reason>`:
 
 - Legacy's first rehydrate pass ran within 60 seconds (`legacy cursor not established` otherwise),
@@ -123,15 +127,34 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
 - The transcript ends at that cursor on a line boundary, and its last turn is closed: no user or
   assistant record follows the last turn end.
 - The delivery record is authoritative and its frontier ends a record at or before the cursor
-  (`frontier F ends no record`). Legacy's reader can end a turn at its `stop_hook_summary`, so the
-  records after it may only be turn ends and TUI bookkeeping: `turn_duration`, `informational`,
+  (`frontier F ends no record`). Legacy's reader can end a turn at its `stop_hook_summary`, so
+  turn ends and TUI bookkeeping after it are not undelivered: `turn_duration`, `informational`,
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
-  `file-history-snapshot` and `hook_success` attachments. A prompt or any other record there
-  holds the channel (`a prompt at N is past frontier F`, `a record at N past frontier F may post`).
+  `file-history-snapshot` and `hook_success` attachments. The first prompt or other record there
+  starts the abandoned range; it no longer holds the channel.
 - Earlier transcripts the log bound total at most 64 files and 128 MiB (`past sources exceed
   budget`).
 - Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
   response tail runs for the session.
+
+An open last turn does not end the adoption, unless the channel also has sessions on another node
+or a node override (those release it first). The channel stays on Legacy, logged as
+`adoption waits for Legacy`, and its writer host looks again every 5 seconds without a restart. It
+reads the transcript again only once the reason it waited on may have cleared: the transcript
+changed, Legacy's cursor reached its end, the frontier moved or the binding log moved. It adopts
+once all of these hold, logged as `deferred adoption committed`:
+
+- The transcript has not changed for 10 seconds.
+- Legacy holds no inflight row, custody, pending start, response tail, mailbox turn, queued
+  intervention or pending dispatch for the channel, and is not emitting a terminal delivery.
+- Every check above passes, and in addition nothing past Legacy's frontier is left undelivered:
+  a deferred adoption abandons nothing. While a record is past the frontier it keeps waiting.
+
+A deferred channel is released for good, with `adoption held: <reason>`, if the reason is final
+(sessions on another node, a node override, a non-authoritative delivery record, the budget) or if
+the binding log bound another transcript while it waited (`was bound while the adoption
+waited`), since Legacy may still owe output it read from that one. A channel whose debt never clears stays on Legacy
+until the next restart, which adopts it as above.
 
 Before editing the list, run both cross-node checks below by hand and keep their output in the lane
 log. If either fails, stop the expansion; neither may be skipped.

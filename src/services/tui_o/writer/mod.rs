@@ -6,6 +6,7 @@ pub mod actor;
 pub mod adoption;
 pub mod binding;
 pub mod confirm;
+mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod pieces;
@@ -87,6 +88,16 @@ pub enum WriterAlarm {
     },
     Halted {
         detail: String,
+    },
+    /// The writer host stopped before any store write, so Legacy keeps the channel's output.
+    Released {
+        detail: String,
+    },
+    /// Adopted at Legacy's cursor: Legacy's undelivered records in `from..to` are posted by neither.
+    Abandoned {
+        source: SourceId,
+        from: u64,
+        to: u64,
     },
     ContentTransform {
         serial: u64,

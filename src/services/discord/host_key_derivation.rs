@@ -1,5 +1,5 @@
-//! Sessions-row lookup for a caller that holds no bot token hash: every hash registered
-//! for the provider, each tried under exact keys only, never a name match or legacy key.
+//! Sessions-row lookup for a caller that holds no bot token hash or no channel name: every
+//! hash registered for the provider, each tried under exact keys only, never a name match.
 
 use serde_json::Value;
 use sqlx::PgPool;
@@ -8,6 +8,7 @@ use super::health::HealthRegistry;
 use super::inflight::{KeyedTeardown, teardown_for_lookup};
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityConflictKind, SessionIdentityKind,
+    resolve_session_row_pg,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
@@ -88,6 +89,57 @@ pub(super) fn merge_lookups(lookups: Vec<HostedLookup>) -> HostedLookup {
         return HostedLookup::Unknown("record changed between candidate reads".to_string());
     }
     HostedLookup::Found(first.clone())
+}
+
+/// The tmux name the one `(provider, hash, channel)` row behind `hashes` records under its own
+/// key, for a caller with no channel name; no row, a failed read or two rows answer instead.
+pub(super) async fn derive_channel_session_name(
+    pool: &PgPool,
+    hashes: &[String],
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<String, HostedLookup> {
+    let hashes: Vec<&String> = hashes
+        .iter()
+        .filter(|hash| !hash.trim().is_empty())
+        .collect();
+    if hashes.is_empty() {
+        return Err(HostedLookup::Unknown("no registered bot hash".to_string()));
+    }
+    if channel_id == 0 {
+        return Err(HostedLookup::Unknown("no channel id".to_string()));
+    }
+    let channel = channel_id.to_string();
+    let (mut rows, mut failed) = (Vec::new(), Vec::new());
+    for hash in hashes {
+        let identity = CanonicalSessionIdentity {
+            kind: SessionIdentityKind::DiscordChannel,
+            discord_token_hash: hash,
+            channel_id: &channel,
+        };
+        match resolve_session_row_pg(pool, None, Some(provider.as_str()), Some(identity)).await {
+            Ok(Some(row)) => rows.push(row),
+            Ok(None) => {}
+            Err(error) => failed.push(error.conflict_kind().map_or_else(
+                || HostedLookup::Unknown(format!("{error:?}")),
+                HostedLookup::Conflict,
+            )),
+        }
+    }
+    let failed = merge_lookups(failed);
+    if failed != HostedLookup::Missing {
+        return Err(failed);
+    }
+    let Some((id, key)) = rows.first() else {
+        return Err(HostedLookup::Missing);
+    };
+    if rows.iter().any(|(other, _)| other != id) {
+        return Err(HostedLookup::Conflict(
+            SessionIdentityConflictKind::EvidenceDivergence,
+        ));
+    }
+    super::session_identity::tmux_name_from_session_key(key)
+        .ok_or_else(|| HostedLookup::Unknown(format!("row key {key} names no tmux session")))
 }
 
 /// Whether a routine probe's failure on `tmux_name` may stand: the row behind a registered

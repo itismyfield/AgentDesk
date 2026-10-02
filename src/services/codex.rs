@@ -441,10 +441,14 @@ fn codex_resume_supports_hook_trust_bypass(
     }
 }
 
+/// Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no".
 pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
-    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS").map_or(true, |value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
@@ -1980,6 +1984,12 @@ fn resolve_codex_tui_tail_result(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once between a ready composer and the RuntimeReady recheck.
+    pub(crate) static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Post-tail StreamMessage emission for the Codex Direct TUI launch: handles
 /// the cancel-suppression guards, the SessionDied failure `Done`, the idle
 /// relay binding, and the gated RuntimeReady handoff (with its readiness /
@@ -2040,7 +2050,7 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
         // so it still needs the rollout binding even when RuntimeReady is
         // suppressed by the post-turn readiness guard.
         if !register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result) {
-            // A hook already moved the pane to a newer source; handing off this one would reclaim it.
+            // A hook moved the pane, or with hooks on its history is unreadable: a handoff could reclaim it.
             return Ok(());
         }
 
@@ -2067,27 +2077,38 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
         //   - Session dead → emit failure Done; tmux death is
         //     observable synchronously so the verdict reaches the
         //     bridge inside the drain window.
-        //   - Composer not yet redrawn within the probe budget → emit
-        //     RuntimeReady anyway with a tracing warning. The
-        //     assistant response has already shipped via the tail
-        //     `Done`; preserving the handoff is the safe default for
-        //     recovery / watcher-relay even if the visual composer is
-        //     still settling. Making this case hard-fail would require
-        //     cross-bridge cooperation tracked separately.
+        //   - Composer not yet redrawn within the probe budget → suppress
+        //     RuntimeReady (see the timeout arm below).
         match crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
             tmux_session_name,
             crate::services::codex_tui::input::PromptReadinessKind::PostTurnHandoff,
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
-                let _ = sender.send(StreamMessage::RuntimeReady {
+                #[cfg(test)]
+                if let Some(seam) = AFTER_READINESS_WAIT.with_borrow_mut(Option::take) {
+                    seam();
+                }
+                let ready = StreamMessage::RuntimeReady {
                     handoff: RuntimeHandoff::CodexTui {
                         rollout_path: tail_result.rollout_path.display().to_string(),
-                        thread_id: tail_result.session_id,
+                        thread_id: tail_result.session_id.clone(),
                         tmux_session_name: tmux_session_name.to_string(),
                         last_offset: tail_result.final_offset,
                     },
-                });
+                };
+                if !codex_direct_tui_hook_overrides_enabled() {
+                    let _ = sender.send(ready);
+                } else if !crate::services::tui_prompt_dedupe::publish_unless_codex_tail_retired(
+                    &codex_tui_idle_relay_binding(tmux_session_name, &tail_result),
+                    tmux_session_name,
+                    || drop(sender.send(ready)),
+                ) {
+                    tracing::info!(
+                        tmux_session = tmux_session_name,
+                        "Codex tail source was replaced during the readiness wait; suppressing RuntimeReady"
+                    );
+                }
             }
             Err(error)
                 if crate::services::codex_tui::input::is_prompt_ready_cancelled_error(&error) =>

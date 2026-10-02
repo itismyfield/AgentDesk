@@ -509,13 +509,16 @@ impl Pair {
             .delivery_start
     }
 
-    fn held_for(&self, reason: &str) {
+    fn released_for(&self, reason: &str) {
         let alarms = self.io.alarms.0.lock().unwrap();
-        let held = |(channel, alarm): &(u64, _)| {
+        let released = |(channel, alarm): &(u64, _)| {
             *channel == A
-                && matches!(alarm, crate::services::tui_o::writer::WriterAlarm::Halted { detail } if detail.contains(reason))
+                && matches!(alarm, crate::services::tui_o::writer::WriterAlarm::Released { detail } if detail.contains(reason))
         };
-        assert!(alarms.iter().any(held), "held for {reason}: {alarms:?}");
+        assert!(
+            alarms.iter().any(released),
+            "released for {reason}: {alarms:?}"
+        );
     }
 }
 
@@ -536,7 +539,7 @@ async fn unit_after_the_pin() {
     settle().await;
     assert_eq!(adoption(A), Adoption::Released);
     assert!(!pair.init_exists(), "a moved transcript writes no init");
-    pair.held_for("length moved");
+    pair.released_for("length moved");
     let (start, rows) = written
         .lock()
         .unwrap()
@@ -564,17 +567,24 @@ async fn a_unit_written_after_the_pin_keeps_the_channel_on_legacy_from_its_curso
 
 async fn undelivered_closed_turn() {
     let pair = Pair::new().await;
-    // A's turn reached the transcript but no Legacy delivery covered it yet.
+    // A's turn reached the transcript but no Legacy delivery covered it yet: its inflight row
+    // still stands, and the gateway reads that as Legacy's custody.
     let leg = &pair.legs[0];
     std::fs::write(&leg.binding.expected_rollout_path, first_turn(&leg.body)).unwrap();
     pair.read_legacy();
     rehydrated(&pair.legs[0]);
+    *pair.io.custody.lock().unwrap() = Some(|channel| {
+        crate::services::discord::inflight::inflight_state_file_exists(
+            &ProviderKind::Claude,
+            channel,
+        )
+    });
     let _candidates =
         cutover::test_override::force_candidates(&[(A, RuntimeHandoffKind::ClaudeTui)]);
     let hosts = pair.host(&pair.io);
     settle().await;
     assert_eq!(adoption(A), Adoption::Released);
-    pair.held_for("past frontier 0 may post");
+    pair.released_for("Legacy retains delivery custody");
     // The late delivery of that turn goes through Legacy, as a tail started below the cursor would.
     finish(&pair.legs[0]).await;
     settle().await;
@@ -664,7 +674,7 @@ async fn unit_after_the_recheck() {
     let activation = std::thread::spawn(move || {
         let events = log.binding_events_since(A, 0)?;
         let snapshot = held::pin(&*legacy, &events, A)?;
-        let sources = || snapshot.recheck(&*legacy, &*log, A);
+        let sources = || snapshot.recheck(&*legacy, &*log, A).map_err(String::from);
         let facts = Ok(Default::default());
         let asked = Instant::now();
         let result = activation::activate_with(&store, A, facts, || Ok(false), &adopting, sources);

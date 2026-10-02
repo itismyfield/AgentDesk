@@ -639,6 +639,21 @@ class RawChromeAndEditAssertions(unittest.TestCase):
                 no_completion, body_marker="[BODY]", required=True
             )
 
+    def test_completion_order_uses_messages_still_in_the_channel(self):
+        old_panel, body = _raw_bot_msg(20, "-# ✅ 완료"), _relay_msg(30, "body [BODY]")
+        new_panel = _raw_bot_msg(40, "-# ✅ 완료")
+        survived = _window(old_panel, body, new_panel)
+        survived.reconcile_snapshot([old_panel, body, new_panel], after_id="10")
+        with self.assertRaisesRegex(assertions.CompletionOrderError, "completion=20"):
+            assertions.completion_chrome_after_body(survived, body_marker="[BODY]", required=True)
+
+        # A deleted panel no longer satisfies a required completion either.
+        deleted_only = _window(old_panel, body, _relay_msg(50, "later relay"))
+        deleted_only.reconcile_snapshot([body, _relay_msg(50, "later relay")], after_id="10")
+        self.assertEqual(deleted_only.deleted_ids, {"20"})
+        with self.assertRaisesRegex(assertions.AssertionError, "completion chrome not found"):
+            assertions.completion_chrome_after_body(deleted_only, body_marker="[BODY]", required=True)
+
 
 class SessionAndCompletionChromeRegression(unittest.TestCase):
     """Pin the wire shapes that the post-deploy E-1 smoke actually observes."""
@@ -1533,7 +1548,8 @@ class RequiredCompletionWait(unittest.TestCase):
     MARKER = "[E2E:E35:offline-c6:OK]"
 
     def _run(self, *, arrival=4.649, initial_delay=0, return_delay=0, retry_after=None,
-             before=False, optional=False, mutation=None, other_failure=False, client_kind="default"):
+             before=False, optional=False, mutation=None, other_failure=False, client_kind="default",
+             move_at=None):
         scenario = driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/"
                                          "E-35-durable-delivery-record.yaml").read_text())
         scenario["assertions"][-1]["completion_chrome_after_body"]["required"] = not optional
@@ -1556,6 +1572,11 @@ class RequiredCompletionWait(unittest.TestCase):
             rows = [_raw_bot_msg(201, self.MARKER, "2026-01-01T00:00:01Z")]
             content = "-# ✅ 완료" if arrival is not None and clock[0] - 100 >= arrival else "-# 🔧 마지막 도구 (아직 없음)"
             rows.append(_raw_bot_msg(202, content, "2026-01-01T00:00:00Z" if before else "2026-01-01T00:00:02Z"))
+            if move_at is not None:
+                # The panel completes above the body, then is re-posted below it and deleted.
+                moved = index >= 2 and clock[0] - 100 >= move_at
+                rows[1:] = ([_raw_bot_msg(203, "-# ✅ 완료", "2026-01-01T00:00:02Z")] if moved
+                            else [_raw_bot_msg(199, "-# ✅ 완료", "2026-01-01T00:00:00Z")])
             if mutation == "raw_count" and index >= 4:
                 rows.extend(_raw_bot_msg(mid, f"ordinary filler {mid}") for mid in range(203, 239))
             if mutation == "body" and index >= 4:
@@ -1653,12 +1674,32 @@ class RequiredCompletionWait(unittest.TestCase):
         self.assertEqual(record.get("completion_rechecks"), [
             {"refetches": 0, "deadline_at": 110, "elapsed_s": 11, "outcome": "EXHAUSTED"}])
 
-    def test_pre_body_completion_and_missing_body_fail_without_wait(self):
+    def test_panel_deleted_after_completing_above_body_is_judged_on_final_state(self):
+        record, error, requests, _ = self._run(move_at=0)
+        self.assertIsNone(error, str(error))
+        self.assertEqual(len(requests), 4)
+        self.assertNotIn("completion_rechecks", record)
+
+    def test_panel_move_within_follow_window_passes_and_later_move_fails(self):
+        for move_at, passed in ((30, True), (36, False)):
+            with self.subTest(move_at=move_at):
+                record, error, _, _ = self._run(move_at=move_at)
+                self.assertEqual(error is None, passed, str(error))
+                trace = record["completion_rechecks"][0]
+                self.assertEqual(trace["deadline_at"], 100 + driver.COMPLETION_MOVE_WAIT_S)
+                self.assertEqual(trace["outcome"], "PASS" if passed else "EXHAUSTED")
+                if not passed:
+                    self.assertIn("completion chrome appeared before body", str(error))
+                    self.assertEqual(trace["elapsed_s"], driver.COMPLETION_MOVE_WAIT_S)
+
+    def test_pre_body_completion_fails_at_move_bound_and_missing_body_without_wait(self):
         for arrival in (0, 4.649):
             with self.subTest(arrival=arrival):
                 record, error, requests, _ = self._run(arrival=arrival, before=True)
                 self.assertIn("completion chrome appeared before body", str(error))
-                self.assertEqual(len(requests), 4 if arrival == 0 else 6)
+                self.assertEqual(record["completion_rechecks"][0],
+                                 {"refetches": 16, "deadline_at": 135, "elapsed_s": 35, "outcome": "EXHAUSTED"})
+                self.assertEqual(len(requests), 20)
         callback = MagicMock()
         with self.assertRaisesRegex(assertions.AssertionError, "body marker.*not found"):
             driver.run_assertion({"completion_chrome_after_body": {"body_marker": "missing", "required": True}},

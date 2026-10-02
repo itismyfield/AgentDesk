@@ -118,6 +118,7 @@ R_EVID = (
 # Keys are relative to PRIMITIVE_ROOT.
 EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "abandon_request_store.rs": {"edit_outbound_message": 1},
+    "admin_host_guard.rs": {".say": 1},
     "commands/config.rs": {".say": 12, "send_long_message*": 1},
     "commands/control.rs": {".say": 15, "send_long_message*": 1},
     "commands/diagnostics/mod.rs": {".say": 9, "send_long_message*": 7},
@@ -131,7 +132,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "commands/node.rs": {".say": 3},
     "commands/receipt.rs": {".say": 2, "send_long_message*": 1},
     "commands/recovery_ops.rs": {".say": 3, "send_long_message*": 1},
-    "commands/restart.rs": {".say": 3},
+    "commands/restart.rs": {".say": 4},
     "commands/session.rs": {".say": 8, "send_long_message*": 2},
     "commands/skill.rs": {".say": 10, "send_long_message*": 3},
     "commands/text_commands.rs": {".send_message": 2, "send_long_message*": 10},
@@ -200,6 +201,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "tui_prompt_relay.rs": {".say": 2},
     "tui_prompt_relay/bridge_gateway.rs": {"edit_outbound_message": 1, "replace_long_message*": 1, "send_long_message*": 1, "send_outbound_message": 1},
     "tui_prompt_relay/synthetic_start_wiring.rs": {".say": 1},
+    "turn_bridge/completion_postlude/o_panel_below.rs": {"TurnGateway::send_message": 1, "send_channel_message*": 1},
     "turn_bridge/current_message_anchor.rs": {"TurnGateway::edit_message": 1, "TurnGateway::send_message": 1},
     "turn_bridge/headless_delivery.rs": {"edit_channel_message*": 1, "send_long_message*": 1},
     "turn_bridge/mod.rs": {"TurnGateway::edit_message": 1},
@@ -207,7 +209,9 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "turn_bridge/status_panel.rs": {".edit_message": 1, "TurnGateway::edit_message": 1, "edit_channel_message*": 2},
     "turn_bridge/status_panel/fallback.rs": {".send_message": 1, "send_channel_message*": 2},
     "turn_bridge/stream_loop/types.rs": {"replace_message_with_outcome": 1},
-    "turn_bridge/stream_tick.rs": {"TurnGateway::edit_message": 5, "TurnGateway::send_message": 1},
+    "turn_bridge/stream_tick.rs": {"TurnGateway::edit_message": 3, "TurnGateway::send_message": 1},
+    "turn_bridge/stream_tick/o_panel.rs": {"TurnGateway::edit_message": 1, "TurnGateway::send_message": 1},
+    "turn_bridge/stream_tick/rollover_guard.rs": {"TurnGateway::edit_message": 2},
     "turn_bridge/terminal_controller_cutover.rs": {"deliver_turn_output*": 2},
     "turn_bridge/terminal_delivery.rs": {"send_long_message*": 1},
     "turn_bridge/terminal_outcome_delivery.rs": {"TurnGateway::edit_message": 1, "replace_message_with_outcome": 1},
@@ -223,6 +227,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
 # file (relative to PRIMITIVE_ROOT): (census rows, target[, gate file]).
 CENSUS: dict[str, tuple[str, ...]] = {
     "abandon_request_store.rs": ("1-D-notice", "KEEP_NONBODY"),
+    "admin_host_guard.rs": ("CMD", "KEEP_NONBODY"),
     "commands/config.rs": ("CMD", "KEEP_NONBODY"),
     "commands/control.rs": ("CMD", "KEEP_NONBODY"),
     "commands/diagnostics/mod.rs": ("CMD", "KEEP_NONBODY"),
@@ -305,6 +310,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "tui_prompt_relay.rs": ("W24", "KEEP_NONBODY"),
     "tui_prompt_relay/bridge_gateway.rs": ("W23", "COV:W10"),
     "tui_prompt_relay/synthetic_start_wiring.rs": ("W24", "KEEP_NONBODY"),
+    "turn_bridge/completion_postlude/o_panel_below.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/current_message_anchor.rs": ("W15", "KEEP_NONBODY"),
     "turn_bridge/headless_delivery.rs": ("W17", "KEEP_36"),
     "turn_bridge/mod.rs": ("W18", "KEEP_NONBODY"),
@@ -313,6 +319,8 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/status_panel/fallback.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/stream_loop/types.rs": ("W10e", "COV:W10"),
     "turn_bridge/stream_tick.rs": ("W14", "CUT_D"),
+    "turn_bridge/stream_tick/o_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
+    "turn_bridge/stream_tick/rollover_guard.rs": ("W14a", "COV:W14"),
     "turn_bridge/terminal_controller_cutover.rs": ("W10b-c", "COV:W10"),
     "turn_bridge/terminal_delivery.rs": ("W10d", "COV:W10"),
     "turn_bridge/terminal_outcome_delivery.rs": (
@@ -404,6 +412,10 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/tmux_watcher/terminal_long_chunks.rs": (
         "apply_watcher_long_chunks_legacy:claim",
     ),
+    "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs": ("idle_tail_tool_opens:peek",),
+    "src/services/discord/turn_bridge/completion_postlude/o_panel_below.rs": (
+        "follow:peek",
+    ),
     "src/services/discord/turn_bridge/headless_delivery.rs": (
         "enqueue_claimed_headless_delivery:claim",
     ),
@@ -415,9 +427,11 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "deliver:claim",
     ),
     "src/services/discord/turn_bridge/stream_tick.rs": (
-        "guarded_bridge_rollover_edit:claim",
         "run_bridge_stream_tick:peek",
         "run_bridge_stream_tick:claim",
+    ),
+    "src/services/discord/turn_bridge/stream_tick/rollover_guard.rs": (
+        "guarded_bridge_rollover_edit:claim",
     ),
     "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": (
         "bridge_o_body_peek_decision:peek",
@@ -432,9 +446,11 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "handle_cancel_prompt_replace:claim",
     ),
     "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": (
+        "handle_known_owner:peek",
         "resume_with_gateway:peek",
         "resume_with_gateway:claim",
     ),
+    "src/services/discord/turn_bridge/watcher_handoff.rs": ("o_body_needs_bridge_terminal:peek",),
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
         "watcher_backstop_turn_is_terminal:peek",
     ),

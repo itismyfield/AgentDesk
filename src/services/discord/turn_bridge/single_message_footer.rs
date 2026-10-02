@@ -26,7 +26,18 @@ pub(super) fn bridge_single_message_panel_footer_enabled(status_panel_v2_enabled
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lets a test reach the two-message completion that the process-wide footer flag hides.
+    pub(super) static SEPARATE_PANEL_FOR_TESTS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 pub(super) fn bridge_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
+    #[cfg(test)]
+    if SEPARATE_PANEL_FOR_TESTS.get() {
+        return status_panel_v2_enabled;
+    }
     super::single_message_panel::separate_status_panel_enabled_for_flags(
         crate::services::discord::single_message_panel_enabled(),
         status_panel_v2_enabled,

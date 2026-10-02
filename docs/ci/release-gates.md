@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
+| **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
 | **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
 
@@ -262,7 +262,7 @@ bytewise UTF-8 오름차순이어야 하고, 파일은 UTF-8/LF/최종 LF 형식
 
 `--verify-lib-inventory`는 `cargo test --manifest-path Cargo.toml --lib -- --list`를
 실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks runner`(`cargo` 샤드)와
-main `Main script checks` job은 모두 Rust 1.94.1 toolchain, sccache, Cargo dependency
+main `Main script checks` job(`cargo` 샤드)은 모두 Rust 1.94.1 toolchain, sccache, Cargo dependency
 cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 이 문서의 재현 명령을
 함께 검토한다.
 
@@ -282,7 +282,8 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
-| Full tests | `full_non_pg`의 `just check` step: `just check` | `just check` |
+| Full tests | `full_non_pg`의 `Library sweep (selection-set gated)` step (PR `library_sweep`과 같은 명령) | 아래 Full tests (PR) 행과 같다 |
+| Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
 | Full tests (PR) | `library_sweep`의 `Library sweep (selection-set gated)` step | 도달 가능한 PostgreSQL과 `AGENTDESK_REQUIRE_PG=1` 아래에서 `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` (⚠️ 레인 이름과 달리 PG가 필요하다 — 위 §PR 측 library sweep 참조) |
 | PostgreSQL tests | `postgres`의 `just test-postgres` step: `just test-postgres` | workflow와 같은 PostgreSQL 환경에서 `just test-postgres` |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
@@ -339,13 +340,14 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 ### Script checks Python runtime
 
 - `scripts/ci-script-checks.sh` 는 Python 3.11+ 를 최소 런타임으로 요구한다. 이는 `tomllib` 같은 Python 3.11 표준 라이브러리 사용과 `scripts/audit_maintainability.py` 정책에 맞춘다.
-- CI의 PR `Script checks runner`(샤드 잡 전부)와 main `Main script checks` job은 `actions/setup-python`으로 Python 3.11을 명시적으로 설치한다.
+- CI의 PR `Script checks runner`(샤드 잡 전부)와 main `Main script checks`(샤드 잡 전부)는 `actions/setup-python`으로 Python 3.11을 명시적으로 설치한다.
 
 ### Script checks 샤드
 
 - PR CI는 `ci-script-checks.sh`의 각 검사를 `if run_check <shard> "<title>"; then … fi`로 `guards`·`contracts`·`cargo` 샤드 중 하나에 고정하고, 샤드마다 별도 잡(`scripts_guards`, `scripts_contracts`, `cargo`는 기존 `scripts`)이 `SCRIPT_CHECK_SHARD`로 자기 샤드만 실행한다. Rust toolchain·캐시는 `cargo` 샤드 잡에만 있다. 새 샤드 잡의 raw job 전체(checkout·setup·install·run, `timeout-minutes: 30`)는 `check-ci-runner-hardening.sh`가 고정한다.
-- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 필수 `Script checks` 컨텍스트가 red가 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다(main `Main script checks`도 동일).
+- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 필수 `Script checks` 컨텍스트가 red가 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다.
 - 이 가드가 필수 `Script checks`를 red로 만드는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
+- main push CI(`ci-main.yml`)도 같은 세 샤드를 `Main script checks`(`scripts`, `cargo`)·`Main script checks (guards)`·`Main script checks (contracts)` 잡으로 나눠 병렬로 돈다. 세 잡은 main 전용 env(`GFP_EVENT_NAME`·`GFP_REPOSITORY`·`GFP_CANDIDATE_SHA`, `TEST_LANE_BASELINE_REF=HEAD`)를 똑같이 두고, Rust·업로드는 `cargo` 샤드 잡에만 있다. 배포 게이트는 run 전체 결론이므로 한 샤드라도 실패하면 그 SHA는 배포되지 않는다. `check-ci-runner-hardening.sh`가 잡 집합·env·업로드 위치를, `tests/test_ci_script_check_shards.py`가 샤드 합집합이 전 검사와 같음을 검사한다.
 - 필수 `Script checks` 컨텍스트는 샤드 잡마다 `required-check-mirror.sh`를 한 번씩 실행하므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
 - 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
 

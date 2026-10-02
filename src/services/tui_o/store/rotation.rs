@@ -33,10 +33,42 @@ pub enum Boundary {
 pub struct SourceLink {
     pub source: SourceId,
     pub seq: u64,
-    /// The verified parent whose keys mask the inherited prefix.
+    /// The verified parent; rows whose identities its consumed bytes hold are not owed again.
     pub parent: Option<SourceId>,
     pub committed_at: DateTime<Utc>,
     pub boundary: Boundary,
+}
+
+/// The source an old one was rotated to and what that hop measured. The extra fields sit beside
+/// the source's own, so a reader that knows only `SourceId` reads the same identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Successor {
+    #[serde(flatten)]
+    pub source: SourceId,
+    /// Seq of the bind that made the hop; absent in records written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session: Option<String>,
+    /// The old source's length when the hop was applied; the successor waits until it is spooled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_to: Option<u64>,
+    /// Seq of the provider record showing the old source's session was left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<u64>,
+}
+
+impl From<SourceId> for Successor {
+    /// The shape of a record written before the hop's fields were kept.
+    fn from(source: SourceId) -> Self {
+        Self {
+            source,
+            seq: None,
+            tmux_session: None,
+            drain_to: None,
+            proof: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +76,7 @@ pub struct Rotation {
     /// Sources a bind attached, by spool key.
     pub links: BTreeMap<String, SourceLink>,
     /// The source each old one was rotated to; binding a source again clears its entry.
-    pub successors: BTreeMap<String, SourceId>,
+    pub successors: BTreeMap<String, Successor>,
 }
 
 impl Rotation {

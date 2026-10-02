@@ -153,6 +153,24 @@ fn clear(transcript: &Path) -> HookSignal {
     HookSignal::from_payload("session_start", &payload)
 }
 
+/// A /clear SessionStart whose relay publish time is `secs` past a fixed epoch.
+fn clear_at(transcript: &Path, secs: i64) -> HookSignal {
+    let published_at = chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0);
+    HookSignal {
+        published_at,
+        ..clear(transcript)
+    }
+}
+
+/// A prompt whose relay publish time is `secs` past the same epoch as `clear_at`.
+fn prompt_at(transcript: &Path, secs: i64) -> HookSignal {
+    let payload = serde_json::json!({ "transcript_path": transcript });
+    HookSignal {
+        published_at: chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0),
+        ..HookSignal::from_payload("user_prompt_submit", &payload)
+    }
+}
+
 /// Launch A, then a /clear to B before B's transcript exists; the log ends in Pending{B}.
 fn launch_then_clear(lane: &Lane, channel: u64, tmux: &str, a_exists: bool) -> (String, String) {
     let (a, b) = (uuid(), uuid());
@@ -584,27 +602,29 @@ fn a_pending_refused_before_the_restart_stays_refused_until_it_resolves() {
     register_tmux_channel(tmux, channel);
     register_provider_session("claude", &a, tmux);
     register_launched_tmux_runtime_binding(tmux, claude(&lane.path(&a), &a));
-    let c_path = lane.touch(&c);
-    let adopted = adopt_claude_continuation_session(&a, &c, &clear(&c_path));
-    assert!(adopted.unwrap().is_some(), "C is bound");
-    let pending = adopt_claude_continuation_session(&a, &b, &clear(&lane.path(&b)));
+    let pending = adopt_claude_continuation_session(&a, &b, &clear_at(&lane.path(&b), 10));
     assert!(pending.unwrap().is_none(), "B waits for its transcript");
+    let c_path = lane.touch(&c);
+    let adopted = adopt_claude_continuation_session(&a, &c, &prompt_at(&c_path, 20));
+    assert!(
+        adopted.unwrap().is_some(),
+        "C is bound and supersedes the waiting B"
+    );
     lane.touch(&b);
-    let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-    let c_file = fs::File::options().write(true).open(&c_path).unwrap();
-    c_file.set_modified(newer).unwrap();
-    let refused = adopt_claude_continuation_session(&a, &b, &clear(&lane.path(&b)));
-    assert!(refused.unwrap().is_none(), "B is older than bound C");
+    let refused = adopt_claude_continuation_session(&a, &b, &clear_at(&lane.path(&b), 15));
+    assert!(
+        refused.unwrap().is_none(),
+        "B's hook predates the pane leaving B"
+    );
     let records = records_strict(channel).unwrap().unwrap();
-    let pending_seq = records[records.len() - 2].seq;
-    assert!(matches!(
-        records[records.len() - 2].new,
-        BindingTarget::Pending { .. }
-    ));
-    assert!(matches!(
-        records.last().unwrap().new,
-        BindingTarget::Rejected { .. }
-    ));
+    let kinds = |r: &BindingEvent| match &r.new {
+        BindingTarget::Pending { .. } => "pending",
+        BindingTarget::Source(_) => "source",
+        BindingTarget::Resolved { .. } => "resolved",
+        BindingTarget::Rejected { .. } => "rejected",
+    };
+    let tail: Vec<_> = records[records.len() - 3..].iter().map(kinds).collect();
+    assert_eq!(tail, ["pending", "source", "rejected"]);
     restart(channel);
     // B is not restored; the pane gets back the verified C it stayed on.
     let restored = exact(lane.judge(channel, tmux, &a));
@@ -618,16 +638,12 @@ fn a_pending_refused_before_the_restart_stays_refused_until_it_resolves() {
         register_rehydrated_tmux_runtime_binding("claude", tmux, channel, claude(&b_path, &b));
     assert!(rebound);
     let records = records_strict(channel).unwrap().unwrap();
-    assert!(matches!(
-        records.last().unwrap().new,
-        BindingTarget::Resolved { pending_seq: seq, .. } if seq == pending_seq
-    ));
+    // The superseded Pending is never resolved; the registration logs B as a source of its own.
+    assert_eq!(kinds(records.last().unwrap()), "source");
     restart(channel);
-    let exact = exact(lane.judge(channel, tmux, &a));
-    assert_eq!(
-        exact.session_id, b,
-        "a Resolved after the refusal restores B"
-    );
+    // An unverified B is not the pin, so the restore leaves the pane to the rehydrate pass.
+    let step = format!("{:?}", lane.judge(channel, tmux, &a));
+    assert_eq!(step, "Finished(NotEligible(Superseded))");
 
     // The restart forgot every binding; the pane is back on B, as a rehydrate leaves it.
     let bound = claude(&b_path, &b);
@@ -635,25 +651,21 @@ fn a_pending_refused_before_the_restart_stays_refused_until_it_resolves() {
         "claude", tmux, channel, bound
     ));
     register_provider_session("claude", &a, tmux);
-    let back_to_c = adopt_claude_continuation_session(&a, &c, &clear(&c_path));
-    assert!(back_to_c.unwrap().is_some(), "newer C is bound again");
-    fs::remove_file(&b_path).unwrap();
-    let again = adopt_claude_continuation_session(&a, &b, &clear(&b_path));
-    assert!(again.unwrap().is_none(), "B is a candidate again");
-    lane.touch(&b);
-    let refused = adopt_claude_continuation_session(&a, &b, &clear(&b_path));
+    let back_to_c = adopt_claude_continuation_session(&a, &c, &clear_at(&c_path, 30));
+    assert!(back_to_c.unwrap().is_some(), "C is bound again");
+    let refused = adopt_claude_continuation_session(&a, &b, &clear_at(&b_path, 25));
     assert!(
         refused.unwrap().is_none(),
-        "the second B is older than C too"
+        "B's second hook predates the pane leaving B too"
     );
     let records = records_strict(channel).unwrap().unwrap();
-    let last = &records.last().unwrap().new;
-    assert!(
-        matches!(last, BindingTarget::Rejected { .. }),
-        "second refusal on record: {last:?}"
-    );
+    let refusals = records.iter().filter(|r| {
+        matches!(&r.new, BindingTarget::Rejected { payload_session_id, reason, .. }
+            if *payload_session_id == b && reason == "regression")
+    });
+    assert_eq!(refusals.count(), 1, "the same judgment of B is logged once");
     restart(channel);
-    let restored = self::exact(lane.judge(channel, tmux, &a));
+    let restored = exact(lane.judge(channel, tmux, &a));
     assert_eq!(restored.session_id, c, "a B refused again is not restored");
 }
 
@@ -738,17 +750,14 @@ fn another_sessions_pending_does_not_repeat_an_earlier_refusal() {
     register_launched_tmux_runtime_binding(tmux, claude(&lane.path(&a), &a));
     let b_path = lane.touch(&b);
     let c_path = lane.touch(&c);
-    let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-    let c_file = fs::File::options().write(true).open(&c_path).unwrap();
-    c_file.set_modified(newer).unwrap();
     assert!(
-        adopt_claude_continuation_session(&a, &c, &clear(&c_path))
+        adopt_claude_continuation_session(&a, &c, &clear_at(&c_path, 20))
             .unwrap()
             .is_some()
     );
-    let refuse_b = || adopt_claude_continuation_session(&a, &b, &clear(&b_path));
-    assert!(refuse_b().unwrap().is_none(), "B is older than bound C");
-    let pending = adopt_claude_continuation_session(&a, &d, &clear(&lane.path(&d)));
+    let refuse_b = || adopt_claude_continuation_session(&a, &b, &clear_at(&b_path, 10));
+    assert!(refuse_b().unwrap().is_none(), "B predates the switch to C");
+    let pending = adopt_claude_continuation_session(&a, &d, &clear_at(&lane.path(&d), 30));
     assert!(pending.unwrap().is_none(), "D waits for its transcript");
     assert!(refuse_b().unwrap().is_none(), "B is refused again");
     let records = records_strict(channel).unwrap().unwrap();
@@ -858,41 +867,32 @@ fn a_waiting_pending_holds_only_its_own_pane_and_the_poll_returns() {
 }
 
 #[test]
-fn a_late_hook_refused_as_older_leaves_the_waiting_pending_queued() {
+fn a_late_hook_refused_as_left_leaves_the_waiting_pending_queued() {
     let lane = Lane::new();
     let (channel, tmux) = (7_518, "p2b-late-hook");
     let a = launched(&lane, channel, tmux);
     let (b, c, d) = (uuid(), uuid(), uuid());
-    let mtime = |secs: i64| {
-        let c_mtime = fs::metadata(lane.path(&c)).unwrap().modified().unwrap();
-        let shift = std::time::Duration::from_secs(secs.unsigned_abs());
-        if secs < 0 {
-            c_mtime - shift
-        } else {
-            c_mtime + shift
-        }
-    };
-    let pin = |path: &Path, at| {
-        fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(at)
-    };
     lane.touch(&c);
     let b_path = lane.touch(&b);
-    pin(&b_path, mtime(-60)).unwrap();
     let adopted = AdoptionHttp::Durable(DurableKind::Adopted);
-    assert_eq!(adopt_from_hook(&a, &c, &clear(&lane.path(&c))), adopted);
+    assert_eq!(adopt_from_hook(&a, &b, &clear_at(&b_path, 10)), adopted);
+    assert_eq!(
+        adopt_from_hook(&a, &c, &prompt_at(&lane.path(&c), 20)),
+        adopted
+    );
     assert!(clear_claude_session_rotation(tmux));
     let pending = AdoptionHttp::Durable(DurableKind::Pending);
-    assert_eq!(adopt_from_hook(&a, &d, &clear(&lane.path(&d))), pending);
+    assert_eq!(
+        adopt_from_hook(&a, &d, &clear_at(&lane.path(&d), 30)),
+        pending
+    );
 
-    let late = adopt_from_hook(&a, &b, &clear(&b_path));
-    assert_eq!(late, AdoptionHttp::Skipped(AdoptSkip::OlderThanBound));
+    // B's own start, delivered only now, was published before the pane left B.
+    let late = adopt_from_hook(&a, &b, &clear_at(&b_path, 15));
+    let regression = AdoptSkip::SourceRejected(SourceRejection::Regression);
+    assert_eq!(late, AdoptionHttp::Skipped(regression));
     assert_eq!(deferred_adoption_count(), 1, "D stays queued");
-    let d_path = lane.touch(&d);
-    pin(&d_path, mtime(60)).unwrap();
+    lane.touch(&d);
     retry_deferred_claude_adoptions();
     assert_eq!(bound_session(tmux), Some(d));
 }
@@ -906,7 +906,7 @@ mod verified_adoption {
     };
     use crate::services::tui_o::shadow::capture::file_identity;
     use crate::services::tui_prompt_dedupe::binding_events::{
-        SourceId, binding_events_since, pinned_file, record_verified,
+        SourceId, binding_events_since, record_verified,
     };
     use crate::services::tui_prompt_dedupe::{
         claude_session_rotation_for_tmux, forget_hook_adopted_claude_session_id,
@@ -970,9 +970,10 @@ mod verified_adoption {
     fn pinned(channel: u64, tmux: &str) -> bool {
         let binding = bound(tmux);
         let session = binding.session_id.unwrap_or_default();
-        pinned_file(channel, tmux, &session, &binding.output_path)
-            .unwrap()
-            .is_some()
+        let pin = pinned_source(channel, tmux).unwrap();
+        pin.is_some_and(|pin| {
+            pin.session_id == session && pin.path == Path::new(&binding.output_path)
+        })
     }
 
     fn source(session: &str, path: &Path) -> SourceId {
@@ -1939,3 +1940,6 @@ mod verified_adoption {
         settled_on(channel, tmux, (&c, &c_path), &b, pending);
     }
 }
+
+#[path = "pending_history_tests.rs"]
+mod history;

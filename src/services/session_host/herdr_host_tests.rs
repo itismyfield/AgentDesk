@@ -30,6 +30,8 @@ struct FakeTransport {
     /// Moves to a new connection on every call, like a reconnecting transport.
     reconnects: bool,
     generation: AtomicU64,
+    /// E7 readings in order; once empty, Off on the current connection.
+    restore: Mutex<VecDeque<RestoreResume>>,
 }
 
 impl HerdrTransport for FakeTransport {
@@ -42,6 +44,23 @@ impl HerdrTransport for FakeTransport {
         };
         (self.reply(call), generation)
     }
+
+    fn call_on(&self, call: &HerdrCall, generation: u64) -> (contract::HerdrOutcome, u64) {
+        let current = self.generation.load(Ordering::SeqCst);
+        if generation != current {
+            let error = HerdrTransportError::NotSent(format!("connection {current}"));
+            return (Err(error), current);
+        }
+        self.calls.lock().unwrap().push(call.clone());
+        (self.reply(call), current)
+    }
+}
+
+fn scripted_restore(transport: &FakeTransport) -> RestoreResume {
+    let next = transport.restore.lock().unwrap().pop_front();
+    next.unwrap_or(RestoreResume::Off {
+        generation: transport.generation.load(Ordering::SeqCst),
+    })
 }
 
 impl FakeTransport {
@@ -69,7 +88,7 @@ fn fake(script: Vec<Step>, reconnects: bool) -> HerdrHost<FakeTransport> {
         reconnects,
         ..FakeTransport::default()
     };
-    HerdrHost::new(endpoint, transport)
+    HerdrHost::new(endpoint, transport).with_restore_reader(scripted_restore)
 }
 
 fn host(script: Vec<Step>) -> HerdrHost<FakeTransport> {
@@ -435,6 +454,74 @@ fn herdr_keys_and_non_herdr_refs_make_no_transport_call() {
     assert!(calls(&herdr).is_empty());
     let caps = herdr.capabilities();
     assert!(caps.send_text && caps.capture_screen && !caps.send_keys && !caps.interrupt);
+}
+
+/// Text, Enter, draft clear (C-e, C-u) and cancel (Escape, interrupt) as the executor sends them.
+fn every_input(herdr: &HerdrHost<FakeTransport>) -> Vec<Result<HostMutation, HostError>> {
+    let mut outcomes = vec![herdr.send_text(pane(), "x")];
+    for keys in [&["Enter"][..], &["C-e", "C-u"], &["Escape"]] {
+        outcomes.push(herdr.send_keys(pane(), keys));
+    }
+    outcomes.push(herdr.interrupt(pane()));
+    outcomes
+}
+
+fn restore_refused() -> Result<HostMutation, HostError> {
+    Ok(HostMutation::Refused(HostRefusal::Precondition(
+        RESTORE_RESUME_NOT_OFF.into(),
+    )))
+}
+
+#[test]
+fn herdr_production_restore_reader_refuses_every_input_before_any_call() {
+    let endpoint = HerdrEndpoint::new("mac-mini", "pilot", Path::new("/tmp/h.sock"), "adk")
+        .expect("valid endpoint");
+    let herdr = HerdrHost::new(endpoint, FakeTransport::default());
+    for outcome in every_input(&herdr) {
+        assert_eq!(
+            outcome,
+            restore_refused(),
+            "no effective-config read exists"
+        );
+    }
+    assert!(
+        calls(&herdr).is_empty(),
+        "an unverified server gets no input"
+    );
+}
+
+#[test]
+fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
+    let with_readings = |readings: Vec<RestoreResume>| {
+        let herdr = host(vec![(send_call("x"), ok())]);
+        *herdr.transport.restore.lock().unwrap() = readings.into();
+        herdr
+    };
+    for reading in [RestoreResume::On, RestoreResume::Unverified] {
+        let herdr = with_readings(vec![reading; 5]);
+        for outcome in every_input(&herdr) {
+            assert_eq!(outcome, restore_refused(), "{reading:?}");
+        }
+        assert!(calls(&herdr).is_empty(), "{reading:?}");
+    }
+
+    let off = RestoreResume::Off { generation: 0 };
+    let herdr = with_readings(vec![off, RestoreResume::Unverified]);
+    assert_eq!(herdr.send_text(pane(), "x"), Ok(HostMutation::Confirmed));
+    assert_eq!(
+        herdr.send_text(pane(), "x"),
+        restore_refused(),
+        "an earlier Off is not reused"
+    );
+    assert_eq!(calls(&herdr).len(), 1);
+
+    let herdr = with_readings(vec![off]);
+    herdr.transport.generation.store(1, Ordering::SeqCst);
+    assert!(
+        matches!(herdr.send_text(pane(), "x"), Err(HostError::Transport(_))),
+        "a reading from before a reconnect admits nothing"
+    );
+    assert!(calls(&herdr).is_empty());
 }
 
 #[test]
@@ -1325,6 +1412,10 @@ fn herdr_items_have_no_production_caller() {
         (POLICY_REPAIR, 2),
         // Dormant Herdr launch: names the host for the pane location and its marker.
         ("src/services/herdr_launch.rs", 2),
+        // Dormant restart reconcile: reads the marker beside the stored pane, never a host.
+        (RECONCILE, 1),
+        // Dormant source attach: takes the caller's reader, never constructs or routes to a host.
+        ("src/services/discord/tui_prompt_relay/herdr_source.rs", 0),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -1355,6 +1446,9 @@ fn herdr_items_have_no_production_caller() {
     const RESOLVE: &str = "src/services/session_host/resolve.rs";
     // Liveness consumers' local host reading: marker and row locator, never a Herdr route.
     const LIVENESS: &str = "src/services/discord/host_liveness.rs";
+    // A Claude turn's own marker check before it probes, kills or launches by name.
+    const CLAUDE_TURN_GATE: &str = "src/services/claude/host_gate.rs";
+    const RECONCILE: &str = "src/services/discord/recovery_engine/host_reconcile.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1372,11 +1466,27 @@ fn herdr_items_have_no_production_caller() {
         ("HostKind::from_persisted", &[LOCATOR, MARKER]),
         (
             "HostKindMarker",
-            &[MARKER, GUARD_ADAPTER, CLEANUP_GATE, RESOLVE, LIVENESS],
+            &[
+                MARKER,
+                GUARD_ADAPTER,
+                CLEANUP_GATE,
+                RESOLVE,
+                LIVENESS,
+                CLAUDE_TURN_GATE,
+                RECONCILE,
+            ],
         ),
         (
             "read_host_kind_marker",
-            &[MARKER, CLEANUP_GATE, RESOLVE, GUARD_ADAPTER, LIVENESS],
+            &[
+                MARKER,
+                CLEANUP_GATE,
+                RESOLVE,
+                GUARD_ADAPTER,
+                LIVENESS,
+                CLAUDE_TURN_GATE,
+                RECONCILE,
+            ],
         ),
         (
             "host_marker::",
@@ -1386,6 +1496,8 @@ fn herdr_items_have_no_production_caller() {
                 RESOLVE,
                 CLAUDE_LAUNCH,
                 LIVENESS,
+                CLAUDE_TURN_GATE,
+                RECONCILE,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
@@ -1483,6 +1595,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 ("src/services/discord/inflight.rs", 0),
                 ("src/services/discord/host_key_derivation.rs", 1),
                 ("src/services/discord/host_defer_gate.rs", 1),
+                ("src/services/discord/host_teardown_gate.rs", 1),
             ],
         ),
         ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
@@ -1863,7 +1976,6 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                     BEFORE_WRITER,
                 ),
                 ("src/services/provider_teardown.rs", 1, UNKEYED),
-                ("src/services/claude.rs", 1, OWNED),
                 ("src/services/codex.rs", 1, OWNED),
                 (
                     "src/services/provider/cancel_token_cleanup/executor.rs",
@@ -2381,11 +2493,12 @@ fn fn_body(code: &str, signature: &str) -> std::ops::Range<usize> {
     open..code.len()
 }
 
-// Dormant guard: nothing outside the owner names the typed probe entries; inside it
-// the observer runs only in the dormant `for_target` body, which nothing calls.
+// Only the Claude turn gate names the typed probe entries outside the owner; inside it
+// the observer runs only in the `for_target` body, which the owner never calls.
 #[test]
 fn typed_session_probe_entries_have_no_production_caller() {
     const OWNER: &str = "src/services/provider/session_probe.rs";
+    const CONSUMER: &str = "src/services/claude/host_gate.rs";
     const ENTRIES: &[&str] = &[
         "SessionProbeTarget",
         "SessionProbe::for_target",
@@ -2399,7 +2512,7 @@ fn typed_session_probe_entries_have_no_production_caller() {
     );
     let mut violations: Vec<String> = sources
         .iter()
-        .filter(|(relative, _)| relative.as_str() != OWNER)
+        .filter(|(relative, _)| ![OWNER, CONSUMER].contains(&relative.as_str()))
         .flat_map(|(relative, prod)| {
             ENTRIES
                 .iter()

@@ -30,6 +30,8 @@ pub(crate) enum HerdrUnknown {
     EndpointChanged,
     MarkerLost,
     NotObserved,
+    /// No endpoint, or the endpoint did not answer the read.
+    ProbeFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,10 +76,8 @@ pub(crate) fn compare_herdr_execution(
     if location.pane_id != now.pane_id {
         return Mismatch(HerdrMismatch::OtherPane);
     }
-    match current.marker {
-        HerdrMarkerEvidence::Herdr => {}
-        HerdrMarkerEvidence::OtherHost => return Mismatch(HerdrMismatch::OtherHostMarker),
-        HerdrMarkerEvidence::Lost => return Unknown(HerdrUnknown::MarkerLost),
+    if current.marker == HerdrMarkerEvidence::OtherHost {
+        return Mismatch(HerdrMismatch::OtherHostMarker);
     }
     let checks = [
         (
@@ -99,8 +99,18 @@ pub(crate) fn compare_herdr_execution(
             HerdrMismatch::ProviderReplaced,
         ),
     ];
-    if let Some((_, mismatch)) = checks.iter().find(|(same, _)| *same == Some(false)) {
+    // A lost marker keeps only a confirmed process replacement on this endpoint and pane.
+    let trusted = |kind: &HerdrMismatch| {
+        current.marker == HerdrMarkerEvidence::Herdr || *kind != HerdrMismatch::OtherNonce
+    };
+    let replaced = checks
+        .iter()
+        .find(|(same, kind)| *same == Some(false) && trusted(kind));
+    if let Some((_, mismatch)) = replaced {
         return Mismatch(*mismatch);
+    }
+    if current.marker == HerdrMarkerEvidence::Lost {
+        return Unknown(HerdrUnknown::MarkerLost);
     }
     if checks.iter().any(|(same, _)| same.is_none()) {
         return Unknown(HerdrUnknown::NotObserved);

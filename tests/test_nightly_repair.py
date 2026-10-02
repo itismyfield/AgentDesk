@@ -12,7 +12,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 NIGHTLY = ROOT / ".github/workflows/ci-nightly.yml"
-DEBUG_JOBS = ("full_macos", "full_windows", "postgres_full")
+DEBUG_JOBS = ("full_macos", "full_windows", "postgres_full",
+              "multinode_regression", "high_risk_recovery_full",
+              "relay_authority_mutations_full")
 DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (PostgreSQL bootstrap and routes)"
 WINDOWS_STEP = "Discord thread-create cross-process lock"
@@ -203,7 +205,7 @@ class NightlyRepairWiringTests(unittest.TestCase):
                 self.assertTrue(membership_commands(mutated))
 
 
-    def test_each_of_the_six_profile_entries_is_required(self) -> None:
+    def test_each_job_profile_entry_is_required(self) -> None:
         for job in DEBUG_JOBS:
             for key in DEBUG_KEYS:
                 with self.subTest(job=job, key=key):

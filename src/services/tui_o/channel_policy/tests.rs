@@ -327,6 +327,39 @@ fn a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it() {
 }
 
 #[test]
+fn a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_releases_it() {
+    use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+    use crate::services::tui_o::cutover::{self, test_override};
+    use RuntimeHandoffKind::ClaudeTui;
+    let _candidates = test_override::force_candidates(&[(41, ClaudeTui)]);
+    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(41).cloned());
+    let candidate = candidate.unwrap();
+    assert!(candidate.defer(41));
+    assert!(candidate.defer(41), "a deferred adoption stays deferred");
+    assert_eq!(
+        cutover::o_owns_tui_output_for_channel(41, Some(ClaudeTui)),
+        Ok(false),
+        "Legacy sends its body"
+    );
+    assert_eq!(
+        intake_route::route_for_placement("claude", 41),
+        IntakeRoute::Unselected
+    );
+    assert_eq!(candidate.peek(), Adoption::Deferred);
+
+    let _candidates = test_override::force_candidates(&[(41, ClaudeTui)]);
+    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(41).cloned());
+    let candidate = candidate.unwrap();
+    assert!(candidate.defer(41));
+    candidate.release(41);
+    assert_eq!(candidate.peek(), Adoption::Released);
+    assert!(
+        !candidate.defer(41),
+        "a released adoption is never deferred again"
+    );
+}
+
+#[test]
 fn a_placement_never_waits_on_another_channels_adoption_in_progress() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute, test_probe};
     use crate::services::tui_o::cutover::test_override;

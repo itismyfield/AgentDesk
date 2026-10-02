@@ -555,6 +555,28 @@ validate_triage_event() {
   ' "$event_path" >/dev/null
 }
 
+# Names the failed jobs so a new failure stays visible under a standing red; best-effort, never fatal.
+nightly_failed_jobs() {
+  local repo="$1" run_id="$2" attempt="$3" pages listed
+  if pages="$(gh api "/repos/$repo/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100" --paginate)" &&
+    listed="$(jq -sre '
+      if length > 0 and all(.[]; type == "object" and (.jobs | type == "array")) then [.[].jobs[]]
+      else error("invalid job pages") end |
+      map(select(type == "object" and (.name | type == "string") and
+        (.conclusion | type == "string") and
+        (.conclusion | IN("success", "skipped", "neutral") | not))) |
+      if length == 0 then "- Failed jobs: none listed" else
+        "- Failed jobs:", (.[] | "  - \(.name): \(.conclusion)" +
+          ([.steps[]? | select(.conclusion == "failure") | .name | strings] |
+            if length > 0 then " (step: \(join(", ")))" else "" end))
+      end
+    ' <<<"$pages")"; then
+    printf '%s\n' "$listed"
+  else
+    printf '%s\n' '- Failed jobs: unavailable (see the run)'
+  fi
+}
+
 nightly_triage() {
   local repo="$1" event_path="$2" issues candidates count number state body comments marker run_id attempt
   local namespace='<!-- agentdesk:ci-nightly:main -->'
@@ -611,6 +633,7 @@ nightly_triage() {
     printf '%s\n' "- Run: https://github.com/$repo/actions/runs/$run_id/attempts/$attempt"
     printf '%s\n' "- Event: $(jq -r '.workflow_run.event' "$event_path")"
     printf '%s\n' "- Head: $(jq -r '.workflow_run.head_sha' "$event_path")"
+    nightly_failed_jobs "$repo" "$run_id" "$attempt"
     printf '\nGitHub records the failure; AgentDesk immediate sync is best-effort.\n'
   } >"$TMP_DIR/nightly-body.md"
   if (( count == 0 )); then

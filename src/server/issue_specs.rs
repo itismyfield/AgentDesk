@@ -352,6 +352,7 @@ mod issue_specs_pg_tests {
     /// loopback and create/drop databases there (#5218).
     #[tokio::test]
     async fn upsert_issue_spec_persists_parsed_contract() {
+        let _lifecycle = crate::db::postgres::lock_test_lifecycle();
         let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
             return;
         };

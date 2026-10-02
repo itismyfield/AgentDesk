@@ -7,7 +7,7 @@ use super::herdr::contract::{self, HerdrTransport};
 use super::herdr::model::{
     ControlPlane, ENDPOINT_MISSING, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest,
 };
-use super::herdr::observe;
+use super::herdr::observe::{self, RESTORE_RESUME_NOT_OFF, RestoreResume};
 use super::model::{
     HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence, HostRefusal,
     HostSessionRef,
@@ -20,6 +20,8 @@ pub(crate) struct HerdrHost<T: HerdrTransport> {
     endpoint: HerdrEndpoint,
     transport: T,
     next_id: AtomicU64,
+    /// E7 reading, taken afresh before every input.
+    read_restore: fn(&T) -> RestoreResume,
 }
 
 fn pane_id(session: HostSessionRef<'_>) -> Result<&str, HostError> {
@@ -42,18 +44,43 @@ impl<T: HerdrTransport> HerdrHost<T> {
             endpoint,
             transport,
             next_id: AtomicU64::new(1),
+            read_restore: observe::read_restore_resume,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_restore_reader(self, read_restore: fn(&T) -> RestoreResume) -> Self {
+        Self {
+            read_restore,
+            ..self
+        }
+    }
+
+    fn next_call(&self, request: HerdrRequest) -> HerdrCall {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        HerdrCall {
+            id: format!("adk-{id}"),
+            request,
         }
     }
 
     /// The call, its outcome and the generation of the connection that answered.
     fn call(&self, request: HerdrRequest) -> (HerdrCall, contract::HerdrOutcome, u64) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let call = HerdrCall {
-            id: format!("adk-{id}"),
-            request,
-        };
+        let call = self.next_call(request);
         let (outcome, generation) = self.transport.call(&call);
         (call, outcome, generation)
+    }
+
+    /// E7 before any input: only a fresh read of resume-on-restore off admits it, and
+    /// only on the connection that read it, so a reconnect drops the earlier reading.
+    fn restore_off(&self) -> Result<u64, HostMutation> {
+        (self.read_restore)(&self.transport)
+            .admitted_generation()
+            .ok_or_else(|| {
+                HostMutation::Refused(HostRefusal::Precondition(
+                    RESTORE_RESUME_NOT_OFF.to_string(),
+                ))
+            })
     }
 
     fn exchange<R>(
@@ -121,9 +148,17 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
         session: HostSessionRef<'_>,
         text: &str,
     ) -> Result<HostMutation, HostError> {
-        let text = text.to_string();
-        let request = |pane_id| HerdrRequest::PaneSendText { pane_id, text };
-        self.exchange(session, request, contract::mutation_result)
+        let pane = pane_id(session)?;
+        let generation = match self.restore_off() {
+            Ok(generation) => generation,
+            Err(refusal) => return Ok(refusal),
+        };
+        let call = self.next_call(HerdrRequest::PaneSendText {
+            pane_id: pane.to_string(),
+            text: text.to_string(),
+        });
+        let (outcome, _) = self.transport.call_on(&call, generation);
+        contract::mutation_result(&call, outcome, pane)
     }
 
     fn send_keys(
@@ -131,11 +166,11 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
         _session: HostSessionRef<'_>,
         _keys: &[&str],
     ) -> Result<HostMutation, HostError> {
-        refused("send_keys")
+        self.restore_off().map_or_else(Ok, |_| refused("send_keys"))
     }
 
     fn interrupt(&self, _session: HostSessionRef<'_>) -> Result<HostMutation, HostError> {
-        refused("interrupt")
+        self.restore_off().map_or_else(Ok, |_| refused("interrupt"))
     }
 
     fn capture_screen(

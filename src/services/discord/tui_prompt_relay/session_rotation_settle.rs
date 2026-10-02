@@ -157,14 +157,25 @@ pub(in crate::services::discord) fn existing_claude_binding_outranks_launch_scri
     let Some(fresh) = fresh else {
         return true;
     };
-    claude_tui_runtime_binding_matches_launch(existing, fresh)
+    (claude_tui_runtime_binding_matches_launch(existing, fresh)
         || claude_continuation_binding_supersedes_launch(existing, fresh)
         || hook_adopted_binding_supersedes_launch(
             existing,
             fresh,
             crate::services::tui_prompt_dedupe::hook_adopted_claude_session_id(tmux_session_name)
                 .as_deref(),
-        )
+        ))
+        && !claude_binding_is_headless(existing)
+}
+
+/// A binding on a headless SDK transcript is never a valid TUI binding to keep.
+#[cfg(unix)]
+fn claude_binding_is_headless(
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> bool {
+    crate::services::claude_tui::transcript_tail::claude_transcript_is_headless_sdk(Path::new(
+        &binding.output_path,
+    ))
 }
 
 /// #5188 (R1): the rehydration pass's SECOND gate — may the launch script's
@@ -189,7 +200,8 @@ pub(in crate::services::discord) fn launch_script_may_replace_binding(
         fresh,
         crate::services::tui_prompt_dedupe::hook_adopted_claude_session_id(tmux_session_name)
             .as_deref(),
-    ) {
+    ) && !claude_binding_is_headless(existing)
+    {
         return false;
     }
     !claude_tui_runtime_binding_matches_launch(existing, fresh)
