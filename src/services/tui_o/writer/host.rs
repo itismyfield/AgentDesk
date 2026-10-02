@@ -567,6 +567,7 @@ pub(crate) mod test_io {
             let evidence = BindingEvidence {
                 hook_event: "SessionStart".into(),
                 received_at,
+                reclaims: false,
             };
             let record = BindingRecord::Bound {
                 old: None,

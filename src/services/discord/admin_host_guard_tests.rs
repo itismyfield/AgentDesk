@@ -1,5 +1,7 @@
 //! Admin commands and diagnostics on every stored host case, through their real entries.
 
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -409,4 +411,121 @@ async fn a_refused_dispatch_reset_stops_before_the_turn_pg() {
     assert!(alive.load(Ordering::SeqCst), "the process is kept");
     crate::services::session_backend::remove_process_session(&name);
     db.drop().await;
+}
+
+/// One stored host case: the shared stored-row cases plus two `.host_kind` markers no
+/// tmux reading accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Host {
+    Case(Case),
+    /// The marker path is a directory, so the marker cannot be read.
+    MarkerUnreadable,
+    /// The marker names a host this build does not know.
+    MarkerZellij,
+}
+
+impl Host {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Case(Case::ALL[0]),
+        Self::Case(Case::ALL[1]),
+        Self::Case(Case::ALL[2]),
+        Self::Case(Case::ALL[3]),
+        Self::Case(Case::ALL[4]),
+        Self::Case(Case::ALL[5]),
+        Self::Case(Case::ALL[6]),
+        Self::MarkerUnreadable,
+        Self::MarkerZellij,
+    ];
+
+    pub(crate) fn admitted(self) -> bool {
+        matches!(self, Self::Case(case) if case.admitted())
+    }
+
+    /// Whether a tmux liveness probe of the session runs: a marker naming no tmux skips it.
+    pub(crate) fn probed(self) -> bool {
+        use crate::services::discord::host_teardown_gate::test_support::Stored;
+        matches!(
+            self,
+            Self::Case(Case::Conflict)
+                | Self::Case(Case::Stored(
+                    Stored::Legacy | Stored::Hosted | Stored::Future | Stored::Missing
+                ))
+        )
+    }
+
+    pub(crate) async fn seed(self, pool: &sqlx::PgPool, key: &str, name: &str, channel: u64) {
+        let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
+        match self {
+            Self::Case(case) => case.seed(pool, key, name, channel).await,
+            Self::MarkerUnreadable => std::fs::create_dir_all(&marker).unwrap(),
+            Self::MarkerZellij => {
+                std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+                std::fs::write(marker, "zellij").unwrap();
+            }
+        }
+    }
+}
+
+/// What tmux answers: every session up, a server without the session, no binary, no server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tmux {
+    Live,
+    Dead,
+    Missing,
+    NoSocket,
+}
+
+impl Tmux {
+    pub(crate) const ALL: [Self; 4] = [Self::Live, Self::Dead, Self::Missing, Self::NoSocket];
+}
+
+/// PATH-first tmux logging each call and answering as the current [`Tmux`] mode says.
+pub(crate) struct ModeTmux {
+    dir: tempfile::TempDir,
+    _env: crate::config::TestEnvVarGuard,
+}
+
+impl ModeTmux {
+    /// Needs the shared test-env lock held, e.g. by a `TestRuntimeRootGuard`.
+    pub(crate) fn install() -> Self {
+        let dir = tempfile::TempDir::new().expect("tmux dir");
+        let binary = dir.path().join("tmux");
+        let mut file = std::fs::File::create(&binary).expect("mode tmux");
+        writeln!(
+            file,
+            "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
+             echo \"$*\" >> \"$d/calls\"\ncase \"$(cat \"$d/mode\")\" in\n\
+             missing) exit 127 ;;\n\
+             nosocket) echo \"no server running on $d/socket\" >&2; exit 1 ;;\n\
+             live) case \"$1\" in list-panes) echo 0 ;; capture-pane) echo pane ;; esac; exit 0 ;;\n\
+             esac\necho \"can't find session: $3\" >&2; exit 1"
+        )
+        .expect("mode tmux body");
+        drop(file);
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+        let mut paths = vec![dir.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let path = std::env::join_paths(paths).expect("join PATH");
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let env = set("PATH", std::path::Path::new(&path));
+        Self { dir, _env: env }
+    }
+
+    pub(crate) fn serve(&self, mode: Tmux) {
+        let mode = format!("{mode:?}").to_lowercase();
+        std::fs::write(self.dir.path().join("mode"), mode).unwrap();
+    }
+
+    /// The logged calls that would kill or type into a session, clearing the log.
+    pub(crate) fn take_writes(&self) -> Vec<String> {
+        let log = self.dir.path().join("calls");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(log);
+        let writes = ["kill-", "send-keys", "respawn", "new-session"];
+        let write = |call: &&str| writes.iter().any(|verb| call.starts_with(verb));
+        calls.lines().filter(write).map(str::to_string).collect()
+    }
 }
