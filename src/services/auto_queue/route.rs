@@ -63,8 +63,6 @@ mod planning;
 mod query;
 #[path = "route_generate.rs"]
 mod route_generate;
-#[path = "route_request_generate.rs"]
-mod route_request_generate;
 #[path = "route_types.rs"]
 mod route_types;
 #[path = "slot_routes.rs"]
@@ -84,7 +82,6 @@ pub use order_routes::{OrderBody, submit_order};
 pub use phase_gate_catalog::{DEFAULT_PHASE_GATE_KIND, catalog as phase_gate_catalog};
 pub use phase_gate_violations::violations_route;
 pub use route_generate::generate;
-pub use route_request_generate::request_generate;
 pub use route_types::{
     ActivateBody, AddRunEntryBody, CancelQuery, GenerateBody, GenerateEntryBody, HistoryQuery,
     PauseBody, RebindSlotBody, ReorderBody, RepairPhaseGateBody, ResetBody, ResetGlobalBody,

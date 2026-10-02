@@ -1504,15 +1504,6 @@ services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::unavailable_deploy_gate_is_a_typed_client_error_before_database_access
 services::auto_queue::route::route_generate::empty_generate_status_count_tests::requested_states_keep_zero_counts_and_ignore_unrequested_rows
-services::auto_queue::route::route_request_generate::tests::instruction_contains_request_id_repo_and_issues
-services::auto_queue::route::route_request_generate::tests::instruction_example_kind_respects_allowed_restriction
-services::auto_queue::route::route_request_generate::tests::instruction_omits_allowed_line_when_none
-services::auto_queue::route::route_request_generate::tests::instruction_uses_exact_thread_group_serial_lane_contract
-services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_accepts_available_catalog_values
-services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_dedups
-services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_none_passthrough
-services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_rejects_unavailable_deploy_gate
-services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_rejects_unknown
 services::auto_queue::route::route_types::reset_body_tests::parses_full_run_scope
 services::auto_queue::route::route_types::reset_body_tests::parses_run_id_only_scope
 services::auto_queue::route::route_types::reset_body_tests::rejects_empty_body
