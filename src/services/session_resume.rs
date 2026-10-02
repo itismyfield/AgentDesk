@@ -17,8 +17,8 @@
 //! `current_path` is already set), which is why the in-memory mirror is not
 //! optional when a runtime owns the channel.
 //!
-//! Teardown of the channel's current tmux/turn reuses `force_kill_turn` — the
-//! same lifecycle path `/force-kill` uses — so no cleanup logic is duplicated.
+//! Teardown of the channel's current tmux/turn reuses the force-kill lifecycle path
+//! `/force-kill` uses, on the host verdict taken before the durable rebind.
 
 use axum::{
     Json,
@@ -41,7 +41,9 @@ use crate::services::discord::health::{
 };
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
+use crate::services::turn_lifecycle::{
+    ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
+};
 use poise::serenity_prelude::ChannelId;
 
 const RESUME_CRITICAL_SECTION_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
@@ -516,6 +518,29 @@ pub(crate) async fn perform_resume_rebind(
     if let Some(reason) = host_refusal.await {
         return Err(ResumeRebindError::HostUnsupported(reason));
     }
+    // The teardown below runs on this verdict, so a kill the host guard keeps refuses here.
+    let teardown = match (registry, provider.as_ref(), channel_id) {
+        (Some(registry), Some(provider), Some(channel_id)) => {
+            let target = TurnLifecycleTarget {
+                provider: Some(provider.clone()),
+                channel_id: Some(channel_id),
+                tmux_name: tmux_name.to_string(),
+            };
+            let stored_provider = Some(provider.as_str());
+            let row = ForceKillRow {
+                pool,
+                session_key,
+                stored_provider,
+            };
+            let verdict = force_kill_verdict(Some(registry), &target, Some(row)).await;
+            if verdict.kept() {
+                let reason = "the session's teardown is kept by the host guard".to_string();
+                return Err(ResumeRebindError::HostUnsupported(reason));
+            }
+            Some((registry, verdict))
+        }
+        _ => None,
+    };
 
     // P1-B — durable-first ordering: commit the DB rebind BEFORE tearing down
     // the current tmux. If the durable UPDATE fails we return here without
@@ -543,20 +568,10 @@ pub(crate) async fn perform_resume_rebind(
     // Teardown the channel's current tmux/turn via the shared lifecycle path.
     let mut tmux_killed = false;
     let mut lifecycle_path = "skipped-no-runtime";
-    if let (Some(registry), Some(provider), Some(channel_id)) =
-        (registry, provider.as_ref(), channel_id)
-    {
-        let lifecycle = force_kill_turn(
-            Some(registry),
-            &TurnLifecycleTarget {
-                provider: Some(provider.clone()),
-                channel_id: Some(channel_id),
-                tmux_name: tmux_name.to_string(),
-            },
-            "resume rebind (/resume)",
-            "force_kill",
-        )
-        .await;
+    if let Some((registry, verdict)) = teardown {
+        let reason = "resume rebind (/resume)";
+        let kill = force_kill_turn_with_verdict(Some(registry), verdict, reason, "force_kill");
+        let lifecycle = kill.await;
         tmux_killed = lifecycle.tmux_killed;
         lifecycle_path = lifecycle.lifecycle_path;
     }
@@ -1097,14 +1112,16 @@ mod tests {
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let registry = HealthRegistry::new();
         registry
             .register("claude".to_string(), Arc::clone(&shared))
             .await;
         let channel_id = ChannelId::new(4_794_103);
         let tmux = format!("AgentDesk-resume-retained-live-{}", std::process::id());
-        let session_key = format!("claude/test/host:{tmux}");
+        let session_key =
+            crate::services::discord::host_teardown_gate::test_support::channel_key(&shared, &tmux);
         let old_session_id = "77777777-7777-7777-7777-777777777777";
         let target_session_id = "88888888-8888-8888-8888-888888888888";
         let old_cwd = tempfile::tempdir().expect("old cwd");
@@ -1205,7 +1222,8 @@ mod tests {
     async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let registry = HealthRegistry::new();
         registry
             .register("claude".to_string(), Arc::clone(&shared))
@@ -1222,14 +1240,15 @@ mod tests {
         let old_session_id = "44444444-4444-4444-4444-444444444444";
         let target_session_id = "55555555-5555-5555-5555-555555555555";
         let tmux = "AgentDesk-claude-resume-intake-lock";
-        let session_key = "claude/test/host:AgentDesk-claude-resume-intake-lock";
+        let session_key =
+            crate::services::discord::host_teardown_gate::test_support::channel_key(&shared, tmux);
         sqlx::query(
             "INSERT INTO sessions
              (session_key, provider, status, cwd, claude_session_id,
               raw_provider_session_id, last_heartbeat)
              VALUES ($1, 'claude', 'idle', $2, $3, $3, NOW())",
         )
-        .bind(session_key)
+        .bind(&session_key)
         .bind(&old_cwd)
         .bind(old_session_id)
         .execute(&pool)
@@ -1253,11 +1272,12 @@ mod tests {
         let resume_pool = pool.clone();
         let resume_registry = registry;
         let resume_target_cwd = target_cwd.clone();
+        let resume_key = session_key.clone();
         let resume = tokio::spawn(async move {
             perform_resume_rebind(
                 &resume_pool,
                 Some(&resume_registry),
-                session_key,
+                &resume_key,
                 Some(ProviderKind::Claude),
                 Some(channel_id),
                 tmux,
@@ -1311,7 +1331,7 @@ mod tests {
             perform_resume_rebind(
                 &blocked_resume_pool,
                 Some(&blocked_resume_registry),
-                session_key,
+                &session_key,
                 Some(ProviderKind::Claude),
                 Some(channel_id),
                 tmux,

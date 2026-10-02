@@ -1032,3 +1032,43 @@ fn only_a_prompt_reclaims_and_only_on_a_complete_history() {
     assert_eq!(awaiting(&pane), Some(x.clone()), "[R5:incomplete]");
     assert_eq!(lines(), before, "[R5:incomplete] nothing is logged");
 }
+
+/// An in-session /resume to a session the pane never held moves the pane at its start, as a pin
+/// that reclaims nothing; a later prompt there still supersedes a late /clear Pending.
+#[test]
+fn an_interactive_resume_to_an_unseen_session_is_adopted_at_its_start() {
+    use crate::services::tui_prompt_dedupe::binding_events::binding_events_judged_since;
+    let lane = Lane::new();
+    let (c, b, old, x) = (uuid(), uuid(), uuid(), uuid());
+    let pane = Pane::new(&lane, 8_105, "r5-resume");
+    pane.chain(&[(&c, 20)]);
+    pane.file(&old);
+    http(&pane, "SessionStart", &old, Some("resume"), 15);
+    let refused = format!("rejected:{old}:regression");
+    assert_eq!(pane.kinds().last(), Some(&refused), "[R5:stale]");
+    assert_eq!(pane.bound(), Some(c.clone()), "[R5:stale]");
+
+    pane.file(&b);
+    let resumed = http(&pane, "SessionStart", &b, Some("resume"), 30);
+    let adopted = matches!(resumed, IngressOutcome::Durable(DurableKind::Adopted));
+    assert!(adopted, "[R5:resume] {resumed:?} {:?}", pane.naming(&b));
+    assert_eq!(pane.bound(), Some(b.clone()), "[R5:resume]");
+    let last = pane.log().pop().unwrap();
+    assert_eq!(
+        (kind(&last), last.cause),
+        (format!("source:{b}"), BindingCause::Resume),
+        "[R5:resume]"
+    );
+    let reclaims = |pane: &Pane| {
+        let judged = binding_events_judged_since(pane.channel, 0).unwrap();
+        judged.last().map(|(_, reclaims)| *reclaims)
+    };
+    assert_eq!(reclaims(&pane), Some(false), "[R5:resume_pin]");
+
+    http(&pane, "SessionStart", &x, Some("clear"), 40);
+    assert_eq!(awaiting(&pane), Some(x.clone()), "[R5:resume_reclaim]");
+    http(&pane, "UserPromptSubmit", &b, None, 45);
+    assert_eq!(awaiting(&pane), None, "[R5:resume_reclaim]");
+    assert_eq!(pane.bound(), Some(b.clone()), "[R5:resume_reclaim]");
+    assert_eq!(reclaims(&pane), Some(true), "[R5:resume_reclaim]");
+}

@@ -684,7 +684,7 @@ fn live_tmux(root: &Path) -> Guard {
     let stub = "#!/bin/bash\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    capture-pane) exit 1 ;;\n    list-panes) echo 0; exit 0 ;;\n  esac\ndone\nexit 0\n";
     fs::write(root.join("tmux"), stub).unwrap();
     fs::set_permissions(root.join("tmux"), fs::Permissions::from_mode(0o700)).unwrap();
-    Guard::set_path_after_shared_test_env_lock("PATH", root)
+    Guard::prepend_path_after_shared_test_env_lock(root)
 }
 
 /// Runs the production post-tail handoff of `tail` with a ready composer and returns what the bridge got.

@@ -504,6 +504,22 @@ pub(in crate::services::discord) async fn stop_active_turn(
     stop_active_turn_on(&target, provider, token, cleanup_policy, reason).await
 }
 
+/// [`stop_active_turn`], or for a force-kill whose verdict approved `Some(name)` (`None`: a process
+/// turn) a stop that reads no marker again and refuses a token naming another session.
+pub(in crate::services::discord) async fn stop_approved_turn(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    approved: Option<Option<&str>>,
+    cleanup_policy: TmuxCleanupPolicy,
+    reason: &str,
+) -> bool {
+    let target = match approved {
+        Some(approved) => StopTarget::approved(token, approved),
+        None => StopTarget::for_token(token),
+    };
+    stop_active_turn_on(&target, provider, token, cleanup_policy, reason).await
+}
+
 /// Every stage acts on `target`, never on a name the token holds by then.
 async fn stop_active_turn_on(
     target: &StopTarget,

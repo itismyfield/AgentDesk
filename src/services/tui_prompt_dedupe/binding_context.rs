@@ -495,7 +495,7 @@ pub(crate) mod tests {
         let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n";
         fs::write(root.join("tmux"), stub).unwrap();
         fs::set_permissions(root.join("tmux"), fs::Permissions::from_mode(0o700)).unwrap();
-        Guard::set_path_after_shared_test_env_lock("PATH", root)
+        Guard::prepend_path_after_shared_test_env_lock(root)
     }
     pub(crate) fn launch_failures(
         mut launch: impl FnMut(&str) -> Result<(), String>,
@@ -514,6 +514,24 @@ pub(crate) mod tests {
             );
         }
         assert!(!root.path().join("tmux.calls").exists());
+    }
+
+    /// Tests that spawn by bare name never take the env lock, so the fake tmux must
+    /// shadow `tmux` without hiding the system tools they run while it is installed.
+    #[test]
+    fn binding_context_fake_tmux_keeps_system_tools_resolvable() {
+        let (root, _env) = fixture();
+        let _tmux = fake_tmux(root.path());
+        let found = std::process::Command::new("sh")
+            .args(["-c", "sleep 0 && command -v tmux"])
+            .output()
+            .expect("sh must resolve from PATH while the fake tmux is installed");
+        assert!(found.status.success(), "{found:?}");
+        let stub = root.path().join("tmux");
+        assert_eq!(
+            String::from_utf8_lossy(&found.stdout).trim(),
+            stub.to_str().unwrap()
+        );
     }
 
     #[test]

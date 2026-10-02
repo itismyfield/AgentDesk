@@ -3,7 +3,6 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
-use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 
 use super::AppState;
@@ -19,8 +18,9 @@ pub use crate::server::dto::kanban::{
     RereviewBody, RetryCardBody, UpdateCardBody,
 };
 use crate::services::discord::host_teardown_gate::row_host_refusal;
-use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{ForceKillRow, TurnLifecycleTarget, force_kill_turn_for_row};
+use crate::services::turn_lifecycle::{
+    ForceKillVerdict, force_kill_row_verdict, force_kill_turn_with_verdict,
+};
 
 // ── Query / Body types ─────────────────────────────────────────
 
@@ -139,37 +139,25 @@ fn target_tmux_name(target: &kanban_db::ActiveTurnTarget) -> &str {
     key.split(':').last().unwrap_or(key)
 }
 
+/// Kills each session on the host verdict the revert took before its transition.
 async fn cancel_turn_targets(
     state: &AppState,
-    pool: &sqlx::PgPool,
-    targets: &[kanban_db::ActiveTurnTarget],
+    verdicts: Vec<(&kanban_db::ActiveTurnTarget, ForceKillVerdict)>,
     reason: &str,
 ) {
-    for target in targets {
-        let tmux_name = target_tmux_name(target).to_string();
-        let (session_key, stored_provider) = (&target.session_key, target.provider.as_deref());
-        let row = ForceKillRow {
-            pool,
-            session_key,
-            stored_provider,
-        };
-        let lifecycle = force_kill_turn_for_row(
-            state.health_registry.as_deref(),
-            &TurnLifecycleTarget {
-                provider: target.provider.as_deref().and_then(ProviderKind::from_str),
-                channel_id: target
-                    .thread_channel_id
-                    .as_deref()
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(ChannelId::new),
-                tmux_name: tmux_name.clone(),
-            },
-            row,
-            reason,
-            "kanban_backlog_revert",
-        )
-        .await;
-
+    for (target, verdict) in verdicts {
+        let registry = state.health_registry.as_deref();
+        let kill = force_kill_turn_with_verdict(registry, verdict, reason, "kanban_backlog_revert");
+        let lifecycle = kill.await;
+        let tmux_name = target_tmux_name(target);
+        if lifecycle.host_guard_kept() {
+            tracing::error!(
+                session_key = %target.session_key,
+                tmux_name,
+                "[kanban] backlog revert ran a kill its own pre-check kept"
+            );
+            continue;
+        }
         tracing::info!(
             "[kanban] cancelled live turn during backlog revert: session={}, tmux={}, killed={}, lifecycle={}",
             target.session_key,
@@ -190,8 +178,8 @@ pub(crate) async fn transition_card_to_backlog_with_cleanup(
     })?;
     let turn_targets = kanban_db::load_active_turn_targets_for_card_pg(pool, card_id).await?;
     // The revert idles and detaches every live session of the card, so one session whose
-    // host is not confirmed legacy tmux refuses the whole revert before anything changes.
-    let mut refusals = Vec::new();
+    // row or kill the host guard keeps refuses the whole revert before anything changes.
+    let (mut refusals, mut verdicts) = (Vec::new(), Vec::new());
     for target in &turn_targets {
         let (key, provider) = (&target.session_key, target.provider.as_deref());
         let (channel, name) = (
@@ -199,7 +187,17 @@ pub(crate) async fn transition_card_to_backlog_with_cleanup(
             target_tmux_name(target),
         );
         let caller = "kanban_backlog_revert";
-        refusals.extend(row_host_refusal(pool, provider, channel, key, name, caller).await);
+        let refusal = row_host_refusal(pool, provider, channel, key, name, caller).await;
+        let registry = state.health_registry.as_deref();
+        let verdict = force_kill_row_verdict(registry, pool, provider, channel, key, name).await;
+        match refusal {
+            Some(refusal) => refusals.push(refusal),
+            None if verdict.kept() => {
+                refusals.push(format!("`{name}` is kept by the force-kill host guard"))
+            }
+            None => {}
+        }
+        verdicts.push((target, verdict));
     }
     if !refusals.is_empty() {
         anyhow::bail!("backlog revert refused: {}", refusals.join("; "));
@@ -220,7 +218,7 @@ pub(crate) async fn transition_card_to_backlog_with_cleanup(
     )
     .await
     .map(|(result, _)| result)?;
-    cancel_turn_targets(state, pool, &turn_targets, "kanban backlog revert").await;
+    cancel_turn_targets(state, verdicts, "kanban backlog revert").await;
     Ok(result)
 }
 

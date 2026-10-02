@@ -365,3 +365,54 @@ async fn a_first_pin_on_an_incomplete_history_does_not_reclaim_the_pane() {
     );
     halt(stop, task).await;
 }
+
+/// Launch A, the pane clears to C, then an in-session /resume to B, never held: the pane moves to
+/// B at its start, and O holds B's rows, history and new alike, until an operator resolves it.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_adopted_resume_holds_its_rows_until_an_operator_resolves() {
+    use crate::services::tui_o::store::rotation::ResolveFrom;
+    let [a, b, c] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
+    let (harness, a_path) = launched(&a);
+    let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
+    let pane = ProducerPane::launch(&a, &a_path);
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    std::fs::write(path(&c), session_row(&c)).unwrap();
+    pane.http("SessionStart", Some("clear"), &a, &c, &path(&c), 10);
+    pane.http("UserPromptSubmit", None, &a, &c, &path(&c), 11);
+    let past = [session_row(&b), row("p1", "past 1"), row("p2", "past 2")].concat();
+    std::fs::write(path(&b), &past).unwrap();
+    pane.http("SessionStart", Some("resume"), &a, &b, &path(&b), 30);
+    append(&path(&b), &row("n1", "b out"));
+    polls(6).await;
+    let b_source = source_id_for(&b, &path(&b)).unwrap();
+    let rotation = harness.channel().rotation().unwrap();
+    let boundary = rotation.link(&b_source).map(|link| link.boundary.clone());
+    let held = Some(Boundary::Pending {
+        candidates: vec![0],
+    });
+    assert_eq!(boundary, held, "[R5:resume_held] bound {:?}", pane.bound());
+    let pending = WriterAlarm::BoundaryPending {
+        source: b_source.clone(),
+    };
+    let alarms = harness.alarms.taken();
+    let raised = alarms.iter().filter(|alarm| **alarm == pending).count();
+    assert_eq!(raised, 1, "[R5:resume_held] {alarms:?}");
+    assert!(harness.port.posts().is_empty(), "[R5:resume_held] posts");
+    let spooled = harness.channel().retained_segments(&b_source);
+    assert!(spooled > 0, "[R5:resume_held] spool");
+    halt(stop, task).await;
+
+    let from = ResolveFrom::Offset(past.len() as u64);
+    let b_path = path(&b).display().to_string();
+    let resolved = harness
+        .store
+        .record_boundary_resolved(CHANNEL, &b_path, &from, "op");
+    assert!(resolved.is_ok(), "[R5:resume_resolved] {resolved:?}");
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(6).await;
+    assert_eq!(harness.port.posts(), ["b out"], "[R5:resume_resolved]");
+    halt(stop, task).await;
+}

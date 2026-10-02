@@ -35,6 +35,16 @@ impl TestEnvVarGuard {
         guard
     }
 
+    /// Put `dir` in front of `PATH` while the caller owns the shared env lock. The system
+    /// dirs stay, because tests that spawn `sh`/`sleep`/`python3` by name run unlocked.
+    #[cfg(unix)]
+    pub(crate) fn prepend_path_after_shared_test_env_lock(dir: &std::path::Path) -> Self {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&inherited));
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        Self::set_value_after_shared_test_env_lock("PATH", &joined)
+    }
+
     pub(crate) fn capture_after_shared_test_env_lock(key: &'static str) -> Self {
         Self {
             _lock: None,

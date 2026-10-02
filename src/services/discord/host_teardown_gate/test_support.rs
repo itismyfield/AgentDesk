@@ -58,6 +58,11 @@ pub(crate) async fn runtime(pool: &PgPool) -> (Arc<SharedData>, Arc<HealthRegist
     (shared, registry)
 }
 
+/// Limits `shared` to the `allowed` channels; an empty list lets it take any channel.
+pub(crate) async fn allow_channels(shared: &SharedData, allowed: &[u64]) {
+    shared.settings.write().await.allowed_channel_ids = allowed.to_vec();
+}
+
 /// The key the channel's turns write for `tmux_name`.
 pub(crate) fn channel_key(shared: &SharedData, tmux_name: &str) -> String {
     let provider = ProviderKind::Claude;
@@ -183,4 +188,76 @@ pub(crate) fn inflight_needing_backfill(channel_id: ChannelId) -> std::path::Pat
     raw.as_object_mut().unwrap().remove("finalizer_turn_id");
     std::fs::write(&path, raw.to_string()).unwrap();
     path
+}
+
+/// Makes `shared` run `tmux_name` on `channel_id` (watcher, session, with `busy` a turn); with
+/// `hosted`, the channel's row under the runtime's hash is a bound Herdr record for that name.
+pub(crate) async fn running_session(
+    shared: &SharedData,
+    pool: &PgPool,
+    channel_id: ChannelId,
+    tmux_name: &str,
+    busy: bool,
+    hosted: Option<&str>,
+) {
+    if busy {
+        busy_turn(shared, channel_id, tmux_name).await;
+    }
+    crate::services::discord::register_resume_watcher_for_tests(shared, channel_id, tmux_name);
+    let base = tmux_name
+        .strip_prefix("AgentDesk-claude-")
+        .expect("a claude name");
+    let session = crate::services::discord::DiscordSession {
+        session_id: Some(format!("{base}-sid")),
+        memento_context_loaded: false,
+        memento_reflected: false,
+        current_path: None,
+        history: Vec::new(),
+        pending_uploads: Vec::new(),
+        cleared: false,
+        remote_profile_name: None,
+        channel_id: Some(channel_id.get()),
+        channel_name: Some(base.to_string()),
+        category_name: None,
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: 0,
+    };
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .insert(channel_id, session);
+    let Some(hosted) = hosted else {
+        return;
+    };
+    let (key, channel) = (channel_key(shared, hosted), channel_id.get());
+    let bound = wire(&record(
+        &owner(&channel.to_string()),
+        "n1",
+        HostedState::Bound,
+    ));
+    let hash = &shared.token_hash;
+    inflight::seed_session_row_hashed(pool, &key, channel, hash, Some(bound)).await;
+}
+
+/// Everything a stop on `channel_id` changes in `shared`: the mailbox turn and its token, the
+/// active-turn counter, the watcher, the session's provider id and the inflight row's bytes.
+pub(crate) async fn runtime_state(shared: &SharedData, channel_id: ChannelId) -> String {
+    use std::sync::atomic::Ordering::SeqCst;
+    let snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+    let token = snapshot.cancel_token.as_ref();
+    let cancelled = token.map(|token| token.cancelled.load(SeqCst));
+    let active = shared.restart.global_active.load(SeqCst);
+    let watcher = shared.tmux_watchers.channel_binding(&channel_id);
+    let watcher = watcher.map(|binding| binding.tmux_session_name);
+    let data = shared.core.lock().await;
+    let session = data.sessions.get(&channel_id);
+    let session = session.map(|session| (session.session_id.clone(), session.channel_name.clone()));
+    let root = inflight::inflight_runtime_root().expect("inflight root");
+    let path = inflight::inflight_state_path(&root, &ProviderKind::Claude, channel_id.get());
+    let bytes = std::fs::read(path).ok();
+    let mailbox = (snapshot.active_user_message_id, cancelled);
+    format!("{:?}", (mailbox, active, watcher, session, bytes))
 }
