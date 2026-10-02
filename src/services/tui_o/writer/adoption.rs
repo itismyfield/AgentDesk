@@ -471,8 +471,8 @@ pub fn pin(
     pin_at(legacy, events, channel, At::Cursor)
 }
 
-/// As `pin`, starting the current source where `at` says. A pin at the end checks the frontier
-/// before the turn, so an open turn it reports already has a frontier on a record within the end.
+/// As `pin`, starting the current source where `at` says. The frontier is checked before the turn,
+/// so an open turn either pin reports already has a frontier on a record within its start.
 pub fn pin_at(
     legacy: &dyn LegacyView,
     events: &[BindingEvent],
@@ -530,9 +530,6 @@ pub fn pin_at(
         let detail = format!("a turn after {} is still open", turns.closed_at);
         Refused::new(Hold::OpenTurn(head.version()), detail)
     };
-    if turns.open && at == At::Cursor {
-        return Err(open());
-    }
     if !turns.frontier_on_line || frontier > start {
         let (read, tmux) = (head.version(), tmux.clone());
         let detail = format!("frontier {frontier} ends no record within ..={start}");

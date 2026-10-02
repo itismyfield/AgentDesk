@@ -213,6 +213,23 @@ async fn a_cursor_that_cannot_be_waited_out_leaves_the_channel_to_legacy_at_boot
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_open_turn_at_the_cursor_waits_only_on_a_sound_frontier() {
+    let open = row("m0", "open");
+    let end = open.len() as u64;
+    for (why, frontier) in [("inside a record", 5), ("past the end", end + 1)] {
+        let stalled = Stalled::new(&open, end, Some(frontier), Custody::Row);
+        let _tasks = stalled.start();
+        polls(3).await;
+        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert!(!stalled.harness.store.has_channel_dir(CHANNEL), "{why}");
+    }
+    let stalled = Stalled::new(&open, end, Some(0), Custody::Row);
+    let _tasks = stalled.start();
+    polls(3).await;
+    stalled.assert_waiting("an open turn with a sound frontier");
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_inflight_row_alone_does_not_keep_legacy_busy_but_an_active_custody_does() {
     let open = Open::new();
     let _tasks = open.start().await;
@@ -383,4 +400,65 @@ async fn a_stalled_adoption_refused_under_the_lock_reports_nothing_and_waits_aga
     stalled.assert_waiting("the stall started over");
     tokio::time::sleep(3 * MINUTE).await;
     stalled.assert_adopted_at_end(Some(0)).await;
+}
+
+/// Legacy moves right before the lock of the adoption its stall ended in: nothing commits, and a
+/// new stall from the move ends in an adoption reporting from `abandoned`.
+async fn moved_before_the_lock(stalled: Stalled, nudge: fn(&Behind), abandoned: u64) {
+    let legacy = Arc::clone(&stalled.legacy);
+    let reached = hook_reached(Step::BeforeLock, move || nudge(&legacy));
+    let _tasks = stalled.start();
+    tokio::time::sleep(41 * MINUTE).await;
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "the stall ended in an adoption"
+    );
+    stalled.assert_waiting("Legacy moved before the lock");
+    tokio::time::sleep(38 * MINUTE).await;
+    stalled.assert_waiting("a new stall started");
+    tokio::time::sleep(3 * MINUTE).await;
+    stalled.assert_adopted_at_end(Some(abandoned)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_redrive_episode_starting_right_before_the_lock_restarts_the_stall() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a_redrive_episode_starting_right_before_the_lock_restarts_the_stall"
+    )) {
+        return;
+    }
+    let nudge: fn(&Behind) = |legacy| {
+        legacy.reconnects.fetch_add(1, Ordering::SeqCst);
+    };
+    moved_before_the_lock(Stalled::dead_tail(), nudge, 0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cursor_moving_right_before_the_lock_restarts_the_stall() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a_cursor_moving_right_before_the_lock_restarts_the_stall"
+    )) {
+        return;
+    }
+    moved_before_the_lock(Stalled::dead_tail(), |legacy| legacy.at(0), 0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delivery_right_before_the_lock_restarts_the_stall() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a_delivery_right_before_the_lock_restarts_the_stall"
+    )) {
+        return;
+    }
+    let first = row("m0", "delivered late");
+    let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
+    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let nudge: fn(&Behind) = |legacy| {
+        let delivered = row("m0", "delivered late").len() as u64;
+        *legacy.frontier.lock().unwrap() = Some(delivered);
+    };
+    moved_before_the_lock(stalled, nudge, first.len() as u64).await;
 }

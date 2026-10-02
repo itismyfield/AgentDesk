@@ -195,20 +195,21 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         }
         seq = events.last().map_or(0, |event| event.seq);
         (pinned_at, read_at) = (Instant::now(), version);
-        let snapshot = 'read: {
+        // A stall that ran out is still checked under the lock, as Legacy may move before it.
+        let (snapshot, ended) = 'read: {
             if expired && let Some(clock) = stall.take() {
                 tracing::info!(
                     channel,
                     "[tui_o] Legacy stayed behind; O starts at the source's end"
                 );
-                break 'read clock.snapshot;
+                break 'read (clock.snapshot, Some(clock.epoch));
             }
             let legacy = Arc::clone(&waiting.legacy);
             let pinned = pin(Arc::clone(&legacy), Ok(events.clone()), channel, At::Cursor).await;
             // Unlike a boot, Legacy may still send a record past its frontier.
             let (mut again, end) = match pinned {
                 Ok(snapshot) => match snapshot.owed() {
-                    None => break 'read snapshot,
+                    None => break 'read (snapshot, None),
                     Some(again) => (again, Some(Ok(snapshot))),
                 },
                 Err(again) if matches!(again.hold, Hold::Cursor { .. }) => {
@@ -243,7 +244,15 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         stall = None;
         let mut rechecked = None;
         let sources = || {
-            let sources = snapshot.recheck(&*waiting.legacy, waiting.log, channel);
+            let legacy = &*waiting.legacy;
+            let moved = ended.as_ref().is_some_and(|epoch| {
+                !snapshot.unchanged(legacy, channel) || legacy.epoch(channel) != *epoch
+            });
+            let sources = if moved {
+                Err(Refused::retry("Legacy moved before O took the channel"))
+            } else {
+                snapshot.recheck(legacy, waiting.log, channel)
+            };
             sources.map_err(|refused| {
                 let detail = refused.to_string();
                 rechecked = Some(refused);
