@@ -125,8 +125,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `COKACDIR_DEBUG` | `src/services/claude.rs:267` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs:1143` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:979` |  |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1374` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1375` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
+| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1382` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
+| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1383` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
 | `HOME` | `src/cli/doctor/orchestrator.rs:467` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |
