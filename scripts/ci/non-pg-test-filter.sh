@@ -85,6 +85,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
   --skip services::auto_queue::route::command::reset_run_scope_pg_tests
   --skip services::auto_queue::route::command::tests
+  --skip services::auto_queue::route::dispatch_query::generate_conflict_tests
   --skip services::auto_queue::route::fsm::tests
   --skip services::auto_queue::route::phase_gate::tests
   --skip services::auto_queue::route::planning::record_entry_dispatch_failure_tests

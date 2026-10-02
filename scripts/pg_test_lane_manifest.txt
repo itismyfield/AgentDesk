@@ -65,6 +65,7 @@ src/services/auto_queue/activate_command.rs
 src/services/auto_queue/cancel_run.rs
 src/services/auto_queue/cleanup_tasks_pg_tests.rs
 src/services/auto_queue/command.rs
+src/services/auto_queue/dispatch_query.rs
 src/services/auto_queue/fsm.rs
 src/services/auto_queue/phase_gate.rs
 src/services/auto_queue/planning.rs
@@ -239,6 +240,7 @@ services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tes
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
 services::auto_queue::route::command::reset_run_scope_pg_tests
 services::auto_queue::route::command::tests
+services::auto_queue::route::dispatch_query::generate_conflict_tests
 services::auto_queue::route::fsm::tests
 services::auto_queue::route::phase_gate::tests
 services::auto_queue::route::planning::record_entry_dispatch_failure_tests
@@ -849,6 +851,7 @@ services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_ev
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_non_live_run_linked_to_live_dispatch_pg
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_non_live_run_with_dispatched_entry_pg
 services::auto_queue::route::command::tests::reopen_and_force_pause_share_multi_run_advisory_order_pg
+services::auto_queue::route::dispatch_query::generate_conflict_tests::an_unstarted_run_blocks_a_second_generate_in_its_scope
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg

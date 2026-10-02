@@ -54,14 +54,9 @@ export default function AutoQueuePanel({
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
   const suppressedRunIdRef = useRef<string | null>(null);
-  // Generate stays locked until a status read that started after generate settled
-  // shows a run it made, or any new run when a request's outcome is unknown.
-  const generateHoldRef = useRef<{
-    runIds: Set<string>;
-    uncertain: boolean;
-    before: string | null;
-    settledAt: number;
-  } | null>(null);
+  // Only the newest status read is applied, and work started for another repo or agent is dropped.
+  const statusSeqRef = useRef(0);
+  const scopeSeqRef = useRef(0);
 
   const resetPanelState = useCallback(() => {
     setStatus(createEmptyAutoQueueStatus());
@@ -73,10 +68,10 @@ export default function AutoQueuePanel({
   }, []);
 
   const fetchStatus = useCallback(async () => {
-    const hold = generateHoldRef.current;
-    const requestedAt = Date.now();
+    const seq = ++statusSeqRef.current;
     try {
-      const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId, { fresh: hold !== null });
+      const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId, { fresh: true });
+      if (seq !== statusSeqRef.current) return;
       const normalized = normalizeAutoQueueStatus(s, suppressedRunIdRef.current);
       if (shouldClearSuppressedAutoQueueRun(s, suppressedRunIdRef.current)) {
         suppressedRunIdRef.current = null;
@@ -84,27 +79,14 @@ export default function AutoQueuePanel({
       setStatus(normalized);
       // Only reset noReadyCards when a run with entries exists
       if (!normalized.run || normalized.entries.length > 0) setNoReadyCards(false);
-      if (
-        hold &&
-        generateHoldRef.current === hold &&
-        requestedAt >= hold.settledAt &&
-        s.run &&
-        (hold.runIds.has(s.run.id) || (hold.uncertain && s.run.id !== hold.before))
-      ) {
-        generateHoldRef.current = null;
-        setGenerating(false);
-      }
     } catch {
       // silent
     }
   }, [selectedRepo, selectedAgentId]);
 
   useEffect(() => {
-    // A lock taken for another repo or agent cannot be confirmed from this one.
-    if (generateHoldRef.current) {
-      generateHoldRef.current = null;
-      setGenerating(false);
-    }
+    scopeSeqRef.current += 1;
+    setGenerating(false);
     void fetchStatus();
     const timer = setInterval(() => void fetchStatus(), 30_000);
     return () => clearInterval(timer);
@@ -135,11 +117,9 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = null;
 
-    const before = status?.run?.id ?? null;
+    const scope = scopeSeqRef.current;
     const failures: string[] = [];
     const partial: string[] = [];
-    const runIds = new Set<string>();
-    let uncertain = false;
     for (const { repo, agentId, issueNumbers } of groups) {
       const label = getAgentLabel(agentId);
       try {
@@ -147,16 +127,18 @@ export default function AutoQueuePanel({
         const skipped = describeGenerateSkips(result, tr);
         if (!result.run) failures.push(`${label}: ${result.message ?? "-"}${skipped ? ` (${skipped})` : ""}`);
         else if (skipped) partial.push(`${label}: ${skipped}`);
-        // Only runs this panel's status scope can show are waited for.
-        if (result.run && repo === selectedRepo && (!selectedAgentId || agentId === selectedAgentId)) {
-          runIds.add(result.run.id);
-        }
       } catch (e) {
-        // Only a 4xx proves nothing was made; a timeout or 5xx may have made a run.
-        if (!(e instanceof api.ApiRequestError && e.status < 500)) uncertain = true;
-        failures.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+        // The server refuses a second unstarted queue in one scope, so a retry cannot duplicate one.
+        const reason =
+          e instanceof api.ApiRequestError && e.status === 409
+            ? tr("이미 큐가 있습니다. 다시 만들려면 먼저 초기화하세요", "a queue already exists; reset it to generate again")
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        failures.push(`${label}: ${reason}`);
       }
     }
+    if (scope !== scopeSeqRef.current) return;
     const messages: string[] = [];
     if (failures.length > 0) {
       messages.push(tr(`큐를 만들지 못했습니다: ${failures.join(", ")}`, `Queue not created: ${failures.join(", ")}`));
@@ -164,21 +146,9 @@ export default function AutoQueuePanel({
     if (partial.length > 0) {
       messages.push(tr(`큐에 넣지 않은 카드: ${partial.join(", ")}`, `Cards left out: ${partial.join(", ")}`));
     }
-    if (uncertain) {
-      messages.push(
-        tr(
-          "응답이 없던 요청이 큐를 만들었을 수 있어, 새 큐가 보일 때까지 생성을 잠급니다. 계속 잠겨 있으면 새로고침해 확인하세요.",
-          "A request that got no answer may have created a queue, so Generate stays locked until a new queue shows. Reload to check if it stays locked.",
-        ),
-      );
-    }
     if (messages.length > 0) setError(messages.join(" · "));
-    if (runIds.size > 0 || uncertain) {
-      generateHoldRef.current = { runIds, uncertain, before, settledAt: Date.now() };
-    } else {
-      setGenerating(false);
-    }
     await fetchStatus();
+    if (scope === scopeSeqRef.current) setGenerating(false);
   };
 
   const handleReset = async () => {
