@@ -1080,24 +1080,6 @@ fn revalidate_and_clear_explicit_background_inflight(
     }
 }
 
-pub async fn hard_stop_runtime_turn(
-    registry: Option<&HealthRegistry>,
-    provider_name: Option<&str>,
-    channel_id: Option<u64>,
-    tmux_name: Option<&str>,
-    stop_source: &'static str,
-) -> HardStopRuntimeResult {
-    runtime_turn_cleanup_by_lookup(
-        registry,
-        provider_name,
-        channel_id,
-        tmux_name,
-        stop_source,
-        true,
-    )
-    .await
-}
-
 pub async fn clear_idle_tmux_stale_turn(
     registry: &HealthRegistry,
     provider_name: &str,

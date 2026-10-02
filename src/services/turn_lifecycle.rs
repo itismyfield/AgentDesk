@@ -423,32 +423,20 @@ async fn stop_turn_with_policy(
         }
     }
 
-    // Some callers only know the tmux session name. When the canonical
-    // provider/channel path cannot resolve, fall back to mailbox cleanup by
-    // tmux lookup. Force-kill tears down watcher ownership; preserve-session
-    // stops clear active-turn state while leaving watcher lifetime to tmux.
+    // A preserve stop that only knows the tmux name clears the runtime turn found by that name.
+    // A force-kill never looks a runtime up by name: with none approved it acts on its row only.
     if lifecycle_path == DIRECT_FALLBACK_PATH
+        && !cleanup_tmux
         && let Some(registry) = health_registry
     {
-        let hard_stop = if cleanup_tmux {
-            crate::services::discord::health::hard_stop_runtime_turn(
-                Some(registry),
-                target.provider.as_ref().map(|provider| provider.as_str()),
-                target.channel_id.map(|channel_id| channel_id.get()),
-                Some(&target.tmux_name),
-                "turn_lifecycle_direct_fallback",
-            )
-            .await
-        } else {
-            crate::services::discord::health::stop_runtime_turn_preserving_watcher(
-                Some(registry),
-                target.provider.as_ref().map(|provider| provider.as_str()),
-                target.channel_id.map(|channel_id| channel_id.get()),
-                Some(&target.tmux_name),
-                "turn_lifecycle_preserve_direct_fallback",
-            )
-            .await
-        };
+        let hard_stop = crate::services::discord::health::stop_runtime_turn_preserving_watcher(
+            Some(registry),
+            target.provider.as_ref().map(|provider| provider.as_str()),
+            target.channel_id.map(|channel_id| channel_id.get()),
+            Some(&target.tmux_name),
+            "turn_lifecycle_preserve_direct_fallback",
+        )
+        .await;
         if hard_stop.cleanup_path != "runtime_unavailable_fallback" {
             lifecycle_path = hard_stop.cleanup_path;
         }
@@ -502,17 +490,13 @@ async fn stop_turn_with_policy(
             && !crate::services::platform::tmux::has_session(&probe_session_owned)
     };
 
+    // Only the target's own channel row: a row found by tmux name may be another runtime's.
     let inflight_cleared = if runtime_persistent_inflight_cleared {
         true
     } else if cleanup_policy.should_clear_inflight() {
-        target.provider.as_ref().is_some_and(|provider| {
-            let cleared_by_tmux = clear_inflight_by_tmux_name(provider, &target.tmux_name);
-            let cleared_by_channel = target
-                .channel_id
-                .is_some_and(|channel_id| clear_inflight_by_channel(provider, channel_id));
-
-            cleared_by_tmux || cleared_by_channel
-        })
+        let keys = (target.provider.as_ref(), target.channel_id);
+        let clear = |(provider, channel_id)| clear_inflight_by_channel(provider, channel_id);
+        keys.0.zip(keys.1).is_some_and(clear)
     } else {
         false
     };
@@ -958,17 +942,6 @@ fn kept_by_host_guard(tmux_session_observed: Option<String>) -> TurnLifecycleSto
     }
 }
 
-/// Scan inflight directory for the provider and delete the file matching the
-/// given tmux session.
-///
-/// Thin wrapper that delegates to the single-owner implementation in
-/// `services::discord::inflight` (see `docs/recovery-paths.md` — inflight
-/// cleanup SSoT, issue #1074). Kept as a function rather than inlined so that
-/// existing call sites in this module continue to read naturally.
-pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
-    crate::services::discord::clear_inflight_by_tmux_name(provider, tmux_name)
-}
-
 fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> bool {
     crate::services::discord::clear_inflight_state(provider, channel_id.get())
 }
@@ -1152,5 +1125,64 @@ mod host_guard_tests {
         assert!(!stop_recorded(channel), "no stop is recorded");
         pool.close().await;
         db.drop().await;
+    }
+
+    // A kill carries out its verdict: a marker that turns Herdr after the verdict does not make
+    // the cleanup judge the host again, while a cleanup with no verdict still reads it.
+    #[test]
+    fn force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg() {
+        use crate::services::provider::cancel_token_cleanup::executor::{
+            CleanupRequest, TmuxCleanupIntent, tmux_kill_dispatches_for_test,
+            with_executor_dispatch_seam,
+        };
+        // The runtime root (env lock) comes before the dispatch seam, as in the stop host tests.
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let mut executor = tokio::runtime::Builder::new_current_thread();
+        let executor = executor.enable_all().build().unwrap();
+        with_executor_dispatch_seam(|| {
+            executor.block_on(async {
+                let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+                let pool = db.connect_and_migrate().await;
+                let (shared, registry) = runtime(&pool).await;
+                let channel = ChannelId::new(1_479_671_301_387_059_950);
+                let name = "AgentDesk-claude-p4r-marker-after";
+                let key = channel_key(&shared, name);
+                seed(&pool, &key, name, channel.get(), Stored::Legacy).await;
+                busy_turn(&shared, channel, name).await;
+                let target = TurnLifecycleTarget {
+                    provider: Some(ProviderKind::Claude),
+                    channel_id: Some(channel),
+                    tmux_name: name.to_string(),
+                };
+                let verdict = force_kill_verdict(Some(&registry), &target, None).await;
+                assert!(!verdict.kept(), "the legacy session is admitted");
+                let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
+                std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+                std::fs::write(&marker, "herdr").unwrap();
+                let kills = tmux_kill_dispatches_for_test();
+                let kill = force_kill_turn_with_verdict(Some(&registry), verdict, "marker", "p4r");
+                assert!(!kill.await.host_guard_kept());
+                let dispatched = tmux_kill_dispatches_for_test() - kills;
+                assert_eq!(
+                    dispatched, 1,
+                    "the approved session is killed once, by its cleanup"
+                );
+                let other = crate::services::provider::CancelToken::new();
+                other.bind_unmanaged_session_name(name);
+                let outcome = other.request_cleanup(CleanupRequest {
+                    cancel_source: "no verdict".to_string(),
+                    intent: TmuxCleanupIntent::CleanupSession,
+                    termination_reason: Some("p4r"),
+                    hard_stop_target: None,
+                });
+                assert!(
+                    outcome.host_refused,
+                    "a cleanup with no verdict still reads the marker"
+                );
+                assert_eq!(tmux_kill_dispatches_for_test() - kills, 1);
+                pool.close().await;
+                db.drop().await;
+            })
+        });
     }
 }

@@ -97,10 +97,10 @@ pub use recovery::{
     PostCancelDrainOutcome, ProviderMailboxState, RuntimeTurnStopResult,
     clear_idle_tmux_stale_turn, clear_provider_channel_runtime,
     finish_cancelled_provider_channel_mailbox, force_kill_provider_channel_runtime,
-    handle_rebind_inflight, handle_relay_recovery, hard_stop_runtime_turn,
-    provider_channel_mailbox_state, resolve_tmux_session_for_cancel,
-    schedule_pending_queue_drain_after_cancel, snapshot_pending_queue_state, spawn_stall_watchdog,
-    spawn_watchdog, stop_providerless_runtime_turn_preserving_watcher_strict_ownership,
+    handle_rebind_inflight, handle_relay_recovery, provider_channel_mailbox_state,
+    resolve_tmux_session_for_cancel, schedule_pending_queue_drain_after_cancel,
+    snapshot_pending_queue_state, spawn_stall_watchdog, spawn_watchdog,
+    stop_providerless_runtime_turn_preserving_watcher_strict_ownership,
     stop_runtime_turn_preserving_watcher,
 };
 pub(crate) use recovery::{

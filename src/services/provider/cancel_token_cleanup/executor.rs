@@ -30,6 +30,23 @@ pub(crate) struct CleanupRequest {
     pub(crate) hard_stop_target: Option<CapturedProcess>,
 }
 
+/// The binding a stop decided on; a destructive cleanup kills only while the token still names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpectedBinding<'a> {
+    /// The stop's own target: its `.host_kind` marker must still admit tmux.
+    Decided(Option<&'a str>),
+    /// A force-kill verdict's session, whose host, marker included, that verdict already read.
+    Approved(Option<&'a str>),
+}
+
+impl<'a> ExpectedBinding<'a> {
+    fn name(self) -> Option<&'a str> {
+        match self {
+            Self::Decided(name) | Self::Approved(name) => name,
+        }
+    }
+}
+
 /// Observable result of a cleanup request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CleanupOutcome {
@@ -60,7 +77,7 @@ impl CancelToken {
     pub(crate) fn request_cleanup_expecting(
         &self,
         request: CleanupRequest,
-        expected: Option<&str>,
+        expected: ExpectedBinding<'_>,
     ) -> CleanupOutcome {
         self.request_cleanup_inner(request, Some(expected))
     }
@@ -68,7 +85,7 @@ impl CancelToken {
     fn request_cleanup_inner(
         &self,
         request: CleanupRequest,
-        expected: Option<Option<&str>>,
+        expected: Option<ExpectedBinding<'_>>,
     ) -> CleanupOutcome {
         #[cfg(test)]
         REQUESTED_INTENTS.with(|intents| intents.borrow_mut().push(request.intent));
@@ -129,7 +146,7 @@ impl CancelToken {
         &self,
         request: CleanupRequest,
         binding: Option<TmuxBinding>,
-        expected: Option<Option<&str>>,
+        expected: Option<ExpectedBinding<'_>>,
         authorization: KillAuthorizationState,
         guard: Option<SessionKillGuard>,
     ) -> CleanupOutcome {
@@ -139,9 +156,13 @@ impl CancelToken {
         let name = binding.as_ref().map(TmuxBinding::name);
         // Checked before either claim, so a refused host leaves both kills untaken.
         let destructive = !matches!(request.intent, TmuxCleanupIntent::PreserveSession);
-        let moved = destructive && expected.is_some_and(|expected| expected != name);
+        let moved = destructive && expected.is_some_and(|expected| expected.name() != name);
+        // A force-kill's verdict judged the host once; every other cleanup reads the marker here.
+        let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
         let marker = crate::services::discord::admin_host_guard::marker_refusal;
-        let refusal = name.filter(|_| destructive && !moved).and_then(marker);
+        let refusal = name
+            .filter(|_| destructive && !moved && !judged)
+            .and_then(marker);
         if moved || refusal.is_some() {
             let source = &request.cancel_source;
             tracing::warn!(?name, ?expected, ?refusal, %source, "cleanup refused before any kill");

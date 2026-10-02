@@ -1507,3 +1507,52 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// A force-kill of a legacy row with no thread channel acts on that row only: a runtime whose
+/// channel session carries the same tmux name under a Herdr row keeps its turn and watcher.
+#[tokio::test(flavor = "current_thread")]
+async fn force_kill_of_a_channelless_row_leaves_a_runtime_holding_its_name_pg() {
+    use crate::services::discord::host_teardown_gate::test_support as host;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _root_guard = set("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let mut state = test_state(pool.clone());
+    let (shared, registry) = host::runtime(&pool).await;
+    state.health_registry = Some(registry);
+    let host_name = crate::services::platform::hostname_short();
+    for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
+        .into_iter()
+        .enumerate()
+    {
+        let tmux = TmuxEnv::install(condition);
+        let name = format!("AgentDesk-claude-p4r-nochannel-{round}");
+        let key = format!("{host_name}:{name}");
+        let sql = "INSERT INTO sessions (session_key, provider, status, last_heartbeat)
+                   VALUES ($1, 'claude', 'turn_active', NOW())";
+        exec(&pool, sql, &[Some(key.as_str())]).await;
+        let channel = 1_479_671_301_387_071_000 + round as u64;
+        let channel = poise::serenity_prelude::ChannelId::new(channel);
+        host::running_session(&shared, &pool, channel, &name, true, Some(&name)).await;
+        let before = untouched(&pool, &shared, channel, &name, &[]).await;
+        let kill = super::force_kill_session_impl_with_reason(&state, &key, false, "operator");
+        let (status, Json(body)) = kill.await;
+        let case = format!("{condition:?}: {status} {body}");
+        let after = untouched(&pool, &shared, channel, &name, &[]).await;
+        assert_eq!(
+            after, before,
+            "{case}: the runtime holding the name is untouched"
+        );
+        assert!(
+            !host::stop_recorded(channel),
+            "{case}: no stop on its channel"
+        );
+        let calls = tmux.take_calls();
+        let killed = calls.iter().any(|call| call.starts_with("kill-session"));
+        assert!(!killed, "{case}: no tmux kill {calls:?}");
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}
