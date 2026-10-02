@@ -3,6 +3,7 @@ import { getCampaigns, type Campaign, type CampaignLive, type CampaignNodeLive }
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
 import { WidgetState } from "../common/WidgetState";
+import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
 import { campaignProgress } from "./campaignModel";
 import { Badge, type Tr } from "./campaignPresentation";
 import CampaignExplorer from "./CampaignExplorer";
@@ -27,19 +28,20 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
+  const [checkedRead, setCheckedRead] = useState<number | null>(null);
   const mounted = useRef(false);
   const requestId = useRef(0);
   const refresh = useCallback(async () => {
     const id = ++requestId.current;
     setLoading(true);
     try {
-      const { campaigns: values, live: nextLive } = await getCampaigns();
+      const { campaigns: values, live: nextLive, read } = await getCampaigns();
       if (!mounted.current || id !== requestId.current) return;
       setLive(nextLive);
       setCampaigns((current) => values.map((value) => {
         const previous = current.find((candidate) => candidate.id === value.id);
         return previous && previous.revision > value.revision ? previous : value;
-      })); setError(null); setRefreshedAt(Date.now());
+      })); setError(null); setRefreshedAt(Date.now()); setCheckedRead(read);
       setSelectedId((current) => values.some((value) => value.id === current) ? current : values.find((value) => value.status === "active")?.id ?? values[0]?.id ?? null);
     } catch (cause) {
       if (mounted.current && id === requestId.current) setError(cause instanceof Error ? cause.message : "Unable to load campaigns");
@@ -70,6 +72,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         <span className="campaign-summary-round">{tr("라운드", "Round")} {campaign.round}</span>
         <strong>{tr(`완료 ${progress.counts.completed}/${progress.total}`, `${progress.counts.completed}/${progress.total} done`)}</strong>
         {refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}
+        <CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} />
       </div>
       {campaign.description && <p className="campaign-description" title={campaign.description}>{campaign.description}</p>}
       <progress className="campaign-progress" max={100} value={progress.percent} aria-label={tr("작업 완료율", "Task completion")} />

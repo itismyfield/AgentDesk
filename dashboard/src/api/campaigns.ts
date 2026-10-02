@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { request } from "./httpClient";
+import { ApiRequestError, request } from "./httpClient";
 
 const campaignStatusSchema = z.enum(["planned", "active", "paused", "completed", "cancelled"]);
 const campaignNodeStatusSchema = z.enum(["pending", "running", "blocked", "completed", "failed", "skipped"]);
@@ -68,6 +68,7 @@ export const campaignSchema = z.looseObject({
   status: campaignStatusSchema,
   round: roundSchema,
   revision: z.number().int().positive(),
+  auto_queue: z.boolean().default(false),
   nodes: z.array(campaignNodeSchema).max(1000).default([]),
   created_at: timestampSchema,
   updated_at: timestampSchema,
@@ -98,47 +99,89 @@ const campaignListResponseSchema = z.looseObject({
   limit: z.number().int().positive().max(500),
   offset: z.number().int().nonnegative(),
 });
-const campaignResponseSchema = z.looseObject({ campaign: campaignSchema });
+const campaignHandoffSchema = z.looseObject({
+  queued: z.array(z.looseObject({ node_id: z.string(), card_id: z.string(), run_id: z.string() })).default([]),
+  waiting: z.array(z.looseObject({ node_id: z.string(), reason: z.string(), detail: z.string().nullable().optional() })).default([]),
+});
+const campaignGetResponseSchema = z.looseObject({ campaign: campaignSchema });
+const campaignSaveResponseSchema = z.looseObject({
+  campaign: campaignSchema,
+  handoff: campaignHandoffSchema.optional(),
+  handoff_error: z.string().optional(),
+});
 
 export type CampaignStatus = z.infer<typeof campaignStatusSchema>;
 export type CampaignNodeStatus = z.infer<typeof campaignNodeStatusSchema>;
 export type CampaignNode = z.infer<typeof campaignNodeSchema>;
 export type Campaign = z.infer<typeof campaignSchema>;
 export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
+export type CampaignHandoff = z.infer<typeof campaignHandoffSchema>;
 /** Campaign id, then node id. */
 export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
 
+let readsStarted = 0;
+/** Number of campaign reads started so far; a read numbered above it starts later. */
+export function campaignReadMark(): number {
+  return readsStarted;
+}
+
+// Reads never join a GET already in flight, so a read's number says when its data was fetched.
 export async function getCampaigns(): Promise<{
   campaigns: Campaign[];
   live: CampaignLive;
+  read: number;
 }> {
+  const read = ++readsStarted;
   const campaigns = new Map<string, Campaign>();
   const live: CampaignLive = {};
   const limit = 100;
   for (let offset = 0; ; offset += limit) {
-    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}`, { suppressErrorToast: true }, campaignListResponseSchema);
+    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}`, { suppressErrorToast: true, shareInflight: false }, campaignListResponseSchema);
     for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
     Object.assign(live, result.live);
-    if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live };
+    if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live, read };
   }
 }
 
-export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
-  const result = await request(
+export async function getCampaign(id: string): Promise<Campaign> {
+  const result = await request(`/api/campaigns/${encodeURIComponent(id)}`, { suppressErrorToast: true, shareInflight: false }, campaignGetResponseSchema);
+  return result.campaign;
+}
+
+/** True when the server answered with a refusal, so the save is known not to have happened. */
+export function isRejectedSave(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status < 500;
+}
+
+// Omitting auto_queue keeps the stored value, so node edits never switch it.
+function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>, timeoutMs?: number) {
+  return request(
     `/api/campaigns/${encodeURIComponent(campaign.id)}`,
     {
       method: "PUT",
       suppressErrorToast: true,
+      timeoutMs,
       body: JSON.stringify({
         expected_revision: campaign.revision,
         title: campaign.title,
         description: campaign.description,
         status: campaign.status,
         round: campaign.round,
-        nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)),
+        nodes: campaign.nodes,
+        ...patch,
       }),
     },
-    campaignResponseSchema,
+    campaignSaveResponseSchema,
   );
+}
+
+export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
+  const result = await saveCampaign(campaign, { nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)) });
   return result.campaign;
+}
+
+/** Turning it on also queues the tasks that are ready now, so the save waits longer than the default. */
+export async function setCampaignAutoQueue(campaign: Campaign, enabled: boolean) {
+  const result = await saveCampaign(campaign, { auto_queue: enabled }, 60_000);
+  return { campaign: result.campaign, handoff: result.handoff ?? null, handoffError: result.handoff_error ?? null };
 }

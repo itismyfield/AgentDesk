@@ -12,7 +12,7 @@ export function makeCampaignNode(id: string, patch: Partial<CampaignNode> = {}):
 
 export function makeLargeCampaign(): Campaign {
   return {
-    id: "large-campaign", title: "120 issue campaign", description: "Grouped work", status: "active", round: 3, revision: 5,
+    id: "large-campaign", title: "120 issue campaign", description: "Grouped work", status: "active", round: 3, revision: 5, auto_queue: false,
     created_at: "2026-09-20T00:00:00Z", updated_at: "2026-09-20T00:00:00Z",
     nodes: Array.from({ length: 120 }, (_, index) => makeCampaignNode(`task-${index}`, {
       title: `Task ${index}: keep the durable checkpoint`,
