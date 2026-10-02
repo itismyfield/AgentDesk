@@ -734,6 +734,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
   services::auto_queue::route::command::reset_run_scope_pg_tests
   services::auto_queue::route::command::tests
+  services::auto_queue::route::dispatch_query::generate_conflict_tests
   services::auto_queue::route::fsm::tests
   services::auto_queue::route::phase_gate::tests
   services::auto_queue::route::planning::record_entry_dispatch_failure_tests
@@ -812,6 +813,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::voice_completion::voice_completion_tests
   services::discord::turn_teardown_clearance::tests
   services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
