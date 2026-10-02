@@ -184,7 +184,7 @@ impl CancelToken {
                         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok();
                     if pid_claimed {
-                        pid_killed = self.kill_pid_tree_guarded(target);
+                        pid_killed = self.kill_pid_tree_guarded(target, name.is_none());
                         if !pid_killed {
                             self.pid_kill_claim.store(0, Ordering::Release);
                             pid_claimed = false;
@@ -262,9 +262,11 @@ impl CancelToken {
         }
     }
 
-    fn kill_pid_tree_guarded(&self, target: &CapturedProcess) -> bool {
+    /// With no tmux binding the target is a process-backend wrapper, whose CLI groups go too.
+    fn kill_pid_tree_guarded(&self, target: &CapturedProcess, wrapper: bool) -> bool {
         #[cfg(test)]
         if !REAL_PID_KILL.with(std::cell::Cell::get) {
+            let _ = wrapper;
             let barriers = PID_DISPATCH_BARRIERS.lock().unwrap().clone();
             if let Some((entered, release)) = barriers {
                 entered.wait();
@@ -273,7 +275,13 @@ impl CancelToken {
             PID_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
             return PID_KILL_SUCCEEDS.load(Ordering::Relaxed);
         }
-        match target.identity {
+        // Read while the wrapper still owns them: once it dies they belong to init.
+        let cli_groups = if wrapper {
+            crate::services::session_backend::owned_cli_groups(target.pid)
+        } else {
+            Vec::new()
+        };
+        let killed = match target.identity {
             Some(identity) => {
                 crate::services::process::kill_pid_tree_if_identity_matches(target.pid, identity)
             }
@@ -285,7 +293,11 @@ impl CancelToken {
                 crate::services::process::kill_pid_tree(target.pid);
                 true
             }
+        };
+        for (pid, identity) in cli_groups {
+            crate::services::process::kill_pid_tree_if_identity_matches(pid, identity);
         }
+        killed
     }
 
     fn tmux_cleanup_is_suppressed(&self, name: &str) -> bool {
