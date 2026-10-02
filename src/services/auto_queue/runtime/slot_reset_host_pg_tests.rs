@@ -40,7 +40,7 @@ mod host {
     use crate::services::discord::admin_host_guard::ManagedReset;
     use crate::services::discord::host_teardown_gate::test_support::{
         Stored, busy_turn, channel_key, inflight_needing_backfill, mailbox_turn_active,
-        nameless_turn, running_session, runtime, runtime_state, seed,
+        nameless_turn, running_session, runtime, runtime_state, seed, shared_on,
     };
 
     /// Where `tmux` resolves: a live isolated server, a missing binary, or no server socket.
@@ -111,6 +111,14 @@ mod host {
 
         fn start(&self, name: &str) {
             let args = ["new-session", "-d", "-s", name, "sleep 600"];
+            assert!(
+                !self.live || self.real_tmux(&args),
+                "start live tmux {name}"
+            );
+        }
+
+        fn start_with(&self, name: &str, command: &str) {
+            let args = ["new-session", "-d", "-s", name, command];
             assert!(
                 !self.live || self.real_tmux(&args),
                 "start live tmux {name}"
@@ -473,13 +481,8 @@ mod host {
             assert!(!early, "{ctx}: the rename runs before the spawned clear");
             assert_eq!(cleared, Ok(2), "{ctx}: only A's and D's rows are idled");
 
+            // Waits for the spawned clears; their records are checked after the effects.
             let clears = runtime_clears_after_done(&slot_threads).await;
-            let applied = Some(ManagedReset::Applied(Some(name(1))));
-            assert!(
-                matches!(clears.as_slice(), [(a, a_reset), (d, Some(ManagedReset::Refused(_)))]
-                    if *a == ta && *a_reset == applied && *d == td),
-                "{ctx}: {clears:?}"
-            );
             assert_eq!(thread_rows(&pool, tb).await, b_rows, "{ctx}");
             assert_eq!(thread_rows(&pool, tc).await, c_rows, "{ctx}");
             assert_eq!(runtime_state(&shared, channel(tb)).await, b_state, "{ctx}");
@@ -511,6 +514,127 @@ mod host {
             assert!(
                 calls.iter().all(|call| call.contains(&name(1))),
                 "{ctx}: {calls:?}"
+            );
+            let applied = Some(ManagedReset::Applied(Some(name(1))));
+            assert!(
+                matches!(clears.as_slice(), [(a, a_reset), (d, Some(ManagedReset::Refused(_)))]
+                    if *a == ta && *a_reset == applied && *d == td),
+                "{ctx}: {clears:?}"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// With a pool-connected runtime, under three tmux conditions, a slot clear stops a turn only
+    /// when its verdict judged the session the turn runs, and then stops it on that verdict alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slot_clear_stops_only_the_turn_its_verdict_approved_pg() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::TempDir::new().unwrap();
+        let _root =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let (shared, registry) = runtime(&pool).await;
+        let qwen = shared_on(&pool).await;
+        registry.register("qwen".to_string(), qwen.clone()).await;
+        let conditions = [Tmux::LiveServer, Tmux::MissingBinary, Tmux::NoServerSocket];
+        for (round, condition) in conditions.into_iter().enumerate() {
+            let tmux = TmuxEnv::install(condition);
+            let id = |n: u64| 1_482_000_000_000_000 + round as u64 * 100 + n;
+            let name = |n: u64| format!("AgentDesk-claude-p4r2t-{round}-{n}");
+            let ctx = format!("{condition:?}");
+            let (te, tf, channel) = (id(1), id(2), ChannelId::new);
+            let agent = format!("p4r2-turn-{round}");
+            slot(&pool, &agent, &[te, tf]).await;
+            // No inflight row is left behind, so the archive-defer probe does not skip the turns.
+            let drop_inflight = |thread: u64| {
+                std::fs::remove_file(inflight_needing_backfill(channel(thread))).unwrap();
+            };
+
+            // E: a Qwen turn running the session its legacy row names; an INT reaches its pane.
+            let e_name = format!("AgentDesk-qwen-p4r2t-{round}-1");
+            let e_key = format!("qwen/test-token-hash/test-host:{e_name}");
+            seed(&pool, &e_key, &e_name, te, Stored::Legacy).await;
+            let sql = "UPDATE sessions SET thread_channel_id = $2, status = 'awaiting_user',
+                       provider = 'qwen', claude_session_id = 'e-sid' WHERE session_key = $1";
+            exec(&pool, sql, &[Some(&e_key), Some(&te.to_string())]).await;
+            let e_token = busy_turn(&qwen, channel(te), &e_name).await;
+            drop_inflight(te);
+            let flags = tempfile::TempDir::new().unwrap();
+            let flag = flags.path().join("interrupted");
+            let trap = format!(
+                "trap 'echo INT >> {}' INT; while :; do sleep 0.1; done",
+                flag.display()
+            );
+            tmux.start_with(&e_name, &trap);
+
+            // F: the legacy row and channel name F judges, but its turn runs a Herdr session.
+            thread_row(
+                &pool,
+                &shared,
+                (tf, &name(2), Stored::Legacy),
+                "idle",
+                Some("claude"),
+            )
+            .await;
+            running_session(&shared, &pool, channel(tf), &name(2), false, None).await;
+            let f_token = busy_turn(&shared, channel(tf), &name(3)).await;
+            drop_inflight(tf);
+            seed(&pool, "unused", &name(3), tf, Stored::MissingHerdrMarker).await;
+            for n in [2, 3] {
+                tmux.start(&name(n));
+            }
+            let f_rows = thread_rows(&pool, tf).await;
+            let f_state = runtime_state(&shared, channel(tf)).await;
+            let _ = tmux.take_calls();
+
+            let clear = super::super::clear_slot_threads_for_slot_pg;
+            let cleared = clear(Some(registry.clone()), &pool, &agent, 0).await;
+            // Before the spawned clear runs, E's marker turns Herdr; its verdict was taken already.
+            let marker = crate::services::tmux_common::session_temp_path(&e_name, "host_kind");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(&marker, "herdr").unwrap();
+            let slot_threads = [te, tf];
+            let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
+            let early = runs.iter().any(|run| run.as_slice() == slot_threads);
+            drop(runs);
+            assert!(
+                !early,
+                "{ctx}: the marker is written before the spawned clear"
+            );
+            assert_eq!(cleared, Ok(1), "{ctx}: only E's row is idled");
+
+            // Waits for the spawned clears; their records are checked after the effects.
+            let clears = runtime_clears_after_done(&slot_threads).await;
+            let sql = "SELECT status || '/' || COALESCE(claude_session_id, '-')
+                       FROM sessions WHERE session_key = $1";
+            assert_eq!(rows(&pool, sql, &e_key).await, ["idle/-"], "{ctx}");
+            assert!(!mailbox_turn_active(&qwen, channel(te)).await, "{ctx}");
+            let cancelled = |token: &crate::services::provider::CancelToken| {
+                token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            };
+            assert!(cancelled(&e_token), "{ctx}: E's approved turn is stopped");
+            let interrupted = std::fs::read_to_string(&flag).unwrap_or_default();
+            assert!(
+                !tmux.live || interrupted.contains("INT"),
+                "{ctx}: E's pane receives the stop's interrupt"
+            );
+            assert_eq!(thread_rows(&pool, tf).await, f_rows, "{ctx}");
+            assert_eq!(runtime_state(&shared, channel(tf)).await, f_state, "{ctx}");
+            assert!(!cancelled(&f_token), "{ctx}: F's turn keeps running");
+            for n in [2, 3] {
+                assert!(
+                    !tmux.live || tmux.alive(&name(n)),
+                    "{ctx}: {} survives",
+                    name(n)
+                );
+            }
+            let applied = Some(ManagedReset::Applied(Some(e_name.clone())));
+            assert!(
+                matches!(clears.as_slice(), [(e, reset)] if *e == te && *reset == applied),
+                "{ctx}: {clears:?}"
             );
         }
         pool.close().await;
