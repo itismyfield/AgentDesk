@@ -125,3 +125,26 @@ it("leaves the unknown state once a newer campaign arrives from elsewhere", asyn
   await act(async () => render({ ...campaign, auto_queue: true, revision: campaign.revision + 1 }));
   expect(button().textContent).toBe("Auto-run on");
 });
+
+it("leaves the unknown state after a read that started later, even at the same revision", async () => {
+  const campaign = makeLargeCampaign();
+  vi.mocked(setCampaignAutoQueue).mockRejectedValue(new Error("Request timeout: /api/campaigns/x"));
+  vi.mocked(getCampaign).mockRejectedValueOnce(new Error("offline"));
+  const render = (checkedAt: number) =>
+    root.render(<CampaignAutoQueueToggle campaign={{ ...campaign }} tr={(_, en) => en} onSaved={vi.fn()} checkedAt={checkedAt} />);
+  await act(async () => render(Date.now() - 60_000));
+  await act(async () => button().click());
+  const failedAt = Date.now();
+  expect(button().getAttribute("aria-pressed")).toBe("mixed");
+
+  await act(async () => render(failedAt - 1));
+  expect(button().getAttribute("aria-pressed")).toBe("mixed");
+  await act(async () => render(failedAt + 1));
+  expect(button().textContent).toBe("Auto-run off");
+  expect(button().getAttribute("aria-pressed")).toBe("false");
+  expect(statusText()).toBeUndefined();
+
+  vi.mocked(setCampaignAutoQueue).mockResolvedValueOnce({ campaign: { ...campaign, auto_queue: true, revision: campaign.revision + 1 }, handoff: null, handoffError: null });
+  await act(async () => button().click());
+  expect(setCampaignAutoQueue).toHaveBeenCalledTimes(2);
+});

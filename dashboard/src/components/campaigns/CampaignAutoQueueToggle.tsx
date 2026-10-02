@@ -24,23 +24,27 @@ export function handoffSummary(handoff: CampaignHandoff, tr: Tr): string {
   return waiting ? `${queued} ${tr("못 넘긴 작업", "Held back")}: ${waiting}` : queued;
 }
 
-export default function CampaignAutoQueueToggle({ campaign, tr, onSaved }: { campaign: Campaign; tr: Tr; onSaved: (updated: Campaign) => void }) {
+export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedAt = null }: {
+  campaign: Campaign; tr: Tr; onSaved: (updated: Campaign) => void;
+  /** When the newest successful read of this campaign started. */
+  checkedAt?: number | null;
+}) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  // Revision on screen when a save's outcome could not be read; a newer one settles it.
-  const [unknownAt, setUnknownAt] = useState<number | null>(null);
-  const unknown = unknownAt === campaign.revision;
+  // Set when a save's outcome could not be read; a newer revision or a read started later settles it.
+  const [unknownSince, setUnknownSince] = useState<{ at: number; revision: number } | null>(null);
+  const unknown = unknownSince !== null && unknownSince.revision === campaign.revision && !(checkedAt !== null && checkedAt > unknownSince.at);
   const stateNow = (value: Campaign) =>
     value.auto_queue ? tr("지금 서버에는 자동 진행이 켜져 있습니다.", "The server has auto-run on now.") : tr("지금 서버에는 자동 진행이 꺼져 있습니다.", "The server has auto-run off now.");
   const readBack = async () => {
     const latest = await getCampaign(campaign.id);
     onSaved(latest);
-    setUnknownAt(null);
+    setUnknownSince(null);
     return latest;
   };
   const toggle = async () => {
     const enabled = !campaign.auto_queue;
-    setBusy(true); setMessage(null);
+    setBusy(true); setMessage(null); setUnknownSince(null);
     try {
       const result = await setCampaignAutoQueue(campaign, enabled);
       onSaved(result.campaign);
@@ -58,7 +62,7 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved }: { cam
           ? `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("넘긴 작업은 노드 상태에서 확인하세요.", "Check the nodes for what was sent.")}`
           : `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("보낸 요청이 나중에 반영될 수 있습니다.", "The request may still apply later.")}`);
       } catch {
-        setUnknownAt(campaign.revision);
+        setUnknownSince({ at: Date.now(), revision: campaign.revision });
         setMessage(tr(`저장 결과를 확인하지 못했습니다 (${reason}). 자동 진행 상태 확인을 눌러 다시 읽으세요.`, `Could not confirm the save (${reason}). Press Check auto-run to read it again.`));
       }
     } finally { setBusy(false); }
@@ -79,6 +83,6 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved }: { cam
         : tr("켜면 선행 작업이 끝난 작업을 자동큐가 차례로 실행합니다. 끄면 새로 넘기는 것만 멈춥니다.", "When on, auto-queue runs each task as soon as its prerequisites are done. Turning it off only stops sending new tasks.")}>
       {unknown ? tr("자동 진행 상태 확인", "Check auto-run") : campaign.auto_queue ? tr("자동 진행 켜짐", "Auto-run on") : tr("자동 진행 꺼짐", "Auto-run off")}
     </button>
-    {message && <p className="campaign-handoff-result" role="status">{message}</p>}
+    {message && (unknown || !unknownSince) && <p className="campaign-handoff-result" role="status">{message}</p>}
   </>;
 }
