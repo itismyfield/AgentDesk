@@ -305,6 +305,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/prompt_identity_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+        "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
     }
 )
 
@@ -331,6 +332,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs",
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs",
+        "src/services/discord/relay_recovery/tests/host_deferred.rs",
         "src/services/discord/relay_recovery/tests/incarnation_follow_up.rs",
         "src/services/discord/relay_recovery/tests/orphan_token_finish.rs",
         "src/services/discord/relay_recovery/tests/unread_tail_seed.rs",

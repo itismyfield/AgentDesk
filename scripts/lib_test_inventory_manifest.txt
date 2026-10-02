@@ -5070,6 +5070,8 @@ services::discord::relay_owner_observability::tests::turn_identity_string_format
 services::discord::relay_owner_observability::tests::ui_outcome_committed_when_gate_emits_and_not_stale
 services::discord::relay_owner_observability::tests::ui_outcome_gate_suppressed_when_gate_does_not_emit
 services::discord::relay_owner_observability::tests::ui_outcome_stale_identity_takes_precedence_over_gate
+services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
+services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::auto_heal_apply::tests::no_transition_apply_reports_not_ok_and_not_applied_end_to_end
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_emission_in_flight_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted
@@ -5290,6 +5292,9 @@ services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idl
 services::discord::router::intake_gate::reply_context_tests::attachment_only_empty_check_ignores_leading_bot_mention
 services::discord::router::intake_gate::reply_context_tests::attachment_only_turn_accepts_any_saved_file_without_prompt
 services::discord::router::intake_gate::reply_context_tests::attachment_reply_context_keeps_canonical_message_id_and_all_files
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status

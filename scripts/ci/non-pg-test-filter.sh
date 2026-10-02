@@ -128,9 +128,11 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests
   --skip services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
+  --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::tests
+  --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
