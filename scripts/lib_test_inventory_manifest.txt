@@ -3760,6 +3760,7 @@ services::discord::inflight::removal::loader_gate_observation_tests::loader_allo
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_kind_is_distinct_from_the_reconcile_fence_kind
 services::discord::inflight::removal::loader_gate_observation_tests::observation_labels_and_allocation_only_evaluation_api_are_exact
 services::discord::inflight::removal::loader_gate_observation_tests::public_loader_observes_production_shaped_published_routes
+services::discord::inflight::removal::nondestructive_loader_tests::archive_defer_probe_reads_only_the_probed_thread
 services::discord::inflight::removal::nondestructive_loader_tests::boot_reap_once_runs_once_per_provider_and_later_callers_wait
 services::discord::inflight::removal::nondestructive_loader_tests::boot_reap_once_survives_a_cancelled_first_caller
 services::discord::inflight::removal::nondestructive_loader_tests::boot_reaper_retires_foreign_malformed_and_out_of_window_rows

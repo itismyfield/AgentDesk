@@ -1106,14 +1106,16 @@ mod tests {
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let registry = HealthRegistry::new();
         registry
             .register("claude".to_string(), Arc::clone(&shared))
             .await;
         let channel_id = ChannelId::new(4_794_103);
         let tmux = format!("AgentDesk-resume-retained-live-{}", std::process::id());
-        let session_key = format!("claude/test/host:{tmux}");
+        let session_key =
+            crate::services::discord::host_teardown_gate::test_support::channel_key(&shared, &tmux);
         let old_session_id = "77777777-7777-7777-7777-777777777777";
         let target_session_id = "88888888-8888-8888-8888-888888888888";
         let old_cwd = tempfile::tempdir().expect("old cwd");
