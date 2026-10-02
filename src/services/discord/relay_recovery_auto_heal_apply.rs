@@ -228,9 +228,14 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     )
     .await;
     settle_auto_heal_confirmation(&mut apply_result, confirmation, &key, now_ms);
-    let skipped = apply_result.status == "reattach_episode_changed";
+    let skipped_reason = match apply_result.status {
+        "reattach_episode_changed" => Some("durable_reattach_confirmation_episode_changed"),
+        "host_deferred" => Some("host_not_legacy_tmux"),
+        _ => None,
+    };
+    let skipped = skipped_reason.is_some();
     if skipped {
-        decision.auto_heal.skipped_reason = Some("durable_reattach_confirmation_episode_changed");
+        decision.auto_heal.skipped_reason = skipped_reason;
     }
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);
@@ -291,7 +296,10 @@ fn settle_auto_heal_confirmation(
             // clears `consecutive_refunds` and the pending retry window, so
             // committing a repeating no-op reset the failure backoff on every
             // pass and the reattach loop could neither converge nor give up.
-            if matches!(
+            if apply_result.status == "host_deferred" {
+                // Nothing ran: the reservation goes back and the failure backoff stays as is.
+                cancel_unapplied_auto_heal_attempt(key);
+            } else if matches!(
                 apply_result.status,
                 "rebind_failed"
                     | "provider_unavailable"

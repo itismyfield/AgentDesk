@@ -128,6 +128,7 @@ pub struct FetchOptions {
 }
 
 impl FetchOptions {
+    #[cfg(test)]
     pub fn force() -> Self {
         Self {
             force_refresh: true,
@@ -271,20 +272,6 @@ impl PrSummaryCache {
     pub fn invalidate(&self, repo: &str, pr_number: i64) {
         let key = CacheKey::new(repo, pr_number);
         self.inner.entries.remove(&key);
-    }
-
-    /// Drop every entry. Used by tests and operator tooling.
-    pub fn clear(&self) {
-        self.inner.entries.clear();
-    }
-
-    /// Current number of cached entries. Exposed for instrumentation.
-    pub fn len(&self) -> usize {
-        self.inner.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.entries.is_empty()
     }
 
     /// Evict the oldest entry when at capacity. We only evict a single
@@ -459,9 +446,9 @@ mod tests {
                 Ok(stub_view("OPEN", "sha-a"))
             })
             .unwrap();
-        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.inner.entries.len(), 1);
         cache.invalidate("o/r", 5);
-        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.inner.entries.len(), 0);
     }
 
     #[test]
@@ -518,7 +505,11 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert!(cache.len() <= 2, "cache exceeded cap: {}", cache.len());
+        assert!(
+            cache.inner.entries.len() <= 2,
+            "cache exceeded cap: {}",
+            cache.inner.entries.len()
+        );
     }
 
     #[test]
@@ -537,6 +528,6 @@ mod tests {
         assert!(err.contains("network"));
         // The old entry is still there even though the refresh failed —
         // we don't tear down good data on a transient gh failure.
-        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.inner.entries.len(), 1);
     }
 }

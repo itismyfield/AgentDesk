@@ -35,10 +35,6 @@ pub(super) async fn upsert_rate_limit_cache_entry(
     }
 }
 
-fn rate_limit_upsert_conflict_target() -> &'static str {
-    "(provider, profile_id)"
-}
-
 pub(super) async fn sync_named_profile_rate_limits(pg_pool: &PgPool) {
     let catalog = crate::services::discord::org_schema::provider_auth_catalog();
     let now = chrono::Utc::now().timestamp();
@@ -106,16 +102,5 @@ pub(super) async fn sync_named_profile_rate_limits(pg_pool: &PgPool) {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_011_upsert_conflict_is_provider_and_profile() {
-        assert_eq!(
-            super::rate_limit_upsert_conflict_target(),
-            "(provider, profile_id)"
-        );
     }
 }

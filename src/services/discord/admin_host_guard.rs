@@ -145,6 +145,48 @@ async fn reset_refusal(
         .then(|| "채널 이름이 없어 세션 호스트를 legacy tmux로 확인하지 못했어요".to_string())
 }
 
+/// Why a stale or orphan turn may not release its mailbox and counters: its session, named by
+/// the watcher, the inflight row or the channel in that order, is not a confirmed legacy one.
+pub(super) async fn turn_release_refusal(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<String> {
+    // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
+    #[cfg(test)]
+    if shared.pg_pool.is_none() {
+        return None;
+    }
+    let name = match shared.tmux_watchers.channel_binding(&channel_id) {
+        Some(binding) => Some(binding.tmux_session_name),
+        None => {
+            let row = super::inflight::load_inflight_state_read_only_result;
+            match row(provider, channel_id.get()) {
+                Ok(row) => row.and_then(|row| row.tmux_session_name),
+                Err(error) => {
+                    return Some(format!("the turn's inflight row is unreadable: {error}"));
+                }
+            }
+        }
+    };
+    let name = match name.filter(|name| !name.trim().is_empty()) {
+        Some(name) => Some(name),
+        None if provider.uses_managed_tmux_backend() => {
+            let data = shared.core.lock().await;
+            let session = data.sessions.get(&channel_id);
+            let channel_name = session.and_then(|session| session.channel_name.as_deref());
+            channel_name.map(|name| provider.build_tmux_session_name(name))
+        }
+        None => None,
+    };
+    if let Some(name) = name {
+        return channel_refusal(shared, provider, channel_id.get(), &name).await;
+    }
+    let deferred = super::host_defer_gate::nameless_channel_deferred;
+    let held = deferred(shared, provider, channel_id.get()).await;
+    held.then(|| "the turn's channel names no session to confirm as legacy tmux".to_string())
+}
+
 /// [`channel_refusal`] for a caller holding the session's own key: only a found legacy row
 /// with no host trace admits it.
 pub(crate) async fn session_key_refusal(

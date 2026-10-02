@@ -1015,7 +1015,6 @@ server::policy_tick_schedule_tests::slo_api_friction_aggregation_falls_back_to_f
 server::policy_tick_schedule_tests::slo_api_friction_aggregation_runs_while_leader_epoch_is_pending
 server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
-server::rate_limit_profiles::tests::test_011_upsert_conflict_is_provider_and_profile
 server::rate_limit_sync::backoff::tests::exponential_backoff_doubles_and_caps_at_thirty_minutes
 server::rate_limit_sync::backoff::tests::parses_retry_after_seconds_and_http_date
 server::rate_limit_sync::backoff::tests::retry_after_is_clamped_and_leaves_the_ladder_alone
@@ -5088,6 +5087,8 @@ services::discord::relay_owner_observability::tests::turn_identity_string_format
 services::discord::relay_owner_observability::tests::ui_outcome_committed_when_gate_emits_and_not_stale
 services::discord::relay_owner_observability::tests::ui_outcome_gate_suppressed_when_gate_does_not_emit
 services::discord::relay_owner_observability::tests::ui_outcome_stale_identity_takes_precedence_over_gate
+services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
+services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::auto_heal_apply::tests::no_transition_apply_reports_not_ok_and_not_applied_end_to_end
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_emission_in_flight_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted
@@ -5308,6 +5309,9 @@ services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idl
 services::discord::router::intake_gate::reply_context_tests::attachment_only_empty_check_ignores_leading_bot_mention
 services::discord::router::intake_gate::reply_context_tests::attachment_only_turn_accepts_any_saved_file_without_prompt
 services::discord::router::intake_gate::reply_context_tests::attachment_reply_context_keeps_canonical_message_id_and_all_files
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status
@@ -7079,6 +7083,7 @@ services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_mes
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
 services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_hook_adopted_binding_outranks_the_stale_launch_script
@@ -8655,7 +8660,6 @@ services::memory::memento::static_slice_cache_tests::elide_static_slice_keeps_ba
 services::memory::memento::static_slice_cache_tests::elide_static_slice_re_emits_when_content_drifts
 services::memory::memento::static_slice_cache_tests::elide_static_slice_second_call_replaces_with_pointer_when_unchanged
 services::memory::memento::static_slice_cache_tests::static_slice_split_separates_ranked_and_core_from_dynamic
-services::memory::memento::tool_feedback_trigger_type_tests::normalizes_automatic_tool_feedback_trigger_to_sampled
 services::memory::memento::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
 services::memory::memento::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
 services::memory::memento::writer_tests::ambiguous_write_error_is_neither_replayed_nor_reported_as_success
@@ -9059,7 +9063,6 @@ services::release_source::tests::release_source_reports_invalid_json_as_unobserv
 services::release_source::tests::release_source_reports_missing_file_as_unobserved
 services::release_source::tests::release_source_reserves_unobserved_for_a_manifest_with_no_confirmed_fact
 services::remote_stub::tests::password_and_keyfile_auth_parse_for_compatibility_only
-services::remote_stub::tests::ssh_connect_stub_refuses_before_auth_for_all_legacy_variants
 services::retrospectives::tests::retrospective_content_remains_available_for_local_audit
 services::retrospectives::tests::terminal_summary_without_new_knowledge_never_queues_memory_sync
 services::review_decision::repo_card::tests::commit_sha_differs_distinct_is_true

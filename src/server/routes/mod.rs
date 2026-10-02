@@ -78,10 +78,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::engine::PolicyEngine;
 use crate::error::{AppError, ErrorCode};
+#[cfg(test)]
 use crate::services::discord::health::HealthRegistry;
 
 /// Shared application state passed to all route handlers.
@@ -664,9 +667,7 @@ mod bind_security_tests {
     }
 }
 
-// reason: PG-pool router constructor used only by the `#[cfg(test)]` router
-// builders in health_api/route tests; the lib build sees no caller. See #3034.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn api_router_with_pg(
     engine: PolicyEngine,
     config: crate::config::Config,
@@ -686,6 +687,7 @@ pub fn api_router_with_pg(
     )
 }
 
+#[cfg(test)]
 pub fn api_router_with_pg_and_cluster(
     engine: PolicyEngine,
     config: crate::config::Config,

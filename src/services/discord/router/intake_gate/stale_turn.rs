@@ -131,19 +131,38 @@ async fn classify_channel_stale_active_turn_proof(
 /// placeholder status are preserved. Returning `false` when the registry is
 /// unreachable is the conservative default — a missing registry happens
 /// during startup before the stall-watchdog would also be running, so
-/// deferring cleanup costs nothing.
+/// deferring cleanup costs nothing. A session whose host is not a confirmed
+/// legacy tmux one is never force-cleaned either.
 pub(super) async fn thread_guard_should_force_clean_stale_thread(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     thread_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> bool {
+    if !stale_turn_release_admitted(shared, provider, thread_id).await {
+        return false;
+    }
     let Some(proof) =
         classify_channel_stale_active_turn_proof(shared, provider, thread_id, now_unix_secs).await
     else {
         return false;
     };
     stale_turn_axis_b_warrants(provider, &proof)
+}
+
+/// Whether the turn's session is confirmed legacy, judged before the classification whose
+/// inflight load may rewrite the row; on `false`, logged, the intake queues and the guard keeps.
+async fn stale_turn_release_admitted(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    let refusal = crate::services::discord::admin_host_guard::turn_release_refusal;
+    let Some(reason) = refusal(shared, provider, channel_id).await else {
+        return true;
+    };
+    tracing::warn!(channel_id = channel_id.get(), %reason, "stale turn release refused");
+    false
 }
 
 /// #1446 Layer 2 — perform the THREAD-GUARD's stale-thread cleanup:
@@ -227,6 +246,9 @@ async fn release_queue_blocked_stale_active_turn(
     channel_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> bool {
+    if !stale_turn_release_admitted(shared, provider, channel_id).await {
+        return false;
+    }
     let Some(proof) =
         classify_channel_stale_active_turn_proof(shared, provider, channel_id, now_unix_secs).await
     else {
@@ -299,6 +321,10 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
     }
     true
 }
+
+#[cfg(all(test, unix))]
+#[path = "stale_turn_host_tests.rs"]
+mod host_tests;
 
 /// #1446 Layer 2 — these cases read inflight files via the runtime root
 /// override, so we keep the always-on slice that needs no `SharedData`
