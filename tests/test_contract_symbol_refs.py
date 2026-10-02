@@ -14,12 +14,16 @@ false-pass has a dedicated reproduction.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+
+import yaml
+from tests.test_high_risk_recovery_path_filter import pattern_to_regex, select
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_contract_symbol_refs.py"
@@ -561,26 +565,46 @@ class WiringTest(unittest.TestCase):
                 f"{name} still grants a branch-name CI escape hatch",
             )
 
-        # A relay_contract path filter and output exist.
-        self.assertIn("relay_contract:", workflow)
-        self.assertIn(
-            "relay_contract: ${{ steps.filter.outputs.relay_contract }}", workflow
-        )
-        # check_fast also runs for a doc-only relay-contract binding change.
-        self.assertIn(
-            "|| needs.changes.outputs.relay_contract == 'true'", workflow
-        )
-        # The anchor host files are covered by the filter.
-        for host in (
-            "src/services/discord/inflight/store.rs",
-            "src/services/discord/turn_bridge/terminal_delivery.rs",
-            "src/services/discord/tmux_watcher/liveness.rs",
-            "src/services/discord/router/message_handler/watchdog.rs",
-            "docs/relay-state-contract.md",
-        ):
-            self.assertIn(host, workflow)
         # The required-context mirror gates the forced run.
         self.assertIn("Relay-contract fast check mirror (always, #4268)", workflow)
+
+
+class RelayContractPathFilterTest(unittest.TestCase):
+    """A doc-only PR reaches `check_fast` only via this output, so the filter
+    key it reads must select exactly the checker's binding sources."""
+
+    def setUp(self) -> None:
+        workflow = REPO_ROOT / ".github" / "workflows" / "ci-pr.yml"
+        changes = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["changes"]
+        expr = changes["outputs"]["relay_contract"]
+        ref = re.fullmatch(r"\$\{\{\s*steps\.([\w-]+)\.outputs\.([\w-]+)\s*\}\}", expr)
+        self.assertIsNotNone(ref, f"relay_contract output is not a bare filter read: {expr}")
+        step_id, self.key = ref.groups()
+        steps = [s for s in changes["steps"] if s.get("id") == step_id]
+        self.assertEqual(len(steps), 1, f"changes job has no single step `{step_id}`")
+        self.assertTrue(steps[0]["uses"].startswith("dorny/paths-filter"))
+        filters = yaml.safe_load(steps[0]["with"]["filters"])
+        self.assertIn(self.key, filters, f"step `{step_id}` defines no `{self.key}` filter")
+        self.filters = {name: tuple(patterns) for name, patterns in filters.items()}
+        self.sources = sorted(
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in (
+                CHECKER.DEFAULT_DOC, SCRIPT_PATH, Path(__file__).resolve(),
+                *CHECKER.DEFAULT_REFERENCE_SOURCES,
+            )
+        )
+
+    def test_filter_selects_every_binding_source(self) -> None:
+        for path in self.sources:
+            with self.subTest(path=path):
+                self.assertIn(self.key, select(self.filters, [path]))
+
+    def test_filter_has_no_pattern_outside_the_binding_sources(self) -> None:
+        stale = [
+            q for q in self.filters[self.key]
+            if not any(pattern_to_regex(q).match(p) for p in self.sources)
+        ]
+        self.assertEqual(stale, [], "update REFERENCE_SOURCE_MODULES or drop the entry")
 
 
 class H2ContractCliTest(unittest.TestCase):

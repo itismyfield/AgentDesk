@@ -39,6 +39,8 @@ pub(crate) struct CleanupOutcome {
     pub(crate) tmux_killed: bool,
     pub(crate) duplicate: bool,
     pub(crate) termination_recorded: bool,
+    /// No claim was taken: the binding is not a confirmed legacy tmux one.
+    pub(crate) host_refused: bool,
 }
 
 impl CleanupOutcome {
@@ -50,6 +52,26 @@ impl CleanupOutcome {
 impl CancelToken {
     /// Execute all token-owned destructive cleanup behind one generation fence.
     pub(crate) fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
+        self.request_cleanup_inner(request, None)
+    }
+
+    /// As [`Self::request_cleanup`], with no PID or tmux kill unless the binding still
+    /// names `expected`, the target a stop decided on.
+    pub(crate) fn request_cleanup_expecting(
+        &self,
+        request: CleanupRequest,
+        expected: Option<&str>,
+    ) -> CleanupOutcome {
+        self.request_cleanup_inner(request, Some(expected))
+    }
+
+    fn request_cleanup_inner(
+        &self,
+        request: CleanupRequest,
+        expected: Option<Option<&str>>,
+    ) -> CleanupOutcome {
+        #[cfg(test)]
+        REQUESTED_INTENTS.with(|intents| intents.borrow_mut().push(request.intent));
         self.publish_cancel_if_source_absent(request.cancel_source.clone());
 
         let binding = self
@@ -77,11 +99,13 @@ impl CancelToken {
                     tmux_killed: false,
                     duplicate: false,
                     termination_recorded: false,
+                    host_refused: false,
                 }
             }
             KillAuthorization::Current(guard) => self.request_cleanup_authorized(
                 request,
                 binding,
+                expected,
                 KillAuthorizationState::Current,
                 Some(guard),
             ),
@@ -93,6 +117,7 @@ impl CancelToken {
                 self.request_cleanup_authorized(
                     request,
                     binding,
+                    expected,
                     KillAuthorizationState::Unregistered,
                     None,
                 )
@@ -104,12 +129,32 @@ impl CancelToken {
         &self,
         request: CleanupRequest,
         binding: Option<TmuxBinding>,
+        expected: Option<Option<&str>>,
         authorization: KillAuthorizationState,
         guard: Option<SessionKillGuard>,
     ) -> CleanupOutcome {
         // `guard` intentionally remains live through this function. Do not call a
         // public cleanup/bind API from here: those APIs can try to lock this slot.
         let _guard = guard;
+        let name = binding.as_ref().map(TmuxBinding::name);
+        // Checked before either claim, so a refused host leaves both kills untaken.
+        let destructive = !matches!(request.intent, TmuxCleanupIntent::PreserveSession);
+        let moved = destructive && expected.is_some_and(|expected| expected != name);
+        let marker = crate::services::discord::admin_host_guard::marker_refusal;
+        let refusal = name.filter(|_| destructive && !moved).and_then(marker);
+        if moved || refusal.is_some() {
+            let source = &request.cancel_source;
+            tracing::warn!(?name, ?expected, ?refusal, %source, "cleanup refused before any kill");
+            return CleanupOutcome {
+                authorization,
+                pid_killed: false,
+                retry_pid_cleanup: false,
+                tmux_killed: false,
+                duplicate: false,
+                termination_recorded: false,
+                host_refused: true,
+            };
+        }
         let mut pid_killed = false;
         let mut retry_pid_cleanup = false;
         let mut tmux_killed = false;
@@ -157,7 +202,7 @@ impl CancelToken {
         }
 
         if matches!(request.intent, TmuxCleanupIntent::CleanupSession) {
-            if let Some(name) = binding.as_ref().map(TmuxBinding::name) {
+            if let Some(name) = name {
                 if !self.tmux_cleanup_is_suppressed(name) {
                     // As with the PID claim, only consume this claim immediately before
                     // the name primitive is dispatched. Preserve and suppressed/no-name
@@ -201,6 +246,7 @@ impl CancelToken {
                 && !pid_claimed
                 && !name_claimed,
             termination_recorded,
+            host_refused: false,
         }
     }
 
@@ -328,8 +374,25 @@ static TMUX_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
 static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
+thread_local! {
+    static REQUESTED_INTENTS: std::cell::RefCell<Vec<TmuxCleanupIntent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The intents this thread has requested since the last call.
+#[cfg(test)]
+pub(crate) fn take_requested_intents_for_test() -> Vec<TmuxCleanupIntent> {
+    REQUESTED_INTENTS.with(|intents| std::mem::take(&mut *intents.borrow_mut()))
+}
+
+#[cfg(test)]
 pub(crate) fn pid_kill_dispatches_for_test() -> usize {
     PID_KILL_DISPATCHES.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn tmux_kill_dispatches_for_test() -> usize {
+    TMUX_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

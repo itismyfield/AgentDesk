@@ -238,6 +238,8 @@ jobs:
   scripts:
     # Distinct from the protected PR `Script checks` context. Main-push CI
     # cannot enforce pre-merge anti-growth after a commit has already landed.
+    # Each job runs one ci-script-checks.sh shard, as in ci-pr.yml; only this
+    # cargo shard provisions Rust and uploads the shard's evidence artifacts.
     name: Main script checks
     runs-on: ubuntu-latest
     steps:
@@ -286,6 +288,7 @@ jobs:
           # Main-push CI verifies current coverage drift, but relative anti-growth
           # authority lives in the protected PR candidate's required context.
           TEST_LANE_BASELINE_REF: HEAD
+          SCRIPT_CHECK_SHARD: cargo
       - name: Upload giant-file progress evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -300,6 +303,62 @@ jobs:
           path: target/maintainability-audit.yaml
           if-no-files-found: ignore
           retention-days: 14
+
+  scripts_guards:
+    name: Main script checks (guards)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        run: ./scripts/ci-script-checks.sh
+        env:
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          TEST_LANE_BASELINE_REF: HEAD
+          SCRIPT_CHECK_SHARD: guards
+
+  scripts_contracts:
+    name: Main script checks (contracts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        run: ./scripts/ci-script-checks.sh
+        env:
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          TEST_LANE_BASELINE_REF: HEAD
+          SCRIPT_CHECK_SHARD: contracts
 
   # Warms the shared cargo registry cache and the Windows sccache entries that
   # the ci-pr.yml `check_fast_cross_os*` jobs restore; main never ran Windows.

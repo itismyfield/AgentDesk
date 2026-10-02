@@ -1,0 +1,198 @@
+//! The host a stop acts on, decided once from the token and shared by the interrupt, the
+//! cooperative cancel and the hard stop. Only a confirmed legacy tmux name reaches tmux.
+
+use std::sync::Arc;
+
+use super::TmuxCleanupPolicy;
+use super::interrupt_policy::ProviderTurnInterruptOutcome;
+#[cfg(test)]
+use crate::services::claude_tui::host_input::MutationGate;
+use crate::services::provider::{CancelToken, ProviderKind};
+#[cfg(test)]
+use crate::services::session_host::HostKind;
+#[cfg(test)]
+use crate::services::session_host::InteractiveSessionHost;
+#[cfg(test)]
+use crate::services::session_host::ResolvedSessionTarget;
+#[cfg(test)]
+use crate::services::session_host::TargetHost;
+
+/// A tmux name whose `.host_kind` marker is absent or tmux when the stop began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LegacyTmuxName(String);
+
+impl LegacyTmuxName {
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StopRefusal {
+    /// The token's `.host_kind` marker is not tmux; `local_tmux` logs what it holds.
+    Marker,
+    #[cfg(test)]
+    Unknown,
+    #[cfg(test)]
+    Conflict,
+    #[cfg(test)]
+    Unsupported { kind: HostKind, op: &'static str },
+}
+
+/// A verified Herdr pane; the session name keys the turn's generation and composer fences.
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct HerdrStopTarget {
+    pub(super) session: String,
+    pub(super) pane: String,
+    pub(super) host: Arc<dyn InteractiveSessionHost>,
+    pub(super) gate: Arc<dyn MutationGate + Send + Sync>,
+}
+
+#[derive(Clone)]
+pub(super) enum StopTarget {
+    /// No tmux name: the process backend, unchanged.
+    Process,
+    LegacyTmux(LegacyTmuxName),
+    /// Test-only until a Herdr turn carries its verified target to the stop.
+    #[cfg(test)]
+    Herdr(HerdrStopTarget),
+    Refused {
+        name: String,
+        refusal: StopRefusal,
+    },
+}
+
+/// Herdr's answer to an Escape the gate admitted; both outcomes keep the claim spent.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum HerdrStopWrite {
+    Confirmed,
+    Indeterminate(String),
+}
+
+impl StopTarget {
+    /// The production verdict: the marker filter alone admits tmux, and no tmux is probed.
+    pub(super) fn for_token(token: &CancelToken) -> Self {
+        let Some(name) = token.tmux_session_name() else {
+            return Self::Process;
+        };
+        if crate::services::discord::host_liveness::local_tmux(&name, None) {
+            return Self::LegacyTmux(LegacyTmuxName(name));
+        }
+        let refusal = StopRefusal::Marker;
+        Self::Refused { name, refusal }
+    }
+
+    /// Resolved host evidence for a Herdr turn; Unknown and Conflict never become tmux.
+    #[cfg(test)]
+    pub(super) fn from_session_target(
+        provider: &ProviderKind,
+        session: &str,
+        target: &ResolvedSessionTarget,
+        host: Arc<dyn InteractiveSessionHost>,
+        gate: Arc<dyn MutationGate + Send + Sync>,
+    ) -> Self {
+        let refused = |refusal| Self::Refused {
+            name: session.to_string(),
+            refusal,
+        };
+        match &target.host {
+            TargetHost::Known {
+                kind: HostKind::Herdr,
+                name,
+                ..
+            } if matches!(provider, ProviderKind::Claude) => Self::Herdr(HerdrStopTarget {
+                session: session.to_string(),
+                pane: name.clone(),
+                host,
+                gate,
+            }),
+            TargetHost::Known { kind, .. } => refused(StopRefusal::Unsupported {
+                kind: *kind,
+                op: "interrupt_until_p10",
+            }),
+            TargetHost::Unknown(_) => refused(StopRefusal::Unknown),
+            TargetHost::Conflict { .. } => refused(StopRefusal::Conflict),
+        }
+    }
+
+    pub(super) fn legacy_name(&self) -> Option<&LegacyTmuxName> {
+        match self {
+            Self::LegacyTmux(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Only the process backend and a legacy tmux name keep the PID and session paths.
+    pub(super) fn reaches_legacy_host(&self) -> bool {
+        matches!(self, Self::Process | Self::LegacyTmux(_))
+    }
+
+    /// The binding the executor must still hold for a destructive cleanup of this stop.
+    pub(super) fn expected_binding(&self) -> Option<&str> {
+        match self {
+            Self::Process => None,
+            Self::LegacyTmux(name) => Some(name.as_str()),
+            #[cfg(test)]
+            Self::Herdr(target) => Some(&target.session),
+            Self::Refused { name, .. } => Some(name),
+        }
+    }
+
+    /// Any other host keeps its session: a session cleanup becomes a preserve.
+    pub(super) fn effective_policy(&self, policy: TmuxCleanupPolicy) -> TmuxCleanupPolicy {
+        match policy {
+            TmuxCleanupPolicy::CleanupSession { .. } if !self.reaches_legacy_host() => {
+                TmuxCleanupPolicy::PreserveSession
+            }
+            policy => policy,
+        }
+    }
+}
+
+/// The interrupt for a target outside tmux: no I/O, except a Claude Herdr pane's Escape.
+pub(super) async fn interrupt_unhosted(
+    target: &StopTarget,
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    reason: &str,
+) -> ProviderTurnInterruptOutcome {
+    #[cfg(not(test))]
+    let _ = token;
+    match target {
+        #[cfg(test)]
+        StopTarget::Herdr(herdr) if matches!(provider, ProviderKind::Claude) => {
+            super::claude_stop_delivery::herdr::interrupt_claude_turn_on_herdr(token, herdr, reason)
+                .await
+        }
+        StopTarget::Refused { name, refusal } => {
+            let provider = provider.as_str();
+            let message = "stop interrupt refused: host is not a confirmed legacy tmux";
+            tracing::warn!(%name, ?refusal, provider, reason, "{message}");
+            not_sent()
+        }
+        _ => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                reason,
+                "stop interrupt unsupported on this host"
+            );
+            not_sent()
+        }
+    }
+}
+
+pub(super) fn not_sent() -> ProviderTurnInterruptOutcome {
+    ProviderTurnInterruptOutcome {
+        tmux_session: None,
+        sent_keys: false,
+        fallback_sigint_pid: None,
+        missing_tmux_session: false,
+        sigint_target_missing: false,
+    }
+}
+
+#[cfg(test)]
+#[path = "stop_host_tests.rs"]
+mod tests;
