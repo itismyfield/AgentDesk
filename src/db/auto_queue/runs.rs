@@ -250,7 +250,8 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// terminalize, force-pause, phase-gate attachment (including its attachment-
 /// free branch), consultation attachment, explicit completion, dispatched-
 /// entry choke points, done-entry reactivation, retry attachment, campaign
-/// handoff append, and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
+/// handoff append, activate's empty-run completion `complete_run_if_empty`,
+/// and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
 /// Retry already takes the d1 retry token first and then the run token before its
 /// failed-sync and replacement attachment. Later cards/entries/runs/slots
 /// ordering is serialized by that first run token for these participants.
@@ -262,8 +263,7 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// does not serialize phase-gate state writes with cancel.
 ///
 /// Known completed writers outside this token protocol are intentionally
-/// scoped: `complete_run_if_empty` cleans a genuinely entry-less run during
-/// activate, `submit_order_with_pg` completes a newly-created run when no
+/// scoped: `submit_order_with_pg` completes a newly-created run when no
 /// ready card was accepted, `reset_global_with_pg` destructively removes queue
 /// entries across every queue before completing runs, and `update_run_with_pg`
 /// is an explicit admin override. They do not inherit the attach-versus-

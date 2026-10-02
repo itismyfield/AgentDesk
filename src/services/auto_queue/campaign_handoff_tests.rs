@@ -326,6 +326,136 @@ async fn postgres_campaign_handoff_skips_a_run_cancelled_while_it_waits_pg() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_handoff_does_not_keep_the_token_of_a_run_that_finished_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(8).await;
+    let engine = engine(&pool);
+    let campaign = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at)
+         VALUES ('old', $1, 'agent-x', 'active', NOW() - INTERVAL '1 minute'),
+                ('new', $1, 'agent-x', 'active', NOW())",
+    )
+    .bind(REPO)
+    .execute(&pool)
+    .await
+    .expect("seed two live runs");
+    let mut finisher = pool.begin().await.expect("begin new-run holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'new'))")
+        .execute(&mut *finisher)
+        .await
+        .expect("hold new run token");
+    let mut old_holder = pool.begin().await.expect("begin old-run holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'old'))")
+        .execute(&mut *old_holder)
+        .await
+        .expect("hold old run token");
+    let old_holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *old_holder)
+        .await
+        .expect("old holder pid");
+
+    let task = spawn_handoff(&pool, &engine, &campaign);
+    wait_for_lock_waiter(&pool, "%aq_run:%").await;
+    sqlx::query(
+        "UPDATE auto_queue_runs SET status = 'completed', completed_at = NOW() WHERE id = 'new'",
+    )
+    .execute(&mut *finisher)
+    .await
+    .expect("finish new run");
+    finisher.commit().await.expect("commit finished run");
+    // The handoff moves on to the old run and waits for its token.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+    )
+    .bind(old_holder_pid)
+    .fetch_one(&pool)
+    .await
+    .expect("inspect blockers")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "handoff never reached the old run"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut probe = pool.begin().await.expect("begin probe");
+    let free: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext('aq_run:' || 'new'))")
+            .fetch_one(&mut *probe)
+            .await
+            .expect("probe new run token");
+    probe.rollback().await.expect("release probe");
+    assert!(
+        free,
+        "the finished run's token was released before waiting on another"
+    );
+
+    old_holder.commit().await.expect("release old run token");
+    let report = task.await.expect("handoff task");
+    assert_eq!(queued_nodes(&report), ["a"]);
+    let (run_id, _, _) = entry_for(&pool, "card-1").await.expect("a queued");
+    assert_eq!(run_id, "old");
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_activate_does_not_complete_a_run_the_handoff_is_filling_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(8).await;
+    seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('empty', $1, 'agent-x', 'active')",
+    )
+    .bind(REPO)
+    .execute(&pool)
+    .await
+    .expect("seed empty run");
+    // What the handoff does under the run token: append an entry, then commit.
+    let mut appender = pool.begin().await.expect("begin appender");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'empty'))")
+        .execute(&mut *appender)
+        .await
+        .expect("hold run token");
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, thread_group, batch_phase)
+         VALUES ('appended', 'empty', 'card-1', 'agent-x', 0, 0)",
+    )
+    .execute(&mut *appender)
+    .await
+    .expect("append entry");
+
+    let activate = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let ctx = crate::services::auto_queue::AutoQueueLogContext::new().run("empty");
+            super::super::activate_command::complete_run_if_empty(&pool, "empty", &ctx)
+                .await
+                .is_ok()
+        })
+    };
+    wait_for_lock_waiter(&pool, "%aq_run:%").await;
+    appender.commit().await.expect("commit appended entry");
+
+    assert!(
+        activate.await.expect("activate task"),
+        "the run has an entry to dispatch"
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'empty'")
+            .fetch_one(&pool)
+            .await
+            .expect("run status");
+    assert_eq!(status, "active");
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_campaign_handoff_drops_nodes_when_a_newer_save_lands_first_pg() {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(8).await;

@@ -250,6 +250,8 @@ async fn enqueue_candidates(
 enum PickedRun {
     Active(String),
     Paused(String),
+    /// Finished while this waited for its token; retry in a fresh transaction.
+    Gone,
 }
 
 /// The agent's live run like generate would find it, or a new one.
@@ -260,57 +262,54 @@ async fn pick_run(
     agent: &str,
 ) -> Result<PickedRun, String> {
     let db = |error: sqlx::Error| format!("campaign handoff: {error}");
-    loop {
-        let live: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM auto_queue_runs
-             WHERE status IN ('active', 'paused')
-               AND (repo = $1 OR repo IS NULL OR repo = '')
-               AND (agent_id = $2 OR agent_id IS NULL OR agent_id = '')
-             ORDER BY created_at DESC, id DESC LIMIT 1",
+    let live: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM auto_queue_runs
+         WHERE status IN ('active', 'paused')
+           AND (repo = $1 OR repo IS NULL OR repo = '')
+           AND (agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(repo)
+    .bind(agent)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db)?;
+    let Some(run_id) = live else {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, review_mode, status,
+                 ai_model, ai_rationale, unified_thread, max_concurrent_threads)
+             VALUES ($1, NULLIF($2, ''), $3, $4, 'active', $5, $6, FALSE, 1)",
         )
+        .bind(&run_id)
         .bind(repo)
         .bind(agent)
-        .fetch_optional(&mut **tx)
+        .bind(AUTO_QUEUE_REVIEW_MODE_DISABLED)
+        .bind(CAMPAIGN_AI_MODEL)
+        .bind(format!("campaign {}: {}", campaign.id, campaign.title))
+        .execute(&mut **tx)
         .await
         .map_err(db)?;
-        let Some(run_id) = live else {
-            let run_id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, review_mode, status,
-                     ai_model, ai_rationale, unified_thread, max_concurrent_threads)
-                 VALUES ($1, NULLIF($2, ''), $3, $4, 'active', $5, $6, FALSE, 1)",
-            )
+        return Ok(PickedRun::Active(run_id));
+    };
+    // Completion and cancel read the run's entries under this token.
+    crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(
+        tx,
+        std::slice::from_ref(&run_id),
+    )
+    .await?;
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
             .bind(&run_id)
-            .bind(repo)
-            .bind(agent)
-            .bind(AUTO_QUEUE_REVIEW_MODE_DISABLED)
-            .bind(CAMPAIGN_AI_MODEL)
-            .bind(format!("campaign {}: {}", campaign.id, campaign.title))
-            .execute(&mut **tx)
+            .fetch_optional(&mut **tx)
             .await
-            .map_err(db)?;
-            return Ok(PickedRun::Active(run_id));
-        };
-        // Completion and cancel read the run's entries under this token.
-        crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(
-            tx,
-            std::slice::from_ref(&run_id),
-        )
-        .await?;
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
-                .bind(&run_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(db)?
-                .flatten();
-        match status.as_deref() {
-            Some("active") => return Ok(PickedRun::Active(run_id)),
-            Some("paused") => return Ok(PickedRun::Paused(run_id)),
-            // It finished while this waited for the token; look again.
-            _ => {}
-        }
-    }
+            .map_err(db)?
+            .flatten();
+    Ok(match status.as_deref() {
+        Some("active") => PickedRun::Active(run_id),
+        Some("paused") => PickedRun::Paused(run_id),
+        _ => PickedRun::Gone,
+    })
 }
 
 async fn enqueue_group(
@@ -322,31 +321,35 @@ async fn enqueue_group(
     report: &mut HandoffReport,
 ) -> Result<(), String> {
     let db = |error: sqlx::Error| format!("campaign handoff: {error}");
-    let mut tx = pool.begin().await.map_err(db)?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('campaign-handoff'))")
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-    // A save that committed first wins; a later save waits until these entries commit.
-    let revision: Option<i64> =
-        sqlx::query_scalar("SELECT revision FROM campaigns WHERE id = $1 FOR SHARE")
-            .bind(&campaign.id)
-            .fetch_optional(&mut *tx)
+    // One run token per transaction: a finished pick is retried after rollback, never stacked.
+    let (mut tx, run_id) = loop {
+        let mut tx = pool.begin().await.map_err(db)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('campaign-handoff'))")
+            .execute(&mut *tx)
             .await
             .map_err(db)?;
-    if revision != Some(campaign.revision) {
-        for member in members {
-            report.wait(member.node_id, "campaign_changed", None);
-        }
-        return Ok(());
-    }
-    let run_id = match pick_run(&mut tx, campaign, repo, agent).await? {
-        PickedRun::Active(run_id) => run_id,
-        PickedRun::Paused(run_id) => {
+        // A save that committed first wins; a later save waits until these entries commit.
+        let revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM campaigns WHERE id = $1 FOR SHARE")
+                .bind(&campaign.id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db)?;
+        if revision != Some(campaign.revision) {
             for member in members {
-                report.wait(member.node_id, "run_paused", Some(run_id.clone()));
+                report.wait(member.node_id, "campaign_changed", None);
             }
             return Ok(());
+        }
+        match pick_run(&mut tx, campaign, repo, agent).await? {
+            PickedRun::Active(run_id) => break (tx, run_id),
+            PickedRun::Paused(run_id) => {
+                for member in members {
+                    report.wait(member.node_id, "run_paused", Some(run_id.clone()));
+                }
+                return Ok(());
+            }
+            PickedRun::Gone => tx.rollback().await.map_err(db)?,
         }
     };
     let (mut next_group, phase): (i64, i64) = sqlx::query_as(
