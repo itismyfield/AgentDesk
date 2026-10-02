@@ -1441,21 +1441,29 @@ diagnostics = {
   "Show PostgreSQL lane resource diagnostics" => "always() && inputs.resource_diagnostics == true",
 }
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
+# A step is a test step by what it runs, so a diagnostics name cannot lend it a condition.
+runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test)/) }
+start_run = "./scripts/ci/postgres-service.sh start"
 steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
 steps.each do |step|
   label = "job postgres step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
   errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
   next unless step.key?("if")
-  allowed = diagnostics.key?(step["name"]) ? diagnostics[step["name"]] : (cleanup.(step) ? "always()" : nil)
+  allowed = if runs_tests.(step) || step["run"] == start_run then nil
+            elsif diagnostics.key?(step["name"]) then diagnostics[step["name"]]
+            elsif cleanup.(step) then "always()"
+            end
   errors << "#{label} may not set if: #{step["if"].inspect}" unless step["if"] == allowed
 end
 index = ->(pred) { steps.index(&pred) }
-start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start" })
-tests = steps.each_index.select { |i| steps[i]["run"].to_s.strip == "just test-postgres" }
+start = index.(->(step) { step["run"] == start_run })
+tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
-errors << "job postgres must run just test-postgres in exactly one step" unless tests.length == 1
-errors << "job postgres must not gate PostgreSQL start or just test-postgres with if" if [start, *tests].compact.any? { |i| steps[i].key?("if") }
-errors << "job postgres must start PostgreSQL, run just test-postgres, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
+test_step = tests.length == 1 ? steps[tests[0]] : {}
+errors << "job postgres must run tests in exactly one step, \"just test-postgres-shard\": just test-postgres-shard" unless test_step["name"] == "just test-postgres-shard" && test_step["run"].to_s.strip == "just test-postgres-shard"
+errors << "job postgres test step must keep timeout-minutes: 40" unless test_step["timeout-minutes"] == 40
+errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
+errors << "job postgres must start PostgreSQL, run the test step, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY

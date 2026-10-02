@@ -285,7 +285,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 | Full tests | `full_non_pg`의 `Library sweep (selection-set gated)` step (PR `library_sweep`과 같은 명령) | 아래 Full tests (PR) 행과 같다 |
 | Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
 | Full tests (PR) | `library_sweep`의 `Library sweep (selection-set gated)` step | 도달 가능한 PostgreSQL과 `AGENTDESK_REQUIRE_PG=1` 아래에서 `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` (⚠️ 레인 이름과 달리 PG가 필요하다 — 위 §PR 측 library sweep 참조) |
-| PostgreSQL tests | `postgres` 샤드별 `just test-postgres` step: `PG_INCLUDE_SHARD=<0\|1> just test-postgres` | workflow와 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=0 just test-postgres`, `PG_INCLUDE_SHARD=1 just test-postgres` (미설정이면 두 샤드의 합집합 전체) |
+| PostgreSQL tests | `postgres` 샤드별 `just test-postgres-shard` step: `PG_INCLUDE_SHARD=<0\|1> just test-postgres-shard` | workflow와 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=0 just test-postgres-shard`, `PG_INCLUDE_SHARD=1 just test-postgres-shard` (둘을 합친 것이 `just test-postgres` 한 번과 같다) |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 
 ## 2. Path Filter Policy
@@ -370,8 +370,9 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 
 ### Serial execution
 
-- `postgres` job의 `just test-postgres` step은 `just test-postgres`를 실행한다. 이 recipe는 `cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1`로 생성 필터의 PG 선택을 한 번에 실행하고 **단일 스레드**를 강제한다.
+- `just test-postgres` recipe(PR `test_fast`·로컬)는 `cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1`로 생성 필터의 PG 선택을 한 번에 실행하고 **단일 스레드**를 강제한다.
 - main 은 이 선택을 matrix 샤드 두 개로 나눈다. `PG_INCLUDE_SHARD` 가 `scripts/ci/non-pg-test-filter.sh` 의 생성 배열 `PG_INCLUDE_ARGS_SHARD_0`(`pg_`, `postgres`)·`PG_INCLUDE_ARGS_SHARD_1`(나머지 include 값 + 두 값의 `--skip`) 중 하나를 고른다. 각 샤드 안에서는 여전히 `--test-threads=1` 이다(스레드를 늘리지 않는다).
+- main 샤드 step 은 `just test-postgres-shard` 를 실행한다. shard 0 은 자기 선택으로 `test-postgres` 전체(뒤의 targeted 명령 포함)를, shard 1 은 자기 선택만(`test-postgres-selection`) 실행하므로 targeted 명령은 push 마다 한 번 돈다. 0/1 이 아닌 값이면 cargo 실행 전에 실패한다.
 - 두 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
 - `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.
 - 이유(#974, `683db919f`): `PgRecoveryTestDatabase::create()` 가 시나리오마다 admin PG connection 을 열어 새 DB 를 만드는데, 기본 병렬 executor 에서는 **admin pool 이 고갈**되어 `pool timed out while waiting for an open connection` 으로 실패했다. `--test-threads=1` 이 순차 실행을 강제해 admin connection 을 재사용하게 한다. 즉 원인은 "테스트 간 lifecycle race" 가 아니라 **connection pool 고갈**이다.

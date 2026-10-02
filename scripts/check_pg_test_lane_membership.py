@@ -38,6 +38,7 @@ NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
 # shard 1 the rest with them skipped, so the shards partition the selection.
 PG_SHARD_0_SELECTORS = ("pg_", "postgres")
 PG_SHARD_JOB = ".github/workflows/ci-main.yml:postgres"
+PG_SHARD_RECIPE = "test-postgres-shard"
 ALLOWLIST_REL = Path("scripts/pg_test_lane_allowlist.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
@@ -1545,13 +1546,21 @@ def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
     ):
         errors.append(f"{PG_SHARD_JOB}: PG_INCLUDE_SHARD must be set once, from matrix.shard")
     workflows = (repo_root / ".github/workflows")
-    for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml"), repo_root / "justfile"]):
-        if not path.is_file():
-            continue
+    for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")]):
         rel = path.relative_to(repo_root).as_posix()
         count = _strip_comments(path.read_text("utf-8")).count("PG_INCLUDE_SHARD")
         if count != (owned if shard_job and shard_job.workflow == rel else 0):
             errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside {PG_SHARD_JOB}")
+    justfile = repo_root / "justfile"
+    if justfile.is_file():
+        # Only the shard recipe main's job runs may read the shard; no recipe may set it.
+        text = _strip_comments(justfile.read_text("utf-8"))
+        try:
+            reads = " ".join(coverage.just_recipe_commands(text, PG_SHARD_RECIPE)).count("PG_INCLUDE_SHARD")
+        except ValueError:
+            reads = 0
+        if text.count("PG_INCLUDE_SHARD") != reads or re.search(r"PG_INCLUDE_SHARD\s*\+?=", text):
+            errors.append(f"justfile: PG_INCLUDE_SHARD is set, or read outside the {PG_SHARD_RECIPE} recipe")
     return errors
 
 

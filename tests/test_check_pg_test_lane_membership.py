@@ -227,7 +227,12 @@ class NonPgFilterContract(unittest.TestCase):
         main.write_text(
             main.read_text("utf-8")
             + "  postgres:\n    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n"
-            + "    steps:\n      - run: just test-postgres\n",
+            + "    steps:\n      - run: just test-postgres-shard\n",
+            "utf-8",
+        )
+        (self.root / "justfile").write_text(
+            "test-postgres:\n    cargo test --lib\n\n"
+            "test-postgres-shard:\n    test \"$PG_INCLUDE_SHARD\" = 1 || just test-postgres\n",
             "utf-8",
         )
         self.assertEqual(membership.non_pg_filter_contract_errors(self.root, self.jobs()), ())
@@ -243,6 +248,10 @@ class NonPgFilterContract(unittest.TestCase):
             "literal shard": (
                 Path(".github/workflows/ci-main.yml"), "${{ matrix.shard }}", "1",
                 "must be set once, from matrix.shard",
+            ),
+            "justfile sets shard": (
+                Path("justfile"), "    cargo test --lib\n", "    PG_INCLUDE_SHARD=0 cargo test --lib\n",
+                "justfile: PG_INCLUDE_SHARD is set",
             ),
             "nightly shard": (
                 Path(".github/workflows/ci-nightly.yml"),
