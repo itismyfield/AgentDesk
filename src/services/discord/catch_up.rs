@@ -1922,15 +1922,6 @@ mod catch_up_recovery_tests {
         message
     }
 
-    fn set_dir_readonly(path: &std::path::Path, readonly: bool) {
-        let mut permissions = std::fs::metadata(path)
-            .unwrap_or_else(|error| panic!("read permissions for {}: {error}", path.display()))
-            .permissions();
-        permissions.set_readonly(readonly);
-        std::fs::set_permissions(path, permissions)
-            .unwrap_or_else(|error| panic!("set permissions for {}: {error}", path.display()));
-    }
-
     #[test]
     fn scan_pace_parses_valid_zero_invalid_and_missing() {
         // Explicit value is honoured.
@@ -2519,10 +2510,12 @@ mod catch_up_recovery_tests {
             .join("discord_pending_queue")
             .join(provider.as_str())
             .join(&shared.token_hash);
-        // The queue dir is created lazily on first persist; pre-create it so the
-        // readonly flip in the cleanup hook can target it before any file lands.
+        // Replace the queue directory with a file after the first commit so later
+        // persistence fails on every platform, preserving the committed contents.
         std::fs::create_dir_all(&pending_queue_dir).expect("pre-create pending queue dir");
-        let readonly_dir = pending_queue_dir.clone();
+        let blocked_dir = pending_queue_dir.clone();
+        let saved_dir = pending_queue_dir.with_extension("saved");
+        let saved_dir_for_hook = saved_dir.clone();
         let cleanup_calls = Arc::new(AtomicUsize::new(0));
         let cleanup_calls_for_hook = Arc::clone(&cleanup_calls);
 
@@ -2539,12 +2532,16 @@ mod catch_up_recovery_tests {
             empty_after_first_fetch: false,
             cleanup_hook: Some(Arc::new(move |_shared, _channel_id, _message_id| {
                 if cleanup_calls_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
-                    set_dir_readonly(&readonly_dir, true);
+                    std::fs::rename(&blocked_dir, &saved_dir_for_hook)
+                        .expect("preserve committed queue directory");
+                    std::fs::write(&blocked_dir, b"not a directory")
+                        .expect("block subsequent queue persistence");
                 }
             })),
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
-        set_dir_readonly(&pending_queue_dir, false);
+        std::fs::remove_file(&pending_queue_dir).expect("remove queue persistence blocker");
+        std::fs::rename(&saved_dir, &pending_queue_dir).expect("restore committed queue directory");
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
 
         let saved_checkpoint = *shared

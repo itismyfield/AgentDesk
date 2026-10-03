@@ -106,6 +106,7 @@ src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
+src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs
 src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs
 src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs
 src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
@@ -293,6 +294,7 @@ services::discord::inflight::rebind_reap::tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::recovery_engine::host_reconcile::tests
+services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
 services::discord::recovery_engine::restore_inflight::host_probe_tests
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
@@ -1031,6 +1033,7 @@ services::discord::inflight::removal::custody_notice_tests::without_postgres_the
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
+services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg
 services::discord::recovery_engine::restore_inflight::host_probe_tests::a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg
 services::discord::recovery_engine::restore_inflight::host_probe_tests::restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg
