@@ -4875,6 +4875,7 @@ services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::ac
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::crossed_codex_turn_forces_watcher_replacement_before_normal_reuse
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
+services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_on_a_withheld_herdr_pane_reports_the_withhold_not_a_reused_watcher
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::relay_setup_failure_rollbacks_are_exact_episode_guarded
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::replacement_after_adoption_before_claim_is_untouched
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::replacement_writer_linearizes_after_episode_authority_handoff
@@ -6639,6 +6640,7 @@ services::discord::tmux::tmux_watcher::tests::restored_response_seed_is_kept_for
 services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
@@ -7667,6 +7669,7 @@ services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_skips_and_does_not_clobber_a_re_owned_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_uses_explicit_pre_mutation_identity
 services::discord::turn_bridge::runtime_handoff_loop::tests::direct_tmux_adoption_rejects_claim_evicted_before_publication
+services::discord::turn_bridge::runtime_handoff_loop::tests::herdr_owner::a_withheld_handoff_records_no_owner_and_a_legacy_one_records_it_before_the_claim
 services::discord::turn_bridge::runtime_handoff_loop::tests::legacy_tmux_ready_reowned_row_never_claims_or_starts_watcher
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_ready_skips_reowned_row_and_does_not_queue_stale_flush
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_runtime_ready_first_population_is_saved
@@ -9981,6 +9984,7 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::an_emission_
 services::tui_o::writer::tests::actor::host_start::deferred::stall::an_inflight_row_alone_does_not_keep_legacy_busy_but_an_active_custody_does
 services::tui_o::writer::tests::actor::host_start::deferred::stall::an_open_turn_at_the_cursor_waits_only_on_a_sound_frontier
 services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intake_open_when_the_stall_ends_restarts_it
+services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel

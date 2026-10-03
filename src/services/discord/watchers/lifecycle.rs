@@ -82,7 +82,7 @@ pub(super) use self::output_policy::*;
 mod claims;
 #[rustfmt::skip]
 #[cfg(test)]
-pub(in crate::services::discord) use self::claims::{claim_cross_channel_tmux_watcher_for_test, claim_or_replace_watcher, claim_or_reuse_watcher, evict_claim_before_adoption_for_test};
+pub(in crate::services::discord) use self::claims::{CLAIM_PAUSE, claim_cross_channel_tmux_watcher_for_test, claim_or_replace_watcher, claim_or_reuse_watcher, evict_claim_before_adoption_for_test};
 pub(super) use self::claims::*;
 pub(in crate::services::discord) use self::claims::{
     ThreadFollowUpParent, WatchWithheld, WatcherClaimIncarnation,
