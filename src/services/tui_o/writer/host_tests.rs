@@ -448,7 +448,9 @@ fn a_channel_binding_log_carries_each_production_event_of_its_channel_and_provid
     let mut value: serde_json::Value =
         serde_json::from_slice(&p5_event(CHANNEL, "codex", foreign)).unwrap();
     value["old"] = serde_json::to_value(&old).unwrap();
-    p5_log(root.path(), CHANNEL, &serde_json::to_vec(&value).unwrap());
+    let mut line = serde_json::to_vec(&value).unwrap();
+    line.push(b'\n');
+    p5_log(root.path(), CHANNEL, &line);
     p5::forget_channel_for_tests(CHANNEL);
     let mut writer = harness.writer();
     let mut sources = super::super::rotation::Sources::new(
