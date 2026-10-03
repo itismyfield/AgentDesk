@@ -91,7 +91,7 @@ impl ChannelStop {
         Ok(Some(stop))
     }
 
-    /// Judges `token` by `name` alone, for a stop that neither cancels nor binds it.
+    /// Judges `token` by `name` alone; [`Self::judge`] adds what the cancel binds and records.
     pub(in crate::services::discord) fn judge_token(
         shared: &Arc<SharedData>,
         provider: &ProviderKind,

@@ -340,7 +340,7 @@ fn clear_persistent_inflight_for_stop(
 }
 
 /// A turn stop on `shared`'s channel, carried out on `stop`, the turn judged before any write;
-/// `approved` judges a token the fallback finds in its place.
+/// its fallback finishes that turn only. `approved` is the force-kill verdict's session.
 async fn stop_judged_channel_runtime(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
