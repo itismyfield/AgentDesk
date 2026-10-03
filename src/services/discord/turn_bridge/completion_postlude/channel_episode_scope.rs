@@ -467,7 +467,7 @@ mod tests {
             "every bridge entry file must declare its mailbox token-registration contract"
         );
 
-        let displaced = include_str!("../../authority_loss_tests.rs");
+        let displaced = include_str!("../authority_loss_tests.rs");
         assert_eq!(displaced.matches(&spawn).count(), 1);
         assert!(displaced.contains("mailbox_try_start_turn(\n                        &shared,\n                        channel,\n                        actor.clone(),"));
         assert!(
