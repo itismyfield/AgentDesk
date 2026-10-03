@@ -79,12 +79,15 @@ fn scripted_e7(transport: &HerdrSocketTransport, endpoint: &HerdrEndpoint) -> Re
 /// The result for one request; it may replace the serving process as it answers.
 type Reply = Box<dyn Fn(&Value, &AtomicU32) -> Value + Send + Sync>;
 
+/// One accepted connection: the request it carried, if any, and every byte it sent.
+type Conn = (Option<Value>, usize);
+
 struct Server {
     path: PathBuf,
     /// The pid of the process accepting connections, as the peer reader reports it.
     serving: Arc<AtomicU32>,
     /// Every connection in accept order: the method it carried, if any, and its bytes.
-    conns: Arc<Mutex<Vec<(Option<Value>, usize)>>>,
+    conns: Arc<Mutex<Vec<Conn>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }

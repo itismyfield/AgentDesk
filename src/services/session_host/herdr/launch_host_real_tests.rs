@@ -194,9 +194,11 @@ fn wait_for(path: &Path, what: &str) {
     }
 }
 
+type Hook = Option<Box<dyn FnOnce()>>;
+
 thread_local! {
     /// Run in order, one before each E7 reading on this thread; `None` runs nothing.
-    static BEFORE_E7: RefCell<Vec<Option<Box<dyn FnOnce()>>>> = const { RefCell::new(Vec::new()) };
+    static BEFORE_E7: RefCell<Vec<Hook>> = const { RefCell::new(Vec::new()) };
 }
 
 fn hooked_e7(transport: &HerdrSocketTransport, endpoint: &HerdrEndpoint) -> RestoreResume {
