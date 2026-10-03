@@ -7,11 +7,11 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use super::contract::{HerdrOutcome, HerdrTransport, HerdrTransportError};
+use super::contract::{HerdrOutcome, HerdrTransport, HerdrTransportError, ServerPeer};
 use super::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
-use super::observe::{self, HerdrHello};
+use super::observe::{self, HerdrHello, RestoreUnverified};
 use super::wire::{self, HerdrFraming, LineJsonFraming, MAX_FRAME_BYTES};
 use crate::services::session_host::model::HostError;
 
@@ -40,6 +40,10 @@ struct Connection {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     generation: u64,
+    hello: HerdrHello,
+    /// Socket peer pid read when the connection opened; `None` if the OS gave none.
+    peer_pid: Option<u32>,
+    connected_at: SystemTime,
 }
 
 impl Connection {
@@ -115,10 +119,18 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
             .set_write_timeout(Some(self.config.io_timeout))
             .map_err(transport)?;
         let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
+        let connected_at = SystemTime::now();
+        let peer_pid = super::provenance::socket_peer_pid(&stream);
         let mut connection = Connection {
             reader: BufReader::new(stream.try_clone().map_err(transport)?),
             writer: stream,
             generation,
+            hello: HerdrHello {
+                version: String::new(),
+                protocol: 0,
+            },
+            peer_pid,
+            connected_at,
         };
         let ping = HerdrCall {
             id: format!("adk-hello-{generation}"),
@@ -126,6 +138,7 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
         };
         let outcome = connection.exchange(&self.framing, &ping, self.config.max_frame_bytes);
         let hello = observe::hello_result(&ping, outcome)?;
+        connection.hello = hello.clone();
         Ok((connection, hello))
     }
 
@@ -181,6 +194,21 @@ impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
 
     fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64) {
         self.attempt(call, Some(generation))
+    }
+
+    fn server_peer(&self) -> Result<ServerPeer, RestoreUnverified> {
+        let mut slot = self.slot();
+        if slot.is_none() {
+            let (connection, _) = self.open().map_err(|_| RestoreUnverified::NoPeer)?;
+            *slot = Some(connection);
+        }
+        let connection = slot.as_ref().ok_or(RestoreUnverified::NoPeer)?;
+        Ok(ServerPeer {
+            generation: connection.generation,
+            pid: connection.peer_pid.ok_or(RestoreUnverified::NoPeer)?,
+            version: connection.hello.version.clone(),
+            connected_at: connection.connected_at,
+        })
     }
 }
 

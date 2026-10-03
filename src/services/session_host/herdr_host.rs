@@ -21,7 +21,25 @@ pub(crate) struct HerdrHost<T: HerdrTransport> {
     transport: T,
     next_id: AtomicU64,
     /// E7 reading, taken afresh before every input.
-    read_restore: fn(&T) -> RestoreResume,
+    read_restore: fn(&T, &HerdrEndpoint) -> RestoreResume,
+}
+
+/// Paste end marker; a body holding it would close the paste early.
+const PASTE_END: &str = "\x1b[201~";
+const PASTE_START: &str = "\x1b[200~";
+
+/// The executor's tmux key names mapped to Herdr's; anything else is never sent.
+fn herdr_key_name(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "Enter" => "enter",
+        "Escape" => "esc",
+        "C-u" => "ctrl+u",
+        "C-e" => "ctrl+e",
+        "Left" => "left",
+        "Right" => "right",
+        "BSpace" => "backspace",
+        _ => return None,
+    })
 }
 
 fn pane_id(session: HostSessionRef<'_>) -> Result<&str, HostError> {
@@ -49,7 +67,10 @@ impl<T: HerdrTransport> HerdrHost<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_restore_reader(self, read_restore: fn(&T) -> RestoreResume) -> Self {
+    pub(crate) fn with_restore_reader(
+        self,
+        read_restore: fn(&T, &HerdrEndpoint) -> RestoreResume,
+    ) -> Self {
         Self {
             read_restore,
             ..self
@@ -74,13 +95,62 @@ impl<T: HerdrTransport> HerdrHost<T> {
     /// E7 before any input: only a fresh read of resume-on-restore off admits it, and
     /// only on the connection that read it, so a reconnect drops the earlier reading.
     fn restore_off(&self) -> Result<u64, HostMutation> {
-        (self.read_restore)(&self.transport)
+        (self.read_restore)(&self.transport, &self.endpoint)
             .admitted_generation()
             .ok_or_else(|| {
                 HostMutation::Refused(HostRefusal::Precondition(
                     RESTORE_RESUME_NOT_OFF.to_string(),
                 ))
             })
+    }
+
+    /// One mutation, after E7, on the connection that read it; `request` is checked first.
+    fn mutate(&self, pane: &str, request: HerdrRequest) -> Result<HostMutation, HostError> {
+        let generation = match self.restore_off() {
+            Ok(generation) => generation,
+            Err(refusal) => return Ok(refusal),
+        };
+        let call = self.next_call(request);
+        let (outcome, _) = self.transport.call_on(&call, generation);
+        contract::mutation_result(&call, outcome, pane)
+    }
+
+    /// Prompt text as one bracketed paste, as tmux `paste-buffer -p` delivers it; Herdr
+    /// does not bracket `send_text` itself. A body holding the end marker is refused.
+    pub(crate) fn send_paste(
+        &self,
+        session: HostSessionRef<'_>,
+        text: &str,
+    ) -> Result<HostMutation, HostError> {
+        let pane = pane_id(session)?;
+        if text.contains(PASTE_END) {
+            return Ok(HostMutation::Refused(HostRefusal::Precondition(
+                "paste_end_marker_in_text".to_string(),
+            )));
+        }
+        let text = format!("{PASTE_START}{text}{PASTE_END}");
+        let pane_id = pane.to_string();
+        self.mutate(pane, HerdrRequest::PaneSendText { pane_id, text })
+    }
+
+    /// One line and Enter in a single input, so the text never lands without its Enter.
+    pub(crate) fn send_line(
+        &self,
+        session: HostSessionRef<'_>,
+        text: &str,
+    ) -> Result<HostMutation, HostError> {
+        let pane = pane_id(session)?;
+        if text.is_empty() || text.chars().any(char::is_control) {
+            return Ok(HostMutation::Refused(HostRefusal::Precondition(
+                "line_not_single".to_string(),
+            )));
+        }
+        let request = HerdrRequest::PaneSendInput {
+            pane_id: pane.to_string(),
+            text: text.to_string(),
+            keys: vec!["enter".to_string()],
+        };
+        self.mutate(pane, request)
     }
 
     fn exchange<R>(
@@ -124,10 +194,12 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
         HostKind::Herdr
     }
 
-    // Key grammar is unverified, so keys and interrupt stay refused.
+    // Supported operations, not admission: no production path selects Herdr.
     fn capabilities(&self) -> HostCapabilities {
         HostCapabilities {
             send_text: true,
+            send_keys: true,
+            interrupt: true,
             capture_screen: true,
             current_working_dir: true,
             execution_pid: true,
@@ -149,28 +221,38 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
         text: &str,
     ) -> Result<HostMutation, HostError> {
         let pane = pane_id(session)?;
-        let generation = match self.restore_off() {
-            Ok(generation) => generation,
-            Err(refusal) => return Ok(refusal),
-        };
-        let call = self.next_call(HerdrRequest::PaneSendText {
+        let request = HerdrRequest::PaneSendText {
             pane_id: pane.to_string(),
             text: text.to_string(),
-        });
-        let (outcome, _) = self.transport.call_on(&call, generation);
-        contract::mutation_result(&call, outcome, pane)
+        };
+        self.mutate(pane, request)
     }
 
+    /// Every key is mapped before any I/O; one unknown key sends none of them.
     fn send_keys(
         &self,
-        _session: HostSessionRef<'_>,
-        _keys: &[&str],
+        session: HostSessionRef<'_>,
+        keys: &[&str],
     ) -> Result<HostMutation, HostError> {
-        self.restore_off().map_or_else(Ok, |_| refused("send_keys"))
+        let pane = pane_id(session)?;
+        let mapped: Option<Vec<String>> = keys
+            .iter()
+            .map(|key| herdr_key_name(key).map(str::to_string))
+            .collect();
+        let Some(keys) = mapped.filter(|keys| !keys.is_empty()) else {
+            return refused("send_keys");
+        };
+        let pane_id = pane.to_string();
+        self.mutate(pane, HerdrRequest::PaneSendKeys { pane_id, keys })
     }
 
-    fn interrupt(&self, _session: HostSessionRef<'_>) -> Result<HostMutation, HostError> {
-        self.restore_off().map_or_else(Ok, |_| refused("interrupt"))
+    fn interrupt(&self, session: HostSessionRef<'_>) -> Result<HostMutation, HostError> {
+        let pane = pane_id(session)?;
+        let request = HerdrRequest::PaneSendKeys {
+            pane_id: pane.to_string(),
+            keys: vec!["ctrl+c".to_string()],
+        };
+        self.mutate(pane, request)
     }
 
     fn capture_screen(

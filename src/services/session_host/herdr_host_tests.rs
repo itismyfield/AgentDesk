@@ -9,6 +9,7 @@ use crate::services::session_host::herdr::contract::HerdrTransportError;
 use crate::services::session_host::herdr::model::{
     ExecutionState, HerdrReadSource, HerdrReply, HerdrResult, PaneState,
 };
+use crate::services::session_host::herdr::observe::RestoreUnverified;
 
 const PANE: &str = "w1-1";
 
@@ -56,7 +57,7 @@ impl HerdrTransport for FakeTransport {
     }
 }
 
-fn scripted_restore(transport: &FakeTransport) -> RestoreResume {
+fn scripted_restore(transport: &FakeTransport, _endpoint: &HerdrEndpoint) -> RestoreResume {
     let next = transport.restore.lock().unwrap().pop_front();
     next.unwrap_or(RestoreResume::Off {
         generation: transport.generation.load(Ordering::SeqCst),
@@ -497,7 +498,10 @@ fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
         *herdr.transport.restore.lock().unwrap() = readings.into();
         herdr
     };
-    for reading in [RestoreResume::On, RestoreResume::Unverified] {
+    for reading in [
+        RestoreResume::On,
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+    ] {
         let herdr = with_readings(vec![reading; 5]);
         for outcome in every_input(&herdr) {
             assert_eq!(outcome, restore_refused(), "{reading:?}");
@@ -506,7 +510,10 @@ fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
     }
 
     let off = RestoreResume::Off { generation: 0 };
-    let herdr = with_readings(vec![off, RestoreResume::Unverified]);
+    let herdr = with_readings(vec![
+        off,
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+    ]);
     assert_eq!(herdr.send_text(pane(), "x"), Ok(HostMutation::Confirmed));
     assert_eq!(
         herdr.send_text(pane(), "x"),

@@ -220,7 +220,7 @@ fn transport(server: &Server, config: HerdrSocketConfig) -> HerdrSocketTransport
 }
 
 /// Stands in for a server that reads resume-on-restore off on whatever connection is open.
-fn restore_off_now(transport: &HerdrSocketTransport) -> RestoreResume {
+fn restore_off_now(transport: &HerdrSocketTransport, _endpoint: &HerdrEndpoint) -> RestoreResume {
     RestoreResume::Off {
         generation: transport.generation(),
     }

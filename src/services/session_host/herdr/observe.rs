@@ -2,27 +2,53 @@
 //! that one observation never spans two connections, and the E7 restore-resume reading.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use super::contract::HerdrOutcome;
+use super::contract::{HerdrOutcome, HerdrTransport};
 use super::model::{
-    ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrObservation, HerdrRequest, HerdrResult,
+    ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest,
+    HerdrResult, VERIFIED_HERDR_VERSIONS,
 };
 use crate::services::session_host::model::HostError;
 
 pub(crate) const RESTORE_RESUME_NOT_OFF: &str = "restore_resume_not_off";
+/// The only config a dedicated server may run with: any other byte, a missing file or a
+/// parse error leaves Herdr on its default, which resumes agents on restore.
+pub(crate) const CANONICAL_CONFIG: &[u8] = b"[session]\nresume_agents_on_restore = false\n";
+/// A config written this close to the server's start may have been read in its old form.
+const START_MARGIN: Duration = Duration::from_secs(1);
 
-/// The running server's effective `[session] resume_agents_on_restore`. Only a read-only
-/// answer from that server, on one connection, can say `Off`; a default or a file cannot.
+/// The running server's effective `[session] resume_agents_on_restore`. `Off` needs the
+/// connected server's provenance: started from the canonical config, unchanged since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreResume {
-    Off {
-        generation: u64,
-    },
+    Off { generation: u64 },
     On,
-    /// No read, or an answer that does not state exactly `false`.
-    Unverified,
+    Unverified(RestoreUnverified),
+}
+
+/// Why a reading is not `Off`; every failed or unsupported observation lands here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreUnverified {
+    /// No connection, or its peer process could not be read.
+    NoPeer,
+    VersionNotVerified,
+    PlatformUnsupported,
+    /// No herdr home, an unknown endpoint, or a server env naming another config.
+    NotBootstrapped,
+    ProcessUnreadable,
+    /// The peer pid's process changed while it was read, or started after the connection.
+    ProcessChanged,
+    ConfigMissing,
+    ConfigUnreadable,
+    ConfigNotCanonical,
+    /// The file changed while it was read.
+    ConfigChanged,
+    ConfigChangedSinceStart,
+    /// The connection or its peer changed between the first and last check.
+    Reconnected,
 }
 
 impl RestoreResume {
@@ -30,18 +56,89 @@ impl RestoreResume {
     pub(crate) fn admitted_generation(self) -> Option<u64> {
         match self {
             Self::Off { generation } => Some(generation),
-            Self::On | Self::Unverified => None,
+            Self::On | Self::Unverified(_) => None,
         }
     }
 }
 
-/// Protocol 22 has no read of the server's effective settings (`server.reload_config`
-/// only reloads), so no server is verified and Herdr create and input stay refused.
-pub(crate) fn read_restore_resume<T: ?Sized>(_transport: &T) -> RestoreResume {
-    RestoreResume::Unverified
+/// One read of the config file: bytes and modification time from the same open file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigRead {
+    pub bytes: Vec<u8>,
+    pub modified: SystemTime,
 }
 
-/// What a verified pong reported. The version string is informational only.
+/// OS reads E7 needs about the server process and its config file.
+pub(crate) trait ServerProvenance {
+    /// Wall-clock start of `pid`.
+    fn process_start(&self, pid: u32) -> Result<SystemTime, RestoreUnverified>;
+    /// Every value `pid`'s environment holds for `key`.
+    fn process_env(&self, pid: u32, key: &str) -> Result<Vec<String>, RestoreUnverified>;
+    fn read_config(&self, path: &Path) -> Result<ConfigRead, RestoreUnverified>;
+}
+
+/// E7 over the production OS reads.
+pub(crate) fn read_restore_resume<T: HerdrTransport + ?Sized>(
+    transport: &T,
+    endpoint: &HerdrEndpoint,
+) -> RestoreResume {
+    read_restore_resume_with(transport, endpoint, &super::provenance::OsProvenance)
+}
+
+/// Protocol 22 has no read of effective settings, so `Off` is proven from provenance: the
+/// connected server is a verified version started with this endpoint's config and XDG home,
+/// and that file holds the canonical bytes, written before the server started.
+pub(crate) fn read_restore_resume_with<T: HerdrTransport + ?Sized>(
+    transport: &T,
+    endpoint: &HerdrEndpoint,
+    provenance: &dyn ServerProvenance,
+) -> RestoreResume {
+    match prove_restore_off(transport, endpoint, provenance) {
+        Ok(generation) => RestoreResume::Off { generation },
+        Err(reason) => RestoreResume::Unverified(reason),
+    }
+}
+
+fn prove_restore_off<T: HerdrTransport + ?Sized>(
+    transport: &T,
+    endpoint: &HerdrEndpoint,
+    provenance: &dyn ServerProvenance,
+) -> Result<u64, RestoreUnverified> {
+    use RestoreUnverified as Why;
+    let peer = transport.server_peer()?;
+    if !VERIFIED_HERDR_VERSIONS.contains(&peer.version.as_str()) {
+        return Err(Why::VersionNotVerified);
+    }
+    let home = endpoint.herdr_home().ok_or(Why::NotBootstrapped)?;
+    let config = home.join("config.toml");
+    let xdg = home.join("xdg");
+    let started = provenance.process_start(peer.pid)?;
+    let env_matches = |key, expected: &Path| -> Result<bool, Why> {
+        let values = provenance.process_env(peer.pid, key)?;
+        Ok(values.len() == 1 && Path::new(&values[0]) == expected)
+    };
+    let bootstrapped =
+        env_matches("HERDR_CONFIG_PATH", &config)? && env_matches("XDG_CONFIG_HOME", &xdg)?;
+    if provenance.process_start(peer.pid)? != started || started > peer.connected_at {
+        return Err(Why::ProcessChanged);
+    }
+    if !bootstrapped {
+        return Err(Why::NotBootstrapped);
+    }
+    let read = provenance.read_config(&config)?;
+    if read.bytes != CANONICAL_CONFIG {
+        return Err(Why::ConfigNotCanonical);
+    }
+    if read.modified + START_MARGIN >= started {
+        return Err(Why::ConfigChangedSinceStart);
+    }
+    match transport.server_peer() {
+        Ok(last) if last == peer => Ok(peer.generation),
+        _ => Err(Why::Reconnected),
+    }
+}
+
+/// What a verified pong reported. Only E7 reads the version; the handshake does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrHello {
     pub version: String,

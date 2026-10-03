@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner, pending, record};
+use crate::services::session_host::RestoreUnverified;
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 const CHANNEL: &str = "1479671301387059300";
@@ -129,8 +130,11 @@ async fn herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_an
             ENDPOINT_MISSING,
         ),
     ];
-    let unverified = [RestoreResume::Unverified, RestoreResume::On]
-        .map(|reading| (Some(endpoint()), RESTORE_RESUME_NOT_OFF, Some(reading)));
+    let unverified = [
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+        RestoreResume::On,
+    ]
+    .map(|reading| (Some(endpoint()), RESTORE_RESUME_NOT_OFF, Some(reading)));
     let cases = cases.map(|(endpoint, reason)| (endpoint, reason, None));
     for (endpoint, reason, reading) in cases.into_iter().chain(unverified) {
         let host = Arc::new(FakeHost::created("pane-1").reading(reading.as_slice()));
@@ -507,7 +511,11 @@ async fn herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evide
 async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let off = |generation| RestoreResume::Off { generation };
-    for second in [RestoreResume::Unverified, RestoreResume::On, off(2)] {
+    for second in [
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+        RestoreResume::On,
+        off(2),
+    ] {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         seed_row(&pool, None).await;

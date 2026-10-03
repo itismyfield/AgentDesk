@@ -3,11 +3,13 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use super::model::{
     ControlPlane, ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrErrorBody, HerdrObservation,
-    HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
+    HerdrPane, HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
 };
+use super::observe::RestoreUnverified;
 use crate::services::session_host::model::{HostError, HostMutation};
 
 /// Upper bound on history lines one capture may request.
@@ -29,6 +31,20 @@ pub(crate) trait HerdrTransport: Send + Sync {
     fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64);
     /// Sends `call` only on the open connection with `generation`; otherwise `NotSent`.
     fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64);
+    /// The process across the current connection, opening one if none is open. A
+    /// transport that cannot name its peer never lets E7 read `Off`.
+    fn server_peer(&self) -> Result<ServerPeer, RestoreUnverified> {
+        Err(RestoreUnverified::NoPeer)
+    }
+}
+
+/// The server at the other end of one connection, as read when it was opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServerPeer {
+    pub generation: u64,
+    pub pid: u32,
+    pub version: String,
+    pub connected_at: SystemTime,
 }
 
 enum Fault {
@@ -216,5 +232,54 @@ pub(crate) fn mutation_result(
         Ok(other) => Ok(HostMutation::Indeterminate(format!(
             "unexpected result {other:?}"
         ))),
+    }
+}
+
+/// What a `workspace.create` left behind. Once the request may have reached the server
+/// only a typed root pane counts; anything else may still have made a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreatedPane {
+    Root(HerdrPane),
+    NotSent(String),
+    Indeterminate(String),
+}
+
+pub(crate) fn created_result(call: &HerdrCall, outcome: HerdrOutcome) -> CreatedPane {
+    match reply_result(call, outcome) {
+        Ok(HerdrResult::WorkspaceCreated { root_pane }) if !root_pane.pane_id.trim().is_empty() => {
+            CreatedPane::Root(root_pane)
+        }
+        Err(Fault::Transport(HerdrTransportError::NotSent(message))) => {
+            CreatedPane::NotSent(message)
+        }
+        Ok(other) => CreatedPane::Indeterminate(format!("unexpected result {other:?}")),
+        Err(fault) => CreatedPane::Indeterminate(format!("{:?}", HostError::from(fault))),
+    }
+}
+
+/// The pane's foreground processes; a reply without the list is not an empty list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ForegroundProcesses {
+    Unreported,
+    Listed(Vec<u32>),
+}
+
+pub(crate) fn foreground_result(
+    call: &HerdrCall,
+    outcome: HerdrOutcome,
+    pane_id: &str,
+) -> Result<(Option<u32>, ForegroundProcesses), HostError> {
+    match reply_result(call, outcome)? {
+        HerdrResult::PaneProcessInfo { process_info } => {
+            same_pane(pane_id, &process_info.pane_id)?;
+            let listed = process_info.foreground_processes.map(|processes| {
+                ForegroundProcesses::Listed(processes.iter().map(|p| p.pid).collect())
+            });
+            Ok((
+                process_info.shell_pid,
+                listed.unwrap_or(ForegroundProcesses::Unreported),
+            ))
+        }
+        other => Err(unexpected(&other).into()),
     }
 }

@@ -10,6 +10,9 @@ use crate::services::session_host::model::{HostError, HostKind, HostLiveness, Ho
 
 pub(crate) const HERDR_PROTOCOL: u32 = 22;
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
+/// Server versions whose restore-on-start behavior was measured; protocol 22 alone cannot
+/// tell 0.9.0 from 0.9.3, so E7 admits only these pong versions.
+pub(crate) const VERIFIED_HERDR_VERSIONS: &[&str] = &["0.9.3"];
 
 /// Where Herdr panes live. Every field is explicit; there is no default socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +21,8 @@ pub(crate) struct HerdrEndpoint {
     config_key: String,
     socket_path: PathBuf,
     herdr_session: String,
+    /// Directory of the dedicated server's own config; without it E7 never reads Off.
+    herdr_home: Option<PathBuf>,
 }
 
 impl HerdrEndpoint {
@@ -40,7 +45,31 @@ impl HerdrEndpoint {
             config_key: config_key.to_string(),
             socket_path: socket_path.to_path_buf(),
             herdr_session: herdr_session.to_string(),
+            herdr_home: None,
         })
+    }
+
+    /// The bootstrap home whose `config.toml` and `xdg/` the server must have been started with.
+    pub(crate) fn with_herdr_home(self, herdr_home: &Path) -> Result<Self, HostError> {
+        if !herdr_home.is_absolute() {
+            return Err(HostError::Unsupported(HostKind::Herdr, ENDPOINT_MISSING));
+        }
+        Ok(Self {
+            herdr_home: Some(herdr_home.to_path_buf()),
+            ..self
+        })
+    }
+
+    pub(crate) fn execution_node(&self) -> &str {
+        &self.execution_node
+    }
+
+    pub(crate) fn config_key(&self) -> &str {
+        &self.config_key
+    }
+
+    pub(crate) fn herdr_home(&self) -> Option<&Path> {
+        self.herdr_home.as_deref()
     }
 
     pub(crate) fn socket_path(&self) -> &Path {
@@ -149,12 +178,36 @@ pub(crate) enum HerdrRequest {
     },
     #[serde(rename = "pane.send_text")]
     PaneSendText { pane_id: String, text: String },
+    #[serde(rename = "pane.send_keys")]
+    PaneSendKeys { pane_id: String, keys: Vec<String> },
+    /// Text then keys as one input; an invalid key makes the server write neither.
+    #[serde(rename = "pane.send_input")]
+    PaneSendInput {
+        pane_id: String,
+        text: String,
+        keys: Vec<String>,
+    },
+    /// No command field: the command is sent afterwards as input on the same connection.
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate {
+        cwd: String,
+        label: String,
+        focus: bool,
+    },
 }
 
 impl HerdrRequest {
-    /// Only these may be resent: a retry cannot deliver input twice.
+    /// Only these may be resent: a retry cannot deliver input twice. Anything not
+    /// listed, including a request added later, counts as a mutation.
     pub(crate) fn is_read_only(&self) -> bool {
-        !matches!(self, Self::PaneSendText { .. })
+        matches!(
+            self,
+            Self::Ping {}
+                | Self::SessionSnapshot {}
+                | Self::PaneGet { .. }
+                | Self::PaneProcessInfo { .. }
+                | Self::PaneRead { .. }
+        )
     }
 }
 
@@ -187,6 +240,15 @@ pub(crate) struct HerdrProcessInfo {
     pub pane_id: String,
     pub shell_pid: Option<u32>,
     pub foreground_process_group_id: Option<u32>,
+    /// `None` when the server sent no list, which is not the same as an empty one.
+    #[serde(default)]
+    pub foreground_processes: Option<Vec<HerdrForegroundProcess>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct HerdrForegroundProcess {
+    pub pid: u32,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -216,6 +278,9 @@ pub(crate) enum HerdrResult {
     },
     PaneRead {
         read: HerdrRead,
+    },
+    WorkspaceCreated {
+        root_pane: HerdrPane,
     },
     Ok,
     #[serde(other)]
