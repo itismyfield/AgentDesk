@@ -468,6 +468,10 @@ pub(crate) fn rebind_output_paths_same(left: &str, right: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "adoption_notice_pg_tests.rs"]
+mod notice_pg_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
