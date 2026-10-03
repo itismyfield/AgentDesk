@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner, pending, record};
+use crate::services::session_host::{RestoreUnverified, ServerWitness};
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 const CHANNEL: &str = "1479671301387059300";
@@ -72,7 +73,7 @@ impl FakeHost {
     }
 
     fn reading(self, readings: &[RestoreResume]) -> Self {
-        *self.restore.lock().unwrap() = readings.iter().copied().collect();
+        *self.restore.lock().unwrap() = readings.iter().cloned().collect();
         self
     }
 
@@ -86,7 +87,9 @@ impl FakeHost {
 impl HerdrLaunchHost for FakeHost {
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
         let next = self.restore.lock().unwrap().pop_front();
-        next.unwrap_or(RestoreResume::Off { generation: 1 })
+        next.unwrap_or(RestoreResume::Off {
+            witness: ServerWitness::for_test(1),
+        })
     }
 
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
@@ -129,8 +132,11 @@ async fn herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_an
             ENDPOINT_MISSING,
         ),
     ];
-    let unverified = [RestoreResume::Unverified, RestoreResume::On]
-        .map(|reading| (Some(endpoint()), RESTORE_RESUME_NOT_OFF, Some(reading)));
+    let unverified = [
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+        RestoreResume::On,
+    ]
+    .map(|reading| (Some(endpoint()), RESTORE_RESUME_NOT_OFF, Some(reading)));
     let cases = cases.map(|(endpoint, reason)| (endpoint, reason, None));
     for (endpoint, reason, reading) in cases.into_iter().chain(unverified) {
         let host = Arc::new(FakeHost::created("pane-1").reading(reading.as_slice()));
@@ -506,23 +512,29 @@ async fn herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evide
 #[tokio::test(flavor = "multi_thread")]
 async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let off = |generation| RestoreResume::Off { generation };
-    for second in [RestoreResume::Unverified, RestoreResume::On, off(2)] {
+    let off = |pid| RestoreResume::Off {
+        witness: ServerWitness::for_test(pid),
+    };
+    for second in [
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+        RestoreResume::On,
+        off(2),
+    ] {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         seed_row(&pool, None).await;
-        let host = Arc::new(FakeHost::created("pane-1").reading(&[off(1), second]));
+        let host = Arc::new(FakeHost::created("pane-1").reading(&[off(1), second.clone()]));
         let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone());
         let result = result.await;
-        let generations: Vec<u64> = (host.requests.lock().unwrap().iter())
-            .map(|request| request.restore_off_generation)
+        let servers: Vec<u32> = (host.requests.lock().unwrap().iter())
+            .map(|request| request.restore_off_witness.pid)
             .collect();
         if second == off(2) {
             assert!(matches!(result, Ok(HerdrLaunchOutcome::Launched { .. })));
             assert_eq!(
-                generations,
+                servers,
                 [2],
-                "the create rides the connection of the latest reading"
+                "the create goes to the server of the latest reading"
             );
         } else {
             assert_eq!(
@@ -530,7 +542,7 @@ async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
                 Err(HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into())),
                 "{second:?}: the admission-time Off is not reused for the create"
             );
-            assert!(generations.is_empty(), "{second:?}: no create");
+            assert!(servers.is_empty(), "{second:?}: no create");
             let kept = decoded(stored(&pool).await);
             assert!(
                 matches!(&kept, HostedRecord::Known(record) if record.state == HostedState::Pending),

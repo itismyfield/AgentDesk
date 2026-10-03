@@ -178,11 +178,8 @@ mod tests {
         assert!(write_frame(&mut Choke(10), b"0123456789").is_ok());
     }
 
-    fn schema() -> Value {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/herdr/stage2-herdr-schema.json"
-        );
+    fn schema(file: &str) -> Value {
+        let path = format!("{}/tests/fixtures/herdr/{file}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -237,15 +234,9 @@ mod tests {
             .unwrap_or_else(|| panic!("schema has no result {tag}"))
     }
 
-    // Pins the vendored schema: every request we send is valid there, and the
-    // smallest schema-valid reply of each result we read still decodes.
-    #[test]
-    fn herdr_wire_matches_the_vendored_schema() {
-        let root = schema();
-        assert_eq!(root["protocol"], json!(HERDR_PROTOCOL));
-        assert_eq!(root["schema_version"], json!(1));
-        let requests = &root["schemas"]["request"]["oneOf"];
-        for request in [
+    /// The requests a pre-0.9.3 server already understood; observation reads only.
+    fn observation_requests() -> Vec<HerdrRequest> {
+        vec![
             HerdrRequest::Ping {},
             HerdrRequest::SessionSnapshot {},
             HerdrRequest::PaneGet {
@@ -260,7 +251,42 @@ mod tests {
                 pane_id: "p".into(),
                 text: "t".into(),
             },
-        ] {
+        ]
+    }
+
+    // Pins the vendored schemas: every request we send is valid there, and the
+    // smallest schema-valid reply of each result we read still decodes.
+    #[test]
+    fn herdr_wire_matches_the_vendored_schema() {
+        let launch = vec![
+            HerdrRequest::PaneSendKeys {
+                pane_id: "p".into(),
+                keys: vec!["enter".into()],
+            },
+            HerdrRequest::PaneSendInput {
+                pane_id: "p".into(),
+                text: "t".into(),
+                keys: vec!["enter".into()],
+            },
+            HerdrRequest::WorkspaceCreate {
+                cwd: "/w".into(),
+                label: "l".into(),
+                focus: false,
+            },
+        ];
+        let stage2 = schema("stage2-herdr-schema.json");
+        check_schema(&stage2, observation_requests(), &[]);
+        let current = schema("herdr-schema-0.9.3.json");
+        let requests = observation_requests().into_iter().chain(launch).collect();
+        check_schema(&current, requests, &["workspace_created"]);
+    }
+
+    fn check_schema(root: &Value, sent: Vec<HerdrRequest>, results: &[&str]) {
+        let root = root.clone();
+        assert_eq!(root["protocol"], json!(HERDR_PROTOCOL));
+        assert_eq!(root["schema_version"], json!(1));
+        let requests = &root["schemas"]["request"]["oneOf"];
+        for request in sent {
             let call = serde_json::to_value(HerdrCall {
                 id: "i".into(),
                 request,
@@ -288,14 +314,15 @@ mod tests {
                 }
             }
         }
-        for tag in [
+        let read = [
             "pong",
             "session_snapshot",
             "pane_info",
             "pane_process_info",
             "pane_read",
             "ok",
-        ] {
+        ];
+        for tag in read.iter().chain(results) {
             let result = minimal(&root, result_branch(&root, tag), 0);
             let reply = json!({"id": "i", "result": result});
             let decoded = decode_reply(reply.to_string().as_bytes())

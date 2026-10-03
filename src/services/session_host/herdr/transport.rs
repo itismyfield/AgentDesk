@@ -1,19 +1,21 @@
-//! Unix-socket transport. Nothing connects until a caller asks; one request
-//! is in flight per connection, and any unclear exchange drops the connection.
+//! Unix-socket transport. Herdr answers one request per connection, so every call, the
+//! hello included, dials its own; nothing connects until a caller asks.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
-use super::contract::{HerdrOutcome, HerdrTransport, HerdrTransportError};
+use super::contract::{
+    HerdrOutcome, HerdrTransport, HerdrTransportError, ServerHello, ServerWitness, Witnessed,
+};
 use super::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
-use super::observe::{self, HerdrHello};
+use super::observe::{self, RestoreUnverified};
+use super::provenance::{self, ProcessStart};
 use super::wire::{self, HerdrFraming, LineJsonFraming, MAX_FRAME_BYTES};
-use crate::services::session_host::model::HostError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HerdrSocketConfig {
@@ -36,21 +38,78 @@ impl Default for HerdrSocketConfig {
     }
 }
 
-struct Connection {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
-    generation: u64,
+/// Names the process that accepted a connection: its pid and start.
+pub(crate) type PeerReader =
+    Box<dyn Fn(&UnixStream) -> Result<(u32, ProcessStart), RestoreUnverified> + Send + Sync>;
+
+/// One dialled connection and the server it reached, read before anything is written.
+struct Dialled {
+    stream: UnixStream,
+    connected_at: SystemTime,
+    server: Result<(ServerWitness, SystemTime), RestoreUnverified>,
 }
 
-impl Connection {
-    fn exchange(
-        &mut self,
-        framing: &dyn HerdrFraming,
-        call: &HerdrCall,
-        max: usize,
-    ) -> HerdrOutcome {
-        let frame = framing.encode(call).map_err(HerdrTransportError::NotSent)?;
-        if let Err(failure) = wire::write_frame(&mut self.writer, &frame) {
+pub(crate) struct HerdrSocketTransport<F: HerdrFraming = LineJsonFraming> {
+    socket_path: PathBuf,
+    config: HerdrSocketConfig,
+    framing: F,
+    read_peer: PeerReader,
+    /// Held from a mutation's server check to its reply, so mutations go out one at a time.
+    mutations: Mutex<()>,
+    hellos: AtomicU64,
+}
+
+impl<F: HerdrFraming> HerdrSocketTransport<F> {
+    /// No I/O: every call dials its own connection.
+    pub(crate) fn new(endpoint: &HerdrEndpoint, config: HerdrSocketConfig, framing: F) -> Self {
+        Self {
+            socket_path: endpoint.socket_path().to_path_buf(),
+            config,
+            framing,
+            read_peer: Box::new(provenance::socket_peer),
+            mutations: Mutex::new(()),
+            hellos: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_peer_reader(self, read_peer: PeerReader) -> Self {
+        Self { read_peer, ..self }
+    }
+
+    fn dial(&self) -> Result<Dialled, HerdrTransportError> {
+        let not_sent = |error: std::io::Error| HerdrTransportError::NotSent(error.to_string());
+        let stream = UnixStream::connect(&self.socket_path).map_err(not_sent)?;
+        stream
+            .set_read_timeout(Some(self.config.io_timeout))
+            .map_err(not_sent)?;
+        stream
+            .set_write_timeout(Some(self.config.io_timeout))
+            .map_err(not_sent)?;
+        let connected_at = SystemTime::now();
+        let server = (self.read_peer)(&stream).map(|(pid, start)| {
+            let witness = ServerWitness {
+                socket: self.socket_path.clone(),
+                pid,
+                start: start.identity,
+            };
+            (witness, start.wall_clock)
+        });
+        Ok(Dialled {
+            stream,
+            connected_at,
+            server,
+        })
+    }
+
+    /// Writes one request on `stream` and reads one reply; the stream is not reused.
+    fn exchange(&self, stream: UnixStream, call: &HerdrCall) -> HerdrOutcome {
+        let frame = self
+            .framing
+            .encode(call)
+            .map_err(HerdrTransportError::NotSent)?;
+        let mut writer = &stream;
+        if let Err(failure) = wire::write_frame(&mut writer, &frame) {
             let detail = format!(
                 "{} of {} bytes: {}",
                 failure.written,
@@ -63,124 +122,87 @@ impl Connection {
                 HerdrTransportError::AfterWrite(detail)
             });
         }
-        let reply = framing
-            .read_frame(&mut self.reader, max)
+        let reply = self
+            .framing
+            .read_frame(&mut BufReader::new(&stream), self.config.max_frame_bytes)
             .map_err(|error| HerdrTransportError::AfterWrite(error.to_string()))?;
         wire::decode_reply(&reply).map_err(HerdrTransportError::AfterWrite)
     }
-}
 
-pub(crate) struct HerdrSocketTransport<F: HerdrFraming = LineJsonFraming> {
-    socket_path: PathBuf,
-    config: HerdrSocketConfig,
-    framing: F,
-    connection: Mutex<Option<Connection>>,
-    generations: AtomicU64,
-}
-
-impl<F: HerdrFraming> HerdrSocketTransport<F> {
-    /// No I/O: the socket is opened by `connect` or a read-only call.
-    pub(crate) fn new(endpoint: &HerdrEndpoint, config: HerdrSocketConfig, framing: F) -> Self {
-        Self {
-            socket_path: endpoint.socket_path().to_path_buf(),
-            config,
-            framing,
-            connection: Mutex::new(None),
-            generations: AtomicU64::new(0),
-        }
-    }
-
-    fn slot(&self) -> MutexGuard<'_, Option<Connection>> {
-        self.connection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Replaces any current connection with a fresh, handshaken one.
-    pub(crate) fn connect(&self) -> Result<HerdrHello, HostError> {
-        let mut slot = self.slot();
-        *slot = None;
-        let (connection, hello) = self.open()?;
-        *slot = Some(connection);
-        Ok(hello)
-    }
-
-    fn open(&self) -> Result<(Connection, HerdrHello), HostError> {
-        let transport = |error: std::io::Error| HostError::Transport(error.to_string());
-        let stream = UnixStream::connect(&self.socket_path).map_err(transport)?;
-        stream
-            .set_read_timeout(Some(self.config.io_timeout))
-            .map_err(transport)?;
-        stream
-            .set_write_timeout(Some(self.config.io_timeout))
-            .map_err(transport)?;
-        let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut connection = Connection {
-            reader: BufReader::new(stream.try_clone().map_err(transport)?),
-            writer: stream,
-            generation,
-        };
-        let ping = HerdrCall {
-            id: format!("adk-hello-{generation}"),
-            request: HerdrRequest::Ping {},
-        };
-        let outcome = connection.exchange(&self.framing, &ping, self.config.max_frame_bytes);
-        let hello = observe::hello_result(&ping, outcome)?;
-        Ok((connection, hello))
-    }
-
-    /// Generation of the current connection, 0 when none is open. Test-only:
-    /// callers take the generation from `call`, never from a later read.
-    #[cfg(test)]
-    fn generation(&self) -> u64 {
-        self.slot()
-            .as_ref()
-            .map_or(0, |connection| connection.generation)
-    }
-
-    /// Mutations never open a connection: a replaced server is not written to.
-    /// The generation is read under the same lock as the exchange; 0 if none ran.
-    /// With `expected`, only that connection may carry the call.
-    fn attempt(&self, call: &HerdrCall, expected: Option<u64>) -> (HerdrOutcome, u64) {
-        let mut slot = self.slot();
-        if slot.is_none() && expected.is_none() && call.request.is_read_only() {
-            match self.open() {
-                Ok((connection, _)) => *slot = Some(connection),
-                Err(error) => {
-                    return (Err(HerdrTransportError::NotSent(format!("{error:?}"))), 0);
-                }
+    fn attempt(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed) {
+        match self.dial() {
+            Ok(dialled) => {
+                let witness = dialled.server.map(|(witness, _)| witness);
+                (self.exchange(dialled.stream, call), witness)
             }
+            Err(error) => (Err(error), Err(RestoreUnverified::NoPeer)),
         }
-        let Some(connection) = slot.as_mut() else {
-            let error = HerdrTransportError::NotSent("no herdr connection".to_string());
-            return (Err(error), 0);
-        };
-        let generation = connection.generation;
-        if let Some(expected) = expected.filter(|expected| *expected != generation) {
-            let error = format!("connection {generation} is not the verified {expected}");
-            return (Err(HerdrTransportError::NotSent(error)), generation);
-        }
-        let outcome = connection.exchange(&self.framing, call, self.config.max_frame_bytes);
-        if !matches!(&outcome, Ok(reply) if reply.id == call.id) {
-            *slot = None;
-        }
-        (outcome, generation)
     }
 }
 
 impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
-    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed) {
         if !call.request.is_read_only() {
-            return self.attempt(call, None);
+            let error = "a mutation needs a verified server witness".to_string();
+            return (
+                Err(HerdrTransportError::NotSent(error)),
+                Err(RestoreUnverified::NoPeer),
+            );
         }
         let deadline = Instant::now() + self.config.read_deadline;
-        observe::retry_read(deadline, self.config.retry_backoff, || {
-            self.attempt(call, None)
+        observe::retry_read(deadline, self.config.retry_backoff, || self.attempt(call))
+    }
+
+    fn call_with_witness(&self, call: &HerdrCall, expected: &ServerWitness) -> HerdrOutcome {
+        if expected.socket != self.socket_path {
+            return Err(HerdrTransportError::NotSent(format!(
+                "witness for {} on {}",
+                expected.socket.display(),
+                self.socket_path.display()
+            )));
+        }
+        let _one_at_a_time = self
+            .mutations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dialled = self.dial()?;
+        match &dialled.server {
+            Ok((witness, _)) if witness == expected => self.exchange(dialled.stream, call),
+            Ok((witness, _)) => Err(HerdrTransportError::NotSent(format!(
+                "server changed: {witness:?} is not the verified {expected:?}"
+            ))),
+            Err(why) => Err(HerdrTransportError::NotSent(format!(
+                "server unreadable: {why:?}"
+            ))),
+        }
+    }
+
+    fn hello(&self) -> Result<ServerHello, RestoreUnverified> {
+        let dialled = self.dial().map_err(|_| RestoreUnverified::NoPeer)?;
+        let (witness, started) = dialled.server?;
+        let ping = HerdrCall {
+            id: format!(
+                "adk-hello-{}",
+                self.hellos.fetch_add(1, Ordering::Relaxed) + 1
+            ),
+            request: HerdrRequest::Ping {},
+        };
+        let outcome = self.exchange(dialled.stream, &ping);
+        let hello = observe::hello_result(&ping, outcome).map_err(|error| {
+            tracing::debug!(?error, "herdr hello refused");
+            RestoreUnverified::NoPeer
+        })?;
+        Ok(ServerHello {
+            witness,
+            started,
+            version: hello.version,
+            connected_at: dialled.connected_at,
         })
     }
 
-    fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64) {
-        self.attempt(call, Some(generation))
+    fn server_witness(&self) -> Witnessed {
+        let dialled = self.dial().map_err(|_| RestoreUnverified::NoPeer)?;
+        dialled.server.map(|(witness, _)| witness)
     }
 }
 
