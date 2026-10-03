@@ -176,197 +176,214 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
         .build()
         .unwrap()
         .block_on(async {
-            let mut shared = discord::make_shared_data_for_tests();
-            let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
-            ui.status_panel_v2_enabled = false;
-            ui.placeholder_live_events_enabled = false;
-            let channel = ChannelId::new(655_200_001);
-            let original = MessageId::new(655_200_002);
-            let actor = Arc::new(CancelToken::new());
-            assert!(
-                discord::mailbox_try_start_turn(
-                    &shared,
-                    channel,
-                    actor.clone(),
-                    UserId::new(7),
-                    original
-                )
-                .await
-            );
-            discord::increment_global_active(&shared, "fixture");
-            let mut row = InflightTurnState::new(
-                ProviderKind::Codex,
-                channel.get(),
-                None,
-                7,
-                original.get(),
-                655_200_003,
-                "original request".into(),
-                Some("fixture-session".into()),
-                Some("fixture-codex-reader".into()),
-                None,
-                None,
-                389918,
-            );
-            row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
-            row.turn_nonce = actor.turn_nonce().map(str::to_owned);
-            row.turn_start_offset = Some(389918);
-            discord::inflight::save_inflight_state(&row).unwrap();
-            let queued = ChannelMailboxRegistry::queued_for_test(655_200_004);
-            let queued_id = queued.message_id;
-            shared
-                .mailbox(channel)
-                .replace_queue(
-                    vec![queued],
-                    discord::queue_persistence_context(&shared, &ProviderKind::Codex, channel),
-                )
-                .await;
-            let gateway = Arc::new(RecordingGateway {
-                shared: shared.clone(),
-                bodies: Default::default(),
-                dispatched: Default::default(),
-            });
-            let barrier = Arc::new(TestBarrier {
-                channel,
-                entered: Default::default(),
-                resume: Default::default(),
-                lost: Default::default(),
-            });
-            *BARRIER.lock().unwrap() = Some(barrier.clone());
-            let mut events =
-                discord::turn_completion_events::subscribe_turn_completion_events(&shared);
-            let mut context = bridge_context(row.clone(), gateway.clone());
-            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-            context.completion_tx = Some(completion_tx);
-            let (tx, rx) = mpsc::channel();
-            spawn_turn_bridge(shared.clone(), actor.clone(), rx, context);
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                barrier.entered.notified(),
-            )
-            .await
-            .unwrap();
-            discord::inflight::clear_inflight_state(&ProviderKind::Codex, channel.get());
-            let mut rebound = row.clone();
-            rebound.user_msg_id = 0;
-            rebound.current_msg_id = 0;
-            rebound.turn_nonce = None;
-            rebound.rebind_origin = true;
-            rebound
-                .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-            rebound.turn_start_offset = Some(0);
-            discord::inflight::save_inflight_state(&rebound).unwrap();
-            gateway.send_message(channel, BODY).await.unwrap();
-            let commit = discord::inflight::commit_watcher_terminal_delivery_locked(
-                &ProviderKind::Codex,
-                channel.get(),
-                &discord::inflight::InflightTurnIdentity::from_state(&rebound),
-                "fixture-codex-reader",
-                discord::inflight::WatcherTerminalCommitPatch {
-                    full_response: BODY.into(),
-                    last_offset: 443,
-                    last_watcher_relayed_offset: Some(443),
-                    last_watcher_relayed_generation_mtime_ns: None,
-                },
-            );
-            assert_eq!(
-                commit,
-                discord::inflight::WatcherTerminalCommitOutcome::Skipped
-            );
-            let rebound_path = discord::inflight::inflight_state_path(
-                &discord::inflight::inflight_runtime_root().unwrap(),
-                &ProviderKind::Codex,
-                channel.get(),
-            );
-            let before = std::fs::read(&rebound_path).unwrap();
-            tx.send(StreamMessage::Text {
-                content: BODY.into(),
-            })
-            .unwrap();
-            barrier.resume.notify_one();
-            tokio::time::timeout(std::time::Duration::from_secs(5), barrier.lost.notified())
-                .await
-                .unwrap();
-            assert!(
+            for terminal_first in [false, true] {
+                let iteration_offset = if terminal_first { 1_000 } else { 0 };
+                let mut shared = discord::make_shared_data_for_tests();
+                let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
+                ui.status_panel_v2_enabled = false;
+                ui.placeholder_live_events_enabled = false;
+                let channel = ChannelId::new(655_200_001 + iteration_offset);
+                let original = MessageId::new(655_200_002 + iteration_offset);
+                let actor = Arc::new(CancelToken::new());
+                assert!(
+                    discord::mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        actor.clone(),
+                        UserId::new(7),
+                        original
+                    )
+                    .await
+                );
+                discord::increment_global_active(&shared, "fixture");
+                let mut row = InflightTurnState::new(
+                    ProviderKind::Codex,
+                    channel.get(),
+                    None,
+                    7,
+                    original.get(),
+                    655_200_003 + iteration_offset,
+                    "original request".into(),
+                    Some("fixture-session".into()),
+                    Some("fixture-codex-reader".into()),
+                    None,
+                    None,
+                    389918,
+                );
+                row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
+                row.turn_nonce = actor.turn_nonce().map(str::to_owned);
+                row.turn_start_offset = Some(389918);
+                discord::inflight::save_inflight_state(&row).unwrap();
+                let queued = ChannelMailboxRegistry::queued_for_test(655_200_004 + iteration_offset);
+                let queued_id = queued.message_id;
                 shared
                     .mailbox(channel)
-                    .snapshot()
-                    .await
-                    .cancel_token
-                    .is_some(),
-                "authority loss alone must not release a running provider"
-            );
-            let _ = tx.send(StreamMessage::CodexTuiTerminalDone {
-                result: BODY.into(),
-                session_id: Some("fixture-session".into()),
-                rollout_path: "/fixture/original-rollout".into(),
-                tmux_session_name: "fixture-codex-reader".into(),
-                turn_nonce: actor.turn_nonce().unwrap().into(),
-                source_start: 389918,
-                complete_record_end: 446221,
-                captured_source: None,
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx)
+                    .replace_queue(
+                        vec![queued],
+                        discord::queue_persistence_context(&shared, &ProviderKind::Codex, channel),
+                    )
+                    .await;
+                let gateway = Arc::new(RecordingGateway {
+                    shared: shared.clone(),
+                    bodies: Default::default(),
+                    dispatched: Default::default(),
+                });
+                let barrier = Arc::new(TestBarrier {
+                    channel,
+                    entered: Default::default(),
+                    resume: Default::default(),
+                    lost: Default::default(),
+                });
+                *BARRIER.lock().unwrap() = Some(barrier.clone());
+                let mut events =
+                    discord::turn_completion_events::subscribe_turn_completion_events(&shared);
+                let mut context = bridge_context(row.clone(), gateway.clone());
+                let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+                context.completion_tx = Some(completion_tx);
+                let (tx, rx) = mpsc::sync_channel(0);
+                spawn_turn_bridge(shared.clone(), actor.clone(), rx, context);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    barrier.entered.notified(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
-            let mut queue_eligible = false;
-            while let Ok(event) = events.try_recv() {
-                queue_eligible |= event.channel_id == channel
-                    && event.turn_id == Some(original.get())
-                    && event.queue_is_eligible();
+                discord::inflight::clear_inflight_state(&ProviderKind::Codex, channel.get());
+                let mut rebound = row.clone();
+                rebound.user_msg_id = 0;
+                rebound.current_msg_id = 0;
+                rebound.turn_nonce = None;
+                rebound.rebind_origin = true;
+                rebound
+                    .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+                rebound.turn_start_offset = Some(0);
+                discord::inflight::save_inflight_state(&rebound).unwrap();
+                gateway.send_message(channel, BODY).await.unwrap();
+                let commit = discord::inflight::commit_watcher_terminal_delivery_locked(
+                    &ProviderKind::Codex,
+                    channel.get(),
+                    &discord::inflight::InflightTurnIdentity::from_state(&rebound),
+                    "fixture-codex-reader",
+                    discord::inflight::WatcherTerminalCommitPatch {
+                        full_response: BODY.into(),
+                        last_offset: 443,
+                        last_watcher_relayed_offset: Some(443),
+                        last_watcher_relayed_generation_mtime_ns: None,
+                    },
+                );
+                assert_eq!(
+                    commit,
+                    discord::inflight::WatcherTerminalCommitOutcome::Skipped
+                );
+                let rebound_path = discord::inflight::inflight_state_path(
+                    &discord::inflight::inflight_runtime_root().unwrap(),
+                    &ProviderKind::Codex,
+                    channel.get(),
+                );
+                let before = std::fs::read(&rebound_path).unwrap();
+                let terminal = StreamMessage::CodexTuiTerminalDone {
+                    result: BODY.into(),
+                    session_id: Some("fixture-session".into()),
+                    rollout_path: "/fixture/original-rollout".into(),
+                    tmux_session_name: "fixture-codex-reader".into(),
+                    turn_nonce: actor.turn_nonce().unwrap().into(),
+                    source_start: 389918,
+                    complete_record_end: 446221,
+                    captured_source: None,
+                };
+                let first = if terminal_first {
+                    terminal.clone()
+                } else {
+                    StreamMessage::Text {
+                        content: BODY.into(),
+                    }
+                };
+                tx.send(first).unwrap();
+                // The second rendezvous proves the adapter queued the first frame before resume.
+                // Only that first frame can carry the terminal witness in the terminal-first case.
+                tx.send(StreamMessage::Text {
+                    content: String::new(),
+                })
+                .unwrap();
+                barrier.resume.notify_one();
+                tokio::time::timeout(std::time::Duration::from_secs(5), barrier.lost.notified())
+                    .await
+                    .unwrap();
+                if !terminal_first {
+                    assert!(
+                        shared
+                            .mailbox(channel)
+                            .snapshot()
+                            .await
+                            .cancel_token
+                            .is_some(),
+                        "authority loss alone must not release a running provider"
+                    );
+                    let _ = tx.send(terminal);
+                }
+                drop(tx);
+                tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut queue_eligible = false;
+                while let Ok(event) = events.try_recv() {
+                    queue_eligible |= event.channel_id == channel
+                        && event.turn_id == Some(original.get())
+                        && event.queue_is_eligible();
+                }
+                shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+                shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+                finalize_epilogue::finalize_and_drain_queued_turns(
+                    shared.clone(),
+                    queue_eligible,
+                    false,
+                    gateway.clone(),
+                    channel,
+                    ProviderKind::Codex,
+                    "fixture".into(),
+                    None,
+                    None,
+                    false,
+                )
+                .await;
+                assert_eq!(
+                    *gateway.dispatched.lock().unwrap(),
+                    vec![queued_id],
+                    "the displaced provider terminal must let the next queued item execute; terminal_first={terminal_first}"
+                );
+                assert!(
+                    queue_eligible,
+                    "the exact original turn must publish queue admission"
+                );
+                assert_eq!(
+                    gateway
+                        .bodies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|body| body.contains(BODY))
+                        .count(),
+                    1,
+                    "the existing publication fence must block the original reader's duplicate; terminal_first={terminal_first}"
+                );
+                assert_eq!(
+                    gateway
+                        .bodies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|body| body.as_str() == NEXT)
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    std::fs::read(rebound_path).unwrap(),
+                    before,
+                    "mailbox completion cannot borrow rebind row mutation authority; terminal_first={terminal_first}"
+                );
+                *BARRIER.lock().unwrap() = None;
             }
-            shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
-            shared.restart.global_finalizing.store(1, Ordering::Relaxed);
-            finalize_epilogue::finalize_and_drain_queued_turns(
-                shared.clone(),
-                queue_eligible,
-                false,
-                gateway.clone(),
-                channel,
-                ProviderKind::Codex,
-                "fixture".into(),
-                None,
-                None,
-                false,
-            )
-            .await;
-            assert_eq!(
-                *gateway.dispatched.lock().unwrap(),
-                vec![queued_id],
-                "the displaced provider terminal must let the next queued item execute"
-            );
-            assert!(
-                queue_eligible,
-                "the exact original turn must publish queue admission"
-            );
-            assert_eq!(
-                gateway
-                    .bodies
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|body| body.contains(BODY))
-                    .count(),
-                1,
-                "the existing publication fence must block the original reader's duplicate"
-            );
-            assert_eq!(
-                gateway
-                    .bodies
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|body| body.as_str() == NEXT)
-                    .count(),
-                1
-            );
-            assert_eq!(
-                std::fs::read(rebound_path).unwrap(),
-                before,
-                "mailbox completion cannot borrow rebind row mutation authority"
-            );
-            *BARRIER.lock().unwrap() = None;
         });
 }
 

@@ -1,5 +1,28 @@
 use super::*;
 
+pub(super) fn remember_terminal(
+    row: &InflightTurnState,
+    actor: &Arc<CancelToken>,
+    message: &StreamMessage,
+    terminal: &mut Option<StreamMessage>,
+) {
+    if terminal.is_none() && displaced_codex_terminal_matches(row, actor, message) {
+        *terminal = Some(message.clone());
+    }
+}
+
+pub(super) fn restore_terminal(
+    outcome: super::stream_loop::StreamLoopOutcome,
+    terminal: Option<StreamMessage>,
+    pending: &mut VecDeque<StreamMessage>,
+) {
+    if outcome == super::stream_loop::StreamLoopOutcome::AuthorityLost
+        && let Some(terminal) = terminal
+    {
+        pending.push_front(terminal);
+    }
+}
+
 pub(super) async fn settle_displaced_terminal(
     episode: (&ProviderKind, &InflightTurnState, &Arc<CancelToken>),
     receiver: (
