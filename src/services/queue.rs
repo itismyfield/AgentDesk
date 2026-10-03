@@ -268,6 +268,12 @@ impl QueueService {
                         "queue-api cancel_dispatch (preserve)",
                     )
                     .await;
+                    // A kept turn changed nothing: the dispatch and its session stay as they are.
+                    if lifecycle.host_guard_kept() {
+                        return Err(ServiceError::conflict("session host is not legacy tmux")
+                            .with_code(ErrorCode::Dispatch)
+                            .with_context("dispatch_id", dispatch_id));
+                    }
                     let finalizer =
                         crate::services::turn_cancel_finalizer::finalize_turn_cancel(
                             crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(

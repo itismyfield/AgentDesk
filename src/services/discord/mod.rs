@@ -1629,29 +1629,6 @@ fn ensure_cancel_token_bound_from_inflight_state(
     true
 }
 
-fn ensure_cancel_token_bound_from_inflight(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    cancel_token: &Arc<CancelToken>,
-    reason: &str,
-) -> bool {
-    if turn_bridge::cancel_token_has_tmux_session(cancel_token) {
-        return true;
-    }
-
-    let Some(state) = inflight::load_inflight_state(provider, channel_id.get()) else {
-        tracing::error!(
-            "cancel token rebind failed: provider={} channel_id={} reason={} error=inflight_not_found",
-            provider.as_str(),
-            channel_id.get(),
-            reason
-        );
-        return false;
-    };
-
-    ensure_cancel_token_bound_from_inflight_state(provider, &state, cancel_token, reason)
-}
-
 async fn mailbox_enqueue_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

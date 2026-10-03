@@ -9,6 +9,7 @@ pub mod confirm;
 mod deferred;
 pub mod deliver;
 pub mod host;
+pub mod input_facts;
 pub mod pieces;
 pub mod rotation;
 pub mod round_trip;

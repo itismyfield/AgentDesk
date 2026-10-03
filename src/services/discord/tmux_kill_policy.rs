@@ -134,7 +134,8 @@ fn provider_native_output_offset_for_stop(
         return None;
     }
 
-    let state = crate::services::discord::inflight::load_inflight_state(
+    // A tombstone only reads the row; the compatibility backfill is left to its next writer.
+    let state = crate::services::discord::inflight::load_inflight_state_read_only(
         &ProviderKind::Codex,
         channel_id.get(),
     )?;

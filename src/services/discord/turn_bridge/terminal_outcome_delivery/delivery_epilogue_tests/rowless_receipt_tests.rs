@@ -425,7 +425,7 @@ async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_ancho
 // unrelated transcript/accounting inputs are neutral; projection and inflight
 // settlement run through the production caller.
 #[rustfmt::skip]
-async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, footer: bool, cancelled: bool) {
+pub(super) async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, footer: bool, cancelled: bool) {
     run_postlude_for_owner(driver, output, footer, cancelled, None).await;
 }
 
