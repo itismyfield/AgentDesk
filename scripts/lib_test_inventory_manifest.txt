@@ -9798,6 +9798,14 @@ services::tui_input::durability_tests::supported::reopen_adopted_unsynced_prefix
 services::tui_input::durability_tests::supported::reopen_refuses_handle_when_adopted_prefix_sync_fails
 services::tui_input::durability_tests::supported::replay_stops_at_first_bad_record_and_discards_valid_suffix
 services::tui_input::durability_tests::supported::snapshot_replacement_survives_every_cut_and_resumes_append
+services::tui_input::rows_tests::handback_plan_follows_the_revert_table
+services::tui_input::rows_tests::move_disposition_follows_the_move_table
+services::tui_input::rows_tests::supported::checkpoint_during_staging_keeps_staged_rows_bindable_after_reopen
+services::tui_input::rows_tests::supported::commit_window_binds_only_staged_rows_from_first_seq_to_before_commit
+services::tui_input::rows_tests::supported::committed_input_is_released_only_by_terminal_or_handback_records
+services::tui_input::rows_tests::supported::failed_staging_after_an_earlier_commit_activates_no_new_staged_row
+services::tui_input::rows_tests::supported::repeated_ledger_legacy_ledger_transitions_keep_each_input_with_one_owner
+services::tui_input::rows_tests::supported::replay_is_deterministic_and_a_cut_commit_leaves_its_inputs_with_legacy
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
 services::tui_o::alarm::tests::a_released_channel_has_its_own_reason_apart_from_halted
 services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
