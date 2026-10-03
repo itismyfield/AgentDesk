@@ -1246,10 +1246,29 @@ mod tests {
         )
         .expect("claude rebind without transcript candidate should use wrapper output path");
 
-        let (expected_output_path, expected_input_fifo) = tmux_runtime_paths(tmux_session_name);
-        assert_eq!(result.output_path, expected_output_path);
+        #[cfg(unix)]
+        let expected_output_path = std::path::PathBuf::from(
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl"),
+        );
+        #[cfg(not(unix))]
+        let expected_output_path =
+            std::env::temp_dir().join(format!("agentdesk-{tmux_session_name}.jsonl"));
+        #[cfg(unix)]
+        let expected_input_fifo = std::path::PathBuf::from(
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "input"),
+        );
+        #[cfg(not(unix))]
+        let expected_input_fifo =
+            std::env::temp_dir().join(format!("agentdesk-{tmux_session_name}.input"));
+        assert_eq!(
+            std::path::PathBuf::from(&result.output_path),
+            expected_output_path
+        );
         assert_eq!(result.synthetic_initial_offset, 0);
-        assert_eq!(result.input_fifo_path, Some(expected_input_fifo));
+        assert_eq!(
+            result.input_fifo_path.map(std::path::PathBuf::from),
+            Some(expected_input_fifo)
+        );
         assert_eq!(result.runtime_kind, None);
         assert_eq!(
             result.session_id.as_deref(),
