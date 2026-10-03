@@ -9897,6 +9897,7 @@ services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
+services::tui_o::alarm::tests::p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
@@ -10117,6 +10118,15 @@ services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_copied
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_the_channel_had_not_read_is_not_counted_as_inherited
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_row_a_pending_parent_also_holds_is_still_posted_after_the_fork_start
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h1_adoption_history_restores_relations_without_native_proof_or_boundary_changes
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h2_rebind_removes_new_successor_including_oldless_binds
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h3_future_resolution_and_future_bind_do_not_restore_an_applied_hop
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h4_retained_prepared_payload_identity_and_posted_delivery_survive_restoration
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h5_unattached_middle_source_is_not_attached_or_compressed
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h6_failed_rotation_write_aborts_resume_and_restart_keeps_cursor_hash_and_frontier
+services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_1_successful_retirement_clears_reader_health_in_the_same_tend
+services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_3_regrowth_reactivates_reader_health_after_successful_recovery
+services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_4_failed_tend_keeps_prior_health_evidence_until_a_successful_pass
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured
