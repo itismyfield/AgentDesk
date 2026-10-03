@@ -134,6 +134,7 @@ impl<T: HerdrTransport> HerdrHost<T> {
     }
 
     /// One line and Enter in a single input, so the text never lands without its Enter.
+    /// Herdr brackets the text as a paste when the pane's program turned bracketed paste on.
     pub(crate) fn send_line(
         &self,
         session: HostSessionRef<'_>,

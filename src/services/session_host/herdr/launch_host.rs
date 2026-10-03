@@ -249,3 +249,7 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
 #[cfg(test)]
 #[path = "launch_host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "launch_host_real_tests.rs"]
+mod real_tests;

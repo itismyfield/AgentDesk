@@ -9537,6 +9537,7 @@ services::session_forwarding::trusted_target::tests::resolver_answer_is_pinned_o
 services::session_host::consumer_guard::tests::automatic_state_change_verdict_for_every_host_state
 services::session_host::consumer_guard::tests::policy_probe_defers_every_non_legacy_host_without_probing
 services::session_host::consumer_guard::tests::transcript_completion_is_never_blocked_by_host_evidence
+services::session_host::herdr::launch_host::real_tests::herdr_real_server_launch_input_bytes_and_refusals
 services::session_host::herdr::launch_host::tests::provider_candidate_names_one_foreground_process_or_why_not
 services::session_host::herdr::launch_host::tests::socket_launch_refuses_unknown_endpoints_and_bad_requests_before_any_call
 services::session_host::herdr::launch_host::tests::socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane
