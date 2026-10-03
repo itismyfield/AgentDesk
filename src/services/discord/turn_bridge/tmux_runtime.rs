@@ -18,6 +18,7 @@ mod judged_stop;
 mod pid_exit;
 mod process_backend_cancel;
 mod process_table;
+mod session_stop;
 mod stop_host;
 
 use claude_stop_delivery::interrupt_claude_turn_session_preserving;
@@ -28,6 +29,8 @@ use process_backend_cancel::{
 };
 use process_table::{provider_cli_pid_in_tmux, send_sigint};
 use stop_host::{LegacyTmuxName, StopOutcome, StopTarget};
+
+pub(in crate::services::discord) use session_stop::SessionStop;
 
 pub(in crate::services::discord) use judged_stop::{
     ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, keeps_turn,
@@ -129,6 +132,34 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
     interrupt_on(&StopTarget::for_token(token), provider, token, reason).await
+}
+
+/// Interrupts a judged session without cancelling or settling a mailbox turn.
+async fn interrupt_session_on(
+    target: &StopTarget,
+    provider: &ProviderKind,
+    reason: &str,
+    observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> ProviderTurnInterruptOutcome {
+    let Some(name) = target.legacy_name() else {
+        return stop_host::not_sent();
+    };
+    if !observed_open() {
+        return stop_host::not_sent();
+    }
+    if matches!(provider, ProviderKind::Claude) {
+        return claude_stop_delivery::interrupt_claude_session(
+            None,
+            Some(name.as_str().to_string()),
+            reason,
+            Some(observed_open),
+        )
+        .await;
+    }
+    // The name-only adapter never publishes a generation or becomes a mailbox token.
+    let token = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+    token.bind_unmanaged_session_name(name.as_str());
+    interrupt_on(target, provider, &token, reason).await
 }
 
 async fn interrupt_on(

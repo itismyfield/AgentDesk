@@ -183,6 +183,10 @@ async fn run_skill_slash_command(
             let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
             let begin = super::super::turn_bridge::begin_command_stop;
             match begin(shared, provider, ctx.channel_id(), false).await {
+                CommandStop::Session(stop) => {
+                    ctx.say(super::STOPPING_RESPONSE).await?;
+                    stop.interrupt(&format!("{invoked_as} stop")).await;
+                }
                 CommandStop::Stop(stop) => {
                     ctx.say(super::STOPPING_RESPONSE).await?;
                     let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;

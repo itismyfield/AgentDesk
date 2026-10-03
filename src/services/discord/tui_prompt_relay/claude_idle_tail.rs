@@ -342,15 +342,7 @@ pub(super) async fn run_claude_idle_response_tail(
     let generation_mtime_ns =
         super::super::turn_bridge::tmux_generation_file_mtime_ns(&tmux_session_name);
     let transcript_string = transcript_path.display().to_string();
-    // Only a local tmux session is probed; another host keeps the tail on its transcript.
-    let tmux = crate::services::discord::host_liveness::local_tmux(&tmux_session_name, None)
-        .then_some(tmux_session_name.as_str());
-    let probe = crate::services::claude::host_gate::host_poll_probe(
-        tmux,
-        ProviderKind::Claude,
-        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-        &transcript_string,
-    );
+    let probe = idle_tail_probe(&tmux_session_name, &transcript_string);
     std::thread::Builder::new()
         .name("claude_idle_response_tail_reader".to_string())
         .spawn(move || {
@@ -430,6 +422,17 @@ pub(super) async fn run_claude_idle_response_tail(
             final_offset,
         );
     }
+}
+
+/// Only local tmux sessions use a host probe; another host polls its transcript.
+fn idle_tail_probe(name: &str, transcript: &str) -> crate::services::provider::SessionProbe {
+    let tmux = crate::services::discord::host_liveness::local_tmux(name, None).then_some(name);
+    crate::services::claude::host_gate::host_poll_probe(
+        tmux,
+        ProviderKind::Claude,
+        Some(RuntimeHandoffKind::ClaudeTui),
+        transcript,
+    )
 }
 
 /// A live pane of a local tmux session; a session marked for another host never reads live.

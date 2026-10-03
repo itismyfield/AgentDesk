@@ -109,6 +109,10 @@ impl StopTarget {
         Self::judge(token.tmux_session_name(), None)
     }
 
+    pub(super) fn for_session(name: &str) -> Self {
+        Self::judge(Some(name.to_string()), None)
+    }
+
     /// The verdict for a token naming `name`; `approved` is a force-kill verdict's session
     /// (`Some(None)`: a process turn), whose host evidence, marker included, was read then.
     pub(super) fn judge(name: Option<String>, approved: Option<Option<&str>>) -> Self {

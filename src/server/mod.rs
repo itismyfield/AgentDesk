@@ -11,7 +11,7 @@ pub(crate) mod maintenance;
 pub(crate) mod multinode_regression;
 mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
-mod outbox_worker;
+pub(crate) mod outbox_worker;
 use outbox_worker::message_outbox_loop;
 mod rate_limit_profiles;
 mod rate_limit_sync;

@@ -72,7 +72,7 @@ pub(crate) mod test_support {
                 file,
                 "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
                  echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
-                 has-session) exit 0 ;;\nlist-panes) echo 0; exit 0 ;;\n\
+                 has-session) [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) echo 0; exit 0 ;;\n\
                  capture-pane) echo pane; exit 0 ;;\n\
                  kill-session) [ -f \"$(cat \"$d/reason_path\")\" ] && echo reason-before-kill >> \"$d/calls\"; exit 0 ;;\n\
                  esac\necho \"can't find session: $3\" >&2; exit 1"
@@ -94,6 +94,10 @@ pub(crate) mod test_support {
                 set("AGENTDESK_CODEX_PATH", &absent),
             ];
             Self { dir, _env: env }
+        }
+
+        pub(crate) fn mark_missing(&self) {
+            std::fs::write(self.dir.path().join("missing"), "").unwrap();
         }
 
         /// The logged calls, oldest first, and clears the log.
