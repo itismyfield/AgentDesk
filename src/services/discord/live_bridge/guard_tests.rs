@@ -449,7 +449,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
                 channel,
                 Arc::new(CancelToken::new()),
                 UserId::new(7),
-                queued_id
+                MessageId::new(queued_id.get() + 10)
             )
             .await
         );
