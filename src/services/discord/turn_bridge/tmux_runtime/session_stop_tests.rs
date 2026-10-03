@@ -216,7 +216,6 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             payload_session_id: "pending".into(),
             payload_transcript_path: None,
         };
-        use std::io::Write as _;
         writeln!(
             std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
             "{}",
