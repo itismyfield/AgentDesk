@@ -21,6 +21,7 @@ static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()
 #[cfg(test)]
 thread_local! {
     static SOURCE_AUTHORITY_CONTENTION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static SOURCE_AUTHORITY_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -66,6 +67,9 @@ fn lock_source_authority<'a>(lock: &'a Mutex<()>, key: &str) -> std::sync::Mutex
         Ok(guard) => return guard,
         Err(std::sync::TryLockError::Poisoned(poison)) => return poison.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => {
+            if let Some(contended) = SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(Option::take) {
+                contended();
+            }
             SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| {
                 if armed.replace(false) {
                     std::panic::resume_unwind(Box::new(SourceAuthorityContention(key.to_string())))

@@ -1083,3 +1083,7 @@ mod reclaim;
 #[cfg(test)]
 #[path = "herdr_resume_tests.rs"]
 mod herdr_resume;
+
+#[cfg(unix)]
+#[path = "clear_launch_tests.rs"]
+mod clear_launch;

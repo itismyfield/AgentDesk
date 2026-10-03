@@ -8,6 +8,7 @@ use super::*;
 pub(super) struct ClaudeTuiLaunchInfo {
     pub(super) working_dir: PathBuf,
     pub(super) session_id: String,
+    pub(super) binding_context_path: Option<PathBuf>,
 }
 
 #[cfg(unix)]
@@ -24,24 +25,80 @@ pub(super) fn claude_tui_launch_transcript(
     tmux_session_name: &str,
     home: Option<&Path>,
 ) -> Option<crate::services::tui_prompt_dedupe::pending::LaunchTranscript> {
+    let launch = claude_tui_launch_info(tmux_session_name)?;
+    transcript_for_launch(&launch, home)
+}
+
+#[cfg(unix)]
+fn claude_tui_launch_info(tmux: &str) -> Option<ClaudeTuiLaunchInfo> {
     let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
-        tmux_session_name,
+        tmux,
         crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
     )?;
-    let launch = parse_claude_tui_launch_script(Path::new(&launch_script_path)).ok()?;
+    parse_claude_tui_launch_script(Path::new(&launch_script_path)).ok()
+}
+
+#[cfg(unix)]
+fn transcript_for_launch(
+    launch: &ClaudeTuiLaunchInfo,
+    home: Option<&Path>,
+) -> Option<crate::services::tui_prompt_dedupe::pending::LaunchTranscript> {
     let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         &launch.working_dir,
         &launch.session_id,
         home,
     )
     .ok()?;
-    let session_id = launch.session_id;
+    let session_id = launch.session_id.clone();
     Some(
         crate::services::tui_prompt_dedupe::pending::LaunchTranscript {
             session_id,
             transcript,
         },
     )
+}
+
+#[cfg(unix)]
+fn claude_rehydrate_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        super::rehydration::claude_pass_tests::claude_home()
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn claude_launch_transcript(
+    tmux: &str,
+) -> Option<crate::services::tui_prompt_dedupe::pending::LaunchTranscript> {
+    claude_tui_launch_transcript(tmux, claude_rehydrate_home().as_deref())
+}
+
+#[cfg(unix)]
+pub(super) fn rehydrated_claude_tui_binding_for_tmux_session(
+    tmux: &str,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    claude_launch_observation(tmux).0
+}
+
+/// The selector and its immutable context path come from one launch-script read.
+#[cfg(unix)]
+pub(super) fn claude_launch_observation(
+    tmux: &str,
+) -> (
+    Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+    Option<PathBuf>,
+) {
+    let Some(launch) = claude_tui_launch_info(tmux) else {
+        return (None, None);
+    };
+    let binding = transcript_for_launch(&launch, claude_rehydrate_home().as_deref())
+        .filter(|launch| launch.transcript.exists())
+        .map(|launch| claude_tui_rehydrated_binding(&launch.session_id, &launch.transcript));
+    (binding, launch.binding_context_path)
 }
 
 /// The binding a rehydrate registers for `session_id`, read from the transcript's current end.
@@ -65,8 +122,28 @@ pub(super) fn claude_tui_rehydrated_binding(
 fn parse_claude_tui_launch_script_content(script: &str) -> Option<ClaudeTuiLaunchInfo> {
     let mut working_dir: Option<PathBuf> = None;
     let mut session_id: Option<String> = None;
+    let mut binding_context_path = None;
     for line in script.lines() {
         let words = shell_words_from_line(line.trim());
+        if words.first().is_some_and(|word| word == "export") {
+            if let Some(path) = words
+                .iter()
+                .skip(1)
+                .find_map(|word| word.strip_prefix("AGENTDESK_BINDING_CONTEXT="))
+            {
+                binding_context_path = (!path.is_empty()).then(|| PathBuf::from(path));
+            }
+            continue;
+        }
+        if words.first().is_some_and(|word| word == "unset")
+            && words
+                .iter()
+                .skip(1)
+                .any(|word| word == "AGENTDESK_BINDING_CONTEXT")
+        {
+            binding_context_path = None;
+            continue;
+        }
         if words.first().is_some_and(|word| word == "cd") {
             if let Some(dir) = words.get(1).filter(|value| !value.trim().is_empty()) {
                 working_dir = Some(PathBuf::from(dir));
@@ -87,6 +164,7 @@ fn parse_claude_tui_launch_script_content(script: &str) -> Option<ClaudeTuiLaunc
     Some(ClaudeTuiLaunchInfo {
         working_dir: working_dir?,
         session_id: session_id?,
+        binding_context_path,
     })
 }
 
@@ -159,7 +237,53 @@ mod tests {
             Some(ClaudeTuiLaunchInfo {
                 working_dir: PathBuf::from("/tmp/project's dir"),
                 session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                binding_context_path: None,
             })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_selector_keeps_its_context_when_the_live_nonce_changes() {
+        use crate::services::tui_prompt_dedupe::binding_context::{
+            CapturedContext, HookBindingEnvelope, PreparedIncarnation, SpawnNonceMarker,
+            observe_spawn_nonce_marker,
+            tests::{fixture, prepared},
+        };
+        let (_root, _env) = fixture();
+        let previous = prepared();
+        let script = format!(
+            "{}cd '/tmp/project'\\''s dir'\nexec 'claude' '--session-id' 'launch-session'\n",
+            previous.env_lines(),
+        );
+        let parsed = parse_claude_tui_launch_script_content(&script).unwrap();
+        assert_eq!(parsed.session_id, "launch-session");
+        assert_eq!(parsed.binding_context_path.as_ref(), Some(&previous.path));
+        let mut next = previous.context.clone();
+        next.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+        let next = PreparedIncarnation::create(next).unwrap();
+        let marker = crate::services::tmux_common::session_temp_path(
+            &previous.context.tmux_session,
+            "spawn_nonce",
+        );
+        std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, &next.context.execution_nonce).unwrap();
+        let captured = HookBindingEnvelope::capture_from_env("claude", |key| {
+            (key == "AGENTDESK_BINDING_CONTEXT").then(|| {
+                parsed
+                    .binding_context_path
+                    .clone()
+                    .unwrap()
+                    .into_os_string()
+            })
+        });
+        assert_eq!(
+            captured.context,
+            CapturedContext::Captured(previous.context.clone())
+        );
+        assert_eq!(
+            observe_spawn_nonce_marker(&previous.context.tmux_session),
+            SpawnNonceMarker::Known(next.context.execution_nonce),
         );
     }
 }
