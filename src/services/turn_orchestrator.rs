@@ -58,6 +58,7 @@ use dispatch_reservation::{
     reconcile_pending_dispatch_marker_before_take_next, record_valve_cleared_pending_dispatch,
     set_pending_user_dispatch, settle_pending_dispatch_on_claim,
 };
+pub(crate) use episode_identity::TokenFinish;
 use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
 #[cfg(test)]
@@ -1330,6 +1331,11 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
+    FinishTurnIfToken {
+        expected: Option<Arc<CancelToken>>,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<TokenFinish>,
+    },
     /// #3016 — identity-guarded finish. Only finalizes the active turn IF the
     /// mailbox's CURRENT `active_user_message_id` matches
     /// `expected_user_message_id`. Closes the wrong-turn race: a stale /
@@ -2322,6 +2328,14 @@ fn spawn_channel_mailbox(
                         );
                     }
                     mark_turn_finished_signal_done(channel_id);
+                }
+                ChannelMailboxMsg::FinishTurnIfToken {
+                    expected,
+                    persistence,
+                    reply,
+                } => {
+                    let finish = episode_identity::finish_turn_if_token;
+                    finish(&mut state, channel_id, expected, persistence, reply);
                 }
                 ChannelMailboxMsg::FinishTurnIfMatches {
                     expected_actor,

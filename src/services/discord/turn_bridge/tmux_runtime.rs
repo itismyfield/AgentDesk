@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::services::discord::InflightRestartMode;
 use crate::services::provider::cancel_token_cleanup::executor::{
-    CleanupRequest, TmuxCleanupIntent,
+    CleanupOutcome, CleanupRequest, TmuxCleanupIntent,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::{HostKind, HostSessionRef, host_for};
@@ -14,9 +14,11 @@ use std::time::Duration;
 // moved items by their original bare names via these glob/explicit re-imports.
 mod claude_stop_delivery;
 mod interrupt_policy;
+mod judged_stop;
 mod pid_exit;
 mod process_backend_cancel;
 mod process_table;
+mod session_stop;
 mod stop_host;
 
 use claude_stop_delivery::interrupt_claude_turn_session_preserving;
@@ -26,7 +28,13 @@ use process_backend_cancel::{
     hard_stop_unresponsive_process_backend_turn, interrupt_process_backend_turn,
 };
 use process_table::{provider_cli_pid_in_tmux, send_sigint};
-use stop_host::StopTarget;
+use stop_host::{LegacyTmuxName, StopOutcome, StopTarget};
+
+pub(in crate::services::discord) use session_stop::SessionStop;
+
+pub(in crate::services::discord) use judged_stop::{
+    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, keeps_turn,
+};
 
 // #3169: `mod.rs`'s cancel epilogue records this sentinel via the
 // `tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON` path, so re-export it
@@ -124,6 +132,34 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
     interrupt_on(&StopTarget::for_token(token), provider, token, reason).await
+}
+
+/// Interrupts a judged session without cancelling or settling a mailbox turn.
+async fn interrupt_session_on(
+    target: &StopTarget,
+    provider: &ProviderKind,
+    reason: &str,
+    observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> ProviderTurnInterruptOutcome {
+    let Some(name) = target.legacy_name() else {
+        return stop_host::not_sent();
+    };
+    if !observed_open() {
+        return stop_host::not_sent();
+    }
+    if matches!(provider, ProviderKind::Claude) {
+        return claude_stop_delivery::interrupt_claude_session(
+            None,
+            Some(name.as_str().to_string()),
+            reason,
+            Some(observed_open),
+        )
+        .await;
+    }
+    // The name-only adapter never publishes a generation or becomes a mailbox token.
+    let token = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+    token.bind_unmanaged_session_name(name.as_str());
+    interrupt_on(target, provider, &token, reason).await
 }
 
 async fn interrupt_on(
@@ -435,26 +471,45 @@ async fn interrupt_on(
     }
 }
 
-pub(in crate::services::discord) fn cancel_token_has_tmux_session(token: &CancelToken) -> bool {
-    token.tmux_session_name().is_some()
-}
-
 pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
     tmux_session_name: &str,
     reason: &str,
 ) -> Option<u32> {
+    bind_token_name(provider, token, tmux_session_name);
+    // Another host's pane is never searched for a PID, so no kill can target one.
+    if !super::super::host_liveness::local_tmux(tmux_session_name, None) {
+        return None;
+    }
+    register_legacy_pid(provider, token, tmux_session_name, reason)
+}
+
+/// Binds a name a stop judged legacy tmux; that verdict stands, so no marker is read again.
+fn bind_judged_legacy(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    name: &LegacyTmuxName,
+    reason: &str,
+) -> Option<u32> {
+    bind_token_name(provider, token, name.as_str());
+    register_legacy_pid(provider, token, name.as_str(), reason)
+}
+
+fn bind_token_name(provider: &ProviderKind, token: &CancelToken, tmux_session_name: &str) {
     if matches!(provider, ProviderKind::Claude) {
         token.bind_claude_tmux_session(tmux_session_name);
     } else {
         token.bind_unmanaged_session_name(tmux_session_name);
     }
-    // Another host's pane is never searched for a PID, so no kill can target one.
-    if !super::super::host_liveness::local_tmux(tmux_session_name, None) {
-        return None;
-    }
+}
 
+fn register_legacy_pid(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    tmux_session_name: &str,
+    reason: &str,
+) -> Option<u32> {
     let tracked_child_pid = token.child_pid_value();
     let provider_pid = provider_cli_pid_in_tmux(tmux_session_name, provider, tracked_child_pid);
     if let Some(pid) = provider_pid {
@@ -491,15 +546,26 @@ pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
 /// In that case the wrong order leaves the provider running and the user
 /// sees stop "fail".
 ///
-/// All user-initiated stop paths (⏳ reaction removal, `/stop`, `!stop`,
-/// `/clear`, watchdog timeouts) MUST call this helper instead of pairing
-/// the two primitives by hand.
+/// Every user-initiated stop (⏳ reaction removal, `/stop`, `!stop`, `/clear`, watchdog timeouts)
+/// runs this sequence, here or through a judged `ChannelStop`, never by pairing the primitives.
 pub(in crate::services::discord) async fn stop_active_turn(
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
 ) -> bool {
+    stop_active_turn_with_outcome(provider, token, cleanup_policy, reason)
+        .await
+        .termination_recorded
+}
+
+/// [`stop_active_turn`], reporting who settles the turn: only a legacy stop's inflight may go.
+pub(in crate::services::discord) async fn stop_active_turn_with_outcome(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    cleanup_policy: TmuxCleanupPolicy,
+    reason: &str,
+) -> StopOutcome {
     let target = StopTarget::for_token(token);
     stop_active_turn_on(&target, provider, token, cleanup_policy, reason).await
 }
@@ -513,11 +579,10 @@ pub(in crate::services::discord) async fn stop_approved_turn(
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
 ) -> bool {
-    let target = match approved {
-        Some(approved) => StopTarget::approved(token, approved),
-        None => StopTarget::for_token(token),
-    };
-    stop_active_turn_on(&target, provider, token, cleanup_policy, reason).await
+    let target = StopTarget::judge(token.tmux_session_name(), approved);
+    stop_active_turn_on(&target, provider, token, cleanup_policy, reason)
+        .await
+        .termination_recorded
 }
 
 /// Every stage acts on `target`, never on a name the token holds by then.
@@ -527,9 +592,9 @@ async fn stop_active_turn_on(
     token: &Arc<CancelToken>,
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
-) -> bool {
+) -> StopOutcome {
     let interrupt_outcome = interrupt_on(target, provider, token, reason).await;
-    let termination_recorded = cancel_active_token_on(Some(target), token, cleanup_policy, reason);
+    let cleanup = cancel_active_token_on(Some(target), token, cleanup_policy, reason);
     let outcome = &interrupt_outcome;
     hard_stop_unresponsive_provider_cli_turn(
         provider,
@@ -540,7 +605,10 @@ async fn stop_active_turn_on(
         reason,
     )
     .await;
-    termination_recorded
+    StopOutcome {
+        termination_recorded: cleanup.termination_confirmed(),
+        settlement: target.settlement(cleanup.host_refused),
+    }
 }
 
 async fn hard_stop_unresponsive_provider_cli_turn(
@@ -727,7 +795,7 @@ pub(in crate::services::discord) fn cancel_active_token(
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
 ) -> bool {
-    cancel_active_token_on(None, token, cleanup_policy, reason)
+    cancel_active_token_on(None, token, cleanup_policy, reason).termination_confirmed()
 }
 
 /// With a stop's `target`, another host keeps its session and the executor refuses a
@@ -737,7 +805,7 @@ fn cancel_active_token_on(
     token: &Arc<CancelToken>,
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
-) -> bool {
+) -> CleanupOutcome {
     let cleanup_policy = target.map_or(cleanup_policy, |target| {
         target.effective_policy(cleanup_policy)
     });
@@ -773,7 +841,6 @@ fn cancel_active_token_on(
         Some(target) => token.request_cleanup_expecting(request, target.expected_binding()),
         None => token.request_cleanup(request),
     }
-    .termination_confirmed()
 }
 
 #[cfg(unix)]

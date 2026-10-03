@@ -26,7 +26,6 @@ mod coordinate_adoption;
 mod coordinate_adoption_tests;
 mod episode_handoff;
 mod test_barriers;
-#[cfg(unix)]
 mod watcher_claim;
 #[cfg(test)]
 use test_barriers::await_post_adoption_claim_barrier;
@@ -219,7 +218,7 @@ async fn rebind_inflight_for_channel_inner(
     expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id =
-        super::inflight::opt_channel_id(channel_id).ok_or(RebindError::ChannelIdZero)?;
+        watcher_claim::admit_channel(shared, provider, channel_id, &tmux_session_override).await?;
 
     // Preflight existence check — fast 409 before walking the validation /
     // tmux-liveness path. Advisory only; the AUTHORITATIVE guard is the atomic
@@ -722,6 +721,7 @@ async fn rebind_inflight_for_channel_inner(
             });
         existing
     } else {
+        adoption::ensure_synthetic_rebind_allowed(channel_id)?;
         // Build and persist the new inflight state. No request_owner / msg_ids
         // apply because this recovery has no originating Discord message.
         //

@@ -319,6 +319,31 @@ pub(in crate::services::discord) async fn try_remove_reaction_raw_with_shared_de
     .await
 }
 
+// Dormant input reconciliation shares the existing reaction identity and channel fallback.
+#[cfg(not(test))]
+impl crate::services::tui_o::writer::input_facts::reactions::ReactionPort for serenity::Http {
+    async fn set(
+        &self,
+        channel: u64,
+        message: u64,
+        emoji: char,
+        present: bool,
+    ) -> Result<(), String> {
+        let message = serenity::MessageId::new(message);
+        if channel == 0 || !is_real_discord_message_id(message) {
+            return Err("input reactions require a real Discord channel and message".into());
+        }
+        let action = if present {
+            ReactionAction::Add
+        } else {
+            ReactionAction::Remove
+        };
+        try_reaction_raw_on_channel_detailed(self, ChannelId::new(channel), message, emoji, action)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId};

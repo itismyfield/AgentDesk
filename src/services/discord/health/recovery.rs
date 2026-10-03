@@ -14,7 +14,7 @@ use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 use crate::services::discord::{self as discord, SharedData};
-use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::HydratePendingQueueResult;
 use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
 
@@ -53,9 +53,16 @@ pub(crate) use watchdog_decisions::{
     stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 
+mod stop_judgement;
 mod stop_result;
+use stop_judgement::host_guard_preserved;
+pub(crate) use stop_judgement::{
+    judge_provider_channel_stop, stop_channel_runtime, stop_judged_provider_channel,
+    stop_provider_channel_runtime_with_policy,
+};
 pub use stop_result::{
-    FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult, RuntimeTurnStopResult,
+    FINISH_UNOBSERVED_PATH, FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult,
+    InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,28 +298,20 @@ fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
         && inflight_safe_to_clear
 }
 
-fn cancel_token_tmux_session(token: &Arc<CancelToken>) -> Option<String> {
-    token
-        .tmux_session_name()
-        .filter(|session| !session.trim().is_empty())
-}
-
+/// `legacy_name` is the session the stop judged legacy tmux; its host is not read again.
 fn preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
     provider: &ProviderKind,
     channel_id: ChannelId,
-    token: &Arc<CancelToken>,
+    legacy_name: Option<&str>,
     cleanup_policy: discord::TmuxCleanupPolicy,
 ) -> bool {
-    let Some(tmux_session) = cancel_token_tmux_session(token) else {
+    let Some(tmux_session) = legacy_name.filter(|session| !session.trim().is_empty()) else {
         return false;
     };
-    if !discord::host_liveness::local_tmux(&tmux_session, None) {
-        return false;
-    }
     let tmux_ready_for_input = watchdog_decisions::idle_tmux_repair_ready_for_input(
         provider,
         channel_id.get(),
-        &tmux_session,
+        tmux_session,
     );
     let inflight_safe_to_clear =
         discord::inflight_state_allows_idle_tmux_repair_for_channel(provider, channel_id.get())
@@ -340,45 +339,46 @@ fn clear_persistent_inflight_for_stop(
     removed_now || disappeared_during_stop
 }
 
-pub(crate) async fn stop_provider_channel_runtime_with_policy(
-    registry: &HealthRegistry,
-    provider_name: &str,
-    channel_id: ChannelId,
-    reason: &str,
-    cleanup_policy: discord::TmuxCleanupPolicy,
-) -> Option<RuntimeTurnStopResult> {
-    let provider = ProviderKind::from_str(provider_name)?;
-    let shared = shared_for_provider(registry, &provider, channel_id).await?;
-    let stop = stop_channel_runtime(&shared, &provider, channel_id, reason, cleanup_policy, None);
-    Some(stop.await)
-}
-
-/// A turn stop on `shared`'s channel; a force-kill passes the session its verdict approved
-/// (`Some(None)`: a process turn) so the stop never judges the host again.
-pub(crate) async fn stop_channel_runtime(
+/// A turn stop on `shared`'s channel, carried out on `stop`, the turn judged before any write;
+/// its fallback finishes that turn only. `approved` is the force-kill verdict's session.
+async fn stop_judged_channel_runtime(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    stop: discord::turn_bridge::ChannelJudgement,
     reason: &str,
     cleanup_policy: discord::TmuxCleanupPolicy,
     approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
+    // A turn that could not be read is kept as a refused host's is.
+    let Ok(stop) = stop else {
+        return host_guard_preserved(shared, channel_id).await;
+    };
     let (shared, provider) = (shared.clone(), provider.clone());
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();
     let should_clear_persistent_inflight = cleanup_policy.should_clear_inflight();
     let persistent_inflight_was_present = should_clear_persistent_inflight
         && discord::inflight::inflight_state_file_exists(&provider, channel_id.get());
-    let result = discord::mailbox_cancel_active_turn(&shared, channel_id).await;
     let mut skipped_idle_provider_interrupt = false;
+    let mut judged_termination = false;
 
-    if let Some(token) = result.token.as_ref() {
+    if let Some(stop) = stop.as_ref() {
+        // A refused host, or a turn that moved on since the verdict, is left unchanged.
+        let result = match stop.refused() {
+            false => Some(stop.cancel().await).filter(|result| result.token.is_some()),
+            true => None,
+        };
+        let Some(result) = result else {
+            return host_guard_preserved(&shared, channel_id).await;
+        };
+        let legacy_name = stop.legacy_name();
         let skip_provider_interrupt = preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
             &provider,
             channel_id,
-            token,
+            legacy_name,
             cleanup_policy,
         );
-        let termination_recorded = if skip_provider_interrupt {
+        let outcome = if skip_provider_interrupt {
             tracing::info!(
                 provider = provider.as_str(),
                 channel_id = channel_id.get(),
@@ -386,19 +386,14 @@ pub(crate) async fn stop_channel_runtime(
                 "preserve cancel skipped provider interrupt for idle Claude TUI turn"
             );
             skipped_idle_provider_interrupt = true;
-            false
+            stop.unstopped()
         } else if !result.already_stopping || cleanup_requested {
-            discord::turn_bridge::stop_approved_turn(
-                &provider,
-                token,
-                approved,
-                cleanup_policy,
-                reason,
-            )
-            .await
+            stop.stop(cleanup_policy, reason).await
         } else {
-            false
+            stop.unstopped()
         };
+        let termination_recorded = outcome.termination_recorded;
+        judged_termination = termination_recorded;
         if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
             let snapshot = shared.mailbox(channel_id).snapshot().await;
             let idle_inflight_cleared = if skipped_idle_provider_interrupt {
@@ -410,13 +405,18 @@ pub(crate) async fn stop_channel_runtime(
                 lifecycle_path: "canonical",
                 had_active_turn: true,
                 queue_depth: snapshot.intervention_queue.len(),
-                persistent_inflight_cleared: idle_inflight_cleared
-                    || (should_clear_persistent_inflight
-                        && clear_persistent_inflight_for_stop(
-                            &provider,
-                            channel_id,
-                            persistent_inflight_was_present,
-                        )),
+                inflight: match outcome.may_clear_inflight() {
+                    false => InflightDisposition::PreservedByHostGuard,
+                    true => InflightDisposition::cleared_if(
+                        idle_inflight_cleared
+                            || (should_clear_persistent_inflight
+                                && clear_persistent_inflight_for_stop(
+                                    &provider,
+                                    channel_id,
+                                    persistent_inflight_was_present,
+                                )),
+                    ),
+                },
                 termination_recorded,
                 // The turn ended on its own: the mailbox anchor is gone by the
                 // canonical exit, which is the only path that never needed a
@@ -424,18 +424,28 @@ pub(crate) async fn stop_channel_runtime(
                 mailbox_foreground_free: snapshot.cancel_token.is_none(),
             };
         }
+        // Only a legacy stop's turn is finished and cleared by the fallback.
+        if !outcome.may_clear_inflight() {
+            return host_guard_preserved(&shared, channel_id).await;
+        }
     }
 
     let owned_role_override =
         discord::turn_finalizer::cleanup::snapshot_role_override(&shared, channel_id);
-    let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
+    let judged = (stop.as_ref(), judged_termination);
+    let finish = stop_judgement::finish_judged_turn(&shared, &provider, channel_id, judged);
+    let finish = match finish.await {
+        Ok(finish) => finish,
+        Err(kept) => return kept,
+    };
     let mut termination_recorded = false;
-    if let Some(token) = finish.removed_token.as_ref() {
+    // The finish removes only the judged token.
+    if let (Some(_), Some(stop)) = (finish.removed_token.as_ref(), stop.as_ref()) {
         let skip_provider_interrupt = skipped_idle_provider_interrupt
             || preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
                 &provider,
                 channel_id,
-                token,
+                stop.legacy_name(),
                 cleanup_policy,
             );
         if skip_provider_interrupt {
@@ -447,14 +457,7 @@ pub(crate) async fn stop_channel_runtime(
             );
             skipped_idle_provider_interrupt = true;
         } else {
-            termination_recorded = discord::turn_bridge::stop_approved_turn(
-                &provider,
-                token,
-                approved,
-                cleanup_policy,
-                reason,
-            )
-            .await;
+            termination_recorded = stop.stop(cleanup_policy, reason).await.termination_recorded;
         }
     }
     apply_runtime_hard_stop_cleanup(
@@ -519,7 +522,7 @@ pub(crate) async fn stop_channel_runtime(
         lifecycle_path: "runtime-fallback",
         had_active_turn: finish.removed_token.is_some() || release.released,
         queue_depth,
-        persistent_inflight_cleared,
+        inflight: InflightDisposition::cleared_if(persistent_inflight_cleared),
         termination_recorded,
         mailbox_foreground_free,
     }
@@ -1341,16 +1344,29 @@ async fn runtime_turn_cleanup_by_lookup(
         && let Some(runtime) =
             find_runtime_channel_match(registry, provider_name, channel_id, tmux_name).await
     {
+        // A preserve stop leaves a turn whose host is not legacy tmux running.
+        let (shared, provider, channel) = (&runtime.shared, &runtime.provider, runtime.channel_id);
+        let judged =
+            discord::turn_bridge::ChannelStop::judge(shared, provider, channel, None, false);
+        let judged = judged.await;
+        if !stop_watcher && discord::turn_bridge::keeps_turn(&judged) {
+            let (cleanup_path, had_active_turn) = ("host-guard-kept", true);
+            let kept = HardStopRuntimeResult::default();
+            return HardStopRuntimeResult {
+                cleanup_path,
+                had_active_turn,
+                ..kept
+            };
+        }
         let owned_role_override = discord::turn_finalizer::cleanup::snapshot_role_override(
             &runtime.shared,
             runtime.channel_id,
         );
-        let finish = discord::mailbox_finish_owned_turn(
-            &runtime.shared,
-            &runtime.provider,
-            runtime.channel_id,
-        )
-        .await;
+        let finish = stop_judgement::finish_found_turn(shared, provider, channel, &judged).await;
+        let finish = match finish {
+            Ok(finish) => finish,
+            Err(kept) => return kept,
+        };
         let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
             &runtime.shared,
             &runtime.provider,

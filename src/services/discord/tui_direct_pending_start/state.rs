@@ -1,3 +1,7 @@
+#[allow(dead_code)]
+#[path = "turn_retirement.rs"]
+pub(in crate::services::discord) mod turn_retirement;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;

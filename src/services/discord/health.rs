@@ -91,6 +91,12 @@ pub use turn_deliver::{
 pub(crate) use recovery::StaleSweepWarrantFixture;
 #[allow(unused_imports)]
 pub(crate) use recovery::self_watchdog;
+#[cfg(test)]
+pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
+pub(crate) use recovery::{
+    FINISH_UNOBSERVED_PATH, InflightDisposition, TOKEN_SUPERSEDED_PATH,
+    judge_provider_channel_stop, stop_judged_provider_channel,
+};
 #[allow(unused_imports)]
 pub use recovery::{
     HardStopRuntimeResult, IdleTmuxStaleTurnRepairResult, PendingQueueSnapshot,
@@ -107,7 +113,6 @@ pub(crate) use recovery::{
     STALL_WATCHDOG_INTERVAL_SECS, channel_has_active_turn, clear_resume_runtime_owner_after_death,
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown, stop_channel_runtime,
-    stop_provider_channel_runtime_with_policy,
 };
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;

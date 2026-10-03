@@ -967,6 +967,11 @@ fn fault(step: &str) -> io::Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_root() -> Option<PathBuf> {
+    TEST_ROOT.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
 pub(crate) fn set_test_root(root: Option<&Path>) {
     TEST_ROOT.with(|slot| *slot.borrow_mut() = root.map(Path::to_path_buf));
 }

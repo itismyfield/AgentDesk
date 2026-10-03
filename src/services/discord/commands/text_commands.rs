@@ -3,36 +3,18 @@ use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
 use super::super::router::{IntakeDeps, IntakeOrigin, LocalAdmissionPermit, dispatch_skill_intake};
+use super::super::turn_bridge::CommandStop;
 use super::super::*;
 use super::build_provider_skill_prompt;
 use super::command_policy::{TextCommandId, TextCommandSelection, select_text_command};
-use crate::services::provider::CancelToken;
 
-enum TextStopLookup {
-    NoActiveTurn,
-    AlreadyStopping,
-    Stop(Arc<CancelToken>),
-}
-
+/// A text stop judges the turn, by its inflight row when the token has no name, before any write.
 async fn cancel_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
     channel_id: serenity::ChannelId,
-) -> TextStopLookup {
-    let result = mailbox_cancel_active_turn(shared, channel_id).await;
-    match result.token {
-        Some(_) if result.already_stopping => TextStopLookup::AlreadyStopping,
-        Some(token) => {
-            ensure_cancel_token_bound_from_inflight(
-                provider,
-                channel_id,
-                &token,
-                "text command stop mailbox lookup",
-            );
-            TextStopLookup::Stop(token)
-        }
-        None => TextStopLookup::NoActiveTurn,
-    }
+) -> CommandStop {
+    super::super::turn_bridge::begin_command_stop(shared, provider, channel_id, true).await
 }
 
 /// #1672: After a `!stop`/`!cc stop` completes, kick the deferred
@@ -399,16 +381,15 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             let stop_lookup =
                 cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
             match stop_lookup {
-                TextStopLookup::Stop(token) => {
+                CommandStop::Session(stop) => {
+                    stop.interrupt("!stop").await;
+                }
+                CommandStop::Stop(stop) => {
                     // #1218: send abort key first, then SIGKILL — see
                     // `stop_active_turn` doc comment.
-                    let termination_recorded = super::super::turn_bridge::stop_active_turn(
-                        &data.provider,
-                        &token,
-                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                        "!stop",
-                    )
-                    .await;
+                    let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+                    let termination_recorded =
+                        stop.stop(policy, "!stop").await.termination_recorded;
                     crate::services::turn_cancel_finalizer::finalize_turn_cancel(
                         crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
                             data.provider.clone(),
@@ -430,10 +411,15 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         "!stop",
                     );
                 }
-                TextStopLookup::AlreadyStopping => {
+                CommandStop::AlreadyStopping => {
                     let _ = msg.reply(&ctx.http, super::ALREADY_STOPPING_RESPONSE).await;
                 }
-                TextStopLookup::NoActiveTurn => {
+                CommandStop::HostRefused => {
+                    let _ = msg
+                        .reply(&ctx.http, super::HOST_REFUSED_STOP_RESPONSE)
+                        .await;
+                }
+                CommandStop::NoActiveTurn => {
                     let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
                 }
             }
@@ -1295,14 +1281,15 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id)
                             .await;
                     match stop_lookup {
-                        TextStopLookup::Stop(token) => {
-                            let termination_recorded = super::super::turn_bridge::stop_active_turn(
-                                &data.provider,
-                                &token,
-                                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                                &stop_reason,
-                            )
-                            .await;
+                        CommandStop::Session(stop) => {
+                            stop.interrupt(&stop_reason).await;
+                            let _ = msg.reply(&ctx.http, super::STOPPING_RESPONSE).await;
+                        }
+                        CommandStop::Stop(stop) => {
+                            let policy =
+                                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+                            let stopped = stop.stop(policy, &stop_reason).await;
+                            let termination_recorded = stopped.termination_recorded;
                             crate::services::turn_cancel_finalizer::finalize_turn_cancel(
                                 crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
                                     data.provider.clone(),
@@ -1323,10 +1310,15 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                             );
                             let _ = msg.reply(&ctx.http, super::STOPPING_RESPONSE).await;
                         }
-                        TextStopLookup::AlreadyStopping => {
+                        CommandStop::AlreadyStopping => {
                             let _ = msg.reply(&ctx.http, super::ALREADY_STOPPING_RESPONSE).await;
                         }
-                        TextStopLookup::NoActiveTurn => {
+                        CommandStop::HostRefused => {
+                            let _ = msg
+                                .reply(&ctx.http, super::HOST_REFUSED_STOP_RESPONSE)
+                                .await;
+                        }
+                        CommandStop::NoActiveTurn => {
                             let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
                         }
                     }
