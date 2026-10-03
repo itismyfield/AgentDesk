@@ -194,7 +194,10 @@ fn codex_hook_payloads_name_the_rollout_whose_session_meta_matches() {
                 .join(format!("rollout-{run_index}-{index}.jsonl"));
             std::fs::write(&path, format!("{record}\n")).expect("write rollout header");
             let meta = read_rollout_session_meta(&path).expect("session_meta parses");
-            assert_eq!(meta.source.as_deref(), Some(expected_source));
+            assert_eq!(
+                meta.source.as_ref().and_then(Value::as_str),
+                Some(expected_source)
+            );
             meta_ids.push(meta.id.expect("session_meta.id"));
         }
         let run_events = run["events"].as_array().expect("events");

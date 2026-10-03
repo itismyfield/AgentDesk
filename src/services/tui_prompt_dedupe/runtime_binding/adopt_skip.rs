@@ -178,6 +178,12 @@ pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
     });
 }
 
+/// Whether a claim on `logical` may be withheld: a Herdr host, or a pane a launch listed.
+/// Any other claim is admitted, whatever other panes are listed.
+pub(crate) fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
+    herdr_host || herdr_execution_listed(logical)
+}
+
 /// Whether a launch or a reconcile listed `logical` as a Herdr pane, admitted or not.
 pub(crate) fn herdr_execution_listed(logical: &str) -> bool {
     if !listed(|flag| flag.load(Acquire)) {

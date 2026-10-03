@@ -52,6 +52,7 @@ _post_deploy_smoke_wait_for_startup_recovery() { return 0; }; _post_deploy_smoke
 # E-1 rc-0 skip fixture: leave the channel unset, so the durable probe returns 0.
 _post_deploy_smoke_check_relay_round_trip() { POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; return 0; }
 _post_deploy_smoke_check_durable_record() { [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ] || return 1; return 0; }
+_post_deploy_smoke_check_turn_scenarios() { [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ] || return 1; return 0; }
 if _run_post_deploy_functional_smoke; then rc=0; else rc=$?; fi
 eval "$(<"$disposition_source")"
 printf 'CASE_DONE runner rc=%s wedge_called=%s\n' "$rc" "$runner_wedge_called"
@@ -347,6 +348,7 @@ effects=0; warn_calls=0
 _post_deploy_smoke_check_fail_closed_warn_rate() { warn_calls=$((warn_calls + 1)); }
 _post_deploy_smoke_check_relay_round_trip() { effects=$((effects + 1)); }
 _post_deploy_smoke_check_durable_record() { effects=$((effects + 1)); POST_DEPLOY_SMOKE_DURABLE_COVERAGE=evaluated; }
+_post_deploy_smoke_check_turn_scenarios() { :; }
 _report_post_deploy_smoke_failure() { printf 'REPORT_CALLED\n'; }
 sleep() { :; }
 curl() {

@@ -393,6 +393,11 @@ impl Harness {
     /// Registers and starts a watcher at `offset`; a running one is cancelled first,
     /// which hands its turn over through cancellation custody.
     pub(super) fn spawn(&mut self, offset: u64) {
+        self.spawn_restoring(offset, None);
+    }
+
+    /// [`Harness::spawn`] seeded with `restored`, as a restart restores a watcher from its row.
+    pub(super) fn spawn_restoring(&mut self, offset: u64, restored: Option<RestoredWatcherTurn>) {
         self.cancel();
         let cancel = Arc::new(AtomicBool::new(false));
         let resume = Arc::new(Mutex::new(None));
@@ -428,7 +433,7 @@ impl Harness {
             epoch,
             delivered,
             beat.clone(),
-            None,
+            restored,
         ));
         self.watcher = Some(Controls {
             cancel,

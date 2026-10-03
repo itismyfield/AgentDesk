@@ -48,6 +48,7 @@ struct HandoffObservation {
     watcher_relay_available: bool,
     watcher_delivery_pin: Option<WatcherClaimIncarnation>,
     watcher_slots: usize,
+    adopted_after_done: bool,
 }
 
 async fn dispatch_process_handoff_with_pin(
@@ -77,6 +78,7 @@ async fn dispatch_process_handoff_with_pin(
             .expect("terminal drain deadline")
     });
     let mut last_activity_heartbeat_at = None;
+    let mut watcher_adopted_after_done = false;
 
     let outcome = handle_runtime_handoff_loop_message(
         message,
@@ -98,7 +100,7 @@ async fn dispatch_process_handoff_with_pin(
             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
             tmux_handed_off: &mut tmux_handed_off,
             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
-            watcher_adopted_after_done: &mut false,
+            watcher_adopted_after_done: &mut watcher_adopted_after_done,
             state_dirty,
             terminal_control_drain_until: &mut terminal_control_drain_until,
             last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
@@ -117,6 +119,7 @@ async fn dispatch_process_handoff_with_pin(
         watcher_relay_available: watcher_relay_available_for_turn,
         watcher_delivery_pin,
         watcher_slots: shared.tmux_watchers.len(),
+        adopted_after_done: watcher_adopted_after_done,
     }
 }
 
@@ -714,3 +717,8 @@ fn provisional_cleanup_preserves_replacement_incarnation() {
     assert!(!registered.cancel.load(Ordering::Relaxed));
     assert!(provisional_cancel.load(Ordering::Relaxed));
 }
+
+// Watcher claims, and so Herdr admission, exist only on Unix.
+#[cfg(unix)]
+#[path = "herdr_owner_tests.rs"]
+mod herdr_owner;

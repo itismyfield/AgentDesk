@@ -99,7 +99,18 @@ pub(super) fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
-    *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
+    // A claim the Herdr admission may withhold stamps only the runtime locator first; its owner
+    // and relay owner wait for the admitted claim. Every other claim keeps main's order.
+    #[cfg(unix)]
+    let owner_after_admission = crate::services::tui_prompt_dedupe::herdr_claim_may_be_withheld(
+        &tmux_session_name,
+        ctx.host == super::super::tmux::WatchHost::Herdr,
+    );
+    #[cfg(not(unix))]
+    let owner_after_admission = false;
+    if !owner_after_admission {
+        *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
+    }
     #[cfg(unix)]
     let relay_http_available = shared_owned.serenity_http_or_token_fallback().is_some();
     #[cfg(unix)]
@@ -116,7 +127,9 @@ pub(super) fn handle_watcher_runtime_handoff(
     };
     #[cfg(not(unix))]
     let intended_relay_owner = super::super::inflight::RelayOwnerKind::None;
-    inflight_state.set_relay_owner_kind(intended_relay_owner);
+    if !owner_after_admission {
+        inflight_state.set_relay_owner_kind(intended_relay_owner);
+    }
 
     // Durable ownership is the admission ticket for every watcher/relay side
     // effect below. The exact stamped row replaces the local projection before
@@ -199,8 +212,13 @@ pub(super) fn handle_watcher_runtime_handoff(
             return outcome;
         };
         *watcher_owner_channel_id = claim.owner_channel_id();
-        let owner_changed =
+        let mut owner_changed =
             inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
+        if owner_after_admission {
+            let relay_before = inflight_state.effective_relay_owner_kind();
+            inflight_state.set_relay_owner_kind(intended_relay_owner);
+            owner_changed |= relay_before != intended_relay_owner;
+        }
         *state_dirty |= owner_changed;
         let incarnation = claim.incarnation().clone();
         (
