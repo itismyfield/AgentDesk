@@ -62,7 +62,7 @@ impl AlarmHealth {
         hits.len() >= NOT_FOUND_THRESHOLD
     }
 
-    /// Only a pause ends on its own evidence; every other condition waits for an operator.
+    /// Pause and reader count end on their own evidence; other sticky conditions wait for an operator.
     fn resume_gateway(&self, channel: u64) {
         let reason = format!("tui_o:{}:{channel}", PAUSED_NO_GATEWAY);
         locked(&self.active).remove(&reason);
@@ -192,11 +192,21 @@ impl AlarmSink for AlarmRouter {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
         self.raise_at(channel, &alarm, Instant::now());
     }
+
+    fn reconcile_reader_count(&self, channel: u64, count: usize) {
+        if count <= super::writer::rotation::MAX_READERS {
+            locked(&self.health.active).remove(&format!("tui_o:too_many_readers:{channel}"));
+        }
+    }
 }
 
 impl AlarmSink for Arc<AlarmRouter> {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
         self.as_ref().raise(channel, alarm);
+    }
+
+    fn reconcile_reader_count(&self, channel: u64, count: usize) {
+        self.as_ref().reconcile_reader_count(channel, count);
     }
 }
 
@@ -261,6 +271,33 @@ mod tests {
 
     fn sent(recorder: &Recorder) -> Vec<(u64, String)> {
         recorder.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch() {
+        let (router, recorder, health) = router(Some(ALERT));
+        router.raise(FAILING, WriterAlarm::TooManyReaders { count: 4 });
+        router.raise(FAILING + 1, WriterAlarm::TooManyReaders { count: 4 });
+        router.raise(FAILING, WriterAlarm::BindingPending { seq: 2 });
+        let history = health.history();
+        let messages = sent(&recorder);
+        router.reconcile_reader_count(FAILING, 3);
+        assert_eq!(
+            health.current_at(Instant::now()),
+            [
+                format!("tui_o:binding_pending:{FAILING}"),
+                format!("tui_o:too_many_readers:{}", FAILING + 1),
+            ]
+        );
+        assert_eq!(health.history(), history);
+        router.raise(FAILING, WriterAlarm::TooManyReaders { count: 4 });
+        assert!(
+            health
+                .current_at(Instant::now())
+                .contains(&format!("tui_o:too_many_readers:{FAILING}"))
+        );
+        assert_eq!(sent(&recorder), messages);
+        assert_eq!(health.history(), history);
     }
 
     #[test]

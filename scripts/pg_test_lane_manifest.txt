@@ -1281,6 +1281,7 @@ services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
+services::herdr_launch::tests::herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_unconfirmed_panes_pg
 services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim

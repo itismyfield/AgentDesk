@@ -132,7 +132,9 @@ impl Herdr {
     /// Launches `session` through the production Herdr launch, with the Claude TUI's own
     /// settings and script preparation; returns the execution nonce.
     fn launch(&mut self, session: &str) -> String {
-        let dir = self.ingress.path("cwd");
+        // The launch refuses a cwd that is not an existing directory before Pending.
+        let dir = self.ingress.path("cwd").with_extension("");
+        std::fs::create_dir_all(&dir).unwrap();
         let prepare = |prepared: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
             let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
                 tmux_session_name: prepared.context.tmux_session.clone(),

@@ -155,7 +155,10 @@ pub enum WriterAlarm {
 
 pub trait AlarmSink: Send + Sync {
     fn raise(&self, channel: u64, alarm: WriterAlarm);
+    fn reconcile_reader_count(&self, _channel: u64, _count: usize) {}
 }
+
+mod historical_hops;
 
 #[cfg(test)]
 #[path = "writer_tests.rs"]

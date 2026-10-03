@@ -4,6 +4,8 @@
 
 mod herdr {
     pub(crate) mod contract;
+    #[cfg(unix)]
+    pub(crate) mod launch_host;
     pub(crate) mod model;
     pub(crate) mod observe;
     pub(crate) mod provenance;
@@ -25,6 +27,10 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
+// Dormant: activation constructs it for a configured endpoint.
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
 pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,

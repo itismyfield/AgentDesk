@@ -8661,6 +8661,7 @@ services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_wi
 services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
 services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
+services::herdr_launch::tests::herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_unconfirmed_panes_pg
 services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
 services::issue_announcements::tests::renders_active_card_with_agent_and_timestamp
 services::issue_announcements::tests::renders_completed_card_for_pr_merge
@@ -9557,6 +9558,11 @@ services::session_forwarding::trusted_target::tests::resolver_answer_is_pinned_o
 services::session_host::consumer_guard::tests::automatic_state_change_verdict_for_every_host_state
 services::session_host::consumer_guard::tests::policy_probe_defers_every_non_legacy_host_without_probing
 services::session_host::consumer_guard::tests::transcript_completion_is_never_blocked_by_host_evidence
+services::session_host::herdr::launch_host::real_tests::herdr_real_server_launch_input_bytes_and_refusals
+services::session_host::herdr::launch_host::tests::provider_candidate_names_one_foreground_process_or_why_not
+services::session_host::herdr::launch_host::tests::socket_launch_refuses_unknown_endpoints_and_bad_requests_before_any_call
+services::session_host::herdr::launch_host::tests::socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane
+services::session_host::herdr::launch_host::tests::socket_launch_types_the_command_into_the_server_that_created_the_pane
 services::session_host::herdr::provenance::tests::e7_config_read_refuses_a_file_changed_or_replaced_mid_read
 services::session_host::herdr::provenance::tests::e7_os_reads_prove_off_for_a_real_bootstrapped_process_only
 services::session_host::herdr::provenance::tests::e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal
@@ -9892,6 +9898,7 @@ services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
+services::tui_o::alarm::tests::p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
@@ -10112,6 +10119,15 @@ services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_copied
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_the_channel_had_not_read_is_not_counted_as_inherited
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_row_a_pending_parent_also_holds_is_still_posted_after_the_fork_start
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h1_adoption_history_restores_relations_without_native_proof_or_boundary_changes
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h2_rebind_removes_new_successor_including_oldless_binds
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h3_future_resolution_and_future_bind_do_not_restore_an_applied_hop
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h4_retained_prepared_payload_identity_and_posted_delivery_survive_restoration
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h5_unattached_middle_source_is_not_attached_or_compressed
+services::tui_o::writer::tests::actor::rotation::recovery_tests::h6_failed_rotation_write_aborts_resume_and_restart_keeps_cursor_hash_and_frontier
+services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_1_successful_retirement_clears_reader_health_in_the_same_tend
+services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_3_regrowth_reactivates_reader_health_after_successful_recovery
+services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_4_failed_tend_keeps_prior_health_evidence_until_a_successful_pass
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured

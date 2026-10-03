@@ -1512,6 +1512,8 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/herdr/transport.rs", 0),
         ("src/services/session_host/herdr/wire.rs", 0),
         ("src/services/session_host/herdr/provenance.rs", 0),
+        // Dormant socket launch host: builds its own transports; nothing constructs it.
+        ("src/services/session_host/herdr/launch_host.rs", 0),
         ("src/services/session_host/model.rs", 3),
         ("src/services/session_host/resolve.rs", 2),
         ("src/services/session_host/consumer_guard.rs", 2),
@@ -1547,7 +1549,9 @@ fn herdr_items_have_no_production_caller() {
         "HerdrHost::<",
         "HerdrSocketTransport::new(",
         "HerdrSocketTransport::<",
+        "SocketHerdrLaunchHost::new(",
     ];
+    const LAUNCH_HOST: &str = "src/services/session_host/herdr/launch_host.rs";
     // Only the inflight binding CAS copies a locator and only the Claude launch writes a
     // (tmux) `.host_kind` marker. Termination holds a locator only as a target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
@@ -1637,7 +1641,13 @@ fn herdr_items_have_no_production_caller() {
             Some(_) => Vec::new(),
             None => NEEDLES.iter().filter(|n| prod.contains(**n)).collect(),
         };
-        let activated = ACTIVATIONS.iter().filter(|n| prod.contains(**n));
+        let activated = ACTIVATIONS
+            .iter()
+            .filter(|n| prod.contains(**n))
+            .filter(|n| {
+                // The launch host owns its transports; the host itself must stay unconstructed.
+                !(relative == LAUNCH_HOST && n.starts_with("HerdrSocketTransport::new("))
+            });
         violations.extend(
             named
                 .into_iter()
