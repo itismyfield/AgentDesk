@@ -309,19 +309,19 @@ mod herdr_off_tests {
         );
     }
 
-    // The launch entry reads O readiness only for a selected channel, keeps an unready one on
-    // tmux, and leaves tmux only for a channel whose O writer already holds a seeded store.
+    // A channel configured for Herdr gets no tmux session whether or not its O writer is ready, and
+    // the guard reads no readiness; an unconfigured channel launches on tmux as before.
     #[cfg(unix)]
     #[test]
-    fn claude_launch_takes_herdr_only_for_a_selected_channel_with_a_ready_o_store() {
+    fn claude_launch_creates_no_tmux_for_a_herdr_configured_channel_ready_or_not() {
         use super::prepare_and_create_claude_tui_session as launch;
         use crate::config::TestEnvVarGuard as Guard;
         use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
         use crate::services::herdr_launch::{
-            HERDR_NOT_ADMITTED, force_launch_gate, o_store_for_test,
+            HERDR_NOT_ADMITTED, force_writer_accepts, o_store_for_test,
             readiness_reads_on_this_thread as reads,
         };
-        use crate::services::tui_o::cutover::test_override::{force_candidates, force_channels};
+        use crate::services::tui_o::cutover::test_override::force_channels;
         use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
         use std::os::unix::fs::PermissionsExt;
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -369,32 +369,23 @@ mod herdr_off_tests {
             calls.contains(&format!("new-session -d -s {tmux}"))
         };
 
-        let _ready_channel = force_channels(&[(46, ClaudeTui), (47, ClaudeTui)]);
-        let _writer = force_launch_gate(false, Some(true));
-        run("AgentDesk-claude-gate-off", 46).expect("an unselected channel stays on tmux");
-        assert!(created("AgentDesk-claude-gate-off"));
-        assert_eq!(
-            reads(),
-            0,
-            "no readiness is read while nothing selects Herdr"
+        let _hosts = crate::config::session_hosts::force_for_test(
+            Some("mac-mini"),
+            &[(46, "mac-mini"), (47, "mac-mini")],
         );
-
-        let _selected = force_launch_gate(true, Some(true));
-        let refused = run("AgentDesk-claude-gate-ready", 46);
-        assert_eq!(refused.err().as_deref(), Some(HERDR_NOT_ADMITTED));
-        assert!(
-            !created("AgentDesk-claude-gate-ready"),
-            "the Herdr branch creates no tmux"
-        );
-        assert_eq!(reads(), 1);
-
-        let _pending = force_candidates(&[(46, ClaudeTui)]);
-        run("AgentDesk-claude-gate-pending", 46).expect("an unadopted channel stays on tmux");
-        assert!(created("AgentDesk-claude-gate-pending"));
-        drop(_pending);
-        run("AgentDesk-claude-gate-no-store", 47).expect("a channel without a store stays on tmux");
-        assert!(created("AgentDesk-claude-gate-no-store"));
-        assert_eq!(reads(), 3);
+        let _ready = force_channels(&[(46, ClaudeTui), (47, ClaudeTui)]);
+        let _writer = force_writer_accepts(Some(true));
+        for (tmux, channel) in [
+            ("AgentDesk-claude-ready", 46),
+            ("AgentDesk-claude-unready", 47),
+        ] {
+            let refused = run(tmux, channel);
+            assert_eq!(refused.err().as_deref(), Some(HERDR_NOT_ADMITTED), "{tmux}");
+            assert!(!created(tmux), "{tmux} must not reach tmux");
+        }
+        assert_eq!(reads(), 0, "the guard reads no O readiness");
+        run("AgentDesk-claude-unconfigured", 48).expect("an unconfigured channel stays on tmux");
+        assert!(created("AgentDesk-claude-unconfigured"));
     }
 }
 

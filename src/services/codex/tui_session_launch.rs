@@ -174,6 +174,36 @@ mod tests {
         );
     }
 
+    // A channel configured for Herdr is refused before the owner marker, launch script or tmux.
+    #[test]
+    fn codex_launch_writes_nothing_for_a_herdr_configured_channel() {
+        use crate::services::herdr_launch::HERDR_NOT_ADMITTED;
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = tests::fixture_after_shared_test_env_lock();
+        let _tmux = tests::fake_tmux(root.path());
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[(51, "mac-mini")]);
+        let tmux = "AgentDesk-codex-herdr-configured";
+        let refused = prepare_codex_tui_launch_script(
+            tmux,
+            None,
+            "",
+            &CodexLaunchOptions::new(""),
+            Some(51),
+            None,
+            false,
+            &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                ProviderKind::Codex,
+            ),
+        );
+        assert_eq!(refused.err().as_deref(), Some(HERDR_NOT_ADMITTED));
+        assert!(!std::path::Path::new(&tmux_owner_path(tmux)).exists());
+        let script = crate::services::tmux_common::session_temp_path(tmux, "sh");
+        assert!(!std::path::Path::new(&script).exists());
+        assert!(!root.path().join("tmux.calls").exists());
+    }
+
     #[test]
     fn codex_tui_hooks_need_the_advertised_bypass_not_trust_hashes() {
         use crate::services::claude_tui::hook_bundle::codex_hook_capability;
