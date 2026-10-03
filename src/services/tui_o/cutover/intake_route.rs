@@ -51,7 +51,12 @@ pub(crate) fn held_channels(provider: &str) -> Vec<String> {
         held.then(|| channel.to_string())
     };
     let mut held: Vec<String> = owned.iter().filter_map(held).collect();
-    held.extend(channel_home::intake_held_channels());
+    // A gate closing between the two reads can name a channel twice; keep the first.
+    for channel in channel_home::intake_held_channels() {
+        if !held.contains(&channel) {
+            held.push(channel);
+        }
+    }
     held
 }
 

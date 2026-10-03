@@ -358,4 +358,46 @@ pub(crate) mod test_override {
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored;"));
         false
     }
+
+    /// Without a delegated home, the owned set is exactly what the boot ownership owns: every
+    /// adoption state, on and off the home, with the writer on and off.
+    #[test]
+    fn without_a_delegated_home_owned_channels_match_boot_ownership() {
+        let channels = [
+            (41, RuntimeHandoffKind::ClaudeTui),
+            (42, RuntimeHandoffKind::CodexTui),
+        ];
+        let from_boot = || -> Vec<(u64, RuntimeHandoffKind)> {
+            let owned = |(channel, kind, candidate): (u64, _, Option<super::Candidate>)| {
+                candidate.filter(|c| c.peek().owned())?;
+                Some((channel, kind?))
+            };
+            super::boot_ownership()
+                .into_iter()
+                .filter_map(owned)
+                .collect()
+        };
+        let states = [
+            Adoption::Pending,
+            Adoption::Committed,
+            Adoption::Held,
+            Adoption::Released,
+            Adoption::Deferred,
+        ];
+        let mut owned_somewhere = false;
+        for state in states {
+            let boots = [
+                unadopted(&channels).adopted(state),
+                unadopted(&channels).foreign("gw").standing_by(state),
+            ];
+            for boot in boots {
+                let _boot = force_boot(boot);
+                assert_eq!(super::owned_channels(), from_boot(), "{state:?}");
+                owned_somewhere |= !super::owned_channels().is_empty();
+                let _off = force_off();
+                assert_eq!(super::owned_channels(), from_boot(), "{state:?} off");
+            }
+        }
+        assert!(owned_somewhere, "some state owns channels");
+    }
 }

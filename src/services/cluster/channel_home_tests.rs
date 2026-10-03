@@ -503,6 +503,14 @@ fn standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake() {
         Adoption::Committed,
         "the boot store, no restart"
     );
+    // Intake closing between the owned read and the gate read names the channel once.
+    let closing = std::sync::Arc::clone(&gate);
+    let closing = test_probe::answer_with(move |_| {
+        closing.close_intake();
+        false
+    });
+    assert_eq!(intake_route::held_channels("claude"), [channel.clone()]);
+    drop(closing);
     gate.close_intake();
     assert!(matches!(
         intake_route::route("claude", SELECTED),
