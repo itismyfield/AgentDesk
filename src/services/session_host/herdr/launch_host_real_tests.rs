@@ -90,7 +90,7 @@ fn spawn_server(bin: &Path, dir: &Path) -> Child {
 }
 
 /// Stops the server in `dir` through its socket and reaps `child`, killing it if needed.
-fn stop_server(bin: &Path, dir: &Path, mut child: Child) {
+fn shut_down_server(bin: &Path, dir: &Path, mut child: Child) {
     let _ = server_command(bin, dir).args(["server", "stop"]).output();
     let deadline = Instant::now() + Duration::from_secs(5);
     while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
@@ -129,7 +129,7 @@ impl RealServer {
         let (bin, dir, child) = (self.bin.clone(), self.dir.clone(), self.child.clone());
         move || {
             let old = child.lock().unwrap().take().expect("a running server");
-            stop_server(&bin, &dir, old);
+            shut_down_server(&bin, &dir, old);
             *child.lock().unwrap() = Some(spawn_server(&bin, &dir));
         }
     }
@@ -171,7 +171,7 @@ impl RealServer {
 impl Drop for RealServer {
     fn drop(&mut self) {
         if let Some(child) = self.child.lock().unwrap().take() {
-            stop_server(&self.bin, &self.dir, child);
+            shut_down_server(&self.bin, &self.dir, child);
         }
     }
 }
