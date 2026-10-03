@@ -296,9 +296,8 @@ fn a_stop_leaves_a_turn_admitted_after_the_judged_one_ended() {
     });
 }
 
-// A force-kill whose judged turn is superseded during its wait kills nothing and leaves the
-// successor's row; one whose judgement of an approved host could not be read keeps the turn
-// even when a fresh, empty actor answers its finish.
+// A force-kill keeps a turn superseded during its wait and one whose approved judgement could not
+// be read, even when a fresh, empty actor would answer its finish: nothing cleared or killed.
 #[test]
 fn a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -334,9 +333,8 @@ fn a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read() {
     });
 }
 
-// The name-lookup stop finishes only the turn it judged: a successor admitted after a judged
-// turn or after an empty judgement stays, a finish the actor drops keeps the turn, and with no
-// actor registered the runtime's session is cleared as before.
+// The name-lookup stop leaves a successor admitted after its judgement, keeps a turn whose finish
+// the actor drops, and with no actor registered still clears the runtime's session.
 #[test]
 fn a_lookup_stop_finishes_only_the_turn_it_judged() {
     let _root = crate::config::TestRuntimeRootGuard::new();

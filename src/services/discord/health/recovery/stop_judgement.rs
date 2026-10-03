@@ -148,9 +148,8 @@ pub(super) async fn unobserved(shared: &SharedData, channel: ChannelId) -> Runti
     preserved(shared, channel, RuntimeTurnStopResult::finish_unobserved).await
 }
 
-/// Finishes the channel's turn only while it is still the one `judged` stopped, or no turn when
-/// it judged none. `Err` is the stop's result when another turn holds the channel or the finish
-/// went unobserved; nothing was finished or cleared then.
+/// Finishes the channel's turn only while `judged` still keys it; `Err` is the stop's result when
+/// another turn holds the channel or the finish went unobserved, with nothing finished or cleared.
 pub(super) async fn finish_judged_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
