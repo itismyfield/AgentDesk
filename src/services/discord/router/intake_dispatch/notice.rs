@@ -89,6 +89,10 @@ pub(super) async fn notify_blocked_intake(
             "세션 owner를 안전하게 확인하지 못했습니다.".to_string(),
             "기존 세션을 stop/clear한 뒤 다시 보내세요.",
         ),
+        IntakeBlockedReason::ChannelHome { block } => (
+            format!("이 채널의 위임 home이 지금 intake를 받을 수 없습니다: {block:?}."),
+            "위임 상태(channel home)를 확인한 뒤 다시 보내세요.",
+        ),
     };
     let content = format!(
         "⛔ {detail} 잘못된 노드에 새 세션을 만들지 않도록 turn을 시작하지 않았습니다. {recovery}"

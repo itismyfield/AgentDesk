@@ -34,6 +34,7 @@ pub(crate) enum IntakeRoutingReasonCode {
     NonPortableAttachmentRoutedTarget,
     AttachmentUnavailable,
     RoutingDependencyFailed,
+    ChannelHome,
 }
 
 impl IntakeRoutingReasonCode {
@@ -63,6 +64,7 @@ impl IntakeRoutingReasonCode {
             Self::NonPortableAttachmentRoutedTarget => "nonportable_attachment_routed_target",
             Self::AttachmentUnavailable => "attachment_unavailable",
             Self::RoutingDependencyFailed => "routing_dependency_failed",
+            Self::ChannelHome => "channel_home",
         }
     }
 }
@@ -152,6 +154,7 @@ fn blocked_reason_code(reason: &IntakeBlockedReason) -> IntakeRoutingReasonCode 
         IntakeBlockedReason::RoutingDependencyFailed { .. } => {
             IntakeRoutingReasonCode::RoutingDependencyFailed
         }
+        IntakeBlockedReason::ChannelHome { .. } => IntakeRoutingReasonCode::ChannelHome,
     }
 }
 
@@ -302,6 +305,12 @@ pub(crate) fn telemetry_for_decision(
                 owner_resolution: OwnerResolutionCode::NoOwner,
                 preferred_label_match: PreferredLabelMatchCode::MatchedWorker,
             },
+            IntakeRoutingBasis::DelegatedHome => IntakeRoutingTelemetry {
+                reason_code: IntakeRoutingReasonCode::ChannelHome,
+                would_assign_target: Some(target_instance_id),
+                owner_resolution: OwnerResolutionCode::NotEvaluated,
+                preferred_label_match: PreferredLabelMatchCode::NotEvaluated,
+            },
         },
         IntakeRouterDecision::SkippedDuplicate { resolved_owner } => IntakeRoutingTelemetry {
             reason_code: IntakeRoutingReasonCode::DuplicateMessage,
@@ -337,7 +346,8 @@ fn blocked_telemetry(reason: &IntakeBlockedReason) -> IntakeRoutingTelemetry<'_>
         IntakeBlockedReason::OverrideUnavailable { .. }
         | IntakeBlockedReason::NonPortableAttachmentRoutedTarget { .. }
         | IntakeBlockedReason::AttachmentUnavailable { .. }
-        | IntakeBlockedReason::RoutingDependencyFailed { .. } => OwnerResolutionCode::NotEvaluated,
+        | IntakeBlockedReason::RoutingDependencyFailed { .. }
+        | IntakeBlockedReason::ChannelHome { .. } => OwnerResolutionCode::NotEvaluated,
     };
     IntakeRoutingTelemetry {
         reason_code: blocked_reason_code(reason),

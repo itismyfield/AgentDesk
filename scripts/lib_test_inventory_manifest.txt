@@ -493,6 +493,7 @@ db::idempotency::tests::pg_integration::claim_with_different_fingerprint_reports
 db::idempotency::tests::pg_integration::claim_with_inflight_slot_reports_in_flight
 db::idempotency::tests::pg_integration::crash_window_retry_blocks_until_expiry_then_reexecutes_replay_safe_mutation
 db::idempotency::tests::pg_integration::gc_expired_removes_only_past_due_rows
+db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
 db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows
@@ -2092,10 +2093,12 @@ services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_iden
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
 services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
+services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
-services::cluster::channel_home::tests::channel_home_items_have_no_production_caller
+services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
+services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
@@ -2118,6 +2121,7 @@ services::cluster::intake_router_hook::edge_case_tests::per_agent_primary_race_r
 services::cluster::intake_router_hook::edge_case_tests::primary_readiness_loss_and_removed_registration_only_use_compatible_fallback_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
+services::cluster::intake_router_hook::home_route_tests::a_channel_routes_by_its_home_row_and_as_before_without_one_pg
 services::cluster::intake_router_hook::o_route_tests::an_o_channel_is_placed_only_on_its_ready_gateway_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
 services::cluster::intake_router_hook::owner_record::tests::admission_idempotency_conflict_returns_prior_row
@@ -2203,6 +2207,7 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
+services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
