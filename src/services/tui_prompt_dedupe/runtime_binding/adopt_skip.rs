@@ -153,6 +153,8 @@ thread_local! {
     pub(crate) static ADMISSION_PAUSE: std::cell::RefCell<
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     > = const { std::cell::RefCell::new(None) };
+    /// Admission reads this thread lets pass before `ADMISSION_PAUSE` parks one.
+    pub(crate) static ADMISSION_PAUSE_SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The admission a watcher claim on `logical` commits under, the map locked until it drops.
@@ -164,6 +166,12 @@ pub(crate) fn herdr_claim_admission(
 ) -> Result<Option<std::sync::MutexGuard<'static, HashMap<String, (String, bool)>>>, ()> {
     #[cfg(test)]
     ADMISSION_PAUSE.with_borrow_mut(|pause| {
+        pause.as_ref()?;
+        let skips = ADMISSION_PAUSE_SKIPS.get();
+        if skips > 0 {
+            ADMISSION_PAUSE_SKIPS.set(skips - 1);
+            return None;
+        }
         let (paused, resume) = pause.take()?;
         paused.send(()).ok().and_then(|()| resume.recv().ok())
     });
