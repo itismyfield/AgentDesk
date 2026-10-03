@@ -73,6 +73,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       - name: Library sweep (selection-set gated)
         timeout-minutes: 45
         shell: bash
@@ -209,6 +212,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       - name: PostgreSQL lane resource diagnostics
         if: ${{ inputs.resource_diagnostics == true }}
         run: |
@@ -288,6 +294,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       - name: High-risk recovery lane
         run: "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 
@@ -335,6 +344,9 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
 
       - name: Setup Python for script checks
         uses: actions/setup-python@v5

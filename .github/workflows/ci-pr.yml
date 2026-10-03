@@ -1127,6 +1127,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       - name: Observe curated lane selections
         timeout-minutes: 20
         shell: bash
@@ -1136,7 +1139,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           set -o pipefail
-          python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-test-fast.log"
+          bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-test-fast.log"
 
       - name: Require observer summary
         if: always()
@@ -1265,6 +1268,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       - name: Observe curated lane selections
         timeout-minutes: 20
         shell: bash
@@ -1274,7 +1280,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           set -o pipefail
-          python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-high-risk.log"
+          bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-high-risk.log"
 
       - name: Require observer summary
         if: always()
@@ -1623,6 +1629,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       # There is no execution-count floor here, deliberately. A floor is a
       # scalar summary of a set, and both measured evasions cleared one: a
       # 402-test narrowing of a single module and a 213-test module disable
@@ -1835,6 +1844,9 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
 
       - name: Setup Python for script checks
         uses: actions/setup-python@v5
@@ -2049,7 +2061,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e
+          expected=fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2120,6 +2132,9 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
 
       - name: Verify named relay-authority targets and selection floors
         env:
@@ -2220,6 +2235,10 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
+        uses: ./.github/actions/ensure-swap
+
       - name: Fetch Cargo dependencies
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
@@ -2275,7 +2294,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e
+          expected=fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
