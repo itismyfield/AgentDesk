@@ -28,6 +28,7 @@ pub(in crate::services::discord) enum CatchUpClassification {
     /// TooOld notice without touching the DLQ path. Positioned strictly between
     /// the sender-eligibility gates and the age gate so it never overrides
     /// NotAllowed/SelfAuthored (#4443/#4453) and only pre-empts TooOld.
+    /// Phase 1 also settles a fresh text command this bot already replied to.
     Settled,
     /// Empty content (whitespace only).
     Empty,
