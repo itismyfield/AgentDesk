@@ -158,3 +158,23 @@ mod tests {
         assert!(!transcript_turns(channel));
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_tick {
+    static TICK: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> =
+        std::sync::Mutex::new(None);
+
+    pub(crate) fn signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *TICK.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, tx));
+        rx
+    }
+
+    pub(crate) fn completed(channel: u64) {
+        let mut tick = TICK.lock().unwrap_or_else(|e| e.into_inner());
+        if tick.as_ref().is_some_and(|(id, _)| *id == channel) {
+            let (_, tx) = tick.take().unwrap();
+            let _ = tx.send(());
+        }
+    }
+}

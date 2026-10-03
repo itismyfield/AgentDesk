@@ -293,9 +293,7 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
         #[cfg(all(test, unix))]
-        super::tests::streaming_harness_tests::n1a_turn_mode_tests::n1a_tick_completed(
-            channel_id.get(),
-        );
+        crate::services::tui_o::turn_mode::test_tick::completed(channel_id.get());
         if should_skip_streaming_placeholder_without_inflight(
             inflight_missing_for_streaming,
             pane_actively_streaming_for_streaming,

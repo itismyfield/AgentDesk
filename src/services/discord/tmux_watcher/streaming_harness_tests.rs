@@ -29,7 +29,7 @@ mod post_stream_exit_host_tests;
 mod herdr_entry_host_tests;
 
 #[path = "n1a_turn_mode_tests.rs"]
-pub(in crate::services::discord::tmux::tmux_watcher) mod n1a_turn_mode_tests;
+mod n1a_turn_mode_tests;
 
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";
