@@ -430,24 +430,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         }
         return;
     }
-    let injected_class = relay_prompt_decision.injected_class;
-    let task_notification =
-        task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
-    let Some(task_notification) = synthetic_start_wiring::post_passive_prompt_notice(
-        shared,
-        &prompt,
-        channel_id,
-        &relay_prompt_decision,
-        task_notification,
-    )
-    .await
-    else {
-        return;
-    };
-    // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
-    let live_events = &shared.ui.placeholder_live_events;
-    live_events.set_turn_request_anchor(channel_id, None, None);
-    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
     // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
     // `<command-*>` wrapper, ~tens-of-ms apart) must not let the SECOND half record a
@@ -477,6 +459,24 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     }
+    let injected_class = relay_prompt_decision.injected_class;
+    let task_notification =
+        task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
+    let Some(task_notification) = synthetic_start_wiring::post_passive_prompt_notice(
+        shared,
+        &prompt,
+        channel_id,
+        &relay_prompt_decision,
+        task_notification,
+    )
+    .await
+    else {
+        return;
+    };
+    // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
+    let live_events = &shared.ui.placeholder_live_events;
+    live_events.set_turn_request_anchor(channel_id, None, None);
+    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
     // recorded — every failure early-return below would otherwise leave the lease set

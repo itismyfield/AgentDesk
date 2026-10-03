@@ -501,6 +501,9 @@ pub(super) fn reacquire_watcher_inflight_for_active_stream(
     // message instead of orphaning the hourglass.
     injected_prompt_message_id: Option<u64>,
 ) -> bool {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        return false;
+    }
     // The streaming-edit target is the placeholder/status-panel message still
     // owned by this watcher; pin it as `current_msg_id` so edits + the terminal
     // ack resolve a target instead of MissingTarget.

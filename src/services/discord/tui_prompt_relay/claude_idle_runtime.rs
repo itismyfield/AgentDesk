@@ -182,11 +182,11 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
             // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
             continue;
         };
-        if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
-            continue;
-        }
-        if let Some(row) =
-            super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
+        let transcript_turns =
+            crate::services::tui_o::turn_mode::transcript_turns(channel_id.get());
+        if !transcript_turns
+            && let Some(row) =
+                super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
         {
             let source = Path::new(&binding.output_path);
             if let Some(lease) =
@@ -389,7 +389,9 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
                     &transcript_path,
                     line_end_offset,
                 );
-                if !claude_idle_prompt_observation_should_tail_response(observation) {
+                if transcript_turns
+                    || !claude_idle_prompt_observation_should_tail_response(observation)
+                {
                     continue;
                 }
                 // #3305/#4033/#4082: use the same injected-prompt decision

@@ -252,3 +252,148 @@ fn n1a_manual_rebind_creates_rows_only_on_unconfirmed_channels() {
         }
     });
 }
+
+#[test]
+fn n1a_confirmed_slash_raw_and_wrapper_post_one_notice() {
+    run(async {
+        let h = RelayE2eHarness::start_with_health_registry().await;
+        h.cache_relay_transport();
+        h.answer_placeholders_immediately();
+        h.use_mock_notify_bot(Duration::from_secs(5)).await;
+        let tmux = "n1a-confirmed-slash-pair";
+        h.attach_tmux_watcher(tmux, "n1a-slash.jsonl");
+        let _confirmed = TestConfirmation::new(CHANNEL_ID);
+        for text in [
+            "/loop 5m check relay",
+            "<command-message>loop is running</command-message><command-name>/loop</command-name><command-args>5m check relay</command-args>",
+        ] {
+            super::super::relay_observed_prompt(
+                &h.shared,
+                ObservedTuiPrompt {
+                    provider: PROVIDER_KEY.into(),
+                    tmux_session_name: tmux.into(),
+                    prompt: text.into(),
+                    source_event_id: None,
+                    observed_at: chrono::Utc::now(),
+                    external_input_lease_generation:
+                        dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+                    ssh_direct_observation_generation:
+                        dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                    hook_prompt_id: None,
+                },
+            )
+            .await;
+        }
+        assert_eq!(
+            h.local_note_posts(),
+            1,
+            "raw echo and wrapper must post only one notice"
+        );
+        assert_eq!(h.messages().len(), 1);
+        assert_eq!(h.placeholder_posts(), 0);
+        assert!(!h.relay_lease_present(tmux));
+        assert!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL_ID).is_none()
+        );
+        assert!(h.unhandled_requests().is_empty());
+    });
+}
+
+#[test]
+fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
+    run(async {
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+        use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
+        let h = RelayE2eHarness::start().await;
+        let tmux = "n1a-confirmed-idle-maintenance";
+        let output = h.attach_tmux_watcher(tmux, "n1a-idle-maintenance.jsonl");
+        h.shared
+            .tmux_watchers
+            .get(&h.channel_id)
+            .unwrap()
+            .cancel
+            .store(true, Ordering::Release);
+        let transcript = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"n1a-live-task\",\"name\":\"Task\",\"input\":{\"description\":\"n1a footer task\",\"prompt\":\"keep running\",\"subagent_type\":\"general-purpose\"}}]}}\n",
+        );
+        std::fs::write(&output, transcript).unwrap();
+        let binding = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: output.to_str().unwrap().into(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(format!("n1a-maintenance-{}", h.root.path().display())),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        dedupe::register_tmux_runtime_binding(tmux, binding.clone());
+        let _confirmed = TestConfirmation::new(CHANNEL_ID);
+        super::super::claude_idle_runtime::relay_idle_claude_bindings(&h.shared).await;
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(tmux)
+                .unwrap()
+                .last_offset,
+            transcript.len() as u64,
+            "confirmed idle must advance the binding offset"
+        );
+        let footer = h
+            .shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(h.channel_id, &ProviderKind::Claude, "*");
+        assert!(
+            footer
+                .block
+                .as_deref()
+                .is_some_and(|block| block.contains("n1a footer task")),
+            "confirmed idle must rehydrate live footer slots: {footer:?}"
+        );
+        let old_end = transcript.len() as u64 + 1000;
+        crate::services::discord::outbound::delivery_record::write_delivered_frontier(
+            &ProviderKind::Claude, CHANNEL_ID, tmux,
+            crate::services::discord::outbound::delivery_record::DeliveredCommit {
+                range: (0, old_end),
+                generation_mtime_ns: crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux),
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        ).unwrap();
+        let mut stale = binding;
+        stale.last_offset = old_end;
+        dedupe::register_tmux_runtime_binding(tmux, stale);
+        super::super::claude_idle_runtime::relay_idle_claude_bindings(&h.shared).await;
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(tmux)
+                .unwrap()
+                .last_offset,
+            transcript.len() as u64,
+            "confirmed idle must reanchor after compaction"
+        );
+        let frontier = crate::services::discord::outbound::delivery_frontier_probe::delivered_frontier_current_generation(&ProviderKind::Claude, h.channel_id, tmux, Some(transcript.len() as u64)).unwrap();
+        assert_eq!(frontier.range.1, transcript.len() as u64);
+        std::fs::write(&output, format!("{transcript}{{\"type\":\"user\",\"message\":{{\"content\":\"fresh direct prompt\"}}}}\n")).unwrap();
+        super::super::claude_idle_runtime::relay_idle_claude_bindings(&h.shared).await;
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(tmux)
+                .unwrap()
+                .last_offset,
+            std::fs::metadata(&output).unwrap().len()
+        );
+        assert!(
+            !h.relay_lease_present(tmux),
+            "confirmed prompt must not record a synthetic lease"
+        );
+        assert!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL_ID).is_none()
+        );
+        assert!(
+            !super::super::CLAUDE_IDLE_RESPONSE_TAILS
+                .lock()
+                .unwrap()
+                .contains(tmux)
+        );
+        assert!(h.unhandled_requests().is_empty());
+        dedupe::clear_tmux_runtime_binding(tmux);
+    });
+}

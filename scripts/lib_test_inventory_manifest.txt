@@ -6641,6 +6641,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_ent
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::n1a_turn_mode_tests::n1a_collector_status_tick_cannot_recreate_confirmed_row
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::n1a_turn_mode_tests::n1a_post_terminal_prologue_cannot_recreate_confirmed_row
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_mid_turn_cutover_shows_no_post_cutover_body
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
@@ -7130,6 +7131,8 @@ services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::he
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_slash_raw_and_wrapper_post_one_notice
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_manual_rebind_creates_rows_only_on_unconfirmed_channels
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_resent_after_a_relay_without_a_post_is_announced_once

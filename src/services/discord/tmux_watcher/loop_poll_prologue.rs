@@ -522,6 +522,7 @@ pub(super) async fn poll_watcher_output_or_continue(
     // (terminal + no-inflight) prefix already holds (keeps `tmux capture-pane` off the hot path).
     let post_terminal_pane_actively_streaming = turn_result_relayed
         && post_terminal_inflight_missing
+        && !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
         && watcher_pane_actively_streaming(tmux_session_name, context.host);
     if post_terminal_pane_actively_streaming {
         // Self-heal: a live turn lost its inflight but kept streaming post-terminal;
