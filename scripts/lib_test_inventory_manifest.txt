@@ -9929,6 +9929,13 @@ services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_
 services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
 services::tui_o::writer::adoption::tests::past_sources_over_the_boot_budget_are_not_adopted
+services::tui_o::writer::input_facts::tests::anonymous_openers_and_sidechain_contamination_fail_closed
+services::tui_o::writer::input_facts::tests::channels_are_isolated_and_partial_or_corrupt_supply_is_not_idle
+services::tui_o::writer::input_facts::tests::claude_parent_tools_and_background_notification_ignore_child_file
+services::tui_o::writer::input_facts::tests::codex_parent_stays_open_during_child_completion_and_foreign_closer
+services::tui_o::writer::input_facts::tests::delayed_supply_replays_order_and_never_exposes_backlog_idle
+services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_supply_only_the_new_parent
+services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
