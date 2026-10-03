@@ -1069,7 +1069,7 @@ mod tests {
     }
 }
 
-fn is_synthetic_create_state(state: &InflightTurnState) -> bool {
+pub(in crate::services::discord) fn is_synthetic_create_state(state: &InflightTurnState) -> bool {
     let rebind = state.rebind_origin
         && state.request_owner_user_id == 0
         && state.user_msg_id == 0

@@ -2,6 +2,15 @@ use super::super::rebind_runtime::claude_rebind_transcript_path;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight;
 
+pub(super) fn ensure_synthetic_rebind_allowed(channel_id: u64) -> Result<(), super::RebindError> {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id) {
+        return Err(super::RebindError::Internal(
+            "transcript turn mode refuses synthetic rebind creation".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn rebind_initial_offset_with_floor(
     initial_offset: u64,
     minimum_initial_offset: Option<u64>,

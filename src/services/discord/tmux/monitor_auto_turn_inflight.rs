@@ -16,6 +16,9 @@ pub(super) async fn ensure_monitor_auto_turn_inflight(
     turn_start_offset: u64,
     last_offset: u64,
 ) -> Option<inflight::InflightTurnIdentity> {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        return None;
+    }
     if inflight::load_inflight_state(provider, channel_id.get()).is_some() {
         return None;
     }

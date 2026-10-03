@@ -93,6 +93,10 @@ pub(crate) use recovery::StaleSweepWarrantFixture;
 pub(crate) use recovery::self_watchdog;
 #[cfg(test)]
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
+pub(crate) use recovery::{
+    FINISH_UNOBSERVED_PATH, InflightDisposition, TOKEN_SUPERSEDED_PATH,
+    judge_provider_channel_stop, stop_judged_provider_channel,
+};
 #[allow(unused_imports)]
 pub use recovery::{
     HardStopRuntimeResult, IdleTmuxStaleTurnRepairResult, PendingQueueSnapshot,
@@ -104,9 +108,6 @@ pub use recovery::{
     snapshot_pending_queue_state, spawn_stall_watchdog, spawn_watchdog,
     stop_providerless_runtime_turn_preserving_watcher_strict_ownership,
     stop_runtime_turn_preserving_watcher,
-};
-pub(crate) use recovery::{
-    InflightDisposition, judge_provider_channel_stop, stop_judged_provider_channel,
 };
 pub(crate) use recovery::{
     STALL_WATCHDOG_INTERVAL_SECS, channel_has_active_turn, clear_resume_runtime_owner_after_death,

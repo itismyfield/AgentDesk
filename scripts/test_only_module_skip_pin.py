@@ -34,6 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/tmux/n1a_monitor_tests.rs",
+        "src/services/discord/tmux_watcher/n1a_turn_mode_tests.rs",
+        "src/services/discord/tui_direct_pending_start/turn_retirement_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/n1a_turn_mode_tests.rs",
         "src/services/tui_o/writer/clear_launch_tests.rs",
         "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
@@ -307,6 +311,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/queue_io/ledger_settlement_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
+        "src/services/discord/health/recovery/stop_judgement/judged_finish_tests.rs",
+        "src/services/discord/health/recovery/live_agent_recovery/judged_finish_fence_tests.rs",
         "src/server/routes/health_api/unread_tail_attribution_tests.rs",
         "src/server/routes/health_api/tui_output_readiness_tests.rs",
         "src/services/tui_o/writer/writer_tests.rs",

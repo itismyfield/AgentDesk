@@ -722,6 +722,7 @@ async fn rebind_inflight_for_channel_inner(
             });
         existing
     } else {
+        adoption::ensure_synthetic_rebind_allowed(channel_id)?;
         // Build and persist the new inflight state. No request_owner / msg_ids
         // apply because this recovery has no originating Discord message.
         //
