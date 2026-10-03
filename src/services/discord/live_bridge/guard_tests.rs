@@ -365,21 +365,20 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             recorder.calls().is_empty(),
             "no placeholder takeover before BODY"
         );
-        assert!(
-            !discord::health::watcher_respawn::retry_pending_watcher_respawn(
-                &registry,
-                &provider,
-                &[shared.clone()],
-                channel,
-                1_000
-            )
-            .await
-        );
+        let respawned = discord::health::watcher_respawn::retry_pending_watcher_respawn(
+            &registry,
+            &provider,
+            &[shared.clone()],
+            channel,
+            1_000,
+        )
+        .await;
         assert_eq!(
             discord::health::watcher_respawn::live_bridge_respawn_test_counts(channel),
             [0, 0, 0],
             "snapshot/reclaim/failure budget must all remain untouched"
         );
+        assert!(!respawned);
         assert!(
             shared.tmux_watchers.len() == 0,
             "the original reader remains the only reader"
@@ -415,20 +414,19 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             "provider exit must not end bridge protection"
         );
         assert!(try_recovery(&provider, channel.get()).is_err());
-        assert!(
-            !discord::health::watcher_respawn::retry_pending_watcher_respawn(
-                &registry,
-                &provider,
-                &[shared.clone()],
-                channel,
-                1_001,
-            )
-            .await
-        );
+        let respawned = discord::health::watcher_respawn::retry_pending_watcher_respawn(
+            &registry,
+            &provider,
+            &[shared.clone()],
+            channel,
+            1_001,
+        )
+        .await;
         assert_eq!(
             discord::health::watcher_respawn::live_bridge_respawn_test_counts(channel),
             [0, 0, 0]
         );
+        assert!(!respawned);
         assert_eq!(
             gateway
                 .bodies
