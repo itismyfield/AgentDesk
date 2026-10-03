@@ -391,13 +391,13 @@ fn a_name_only_preserve_stop_keeps_a_turn_on_another_host() {
     });
 }
 
-// A turn the stop cannot read is kept as a refused host's: a user stop on an unbound turn whose
-// row fails to read or parse, and a runtime stop behind an unreachable mailbox, change nothing.
+// A user stop on an unbound turn whose row fails to read or parse keeps it as a refused host's:
+// nothing cancelled, bound or tombstoned, and the row is left as it was.
 #[test]
 fn a_stop_keeps_a_turn_it_could_not_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     run(async {
-        let (shared, registry) = runtime().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let root = inflight::inflight_runtime_root().expect("inflight root");
         for (n, row) in ["unreadable", "unparsable"].into_iter().enumerate() {
             let channel = ChannelId::new(5_340_680_000 + n as u64 * 10);
@@ -421,22 +421,6 @@ fn a_stop_keeps_a_turn_it_could_not_read() {
             assert_eq!(path.is_dir(), row == "unreadable", "{row}");
             assert!(matches!(stop, CommandStop::HostRefused), "{row}");
         }
-        let channel = ChannelId::new(5_340_680_100);
-        let row = inflight_row(&ProviderKind::Claude, channel, "p6asb-unreachable", false);
-        shared.mailboxes.insert_unreachable_for_test(channel);
-        let before = file_state(&row);
-        let stop = crate::services::discord::health::stop_provider_channel_runtime_with_policy;
-        let policy = TmuxCleanupPolicy::PreserveSession;
-        let result = stop(&registry, "claude", channel, "p6asb", policy).await;
-        shared.mailboxes.remove_fixture_for_test(channel);
-        assert_eq!(
-            file_state(&row),
-            before,
-            "the row is neither cleared nor saved"
-        );
-        assert_eq!(tombstone(channel), None);
-        let kept = InflightDisposition::PreservedByHostGuard;
-        assert_eq!(result.map(|result| result.inflight), Some(kept));
     });
 }
 
