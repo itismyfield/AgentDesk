@@ -266,11 +266,16 @@ impl RecoveryRegistration {
         self.slot.is_some()
     }
 
-    pub(super) async fn run<T>(&self, future: impl Future<Output = T>) -> T {
-        if self.slot.is_none() {
-            future.await
-        } else {
-            RECOVERY.scope(self.clone(), future).await
+    // Allocate before entering the scope so nested recovery futures do not grow caller stacks.
+    pub(super) fn run<T>(&self, future: impl Future<Output = T>) -> impl Future<Output = T> {
+        let future = Box::pin(future);
+        let registration = self.clone();
+        async move {
+            if registration.slot.is_none() {
+                future.await
+            } else {
+                RECOVERY.scope(registration, future).await
+            }
         }
     }
 }
