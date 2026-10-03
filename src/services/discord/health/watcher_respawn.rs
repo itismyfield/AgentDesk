@@ -1049,6 +1049,63 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn live_original_defers_deadman_until_its_execution_ends() {
+        let _absence = lock_watcher_absence_for_test().await;
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let channel = ChannelId::new(655_214_001);
+        let provider = ProviderKind::Codex;
+        let shared = discord::make_shared_data_for_tests();
+        let token = std::sync::Arc::new(CancelToken::new());
+        let state = discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            7,
+            9001,
+            9002,
+            "original".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let original =
+            discord::live_bridge::register_or_requeue(&shared, &provider, &state, &token)
+                .await
+                .unwrap();
+        let snapshot = snapshot(
+            channel.get(),
+            Some("AgentDesk-codex-deadman-fixture"),
+            Some(true),
+            true,
+            Some(9001),
+        );
+        assert!(!detect_and_escalate_watcher_absence(
+            &provider, channel, &snapshot, false, 0
+        ));
+        assert!(!detect_and_escalate_watcher_absence(
+            &provider,
+            channel,
+            &snapshot,
+            false,
+            WATCHER_ABSENCE_DEADMAN_SECS as i64
+        ));
+        drop(original);
+        assert!(!detect_and_escalate_watcher_absence(
+            &provider, channel, &snapshot, false, 0
+        ));
+        assert!(detect_and_escalate_watcher_absence(
+            &provider,
+            channel,
+            &snapshot,
+            false,
+            WATCHER_ABSENCE_DEADMAN_SECS as i64
+        ));
+        clear_watcher_absence(&provider, channel);
+    }
+
     #[test]
     fn respawn_decision_requires_live_agentdesk_tmux() {
         assert!(force_clean_should_respawn_watcher(&snapshot(
@@ -1986,7 +2043,7 @@ mod tests {
     #[test]
     fn retry_respawn_call_site_pins_the_inflight_episode() {
         let body = include_str!("watcher_respawn.rs")
-            .split_once("async fn retry_pending_watcher_respawn(")
+            .split_once("async fn retry_pending_watcher_respawn_admitted(")
             .expect("single-channel retry")
             .1;
         // Bounded to the argument list: an unbounded slice runs to EOF and this

@@ -890,10 +890,19 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
+    let mut deferred_state = inflight_state.clone();
+    deferred_state.set_followup_requeue_context(
+        reply_context.clone(),
+        reply_context.is_some(),
+        false,
+        pending_uploads.clone(),
+        None,
+        false,
+    );
     let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
         shared,
         &provider,
-        &inflight_state,
+        &deferred_state,
         &cancel_token,
     )
     .await

@@ -3507,6 +3507,7 @@ services::discord::health::watcher_respawn::tests::deadman_switch_escalates_afte
 services::discord::health::watcher_respawn::tests::deadman_switch_ignores_idle_channel_without_relay_work
 services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier
 services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_floor_uses_generation_fenced_frontier
+services::discord::health::watcher_respawn::tests::live_original_defers_deadman_until_its_execution_ends
 services::discord::health::watcher_respawn::tests::relay_work_terms_cannot_qualify_a_channel_the_arming_gate_rejects
 services::discord::health::watcher_respawn::tests::release_is_noop_when_mailbox_already_idle
 services::discord::health::watcher_respawn::tests::release_is_noop_when_snapshot_had_no_owner

@@ -239,6 +239,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
     let _absence = discord::health::watcher_respawn::lock_watcher_absence_for_test().await;
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for terminal_first in [true, false] {
         let channel = ChannelId::new(655_202_001 + u64::from(terminal_first) * 100);
         let provider = ProviderKind::Codex;
@@ -260,6 +261,10 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
         );
         std::fs::write(&rollout, native.as_bytes()).unwrap();
         let tmux = row.tmux_session_name.as_deref().unwrap();
+        let _alive = crate::services::session_host::test_support::InjectedLivenessGuard::set(
+            crate::services::session_host::HostSessionRef::tmux(tmux),
+            crate::services::session_host::HostLiveness::Live,
+        );
         crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
             tmux,
             &rollout,
@@ -439,7 +444,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             "no next-turn pause before BODY"
         );
         assert!(
-            !discord::mailbox_try_start_turn(
+            !discord::queue_io::mailbox_try_start_turn_behind_queue(
                 &shared,
                 channel,
                 Arc::new(CancelToken::new()),
@@ -448,6 +453,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             )
             .await
         );
+
         gateway.release.notify_one();
         tokio::time::timeout(Duration::from_secs(10), completion_rx)
             .await
@@ -489,6 +495,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
 async fn confirmed_original_registers_and_blocks_death_while_n1_rejects_synthetic_birth() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = ChannelId::new(655_203_001);
     let _confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
     let shared = discord::make_shared_data_for_tests();
@@ -500,18 +507,31 @@ async fn confirmed_original_registers_and_blocks_death_while_n1_rejects_syntheti
     discord::inflight::save_inflight_state(&row).unwrap();
     let recorder = discord::recovery_engine::o_cut_recorder::start(channel.get()).await;
     let handed_off = discord::tmux_restart_handoff::start_restart_handoff_from_state(
-            channel,
-            &recorder.http,
-            &shared,
-            &ProviderKind::Codex,
-            row.clone(),
-            BODY
-        )
-        .await;
-    assert!(recorder.calls().is_empty(), "confirmed death must not take over the placeholder");
-    assert_eq!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap().turn_nonce, row.turn_nonce);
+        channel,
+        &recorder.http,
+        &shared,
+        &ProviderKind::Codex,
+        row.clone(),
+        BODY,
+    )
+    .await;
+    assert!(
+        recorder.calls().is_empty(),
+        "confirmed death must not take over the placeholder"
+    );
+    assert_eq!(
+        discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get())
+            .unwrap()
+            .turn_nonce,
+        row.turn_nonce
+    );
     assert!(!handed_off);
-    assert!(original.is_some(), "confirmed original execution still registers");
+    assert!(
+        original.is_some(),
+        "confirmed original execution still registers"
+    );
+    drop(original);
+    discord::inflight::clear_inflight_state(&ProviderKind::Codex, channel.get());
     assert!(
         !discord::tmux::tmux_watcher::liveness::reacquire_watcher_inflight_for_active_stream(
             &ProviderKind::Codex,
@@ -524,17 +544,37 @@ async fn confirmed_original_registers_and_blocks_death_while_n1_rejects_syntheti
             None
         )
     );
-    assert_eq!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap().turn_nonce, row.turn_nonce);
+    assert!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).is_none());
 }
 
 #[tokio::test]
 async fn live_original_blocks_both_pinned_and_unpinned_manual_rebind_before_preflight() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = 655_204_001;
     let shared = discord::make_shared_data_for_tests();
     let token = Arc::new(CancelToken::new());
-    let row = row(channel, &token);
+    let mut row = row(channel, &token);
+    row.tmux_session_name =
+        Some(ProviderKind::Codex.build_tmux_session_name("live-guard-fixture-cdx"));
+    let output = root.path().join("rebind-native.jsonl");
+    std::fs::write(&output, format!("{}\n", serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"fixture-native-turn","last_agent_message":BODY}}))).unwrap();
+    row.output_path = Some(output.display().to_string());
+    row.turn_start_offset = Some(0);
+    let tmux = row.tmux_session_name.as_deref().unwrap();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux,
+        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+    )
+    .unwrap();
+    crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
+        tmux,
+        &output,
+        Some("fixture-session"),
+        Some(0),
+    )
+    .unwrap();
     let _original = register_original(&ProviderKind::Codex, channel, &token)
         .await
         .unwrap();
@@ -558,8 +598,27 @@ async fn live_original_blocks_both_pinned_and_unpinned_manual_rebind_before_pref
             expected,
         )
         .await;
-        assert!(recorder.calls().is_empty(), "no external preflight or takeover while original reader lives");
-        assert_eq!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap().turn_nonce, durable.turn_nonce);
+        let after = discord::inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap();
+        assert_eq!(
+            after.effective_relay_owner_kind(),
+            durable.effective_relay_owner_kind(),
+            "no coordinate adoption while original reader lives"
+        );
+        assert_eq!(after.output_path, durable.output_path);
+        assert!(
+            shared.tmux_watchers.len() == 0,
+            "no recovery reader while original lives"
+        );
+        assert!(
+            recorder.calls().is_empty(),
+            "no external preflight or takeover while original reader lives"
+        );
+        assert_eq!(
+            discord::inflight::load_inflight_state(&ProviderKind::Codex, channel)
+                .unwrap()
+                .turn_nonce,
+            durable.turn_nonce
+        );
         assert!(
             matches!(
                 result,
@@ -575,6 +634,7 @@ async fn live_original_blocks_both_pinned_and_unpinned_manual_rebind_before_pref
 async fn actual_dead_original_retains_existing_handoff_and_exact_successor_cleanup_fence() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = ChannelId::new(655_205_001);
     let shared = discord::make_shared_data_for_tests();
     let token = Arc::new(CancelToken::new());
@@ -634,11 +694,20 @@ async fn actual_dead_original_retains_existing_handoff_and_exact_successor_clean
 async fn recovery_first_timeout_requeues_original_input_and_unwinds_only_its_actor() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = ChannelId::new(655_206_001);
     let mut shared = discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
     let token = Arc::new(CancelToken::new());
-    let row = row(channel.get(), &token);
+    let mut row = row(channel.get(), &token);
+    row.set_followup_requeue_context(
+        Some("original reply context".into()),
+        true,
+        false,
+        Vec::new(),
+        None,
+        true,
+    );
     assert!(
         discord::mailbox_try_start_turn(
             &shared,
@@ -662,6 +731,11 @@ async fn recovery_first_timeout_requeues_original_input_and_unwinds_only_its_act
     assert_eq!(snapshot.intervention_queue.len(), 1);
     assert_eq!(snapshot.intervention_queue[0].text, row.user_text);
     assert_eq!(
+        snapshot.intervention_queue[0].reply_context,
+        row.followup_reply_context
+    );
+    assert!(snapshot.intervention_queue[0].has_reply_boundary);
+    assert_eq!(
         snapshot.intervention_queue[0].message_id.get(),
         row.user_msg_id
     );
@@ -674,6 +748,7 @@ async fn recovery_first_timeout_requeues_original_input_and_unwinds_only_its_act
 async fn row_loss_keeps_original_registration_and_blocks_self_heal_until_both_owners_exit() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = ChannelId::new(655_207_001);
     let token = Arc::new(CancelToken::new());
     let producer = register_original(&ProviderKind::Codex, channel.get(), &token)
@@ -746,6 +821,7 @@ fn original_and_restore_source_coverage_preserves_admission_order() {
 async fn off_entries_do_not_register_wait_or_block_existing_recovery() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let _off = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_CODEX_LIVE_BRIDGE_GUARD",
         std::ffi::OsStr::new("0"),
@@ -791,6 +867,7 @@ async fn off_entries_do_not_register_wait_or_block_existing_recovery() {
 async fn real_bridge_entry_abort_keeps_the_original_reader_registered() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = ChannelId::new(655_209_001);
     let mut shared = discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
@@ -863,6 +940,7 @@ async fn thread_registration_uses_the_row_channel_and_runtime_learning_keeps_the
 async fn canonical_root_alias_keeps_the_slot_before_and_after_first_row_creation() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let alias_dir = tempfile::tempdir().unwrap();
     let alias = alias_dir.path().join("alias");
     std::os::unix::fs::symlink(root.path(), &alias).unwrap();
@@ -880,7 +958,6 @@ async fn canonical_root_alias_keeps_the_slot_before_and_after_first_row_creation
     drop(original);
 }
 
-
 #[tokio::test(start_paused = true)]
 async fn recovery_first_release_revalidates_actor_and_preserves_successor() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -889,7 +966,16 @@ async fn recovery_first_release_revalidates_actor_and_preserves_successor() {
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
     let token = Arc::new(CancelToken::new());
     let original = row(channel.get(), &token);
-    assert!(discord::mailbox_try_start_turn(&shared, channel, token.clone(), UserId::new(7), MessageId::new(original.user_msg_id)).await);
+    assert!(
+        discord::mailbox_try_start_turn(
+            &shared,
+            channel,
+            token.clone(),
+            UserId::new(7),
+            MessageId::new(original.user_msg_id)
+        )
+        .await
+    );
     discord::increment_global_active(&shared, "fixture");
     let recovery = try_recovery(&ProviderKind::Codex, channel.get()).unwrap();
     let start = register_or_requeue(&shared, &ProviderKind::Codex, &original, &token);
@@ -902,15 +988,30 @@ async fn recovery_first_release_revalidates_actor_and_preserves_successor() {
     discord::saturating_decrement_global_active(&shared);
     let successor = Arc::new(CancelToken::new());
     let successor_id = MessageId::new(original.user_msg_id + 10);
-    assert!(discord::mailbox_try_start_turn(&shared, channel, successor.clone(), UserId::new(7), successor_id).await);
+    assert!(
+        discord::mailbox_try_start_turn(
+            &shared,
+            channel,
+            successor.clone(),
+            UserId::new(7),
+            successor_id
+        )
+        .await
+    );
     discord::increment_global_active(&shared, "fixture successor");
     drop(recovery);
     assert!(matches!(start.await, Err(true)));
     let snapshot = shared.mailbox(channel).snapshot().await;
-    assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &successor));
+    assert!(Arc::ptr_eq(
+        snapshot.cancel_token.as_ref().unwrap(),
+        &successor
+    ));
     assert_eq!(snapshot.active_user_message_id, Some(successor_id));
     assert_eq!(snapshot.intervention_queue.len(), 1);
-    assert_eq!(snapshot.intervention_queue[0].message_id.get(), original.user_msg_id);
+    assert_eq!(
+        snapshot.intervention_queue[0].message_id.get(),
+        original.user_msg_id
+    );
     assert!(!is_live(&ProviderKind::Codex, channel.get()));
 }
 
@@ -919,7 +1020,12 @@ async fn other_providers_do_not_register_or_block_recovery() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let token = Arc::new(CancelToken::new());
     for provider in [ProviderKind::Claude, ProviderKind::Gemini] {
-        assert!(register_original(&provider, 655_213_001, &token).await.unwrap().is_none());
+        assert!(
+            register_original(&provider, 655_213_001, &token)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(try_recovery(&provider, 655_213_001).unwrap().slot.is_none());
         assert!(!is_live(&provider, 655_213_001));
     }

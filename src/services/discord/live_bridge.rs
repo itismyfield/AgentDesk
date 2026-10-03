@@ -172,8 +172,10 @@ pub(super) async fn register_or_requeue(
                 .is_some_and(|current| Arc::ptr_eq(current, cancel))
                 && snapshot.active_user_message_id.map(|id| id.get()) == Some(state.user_msg_id)
                 && super::inflight::load_inflight_state(provider, state.channel_id).is_none_or(
-                    |current| current.user_msg_id == state.user_msg_id
-                        && current.turn_nonce == state.turn_nonce,
+                    |current| {
+                        current.user_msg_id == state.user_msg_id
+                            && current.turn_nonce == state.turn_nonce
+                    },
                 )
             {
                 Ok(Some(original))
@@ -273,6 +275,6 @@ impl RecoveryRegistration {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "live_bridge/guard_tests.rs"]
 mod tests;
