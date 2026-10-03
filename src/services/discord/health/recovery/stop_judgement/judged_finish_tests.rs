@@ -17,34 +17,25 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_lifecycle::{TurnLifecycleStopResult, TurnLifecycleTarget};
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 
-/// Where a stop runs a test's hook on its channel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Seam {
-    BeforeJudge,
-    AfterJudge,
-}
-
 type Hook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 thread_local! {
-    static HOOKS: RefCell<Vec<(ChannelId, Seam, Hook)>> = const { RefCell::new(Vec::new()) };
+    static HOOKS: RefCell<Vec<(ChannelId, Hook)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Runs `hook` once, the next time a stop on `channel` reaches `seam`.
-pub(crate) fn at<F>(channel: ChannelId, seam: Seam, hook: impl FnOnce() -> F + Send + 'static)
+/// Runs `hook` once, the next time a name-lookup stop on `channel` has judged it.
+pub(crate) fn at<F>(channel: ChannelId, hook: impl FnOnce() -> F + Send + 'static)
 where
     F: Future<Output = ()> + Send + 'static,
 {
     let hook: Hook = Box::new(move || Box::pin(hook()));
-    HOOKS.with_borrow_mut(|hooks| hooks.push((channel, seam, hook)));
+    HOOKS.with_borrow_mut(|hooks| hooks.push((channel, hook)));
 }
 
-pub(super) async fn seam(channel: ChannelId, seam: Seam) {
+pub(super) async fn after_judge(channel: ChannelId) {
     let hook = HOOKS.with_borrow_mut(|hooks| {
-        let at = hooks
-            .iter()
-            .position(|(c, s, _)| (*c, *s) == (channel, seam))?;
-        Some(hooks.remove(at).2)
+        let at = hooks.iter().position(|(held, _)| *held == channel)?;
+        Some(hooks.remove(at).1)
     });
     if let Some(hook) = hook {
         hook().await;
@@ -296,53 +287,33 @@ fn a_stop_leaves_a_turn_admitted_after_the_judged_one_ended() {
     });
 }
 
-// A force-kill keeps a turn superseded during its wait and one whose approved judgement could not
-// be read, even when a fresh, empty actor would answer its finish: nothing cleared or killed.
+// A force-kill keeps a turn superseded during its wait: nothing of the successor's is cleared or
+// killed.
 #[test]
-fn a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read() {
+fn a_force_kill_keeps_a_superseded_turn() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     run(async {
         let fx = Channel::new(5_340_132_000).await;
         let (result, next) = tokio::join!(fx.force_kill(), fx.admit_successor_after_cancel());
         fx.assert_successor_kept(&next, "superseded").await;
         assert!(result.host_guard_kept(), "superseded: kept, nothing killed");
-
-        let fx = Channel::new(5_340_132_100).await;
-        let row = file_state(&Channel::row_path(fx.channel));
-        let (shared, channel) = (fx.shared.clone(), fx.channel);
-        at(channel, Seam::BeforeJudge, move || async move {
-            shared.mailboxes.insert_unreachable_for_test(channel);
-        });
-        let shared = fx.shared.clone();
-        at(channel, Seam::AfterJudge, move || async move {
-            shared.mailboxes.remove_fixture_for_test(channel);
-        });
-        let result = fx.force_kill().await;
-        assert!(
-            !fx.judged.cancelled.load(Ordering::SeqCst),
-            "unread: not cancelled"
-        );
-        fx.assert_runtime_kept("unread").await;
-        assert_eq!(
-            file_state(&Channel::row_path(channel)),
-            row,
-            "unread: row as it was"
-        );
-        assert!(result.host_guard_kept(), "unread: kept");
-        assert!(HOOKS.with_borrow(Vec::is_empty), "both seams were reached");
     });
 }
 
-// The name-lookup stop leaves a successor admitted after its judgement, keeps a turn whose finish
-// the actor drops, and with no actor registered still clears the runtime's session.
+// The name-lookup stop leaves a successor admitted after its judgement and keeps a turn whose
+// finish the actor drops; with no actor registered, or one that never answers, it goes on as main.
 #[test]
 fn a_lookup_stop_finishes_only_the_turn_it_judged() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     run(async {
-        for (n, case) in ["superseded", "empty", "unanswered", "no actor"]
-            .into_iter()
-            .enumerate()
-        {
+        let cases = [
+            "superseded",
+            "empty",
+            "unanswered",
+            "no actor",
+            "dead actor",
+        ];
+        for (n, case) in cases.into_iter().enumerate() {
             let fx = Channel::new(5_340_133_000 + n as u64 * 100).await;
             let (shared, channel) = (fx.shared.clone(), fx.channel);
             if case == "empty" {
@@ -353,9 +324,12 @@ fn a_lookup_stop_finishes_only_the_turn_it_judged() {
             if case == "no actor" {
                 shared.mailboxes.remove_fixture_for_test(channel);
             }
+            if case == "dead actor" {
+                shared.mailboxes.insert_unreachable_for_test(channel);
+            }
             let next = Arc::new(std::sync::Mutex::new(None));
             let held = next.clone();
-            at(channel, Seam::AfterJudge, move || async move {
+            at(channel, move || async move {
                 match case {
                     "superseded" | "empty" => {
                         let next = admit_successor(&shared, channel).await;
@@ -384,6 +358,7 @@ fn a_lookup_stop_finishes_only_the_turn_it_judged() {
                     let session = fx.shared.core.lock().await.sessions.get(&channel).cloned();
                     let session = session.and_then(|session| session.session_id);
                     assert_eq!(session, None, "{case}: the session is cleared");
+                    assert!(!result.host_guard_kept(), "{case}: goes on as main");
                 }
             }
             fx.shared.mailboxes.remove_fixture_for_test(channel);

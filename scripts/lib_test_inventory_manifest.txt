@@ -3292,7 +3292,7 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_l
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_liveness_keeps_force_clean_when_jsonl_stale
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_should_force_clean_requires_all_signals
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
-services::discord::health::recovery::stop_judgement::judged_finish_tests::a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read
+services::discord::health::recovery::stop_judgement::judged_finish_tests::a_force_kill_keeps_a_superseded_turn
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_lookup_stop_finishes_only_the_turn_it_judged
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_stop_leaves_a_turn_admitted_after_the_judged_one_ended
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders

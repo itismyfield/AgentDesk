@@ -14,8 +14,6 @@ use poise::serenity_prelude as serenity;
 
 #[cfg(test)]
 pub(super) mod judged_finish_tests;
-#[cfg(test)]
-use judged_finish_tests::Seam;
 
 /// The runtime a stop resolved for a provider channel and its turn's verdict; nothing written.
 pub(crate) struct ProviderChannelStop(Option<JudgedChannel>);
@@ -110,11 +108,7 @@ pub(crate) async fn stop_channel_runtime(
     cleanup_policy: discord::TmuxCleanupPolicy,
     approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
-    #[cfg(test)]
-    judged_finish_tests::seam(channel_id, Seam::BeforeJudge).await;
     let stop = ChannelStop::judge(shared, provider, channel_id, approved, false).await;
-    #[cfg(test)]
-    judged_finish_tests::seam(channel_id, Seam::AfterJudge).await;
     let policy = cleanup_policy;
     let run = super::stop_judged_channel_runtime;
     run(shared, provider, channel_id, stop, reason, policy, approved).await
@@ -143,13 +137,8 @@ pub(super) async fn preserved(
     kept(snapshot.intervention_queue.len())
 }
 
-/// The result of a stop whose finish went unobserved: nothing was finished or cleared.
-pub(super) async fn unobserved(shared: &SharedData, channel: ChannelId) -> RuntimeTurnStopResult {
-    preserved(shared, channel, RuntimeTurnStopResult::finish_unobserved).await
-}
-
-/// Finishes the channel's turn only while `judged` still keys it; `Err` is the stop's result when
-/// another turn holds the channel or the finish went unobserved, with nothing finished or cleared.
+/// Finishes the channel's turn only while `judged` still keys it; `Err`, with nothing cleared, when
+/// another turn holds the channel or the judged turn's finish went unobserved.
 pub(super) async fn finish_judged_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -165,7 +154,11 @@ pub(super) async fn finish_judged_turn(
                 |depth| RuntimeTurnStopResult::token_superseded(depth, judged_termination);
             Err(preserved(shared, channel, superseded).await)
         }
-        TokenFinish::Unavailable | TokenFinish::NoMailbox => Err(unobserved(shared, channel).await),
+        // An actor that cannot answer holds no turn this stop judged: it finishes offline, as main.
+        TokenFinish::Unavailable if key.is_none() => Ok(discord::unavailable_finish_turn_result()),
+        TokenFinish::Unavailable | TokenFinish::NoMailbox => {
+            Err(preserved(shared, channel, RuntimeTurnStopResult::finish_unobserved).await)
+        }
     }
 }
 
@@ -178,7 +171,7 @@ pub(super) async fn finish_found_turn(
     judged: &ChannelJudgement,
 ) -> Result<FinishTurnResult, HardStopRuntimeResult> {
     #[cfg(test)]
-    judged_finish_tests::seam(channel, Seam::AfterJudge).await;
+    judged_finish_tests::after_judge(channel).await;
     let Ok(stop) = judged else {
         return Err(HardStopRuntimeResult::finish_unobserved());
     };
@@ -186,6 +179,7 @@ pub(super) async fn finish_found_turn(
     match discord::mailbox_finish_judged_turn(shared, provider, channel, key, Peek).await {
         TokenFinish::Finished(finish) | TokenFinish::NoActiveTurn(finish) => Ok(finish),
         TokenFinish::NoMailbox => Ok(discord::unavailable_finish_turn_result()),
+        TokenFinish::Unavailable if key.is_none() => Ok(discord::unavailable_finish_turn_result()),
         TokenFinish::TokenMismatch { has_pending } => {
             Err(HardStopRuntimeResult::token_superseded(has_pending))
         }
