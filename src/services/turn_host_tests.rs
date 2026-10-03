@@ -76,9 +76,8 @@ async fn configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and
     ));
 }
 
-// An unconfigured channel whose row still holds a Pending, Bound or unreadable Herdr record is
-// refused; a legacy, retired or missing row keeps tmux. A configured channel never reads an
-// unreadable record as legacy, and with a readable row reaches the admission switch.
+// Unconfigured: a Pending, Bound or unreadable Herdr row refuses, any other row keeps tmux.
+// Configured: an unreadable record refuses, a readable row goes on to the admission switch.
 #[tokio::test(flavor = "multi_thread")]
 async fn unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg()
  {
