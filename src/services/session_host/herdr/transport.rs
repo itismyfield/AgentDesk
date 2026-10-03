@@ -180,6 +180,10 @@ impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
     fn hello(&self) -> Result<ServerHello, RestoreUnverified> {
         let dialled = self.dial().map_err(|_| RestoreUnverified::NoPeer)?;
         let (witness, started) = dialled.server?;
+        // A process that started after this connection was made is a reused pid: no ping.
+        if started > dialled.connected_at {
+            return Err(RestoreUnverified::ProcessChanged);
+        }
         let ping = HerdrCall {
             id: format!(
                 "adk-hello-{}",

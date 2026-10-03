@@ -191,7 +191,8 @@ pub(crate) enum HerdrRequest {
         text: String,
         keys: Vec<String>,
     },
-    /// No command field: the command is sent afterwards as input on the same connection.
+    /// No command field: the command follows as input on its own connection, sent only to
+    /// the same verified server.
     #[serde(rename = "workspace.create")]
     WorkspaceCreate {
         cwd: String,

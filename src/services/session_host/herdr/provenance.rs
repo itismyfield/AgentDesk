@@ -137,6 +137,20 @@ fn procargs2_environ(raw: &[u8]) -> Option<Vec<String>> {
     Some(environ)
 }
 
+/// `/proc/<pid>/environ` entries. Linux reads it empty for a zombie, a kernel thread or a
+/// process still inside exec, so empty is unreadable, never an environment without the key.
+fn linux_environ(raw: &[u8]) -> Result<Vec<String>, RestoreUnverified> {
+    let entries: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect();
+    if entries.is_empty() {
+        return Err(RestoreUnverified::ProcessUnreadable);
+    }
+    Ok(entries)
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
@@ -242,11 +256,7 @@ fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
 fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
     let raw = std::fs::read(format!("/proc/{pid}/environ"))
         .map_err(|_| RestoreUnverified::ProcessUnreadable)?;
-    Ok(raw
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| String::from_utf8_lossy(entry).into_owned())
-        .collect())
+    linux_environ(&raw)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
