@@ -61,8 +61,8 @@ pub(crate) use stop_judgement::{
     stop_provider_channel_runtime_with_policy,
 };
 pub use stop_result::{
-    FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult, InflightDisposition,
-    RuntimeTurnStopResult,
+    FINISH_UNOBSERVED_PATH, FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult,
+    InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -340,7 +340,7 @@ fn clear_persistent_inflight_for_stop(
 }
 
 /// A turn stop on `shared`'s channel, carried out on `stop`, the turn judged before any write;
-/// `approved` judges a token the fallback finds in its place.
+/// its fallback finishes that turn only. `approved` is the force-kill verdict's session.
 async fn stop_judged_channel_runtime(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -360,6 +360,7 @@ async fn stop_judged_channel_runtime(
     let persistent_inflight_was_present = should_clear_persistent_inflight
         && discord::inflight::inflight_state_file_exists(&provider, channel_id.get());
     let mut skipped_idle_provider_interrupt = false;
+    let mut judged_termination = false;
 
     if let Some(stop) = stop.as_ref() {
         // A refused host, or a turn that moved on since the verdict, is left unchanged.
@@ -392,6 +393,7 @@ async fn stop_judged_channel_runtime(
             stop.unstopped()
         };
         let termination_recorded = outcome.termination_recorded;
+        judged_termination = termination_recorded;
         if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
             let snapshot = shared.mailbox(channel_id).snapshot().await;
             let idle_inflight_cleared = if skipped_idle_provider_interrupt {
@@ -430,20 +432,15 @@ async fn stop_judged_channel_runtime(
 
     let owned_role_override =
         discord::turn_finalizer::cleanup::snapshot_role_override(&shared, channel_id);
-    let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
+    let judged = (stop.as_ref(), judged_termination);
+    let finish = stop_judgement::finish_judged_turn(&shared, &provider, channel_id, judged);
+    let finish = match finish.await {
+        Ok(finish) => finish,
+        Err(kept) => return kept,
+    };
     let mut termination_recorded = false;
-    if let Some(token) = finish.removed_token.as_ref() {
-        // The judged turn keeps its verdict; any other token is judged now, as on main.
-        let fresh;
-        let stop = match stop.as_ref().filter(|stop| stop.is_token(token)) {
-            Some(stop) => stop,
-            None => {
-                let (name, token) = (token.tmux_session_name(), token.clone());
-                let judge = discord::turn_bridge::ChannelStop::judge_token;
-                fresh = judge(&shared, &provider, channel_id, token, approved, name);
-                &fresh
-            }
-        };
+    // The finish removes only the judged token.
+    if let (Some(_), Some(stop)) = (finish.removed_token.as_ref(), stop.as_ref()) {
         let skip_provider_interrupt = skipped_idle_provider_interrupt
             || preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
                 &provider,
@@ -1351,7 +1348,8 @@ async fn runtime_turn_cleanup_by_lookup(
         let (shared, provider, channel) = (&runtime.shared, &runtime.provider, runtime.channel_id);
         let judged =
             discord::turn_bridge::ChannelStop::judge(shared, provider, channel, None, false);
-        if !stop_watcher && discord::turn_bridge::keeps_turn(&judged.await) {
+        let judged = judged.await;
+        if !stop_watcher && discord::turn_bridge::keeps_turn(&judged) {
             let (cleanup_path, had_active_turn) = ("host-guard-kept", true);
             let kept = HardStopRuntimeResult::default();
             return HardStopRuntimeResult {
@@ -1364,12 +1362,11 @@ async fn runtime_turn_cleanup_by_lookup(
             &runtime.shared,
             runtime.channel_id,
         );
-        let finish = discord::mailbox_finish_owned_turn(
-            &runtime.shared,
-            &runtime.provider,
-            runtime.channel_id,
-        )
-        .await;
+        let finish = stop_judgement::finish_found_turn(shared, provider, channel, &judged).await;
+        let finish = match finish {
+            Ok(finish) => finish,
+            Err(kept) => return kept,
+        };
         let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
             &runtime.shared,
             &runtime.provider,

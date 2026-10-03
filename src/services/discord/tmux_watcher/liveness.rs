@@ -490,17 +490,13 @@ pub(super) fn reacquire_watcher_inflight_for_active_stream(
     start_offset: u64,
     status_panel_msg_id: Option<serenity::MessageId>,
     placeholder_msg_id: Option<serenity::MessageId>,
-    // #3107 codex re-review (P2#3): the #3099 hourglass anchor from the
-    // just-cleared inflight, when a source still has it. The watcher-owned
-    // re-acquire mints a `user_msg_id == 0` synthetic row; per #3099/#3100 the
-    // watcher path does NOT add a `⏳` to a real Discord *user* message for
-    // such turns, so leaving this `None` is safe for the common case. But if
-    // the cleared row HAD pinned an injected message id (e.g. a
-    // task-notification auto-turn that lost its inflight mid-flight), preserving
-    // it here keeps the `⏳ → ✅` completion cleanup able to find its own
-    // message instead of orphaning the hourglass.
+    // Preserve an injected prompt's message anchor for completion cleanup.
+    // Ordinary watcher-owned synthetic turns have no user-message anchor.
     injected_prompt_message_id: Option<u64>,
 ) -> bool {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        return false;
+    }
     // The streaming-edit target is the placeholder/status-panel message still
     // owned by this watcher; pin it as `current_msg_id` so edits + the terminal
     // ack resolve a target instead of MissingTarget.

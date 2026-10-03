@@ -33,6 +33,7 @@ use super::{
 pub struct TuiOConfig {
     pub shadow: ShadowConfig,
     pub writer: WriterChannelsConfig,
+    pub turn: crate::services::tui_o::turn_mode::TurnConfig,
     /// Operator channel for writer alarms; absent keeps them to health and logs.
     pub alert_channel_id: Option<u64>,
 }
