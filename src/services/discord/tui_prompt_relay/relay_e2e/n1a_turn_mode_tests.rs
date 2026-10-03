@@ -301,6 +301,21 @@ fn n1a_confirmed_slash_raw_and_wrapper_post_one_notice() {
 
 #[test]
 fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
+    const CHILD: &str = "ADK_N1A_IDLE_MAINTENANCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated footer maintenance fixture failed");
+        return;
+    }
     run(async {
         use crate::services::agent_protocol::RuntimeHandoffKind;
         use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
