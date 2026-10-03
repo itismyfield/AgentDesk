@@ -357,18 +357,24 @@ impl<B: BindingEvents> Sources<B> {
     ) -> Result<(), WriterAlarm> {
         for (expected, event) in (1..).zip(events.iter().take_while(|e| e.seq <= checkpoint)) {
             if event.seq != expected {
-                return Err(WriterAlarm::BindingGap { expected, found: event.seq });
+                return Err(WriterAlarm::BindingGap {
+                    expected,
+                    found: event.seq,
+                });
             }
             if event.channel_id != self.channel || event.provider != self.provider {
                 return Err(halt("historical binding names another channel or provider"));
             }
         }
-        let changed = super::historical_hops::restore(
-            &mut self.rotation, events, checkpoint,
-            |source| writer.store().cursor(source).is_some(),
-        );
+        let changed =
+            super::historical_hops::restore(&mut self.rotation, events, checkpoint, |source| {
+                writer.store().cursor(source).is_some()
+            });
         if changed {
-            writer.store().write_rotation(&self.rotation).map_err(halted("historical rotation"))?;
+            writer
+                .store()
+                .write_rotation(&self.rotation)
+                .map_err(halted("historical rotation"))?;
         }
         Ok(())
     }
@@ -524,7 +530,12 @@ impl<B: BindingEvents> Sources<B> {
         for reader in &mut self.readers {
             if let Some(next) = self.rotation.successors.get(&source_key(&reader.source)) {
                 reader.rotated_at.get_or_insert(Instant::now());
-                reader.drain_to = next.drain_to.filter(|end| reader.capture.as_ref().is_some_and(|c| c.captured_through() < *end));
+                reader.drain_to = next.drain_to.filter(|end| {
+                    reader
+                        .capture
+                        .as_ref()
+                        .is_some_and(|c| c.captured_through() < *end)
+                });
             }
         }
         let seeded = writer.store().set_binding_checkpoint(seq);

@@ -7,7 +7,10 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::source_key;
 
-pub(super) fn fold(events: &[BindingEvent], checkpoint: u64) -> BTreeMap<String, (&SourceId, Successor)> {
+pub(super) fn fold(
+    events: &[BindingEvent],
+    checkpoint: u64,
+) -> BTreeMap<String, (&SourceId, Successor)> {
     let applied = &events[..events.partition_point(|event| event.seq <= checkpoint)];
     let mut hops = BTreeMap::new();
     for event in applied {
@@ -18,7 +21,10 @@ pub(super) fn fold(events: &[BindingEvent], checkpoint: u64) -> BTreeMap<String,
             BindingTarget::Source(source) => source,
             BindingTarget::Pending { .. } => {
                 let resolved = applied.iter().find_map(|later| match &later.record {
-                    BindingRecord::Resolved { resolves_seq, source } if *resolves_seq == event.seq => Some(source),
+                    BindingRecord::Resolved {
+                        resolves_seq,
+                        source,
+                    } if *resolves_seq == event.seq => Some(source),
                     _ => None,
                 });
                 let Some(source) = resolved else { continue };
@@ -27,13 +33,19 @@ pub(super) fn fold(events: &[BindingEvent], checkpoint: u64) -> BTreeMap<String,
         };
         hops.remove(&source_key(new));
         if let Some(old) = old.as_ref().filter(|old| *old != new) {
-            hops.insert(source_key(old), (old, Successor {
-                source: new.clone(),
-                seq: Some(event.seq),
-                tmux_session: Some(event.tmux_session.clone()),
-                drain_to: None,
-                proof: None,
-            }));
+            hops.insert(
+                source_key(old),
+                (
+                    old,
+                    Successor {
+                        source: new.clone(),
+                        seq: Some(event.seq),
+                        tmux_session: Some(event.tmux_session.clone()),
+                        drain_to: None,
+                        proof: None,
+                    },
+                ),
+            );
         }
     }
     hops
@@ -48,7 +60,9 @@ pub(super) fn restore(
     let mut changed = false;
     for (key, (old, mut next)) in fold(events, checkpoint) {
         if !rotation.successors.contains_key(&key) && attached(old) && attached(&next.source) {
-            next.drain_to = std::fs::metadata(&old.path).ok().map(|metadata| metadata.len());
+            next.drain_to = std::fs::metadata(&old.path)
+                .ok()
+                .map(|metadata| metadata.len());
             rotation.successors.insert(key, next);
             changed = true;
         }
