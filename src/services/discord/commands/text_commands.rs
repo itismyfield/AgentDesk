@@ -381,6 +381,9 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             let stop_lookup =
                 cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
             match stop_lookup {
+                CommandStop::Session(stop) => {
+                    stop.interrupt("!stop").await;
+                }
                 CommandStop::Stop(stop) => {
                     // #1218: send abort key first, then SIGKILL — see
                     // `stop_active_turn` doc comment.
@@ -1278,6 +1281,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id)
                             .await;
                     match stop_lookup {
+                        CommandStop::Session(stop) => {
+                            stop.interrupt(&stop_reason).await;
+                            let _ = msg.reply(&ctx.http, super::STOPPING_RESPONSE).await;
+                        }
                         CommandStop::Stop(stop) => {
                             let policy =
                                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
