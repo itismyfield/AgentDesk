@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;

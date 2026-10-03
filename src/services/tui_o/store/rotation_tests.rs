@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use chrono::Utc;
 
 use super::super::tests::{enabled, initialized};

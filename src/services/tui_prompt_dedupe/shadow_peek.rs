@@ -24,7 +24,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         reset_state_for_tests();
-        let expired = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+        let expired = {
+            let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+            state.aged_stamp_for_tests(SESSION_MAPPING_TTL + Duration::from_secs(1))
+        };
         let victim = PromptKey::new("claude", "shadow-peek-victim");
         let binding = TuiRuntimeBinding {
             runtime_kind: RuntimeHandoffKind::ClaudeTui,
