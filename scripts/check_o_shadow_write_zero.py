@@ -16,6 +16,7 @@ CRATE_ALLOW = {
     "crate::services::discord::formatting::split_for_shadow",
     "crate::services::provider::ProviderKind::Claude",
     "crate::services::provider::ProviderKind::Codex",
+    "crate::services::tui_o::turn_mode::TurnConfig",
     "crate::services::tui_prompt_dedupe::TuiRuntimeBinding",
     "crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding",
     "crate::services::tui_turn_state::envelope_is_turn_end_terminator",
@@ -129,6 +130,7 @@ def scan_cli(name: str, text: str) -> list[str]:
             for number, line in enumerate(code.split("\n"), 1) if CLI_DENIED.search(line)]
 
 BAD = [
+    ("fn f() { crate::services::tui_o::turn_mode::confirm(1); }", False),
     ("fn f() { crate::services::discord::runtime_store::fsync_parent_dir(p); }", False),
     ("fn f(ctx: &Ctx) { ctx.http.say(1); }", False),
     ("fn f() { use std::fs::{write}; let _ = write(p, b); }", False),
@@ -149,6 +151,7 @@ BAD = [
     ("#[cfg(test)]\nmod tests {\n}\nfn f() { std::fs::write(p, b); }\n", False),
 ]
 GOOD = [
+    ("struct C { turn: crate::services::tui_o::turn_mode::TurnConfig }", False),
     ("fn claim_report_attempt() { let _ = std::fs::OpenOptions::new(); crate::services::discord::runtime_store::fsync_parent_dir(p); }", True),
     ("use std::fs::OpenOptions;\nfn open() { let _ = OpenOptions::new(); }", True),
     ("use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, peek_tmux_runtime_binding as peek};\n"

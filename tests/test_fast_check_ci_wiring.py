@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "0c67a7933577ad27b11c16b16631dcdc4d0c2411fc5088ba5da14be4ebf4921e"
+    "fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -1269,7 +1269,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "protected step inventory changed; expected indices [8, 9]",
+                    "protected step inventory changed; expected indices [9, 10]",
                     result.stderr,
                 )
 

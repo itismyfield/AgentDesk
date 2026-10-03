@@ -238,6 +238,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       # 30 minutes is the old 15 + 15 arithmetic budget, not measured runtime: selected lib tests grow 385 -> 636 and PG-connected tests 276 -> 422 under `--test-threads=1`.
       # `--lib` like `just test-postgres`: the PG filter selects nothing elsewhere, and building
       # all targets at once got the runner killed for memory (exit 143, #4245). e2e runs below.
@@ -354,6 +357,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
       - name: Rust multinode invariants
         timeout-minutes: 15
         run: "cargo test --lib multinode_regression:: -- --nocapture --test-threads=1"
@@ -405,6 +411,9 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
 
       - name: High-risk recovery lane
         run: "cargo test --lib high_risk_recovery:: -- --test-threads=1"
@@ -561,6 +570,9 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
 
       - name: Fetch Cargo dependencies
         env:

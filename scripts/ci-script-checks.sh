@@ -414,6 +414,10 @@ bash scripts/main-ci-triage.sh --self-test
 # End nightly notification contract.
 fi
 
+if run_check guards "Lib test build swap and memory probe contract"; then
+"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring
+fi
+
 if run_check guards "CI timeout wrapper tests (#4413)"; then
 "$PYTHON" -m unittest tests.test_ci_timeout
 fi
@@ -478,7 +482,7 @@ if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 "$PYTHON" -m unittest tests.test_target_empty_identity
-AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
 

@@ -3,14 +3,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{StoreError, damage, durable};
+use super::{StoreError, damage};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 use crate::services::tui_o::shadow::{SourceId, UnitKey};
 
@@ -268,16 +268,27 @@ pub(super) fn append(
     at: DateTime<Utc>,
     entry: &LedgerEntry,
 ) -> Result<(), StoreError> {
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    append_to(&mut file, at, entry)
+}
+
+pub(super) fn append_to(
+    file: &mut File,
+    at: DateTime<Utc>,
+    entry: &LedgerEntry,
+) -> Result<(), StoreError> {
     let entry = entry.clone();
     let mut line = serde_json::to_vec(&LedgerLine { at, entry })?;
     line.push(b'\n');
-    Ok(durable::append_synced(path, &line)?)
+    file.write_all(&line)?;
+    Ok(file.sync_data()?)
 }
 
 /// The `from` of a durable `BoundaryResolved` for `source`, read without recovering the ledger.
 /// An unfinished last line is refused: a line appended after it would become mid-file damage.
-pub(super) fn resolution(path: &Path, source: &SourceId) -> Result<Option<u64>, StoreError> {
-    let bytes = std::fs::read(path)?;
+pub(super) fn resolution(file: &mut File, source: &SourceId) -> Result<Option<u64>, StoreError> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
     if bytes.last().is_some_and(|byte| *byte != b'\n') {
         let detail = "the ledger ends in an unfinished entry; start the writer to recover it";
         return Err(StoreError::Rejected(detail.into()));
@@ -299,11 +310,22 @@ pub(super) fn resolution(path: &Path, source: &SourceId) -> Result<Option<u64>, 
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
 pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+    recover_with_tail(path, initial_anchor, || {})
+}
+
+fn recover_with_tail(
+    path: &Path,
+    initial_anchor: u64,
+    mut before_truncate: impl FnMut(),
+) -> Result<LedgerState, StoreError> {
     let mut state = LedgerState {
         anchor: initial_anchor,
         ..LedgerState::default()
     };
-    let mut reader = BufReader::new(File::open(path)?);
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    // Refuse recovery while an operator is writing; replay and truncation share this handle.
+    file.try_lock().map_err(io::Error::from)?;
+    let mut reader = BufReader::new(file);
     let (mut offset, mut line) = (0u64, Vec::new());
     loop {
         line.clear();
@@ -312,7 +334,9 @@ pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, S
             return Ok(state);
         }
         if line.last() != Some(&b'\n') {
-            durable::truncate_synced(path, offset)?;
+            before_truncate();
+            reader.get_ref().set_len(offset)?;
+            reader.get_ref().sync_all()?;
             return Ok(state);
         }
         let parsed: LedgerLine = serde_json::from_slice(&line)
@@ -407,3 +431,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ledger_lock_tests.rs"]
+mod lock_tests;

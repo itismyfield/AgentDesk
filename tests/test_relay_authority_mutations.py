@@ -951,6 +951,7 @@ class MutationPathFilterContractTests(unittest.TestCase):
             "Install Rust toolchain": STEP_CONDITION,
             "Setup sccache": STEP_CONDITION,
             "Cache Cargo dependencies": STEP_CONDITION,
+            "Ensure swap for the lib test build": STEP_CONDITION,
             "Fetch Cargo dependencies": STEP_CONDITION,
             MUTATION_STEP: STEP_CONDITION,
             "sccache stats": f"always() && ({STEP_CONDITION})",
