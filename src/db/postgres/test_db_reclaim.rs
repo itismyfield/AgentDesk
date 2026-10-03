@@ -1236,6 +1236,7 @@ mod tests {
         let path = dir.path().join("audit.jsonl");
         let holder = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .expect("open log");

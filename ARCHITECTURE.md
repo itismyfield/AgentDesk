@@ -1752,6 +1752,7 @@ src/
 │   │   ├── role_map_enrichment.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── runtime_store_checkpoint_lock_tests.rs
 │   │   ├── semantic_boundaries.rs
 │   │   ├── session_banner.rs
 │   │   ├── session_canonical_identity.rs

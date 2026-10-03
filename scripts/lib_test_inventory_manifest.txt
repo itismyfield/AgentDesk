@@ -5679,6 +5679,7 @@ services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests
 services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::unchanged_generation_inside_the_window_holds
 services::discord::runtime_bootstrap::voice::voice_bootstrap_tests::manual_join_only_config_starts_rejoin_supervisor_and_routes_rejoin
 services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_write_returns_error_for_unwritable_parent_path
+services::discord::runtime_store::checkpoint_lock_tests::checkpoint_lock_keeps_max_across_a_paused_low_writer
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
