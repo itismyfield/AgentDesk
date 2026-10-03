@@ -1822,6 +1822,8 @@ services::claude_tui::hook_server::observation_ingress::tests::a_repeat_hook_of_
 services::claude_tui::hook_server::observation_ingress::tests::a_tmux_pane_switch_never_looks_up_the_herdr_hold
 services::claude_tui::hook_server::observation_ingress::tests::an_unmapped_hook_is_refused_until_the_first_discovery_pass_finishes
 services::claude_tui::hook_server::observation_ingress::tests::discovery_grace_uses_the_production_sixty_second_boundary
+services::claude_tui::hook_server::observation_ingress::windows_tests::a_claude_transcript_without_supported_file_identity_is_refused
+services::claude_tui::hook_server::observation_ingress::windows_tests::a_rollout_without_supported_file_identity_is_refused
 services::claude_tui::hook_server::relay_receipts::tests::ledger_retention_covers_every_deliverable_request
 services::claude_tui::hook_server::relay_receipts::tests::managed_inflight_deadline_never_reissues_fresh
 services::claude_tui::hook_server::relay_receipts::tests::managed_missing_freshness_never_inserts_and_legacy_survives
@@ -9520,6 +9522,7 @@ services::session_host::herdr_host::tests::name_only_scan_follows_reexports_and_
 services::session_host::herdr_host::tests::name_only_teardown_calls_stay_on_the_reviewed_list
 services::session_host::herdr_host::tests::session_target_guard_stays_behind_the_keyed_gate
 services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
+services::session_host::herdr_host::windows_tests::an_unconfigured_herdr_host_refuses_every_operation
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead
@@ -10156,13 +10159,14 @@ services::tui_prompt_dedupe::tests::advance_offset_rejects_mismatched_path_when_
 services::tui_prompt_dedupe::tests::advances_runtime_binding_offset_for_same_output_path
 services::tui_prompt_dedupe::tests::advances_runtime_binding_relay_offset_separately_from_runtime_path
 services::tui_prompt_dedupe::tests::candidate_observation_checks_all_pending_forms_before_direct_publish
-services::tui_prompt_dedupe::tests::claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset
-services::tui_prompt_dedupe::tests::claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind
 services::tui_prompt_dedupe::tests::clear_external_input_relay_lease_if_generation_matches_preserves_newer_unassigned
 services::tui_prompt_dedupe::tests::clear_external_input_relay_lease_if_matches_preserves_newer_turn
 services::tui_prompt_dedupe::tests::clears_runtime_binding_by_tmux_session
 services::tui_prompt_dedupe::tests::codex_and_qwen_keep_claude_interrupt_text_as_user_prompt
 services::tui_prompt_dedupe::tests::codex_distinct_message_entry_ids_publish_distinct_direct_prompts
+services::tui_prompt_dedupe::tests::continuation_tests::claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset
+services::tui_prompt_dedupe::tests::continuation_tests::claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind
+services::tui_prompt_dedupe::tests::continuation_tests::hook_re_report_restates_the_adopted_session_authority
 services::tui_prompt_dedupe::tests::dedup_suppressed_candidate_does_not_record_entry_id
 services::tui_prompt_dedupe::tests::deferred_anchor_completion_is_isolated_by_provider_and_session
 services::tui_prompt_dedupe::tests::deferred_anchor_completion_is_not_cross_consumed_by_a_different_turn_same_key
@@ -10183,7 +10187,6 @@ services::tui_prompt_dedupe::tests::extracts_codex_rollout_top_level_entry_id
 services::tui_prompt_dedupe::tests::extracts_codex_rollout_user_message_text
 services::tui_prompt_dedupe::tests::extracts_non_meta_claude_array_user_message_after_slash_command
 services::tui_prompt_dedupe::tests::extracts_qwen_jsonl_user_message_text
-services::tui_prompt_dedupe::tests::hook_re_report_restates_the_adopted_session_authority
 services::tui_prompt_dedupe::tests::ignores_claude_interrupt_marker_without_relay_lease
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_interrupt_marker_user_message_text
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_meta_user_message_text
