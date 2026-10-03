@@ -436,6 +436,40 @@ fn a_channel_binding_log_carries_each_production_event_of_its_channel_and_provid
     assert!(log.binding_events_since(OTHER, 0).is_err());
     let codex = ChannelBindingLog::new(9, ShadowProvider::Claude);
     assert!(codex.binding_events_since(9, 0).is_err());
+
+    let (harness, _, old) = switched_over(b"");
+    let path = old.path.with_file_name("foreign.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let new = source_id_for("foreign", &path).unwrap();
+    let mut store = harness.channel();
+    store.attach_source(&new).unwrap();
+    store.set_binding_checkpoint(1).unwrap();
+    let foreign = p5::BindingTarget::Source(new);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&p5_event(CHANNEL, "codex", foreign)).unwrap();
+    value["old"] = serde_json::to_value(&old).unwrap();
+    p5_log(root.path(), CHANNEL, &serde_json::to_vec(&value).unwrap());
+    let mut writer = harness.writer();
+    let mut sources = super::super::rotation::Sources::new(
+        CHANNEL,
+        ShadowProvider::Claude,
+        Arc::new(ChannelBindingLog::new(CHANNEL, ShadowProvider::Claude)),
+    );
+    sources
+        .resume(
+            &mut writer,
+            &mut UnitDeriver::new(CHANNEL, ShadowProvider::Claude),
+            &mut VecDeque::new(),
+        )
+        .unwrap();
+    assert!(writer.store().rotation().unwrap().successors.is_empty());
+    assert!(
+        harness
+            .alarms
+            .taken()
+            .iter()
+            .any(|alarm| matches!(alarm, WriterAlarm::BindingLogUnavailable { .. }))
+    );
     p5::set_test_root(None);
 }
 

@@ -356,7 +356,7 @@ impl<B: BindingEvents> Sources<B> {
         events: &[BindingEvent],
         checkpoint: u64,
     ) -> Result<(), WriterAlarm> {
-        super::historical_hops::validate(events, checkpoint, self.channel, self.provider)?;
+        super::historical_hops::validate(events, checkpoint, self.channel)?;
         let changed =
             super::historical_hops::restore(&mut self.rotation, events, checkpoint, |source| {
                 writer.store().cursor(source).is_some()

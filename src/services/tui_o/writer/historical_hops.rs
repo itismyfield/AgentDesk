@@ -11,7 +11,6 @@ pub(super) fn validate(
     events: &[BindingEvent],
     checkpoint: u64,
     channel: u64,
-    provider: super::super::shadow::ShadowProvider,
 ) -> Result<(), super::WriterAlarm> {
     for (expected, event) in (1..).zip(events.iter().take_while(|e| e.seq <= checkpoint)) {
         if event.seq != expected {
@@ -20,9 +19,9 @@ pub(super) fn validate(
                 found: event.seq,
             });
         }
-        if event.channel_id != channel || event.provider != provider {
+        if event.channel_id != channel {
             return Err(super::WriterAlarm::Halted {
-                detail: "historical binding names another channel or provider".into(),
+                detail: "historical binding names another channel".into(),
             });
         }
     }
