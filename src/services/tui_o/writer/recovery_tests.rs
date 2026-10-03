@@ -99,6 +99,36 @@ fn h1_adoption_history_restores_relations_without_native_proof_or_boundary_chang
         sources.tend(&mut writer).unwrap();
         assert!(!writer.store().cursor(&ids[0]).unwrap().retired);
     }
+    restoration_precedes_retained_spool_ordering();
+}
+
+fn restoration_precedes_retained_spool_ordering() {
+    let (harness, mut ids, bindings) = fixture(2);
+    ids.sort_by_key(source_key);
+    let (new, old) = (&ids[0], &ids[1]);
+    append(&old.path, &row("old", "old retained"));
+    append(&new.path, &row("new", "new retained"));
+    checkpoint(&harness, 1);
+    let (mut sources, mut writer, mut deriver, mut owed) = resume(&harness, bindings.clone());
+    sources
+        .capture(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    bindings.commit(hop(2, old, new));
+    checkpoint(&harness, 2);
+    drop(writer);
+    let (_, _, _, owed) = resume(&harness, bindings);
+    let payloads: Vec<_> = owed
+        .iter()
+        .filter_map(|item| match item {
+            Derived::Piece(piece) => Some(piece.payload.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        payloads,
+        ["old retained", "new retained"],
+        "the restored relation must order retained replay before opening readers"
+    );
 }
 
 #[test]
