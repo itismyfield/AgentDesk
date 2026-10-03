@@ -206,6 +206,8 @@ fn n1a_retirement_race_preserves_the_replacement_snapshot() {
     );
 }
 
+// Contention requires Unix-only exclusive marker claims.
+#[cfg(unix)]
 #[test]
 fn n1a_retirement_delete_contention_returns_residue_for_retry() {
     let _lock = crate::config::shared_test_env_lock()
@@ -244,6 +246,8 @@ fn n1a_retirement_delete_contention_returns_residue_for_retry() {
     assert!(markers::load_for_channel("claude", channel).is_empty());
 }
 
+// A file parent induces ENOTDIR only on Unix.
+#[cfg(unix)]
 #[test]
 fn n1a_retirement_post_snapshot_io_error_is_retryable() {
     let _lock = crate::config::shared_test_env_lock()
