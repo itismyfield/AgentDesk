@@ -305,6 +305,9 @@ mod tests {
 }
 
 #[cfg(test)]
+mod judged_finish_fence_tests;
+
+#[cfg(test)]
 mod host_guard_tests {
     use crate::services::agent_recovery::{
         self, ChannelRecoveryStatus, ChannelState, CheckpointPayload, DetectorSignal, ObserveInput,

@@ -13,7 +13,9 @@ use crate::services::turn_orchestrator::{FinishTurnResult, TokenFinish};
 use poise::serenity_prelude as serenity;
 
 #[cfg(test)]
-mod judged_finish_tests;
+pub(super) mod judged_finish_tests;
+#[cfg(test)]
+use judged_finish_tests::Seam;
 
 /// The runtime a stop resolved for a provider channel and its turn's verdict; nothing written.
 pub(crate) struct ProviderChannelStop(Option<JudgedChannel>);
@@ -108,9 +110,11 @@ pub(crate) async fn stop_channel_runtime(
     cleanup_policy: discord::TmuxCleanupPolicy,
     approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
+    #[cfg(test)]
+    judged_finish_tests::seam(channel_id, Seam::BeforeJudge).await;
     let stop = ChannelStop::judge(shared, provider, channel_id, approved, false).await;
     #[cfg(test)]
-    judged_finish_tests::after_judge(channel_id).await;
+    judged_finish_tests::seam(channel_id, Seam::AfterJudge).await;
     let policy = cleanup_policy;
     let run = super::stop_judged_channel_runtime;
     run(shared, provider, channel_id, stop, reason, policy, approved).await
@@ -175,7 +179,7 @@ pub(super) async fn finish_found_turn(
     judged: &ChannelJudgement,
 ) -> Result<FinishTurnResult, HardStopRuntimeResult> {
     #[cfg(test)]
-    judged_finish_tests::after_judge(channel).await;
+    judged_finish_tests::seam(channel, Seam::AfterJudge).await;
     let Ok(stop) = judged else {
         return Err(HardStopRuntimeResult::finish_unobserved());
     };

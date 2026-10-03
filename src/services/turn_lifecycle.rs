@@ -519,7 +519,7 @@ async fn stop_turn_with_policy(
     // Only the target's own channel row: a row found by tmux name may be another runtime's.
     let inflight_cleared = if runtime_persistent_inflight_cleared {
         true
-    } else if lifecycle_path != TOKEN_SUPERSEDED_PATH && cleanup_policy.should_clear_inflight() {
+    } else if cleanup_policy.should_clear_inflight() {
         let keys = (target.provider.as_ref(), target.channel_id);
         let clear = |(provider, channel_id)| clear_inflight_by_channel(provider, channel_id);
         keys.0.zip(keys.1).is_some_and(clear)
