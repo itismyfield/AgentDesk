@@ -355,17 +355,7 @@ impl<B: BindingEvents> Sources<B> {
         events: &[BindingEvent],
         checkpoint: u64,
     ) -> Result<(), WriterAlarm> {
-        for (expected, event) in (1..).zip(events.iter().take_while(|e| e.seq <= checkpoint)) {
-            if event.seq != expected {
-                return Err(WriterAlarm::BindingGap {
-                    expected,
-                    found: event.seq,
-                });
-            }
-            if event.channel_id != self.channel || event.provider != self.provider {
-                return Err(halt("historical binding names another channel or provider"));
-            }
-        }
+        super::historical_hops::validate(events, checkpoint, self.channel, self.provider)?;
         let changed =
             super::historical_hops::restore(&mut self.rotation, events, checkpoint, |source| {
                 writer.store().cursor(source).is_some()

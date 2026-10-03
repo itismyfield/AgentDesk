@@ -7,6 +7,28 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::source_key;
 
+pub(super) fn validate(
+    events: &[BindingEvent],
+    checkpoint: u64,
+    channel: u64,
+    provider: super::super::shadow::ShadowProvider,
+) -> Result<(), super::WriterAlarm> {
+    for (expected, event) in (1..).zip(events.iter().take_while(|e| e.seq <= checkpoint)) {
+        if event.seq != expected {
+            return Err(super::WriterAlarm::BindingGap {
+                expected,
+                found: event.seq,
+            });
+        }
+        if event.channel_id != channel || event.provider != provider {
+            return Err(super::WriterAlarm::Halted {
+                detail: "historical binding names another channel or provider".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn fold(
     events: &[BindingEvent],
     checkpoint: u64,

@@ -274,6 +274,33 @@ mod tests {
     }
 
     #[test]
+    fn p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch() {
+        let (router, recorder, health) = router(Some(ALERT));
+        router.raise(FAILING, WriterAlarm::TooManyReaders { count: 4 });
+        router.raise(FAILING + 1, WriterAlarm::TooManyReaders { count: 4 });
+        router.raise(FAILING, WriterAlarm::BindingPending { seq: 2 });
+        let history = health.history();
+        let messages = sent(&recorder);
+        router.reconcile_reader_count(FAILING, 3);
+        assert_eq!(
+            health.current_at(Instant::now()),
+            [
+                format!("tui_o:binding_pending:{FAILING}"),
+                format!("tui_o:too_many_readers:{}", FAILING + 1),
+            ]
+        );
+        assert_eq!(health.history(), history);
+        router.raise(FAILING, WriterAlarm::TooManyReaders { count: 4 });
+        assert!(
+            health
+                .current_at(Instant::now())
+                .contains(&format!("tui_o:too_many_readers:{FAILING}"))
+        );
+        assert_eq!(sent(&recorder), messages);
+        assert_eq!(health.history(), history);
+    }
+
+    #[test]
     fn first_event_raises_health_and_one_operator_message() {
         let (router, recorder, health) = router(Some(ALERT));
         let now = Instant::now();
