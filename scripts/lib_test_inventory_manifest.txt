@@ -3247,6 +3247,7 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_zero_id_owned_inflight
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
+services::discord::health::recovery::live_agent_recovery::judged_finish_fence_tests::a_fence_does_not_hold_over_a_successor_or_an_unanswered_finish
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
 services::discord::health::recovery::o_stale_leak_cut_tests::o_delegated_stale_leak_recovery_resends_nothing
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
@@ -3303,6 +3304,9 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_l
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_liveness_keeps_force_clean_when_jsonl_stale
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_should_force_clean_requires_all_signals
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
+services::discord::health::recovery::stop_judgement::judged_finish_tests::a_force_kill_keeps_a_superseded_turn
+services::discord::health::recovery::stop_judgement::judged_finish_tests::a_lookup_stop_finishes_only_the_turn_it_judged
+services::discord::health::recovery::stop_judgement::judged_finish_tests::a_stop_leaves_a_turn_admitted_after_the_judged_one_ended
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
 services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant

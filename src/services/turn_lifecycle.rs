@@ -3,7 +3,9 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::health::{
+    FINISH_UNOBSERVED_PATH, HealthRegistry, TOKEN_SUPERSEDED_PATH,
+};
 use crate::services::discord::host_teardown_gate::{
     ChannelTeardown, backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown,
     row_gate, runtime_target_holds, runtime_teardown,
@@ -457,8 +459,13 @@ async fn stop_turn_with_policy(
             lifecycle_path = hard_stop.cleanup_path;
         }
     }
-    if lifecycle_path == HOST_GUARD_KEPT_PATH {
-        return kept_by_host_guard(tmux_session_observed);
+    // A turn whose finish went unobserved is kept; a force-kill never kills a superseded turn's host.
+    match lifecycle_path {
+        HOST_GUARD_KEPT_PATH | FINISH_UNOBSERVED_PATH => {
+            return kept_by_host_guard(tmux_session_observed);
+        }
+        TOKEN_SUPERSEDED_PATH if cleanup_tmux => return kept_by_host_guard(tmux_session_observed),
+        _ => {}
     }
 
     let tmux_killed = if cleanup_tmux {
