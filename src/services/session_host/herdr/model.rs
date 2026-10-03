@@ -14,6 +14,10 @@ pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 /// tell 0.9.0 from 0.9.3, so E7 admits only these pong versions.
 pub(crate) const VERIFIED_HERDR_VERSIONS: &[&str] = &["0.9.3"];
 
+fn endpoint_missing() -> HostError {
+    HostError::Unsupported(HostKind::Herdr, ENDPOINT_MISSING)
+}
+
 /// Where Herdr panes live. Every field is explicit; there is no default socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrEndpoint {
@@ -38,7 +42,7 @@ impl HerdrEndpoint {
             || blank(herdr_session)
             || !socket_path.is_absolute()
         {
-            return Err(HostError::Unsupported(HostKind::Herdr, ENDPOINT_MISSING));
+            return Err(endpoint_missing());
         }
         Ok(Self {
             execution_node: execution_node.to_string(),
@@ -52,7 +56,7 @@ impl HerdrEndpoint {
     /// The bootstrap home whose `config.toml` and `xdg/` the server must have been started with.
     pub(crate) fn with_herdr_home(self, herdr_home: &Path) -> Result<Self, HostError> {
         if !herdr_home.is_absolute() {
-            return Err(HostError::Unsupported(HostKind::Herdr, ENDPOINT_MISSING));
+            return Err(endpoint_missing());
         }
         Ok(Self {
             herdr_home: Some(herdr_home.to_path_buf()),

@@ -255,14 +255,11 @@ async fn restore_off_generation(
         .admitted_generation()
 }
 
-/// What can be judged locally about a launch: an absolute existing directory and one line
-/// of command text, since the command is typed into the pane followed by Enter.
+/// What the launch text alone shows: an absolute cwd and one line of command, since the
+/// command is typed into the pane followed by Enter. Whether the cwd exists is the host's check.
 pub(crate) fn launch_command_eligible(cwd: &Path, command: &str) -> Result<(), String> {
-    if !cwd.is_absolute() || !cwd.is_dir() || cwd.to_str().is_none() {
-        return Err(format!(
-            "cwd {} is not an existing absolute directory",
-            cwd.display()
-        ));
+    if !cwd.is_absolute() || cwd.to_str().is_none() {
+        return Err(format!("cwd {} is not an absolute path", cwd.display()));
     }
     if command.trim().is_empty() || command.chars().any(char::is_control) {
         return Err("command is not one line of text".to_string());

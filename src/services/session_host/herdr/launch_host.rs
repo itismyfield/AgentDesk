@@ -159,47 +159,8 @@ impl SocketHerdrLaunchHost {
         }
     }
 
-    /// Polls the new pane until one non-shell foreground process shows up or the window
-    /// closes; any other answer is returned with the reason it was not a candidate.
-    pub(crate) fn provider_candidate(&self, location: &HostedLocation) -> ProviderCandidate {
-        let found = self.endpoints.iter().find(|(endpoint, _)| {
-            same_endpoint(
-                endpoint,
-                &location.execution_node,
-                &location.endpoint_config_key,
-                &location.socket_addr,
-                &location.named_session,
-            )
-        });
-        let Some((_, transport)) = found else {
-            return ProviderCandidate::UnknownEndpoint;
-        };
-        let deadline = Instant::now() + PROVIDER_WINDOW;
-        loop {
-            let candidate = self.read_candidate(transport, &location.pane_id);
-            if candidate != ProviderCandidate::NoneYet || Instant::now() + PROVIDER_POLL >= deadline
-            {
-                return candidate;
-            }
-            thread::sleep(PROVIDER_POLL);
-        }
-    }
-}
-
-impl HerdrLaunchHost for SocketHerdrLaunchHost {
-    fn restore_resume(&self, launch: &HerdrLaunchEndpoint) -> RestoreResume {
-        match self.endpoint(launch) {
-            Some((endpoint, transport)) => (self.read_restore)(transport, endpoint),
-            None => RestoreResume::Unverified(RestoreUnverified::NotBootstrapped),
-        }
-    }
-
-    /// Create, check the pane's cwd, read E7 again, then type the command with Enter, all
-    /// on the connection E7 read. After the create, no failure removes or retries the pane.
-    fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
-        if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
-            return HerdrCreateOutcome::NotSent(detail);
-        }
+    /// The create after the local checks: everything from the first socket call on.
+    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         let Some(configured) = self.endpoint(&request.endpoint) else {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
         };
@@ -241,6 +202,57 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
             },
             other => unconfirmed(format!("command input: {other:?}")),
         }
+    }
+
+    /// Polls the new pane until one non-shell foreground process shows up or the window
+    /// closes; any other answer is returned with the reason it was not a candidate.
+    pub(crate) fn provider_candidate(&self, location: &HostedLocation) -> ProviderCandidate {
+        let found = self.endpoints.iter().find(|(endpoint, _)| {
+            same_endpoint(
+                endpoint,
+                &location.execution_node,
+                &location.endpoint_config_key,
+                &location.socket_addr,
+                &location.named_session,
+            )
+        });
+        let Some((_, transport)) = found else {
+            return ProviderCandidate::UnknownEndpoint;
+        };
+        let deadline = Instant::now() + PROVIDER_WINDOW;
+        loop {
+            let candidate = self.read_candidate(transport, &location.pane_id);
+            if candidate != ProviderCandidate::NoneYet || Instant::now() + PROVIDER_POLL >= deadline
+            {
+                return candidate;
+            }
+            thread::sleep(PROVIDER_POLL);
+        }
+    }
+}
+
+impl HerdrLaunchHost for SocketHerdrLaunchHost {
+    fn restore_resume(&self, launch: &HerdrLaunchEndpoint) -> RestoreResume {
+        match self.endpoint(launch) {
+            Some((endpoint, transport)) => (self.read_restore)(transport, endpoint),
+            None => RestoreResume::Unverified(RestoreUnverified::NotBootstrapped),
+        }
+    }
+
+    /// Create, check the pane's cwd, read E7 again, then type the command with Enter, all
+    /// on the connection E7 read. After the create, no failure removes or retries the pane.
+    fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+        if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
+            return HerdrCreateOutcome::NotSent(detail);
+        }
+        // Herdr opens a missing cwd in HOME without an error, so it is never asked to.
+        if !request.cwd.is_dir() {
+            return HerdrCreateOutcome::NotSent(format!(
+                "cwd {} is not a directory",
+                request.cwd.display()
+            ));
+        }
+        self.create_eligible(request)
     }
 
     /// No stamps until the candidate's nonce is checked; the reading is logged, not stored.

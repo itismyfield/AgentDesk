@@ -431,39 +431,89 @@ fn herdr_send_text_keeps_ambiguous_outcomes_indeterminate() {
     }
 }
 
+fn keys_call(keys: &[&str]) -> HerdrRequest {
+    HerdrRequest::PaneSendKeys {
+        pane_id: PANE.into(),
+        keys: keys.iter().map(|key| key.to_string()).collect(),
+    }
+}
+
+// Executor key names reach Herdr under its own names in one request; an unknown key,
+// a bad text or a non-Herdr ref sends nothing at all.
 #[test]
-fn herdr_keys_and_non_herdr_refs_make_no_transport_call() {
-    let herdr = host(Vec::new());
-    let unsupported = |op| {
-        Ok(HostMutation::Refused(HostRefusal::Unsupported {
-            kind: HostKind::Herdr,
-            op,
-        }))
-    };
-    assert_eq!(herdr.send_keys(pane(), &["C-c"]), unsupported("send_keys"));
-    assert_eq!(herdr.interrupt(pane()), unsupported("interrupt"));
+fn herdr_keys_map_whole_or_send_nothing() {
+    let executor_keys = ["Enter", "Escape", "C-u", "C-e", "Left", "Right", "BSpace"];
+    let herdr_names = [
+        "enter",
+        "esc",
+        "ctrl+u",
+        "ctrl+e",
+        "left",
+        "right",
+        "backspace",
+    ];
+    let herdr = host(vec![
+        (keys_call(&herdr_names), ok()),
+        (keys_call(&["ctrl+c"]), ok()),
+        (keys_call(&["esc"]), Scripted::Error("invalid_key")),
+    ]);
+    assert_eq!(
+        herdr.send_keys(pane(), &executor_keys),
+        Ok(HostMutation::Confirmed)
+    );
+    assert_eq!(herdr.interrupt(pane()), Ok(HostMutation::Confirmed));
+    assert!(matches!(
+        herdr.send_keys(pane(), &["Escape"]),
+        Ok(HostMutation::Indeterminate(_))
+    ));
+    assert_eq!(calls(&herdr).len(), 3);
+
+    let silent = host(Vec::new());
+    let unsupported = Ok(HostMutation::Refused(HostRefusal::Unsupported {
+        kind: HostKind::Herdr,
+        op: "send_keys",
+    }));
+    for keys in [&["Enter", "C-z"][..], &["enter"], &[]] {
+        assert_eq!(silent.send_keys(pane(), keys), unsupported, "{keys:?}");
+    }
+    let end = format!("a{PASTE_END}b");
+    for refused in [
+        silent.send_paste(pane(), &end),
+        silent.send_line(pane(), "/clear\n"),
+        silent.send_line(pane(), ""),
+    ] {
+        assert!(
+            matches!(
+                refused,
+                Ok(HostMutation::Refused(HostRefusal::Precondition(_)))
+            ),
+            "{refused:?}"
+        );
+    }
     for wrong in [
         HostSessionRef::tmux(PANE),
         HostSessionRef::process(PANE),
         HostSessionRef::herdr_pane(" "),
     ] {
-        assert_eq!(herdr.presence(wrong), HostPresence::ProbeFailed);
-        assert_eq!(herdr.liveness(wrong), HostLiveness::ProbeError);
-        assert!(herdr.send_text(wrong, "x").is_err());
-        assert!(herdr.execution_pid(wrong).is_err());
+        assert_eq!(silent.presence(wrong), HostPresence::ProbeFailed);
+        assert_eq!(silent.liveness(wrong), HostLiveness::ProbeError);
+        assert!(silent.send_text(wrong, "x").is_err());
+        assert!(silent.send_keys(wrong, &["Enter"]).is_err());
+        assert!(silent.send_paste(wrong, "x").is_err());
+        assert!(silent.execution_pid(wrong).is_err());
     }
-    assert!(calls(&herdr).is_empty());
-    let caps = herdr.capabilities();
-    assert!(caps.send_text && caps.capture_screen && !caps.send_keys && !caps.interrupt);
+    assert!(calls(&silent).is_empty());
 }
 
-/// Text, Enter, draft clear (C-e, C-u) and cancel (Escape, interrupt) as the executor sends them.
+/// Text, Enter, draft clear (C-e, C-u), cancel (Escape, interrupt), paste and a command line.
 fn every_input(herdr: &HerdrHost<FakeTransport>) -> Vec<Result<HostMutation, HostError>> {
     let mut outcomes = vec![herdr.send_text(pane(), "x")];
     for keys in [&["Enter"][..], &["C-e", "C-u"], &["Escape"]] {
         outcomes.push(herdr.send_keys(pane(), keys));
     }
     outcomes.push(herdr.interrupt(pane()));
+    outcomes.push(herdr.send_paste(pane(), "x"));
+    outcomes.push(herdr.send_line(pane(), "/clear"));
     outcomes
 }
 
@@ -502,7 +552,7 @@ fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
         RestoreResume::On,
         RestoreResume::Unverified(RestoreUnverified::NoPeer),
     ] {
-        let herdr = with_readings(vec![reading; 5]);
+        let herdr = with_readings(vec![reading; 8]);
         for outcome in every_input(&herdr) {
             assert_eq!(outcome, restore_refused(), "{reading:?}");
         }
@@ -1406,6 +1456,9 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/herdr/observe.rs", 0),
         ("src/services/session_host/herdr/transport.rs", 0),
         ("src/services/session_host/herdr/wire.rs", 0),
+        ("src/services/session_host/herdr/provenance.rs", 0),
+        // Dormant socket launch host: builds its own transports; nothing constructs it.
+        ("src/services/session_host/herdr/launch_host.rs", 0),
         ("src/services/session_host/model.rs", 3),
         ("src/services/session_host/resolve.rs", 2),
         ("src/services/session_host/consumer_guard.rs", 2),
@@ -1441,7 +1494,9 @@ fn herdr_items_have_no_production_caller() {
         "HerdrHost::<",
         "HerdrSocketTransport::new(",
         "HerdrSocketTransport::<",
+        "SocketHerdrLaunchHost::new(",
     ];
+    const LAUNCH_HOST: &str = "src/services/session_host/herdr/launch_host.rs";
     // Only the inflight binding CAS copies a locator and only the Claude launch writes a
     // (tmux) `.host_kind` marker. Termination holds a locator only as a target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
@@ -1531,7 +1586,13 @@ fn herdr_items_have_no_production_caller() {
             Some(_) => Vec::new(),
             None => NEEDLES.iter().filter(|n| prod.contains(**n)).collect(),
         };
-        let activated = ACTIVATIONS.iter().filter(|n| prod.contains(**n));
+        let activated = ACTIVATIONS
+            .iter()
+            .filter(|n| prod.contains(**n))
+            .filter(|n| {
+                // The launch host owns its transports; the host itself must stay unconstructed.
+                !(relative == LAUNCH_HOST && n.starts_with("HerdrSocketTransport::new("))
+            });
         violations.extend(
             named
                 .into_iter()

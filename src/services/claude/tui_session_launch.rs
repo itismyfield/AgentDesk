@@ -417,7 +417,6 @@ mod herdr_env_tests {
     fn herdr_launch_child_loses_the_herdr_pane_env_while_tmux_keeps_its_launch_env() {
         use super::{prepare_and_create_claude_tui_session, prepare_claude_herdr_launch};
         use crate::config::TestEnvVarGuard as Guard;
-        use crate::services::herdr_launch::HERDR_PANE_ENV;
         use crate::services::tui_prompt_dedupe::binding_context::{PreparedIncarnation, tests};
         use std::os::unix::fs::PermissionsExt;
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -451,12 +450,21 @@ mod herdr_env_tests {
         );
         let id = "11111111-1111-4111-8111-111111111111";
         let system_prompt = "keep this\nexec rm -rf /tmp/never";
-        // What Herdr hands every process in the pane, the launch command included.
+        // What Herdr 0.9.3 hands every process in the pane, the launch command included.
+        const PANE_ENV: [&str; 7] = [
+            "HERDR_ENV",
+            "HERDR_PANE_ID",
+            "HERDR_BIN_PATH",
+            "HERDR_SOCKET_PATH",
+            "HERDR_TAB_ID",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_CONFIG_PATH",
+        ];
         let run = |tag: &str, command: &str| {
             let status = std::process::Command::new("bash")
                 .args(["-c", command])
                 .current_dir(root.path())
-                .envs(HERDR_PANE_ENV.map(|key| (key, format!("pane-{key}"))))
+                .envs(PANE_ENV.map(|key| (key, format!("pane-{key}"))))
                 .env("CHILD_TAG", tag)
                 .status()
                 .unwrap();
@@ -536,17 +544,17 @@ mod herdr_env_tests {
             crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         );
         let (env, _) = run("tmux", &format!("bash {script}"));
-        let kept: Vec<_> = HERDR_PANE_ENV
-            .iter()
-            .filter_map(|key| env.get(*key))
-            .collect();
+        let kept: Vec<_> = PANE_ENV.iter().filter_map(|key| env.get(*key)).collect();
         assert_eq!(
             kept,
             [
                 "pane-HERDR_ENV",
                 "pane-HERDR_PANE_ID",
                 "pane-HERDR_BIN_PATH",
-                "/overlay/herdr.sock"
+                "/overlay/herdr.sock",
+                "pane-HERDR_TAB_ID",
+                "pane-HERDR_WORKSPACE_ID",
+                "pane-HERDR_CONFIG_PATH"
             ],
             "the tmux launch environment is left as it was"
         );

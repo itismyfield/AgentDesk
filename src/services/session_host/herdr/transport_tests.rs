@@ -594,3 +594,26 @@ fn herdr_socket_sends_a_mutation_only_on_the_connection_its_check_read() {
         "a check read on connection 1 must not let input out on connection 2"
     );
 }
+
+// E7 names the process across the live connection, and a reconnect is a new peer reading.
+#[test]
+fn herdr_socket_peer_is_the_accepting_process_on_the_current_connection() {
+    let mut pong = conn(Vec::new());
+    pong.pong = json!({"type": "pong", "version": "0.9.3", "protocol": 22});
+    let server = serve(vec![pong]);
+    let transport = transport(&server, config());
+    let first = transport.server_peer().expect("peer");
+    assert_eq!(
+        (first.generation, first.pid, first.version.as_str()),
+        (1, std::process::id(), "0.9.3")
+    );
+    assert_eq!(
+        transport.server_peer(),
+        Ok(first.clone()),
+        "no new connection"
+    );
+    transport.connect().expect("handshake");
+    let second = transport.server_peer().expect("peer");
+    assert_eq!(second.generation, 2);
+    assert_eq!(server.methods(), ["ping", "ping"]);
+}
