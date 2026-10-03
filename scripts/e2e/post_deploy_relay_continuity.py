@@ -127,6 +127,28 @@ BUILTIN_FIXTURES: dict[str, dict[str, Any]] = {
             ]
         },
     },
+    "clear-body-held": {
+        **copy.deepcopy(_FIXTURE_PASS),
+        "discord": {
+            "local_output_after_restart_seen": True,
+            "post_restart_marker_seen": True,
+            "post_restart_message_id": "333",
+            "clear_body_withheld": True,
+        },
+    },
+    "codex-continuous-kills": {
+        **copy.deepcopy(_FIXTURE_PASS),
+        "cell": "codex-tui",
+        "health_detail": {
+            "mailboxes": [
+                {
+                    **_idle_mailbox(provider="codex"),
+                    "relay_stall_state": "mailbox_stopped_by_kill",
+                    "relay_owner_kind": "none",
+                }
+            ]
+        },
+    },
 }
 
 
@@ -615,6 +637,21 @@ def validate_fixture_evidence(evidence: dict[str, Any]) -> list[str]:
             )
         else:
             violations.append("Discord post-restart relay marker missing")
+
+    # Issue #6551: Body held after !clear command
+    if discord.get("clear_body_withheld") is True:
+        violations.append("discord clear_body_withheld=true (issue #6551: body withheld after !clear)")
+
+    # Issue #6552: Codex warm follow-up kill pattern (detected via mailbox stall on each turn)
+    target_provider = _cell_provider(str(evidence.get("cell") or ""))
+    if target_provider == "codex":
+        health_detail = evidence.get("health_detail")
+        mailboxes = health_detail.get("mailboxes") if isinstance(health_detail, dict) else []
+        for mailbox in mailboxes:
+            if isinstance(mailbox, dict) and _mailbox_provider(mailbox) == "codex":
+                stall_state = str(mailbox.get("relay_stall_state") or "").lower()
+                if stall_state == "mailbox_stopped_by_kill":
+                    violations.append("codex relay_stall_state=mailbox_stopped_by_kill (issue #6552: warm follow-up kill on each turn)")
 
     health_detail = evidence.get("health_detail")
     mailboxes = health_detail.get("mailboxes") if isinstance(health_detail, dict) else None
