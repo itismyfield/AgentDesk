@@ -680,7 +680,8 @@ src/
 │   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── input/
-│   │   │   └── composer_lock.rs
+│   │   │   ├── composer_lock.rs
+│   │   │   └── composer_status.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs

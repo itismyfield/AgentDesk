@@ -104,9 +104,11 @@ use tokio::sync::Notify;
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_lock;
+mod composer_status;
 #[allow(unused_imports)]
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
+use composer_status::{line_is_codex_fast_context_status, line_is_codex_model_first_status};
 
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
@@ -1019,21 +1021,51 @@ fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> b
         && !snapshot.prompt_draft_detected
 }
 
+const CODEX_INTERACTIVE_MODAL_MARKERS: &[&str] = &[
+    "approval required",
+    "allow command",
+    "allow this action",
+    "confirm to continue",
+    "do you trust",
+    "trust this folder",
+    "sign in",
+    "log in",
+    "authentication required",
+];
+
+fn pane_has_codex_interactive_modal_in_pane(pane: &str) -> bool {
+    // Only the header adjoining a current composer can veto it; answer prose is not a modal.
+    let recent: Vec<&str> = pane
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(6)
+        .collect();
+    if !recent
+        .iter()
+        .take(3)
+        .any(|line| line_is_codex_model_first_status(line))
+    {
+        return false;
+    }
+    let header = recent
+        .iter()
+        .position(|line| line.starts_with('›'))
+        .and_then(|prompt| recent.get(prompt + 1));
+    header.is_some_and(|line| {
+        let lower = line.to_ascii_lowercase();
+        CODEX_INTERACTIVE_MODAL_MARKERS
+            .iter()
+            .any(|marker| lower.starts_with(marker))
+    })
+}
+
 fn codex_snapshot_indicates_interactive_modal(snapshot: &PromptReadinessSnapshot) -> bool {
     let lower = snapshot.pane_tail.to_ascii_lowercase();
-    [
-        "approval required",
-        "allow command",
-        "allow this action",
-        "confirm to continue",
-        "do you trust",
-        "trust this folder",
-        "sign in",
-        "log in",
-        "authentication required",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    CODEX_INTERACTIVE_MODAL_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 pub(crate) fn steering_snapshot_decision(
@@ -1051,8 +1083,7 @@ pub(crate) fn steering_snapshot_decision(
     if snapshot.prompt_draft_detected {
         return Err("composer draft");
     }
-    // Codex has no shared modal detector yet. Keep this conservative blacklist
-    // behind the positive canonical composer marker, which is the primary gate.
+    // Steering also rejects modal wording anywhere in the captured tail.
     if codex_snapshot_indicates_interactive_modal(snapshot) {
         return Err("interactive modal");
     }
@@ -1245,7 +1276,10 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
         .rev()
         .take(PROMPT_READY_SCAN_LINES)
         .collect();
-    if recent.is_empty() || recent_has_codex_active_turn(&recent) {
+    if recent.is_empty()
+        || recent_has_codex_active_turn(&recent)
+        || pane_has_codex_interactive_modal_in_pane(pane)
+    {
         return false;
     }
     if recent_has_codex_compact_prompt(&recent) {
@@ -1280,7 +1314,9 @@ fn pane_looks_ready_for_codex_prompt_with_ansi(pane: &str) -> bool {
     // ANSI-preserving tmux capture lets us distinguish Codex's dim placeholder
     // suggestions from real user drafts in the compact prompt.
     let plain = strip_ansi_escape_sequences(pane);
-    if pane_has_codex_active_turn_in_pane(&plain) {
+    if pane_has_codex_active_turn_in_pane(&plain)
+        || pane_has_codex_interactive_modal_in_pane(&plain)
+    {
         return false;
     }
     if pane_has_dim_legacy_codex_prompt_in_pane(pane) {
@@ -1480,19 +1516,6 @@ fn line_is_dim_legacy_codex_prompt(line: &str) -> bool {
     line.find('›')
         .map(|idx| contains_dim_sgr(&line[idx + '›'.len_utf8()..]))
         .unwrap_or(false)
-}
-
-fn line_is_codex_fast_context_status(line: &str) -> bool {
-    let parts: Vec<&str> = line.split('·').map(str::trim).collect();
-    parts.len() == 3
-        && matches!(parts[0], "Fast on" | "Fast off")
-        && !parts[1].is_empty()
-        && parts[2]
-            .strip_prefix("Context ")
-            .and_then(|value| value.strip_suffix("% left"))
-            .is_some_and(|percent| {
-                !percent.is_empty() && percent.chars().all(|ch| ch.is_ascii_digit())
-            })
 }
 
 fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
