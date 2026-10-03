@@ -303,7 +303,7 @@ fn n1a_confirmed_slash_raw_and_wrapper_post_one_notice() {
 fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
     const CHILD: &str = "ADK_N1A_IDLE_MAINTENANCE_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance",
@@ -311,11 +311,14 @@ fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
             ])
             .env(CHILD, "1")
             .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "1")
-            .status()
+            .output()
             .unwrap();
+        // Captured so the child's libtest summary is not counted as this run's.
         assert!(
-            status.success(),
-            "isolated footer maintenance fixture failed"
+            out.status.success(),
+            "isolated footer maintenance fixture failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
         return;
     }
