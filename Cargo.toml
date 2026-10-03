@@ -132,11 +132,6 @@ plist = "1.8"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
-# Non-incremental builds (CI) otherwise split this crate into 16 codegen units, and the lib test
-# compile then holds several multi-GB LLVM modules at once; 256 is the incremental default.
-[profile.dev.package.agentdesk]
-codegen-units = 256
-
 [profile.release]
 opt-level = "z"
 lto = true
