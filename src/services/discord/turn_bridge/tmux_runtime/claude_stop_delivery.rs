@@ -1,4 +1,4 @@
-//! Exactly-once and phase-safe Claude turn interrupt policy.
+//! Claude token interrupts keep their claims and fences; session interrupts recheck O's turn.
 
 use super::interrupt_policy::{
     ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON, ClaudeTurnInterruptDelivery,
@@ -523,17 +523,8 @@ pub(super) async fn interrupt_claude_session(
         };
     };
 
-    // The session-level generation check and provider write run under one lock in
-    // `lock_current_claude_interrupt_session`; a newer turn cannot publish itself
-    // between the check and the Escape/FIFO write. Transcript identity is
-    // supplemental only: when the turn-start entry has fallen outside the bounded
-    // tail window, fail open after the authoritative session-generation check.
-    //
-    // P2 #4616: `deliver_claimed_claude_stop_under_lock_order` takes the per-pane
-    // composer lock OUTSIDE this registry guard for the interactive Escape, so we
-    // never hold the GLOBAL interrupt-registry lock while parked on the composer
-    // lock (which can wait up to `SELECTOR_OPEN_TIMEOUT` + confirm). The `write`
-    // closure below is provider I/O only — it acquires no composer lock.
+    // Token stops retain their generation fence; session stops re-read O's bound parent turn.
+    // Interactive Escape holds the composer lock before either delivery check.
     let session_for_task = session_name.clone();
     let token_for_task = token.cloned();
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());

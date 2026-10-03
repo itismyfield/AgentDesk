@@ -1544,6 +1544,7 @@ src/
 │   │   │   │   ├── process_force_kill_tests.rs
 │   │   │   │   ├── process_table.rs
 │   │   │   │   ├── session_stop.rs
+│   │   │   │   ├── session_stop_tests.rs
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
