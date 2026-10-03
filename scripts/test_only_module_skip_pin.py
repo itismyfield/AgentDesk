@@ -54,6 +54,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/admin_host_guard_tests.rs",
         "src/server/routes/agents_host_guard_tests.rs",
         "src/services/provider_teardown_tests.rs",
+        "src/services/discord/placeholder_live_events/clock_tests.rs",
         "src/services/discord/execution_identity/herdr_observation_tests.rs",
         "src/services/discord/execution_identity/herdr_report_order_tests.rs",
         "src/services/discord/watchers/lifecycle/watch_host_tests.rs",
