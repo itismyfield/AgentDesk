@@ -207,3 +207,53 @@ fn herdr_execution_withheld(logical: &str) -> bool {
         .get(logical)
         .is_some_and(|(_, admitted)| !admitted)
 }
+
+#[cfg(test)]
+mod herdr_race_condition_tests {
+    use super::*;
+
+    /// Verify fail-closed behavior: once an execution is withheld, any claim on it fails.
+    /// This simulates the race: herdr_claim_may_be_withheld reads not-yet-listed, then
+    /// execution becomes listed and withheld before herdr_claim_admission reads it.
+    #[test]
+    fn herdr_claim_admission_fails_closed_on_withheld_execution() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        LISTED.with(|flag| flag.store(true, std::sync::atomic::Ordering::Release));
+
+        let logical = "test-herdr-race-pane";
+
+        // Scenario 1: execution not yet installed
+        // Both checks should succeed (not withheld, not listed)
+        assert!(
+            !herdr_claim_may_be_withheld(logical, false),
+            "not yet installed"
+        );
+        assert!(
+            herdr_claim_admission(logical, false).is_ok(),
+            "not yet installed"
+        );
+
+        // Scenario 2: execution installed but withheld
+        install_herdr_execution(logical, "race-nonce");
+        withhold_herdr_execution(logical, Some("race-nonce"));
+
+        // Now both checks should fail (withheld)
+        assert!(herdr_claim_may_be_withheld(logical, false), "is withheld");
+        assert!(
+            herdr_claim_admission(logical, false).is_err(),
+            "admission fails for withheld pane"
+        );
+
+        // Scenario 3: execution admitted
+        admit_herdr_execution(logical, "race-nonce");
+
+        // Now checks should pass (admitted)
+        assert!(herdr_claim_may_be_withheld(logical, false), "still listed");
+        assert!(
+            herdr_claim_admission(logical, false).is_ok(),
+            "admission succeeds for admitted pane"
+        );
+    }
+}
