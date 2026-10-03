@@ -137,6 +137,9 @@ case "$POST_DEPLOY_SMOKE_SCOPE" in
     *) echo "AGENTDESK_POST_DEPLOY_SMOKE_SCOPE must be full or api" >&2; exit 2 ;;
 esac
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
+# Set before the health gates: their channels are the deploy-nonblocking reader alarms.
+POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
+POST_DEPLOY_SMOKE_CODEX_TURNS_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_CODEX_CELL:-codex-tui}"
 # The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
 # so launchd Label and plist filename never diverge when the operator overrides one side.
 PLIST_REL="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
@@ -2988,6 +2991,11 @@ elif [ -f "$REL_BINARY" ]; then
     mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
 fi
 
+# Resolved once before promotion so the new-binary and rollback health gates
+# accept the same smoke channels; an unreadable config accepts none.
+DEPLOY_E2E_SMOKE_CHANNEL_IDS=$(_deploy_e2e_smoke_channel_ids "$REPO" \
+    "$ADK_REL/config/agentdesk.yaml" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL")
+echo "▸ Smoke E2E channels whose reader-count alarm does not block health: ${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-none}"
 echo "▸ Promoting staged binary..."
 mv -f "$STAGED_BINARY" "$REL_BINARY"
 STAGED_BINARY=""
@@ -3302,7 +3310,6 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 )
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
-POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
 POST_DEPLOY_SMOKE_RECOVERY_GATE_S="${AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S:-120}"
 # The E-35 phase from lease acquisition through scenario execution is capped,
 # including its live safety gate, setup/send/fetch HTTP, response wait, record
@@ -3312,7 +3319,6 @@ POST_DEPLOY_SMOKE_RECOVERY_GATE_S="${AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S
 POST_DEPLOY_SMOKE_E35_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_E35_DEADLINE_S:-900}"
 # E-50/E-51 phase caps: 120 + 150 s plus two idle preflights (5 s each) stay
 # under the 300 s budget the turn scenarios may add to the smoke.
-POST_DEPLOY_SMOKE_CODEX_TURNS_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_CODEX_CELL:-codex-tui}"
 POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S:-120}"
 POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S:-150}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
