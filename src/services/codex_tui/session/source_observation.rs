@@ -279,7 +279,8 @@ fn first_record_session_meta(
             crate::services::codex_tui::rollout_index::RolloutSessionMeta {
                 id: text("id"),
                 cwd: PathBuf::from(cwd),
-                source: payload["source"].as_str().map(ToString::to_string),
+                source: payload.get("source").cloned(),
+                parent_thread_id: text("parent_thread_id"),
                 originator: payload["originator"].as_str().map(ToString::to_string),
             },
         ),
@@ -356,10 +357,13 @@ fn verify_rollout(
     if meta_id != Some(id) {
         return Err(Reject::SessionMetaIdMismatch);
     }
-    let source_matches = meta.source.as_deref() == Some(expected.as_str())
+    let source = meta.source.as_ref().and_then(Value::as_str);
+    let source_matches = source == Some(expected.as_str())
         && (expected == CodexRolloutSource::Exec || meta.is_tui_compatible());
     if !source_matches {
-        return Err(Reject::SourceMismatch { found: meta.source });
+        return Err(Reject::SourceMismatch {
+            found: source.map(ToString::to_string),
+        });
     }
     run_verify_step(VerifyStep::BeforeFinalIdentity);
     // The header came from this descriptor; the path must still resolve, inside root, to it.

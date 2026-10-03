@@ -682,6 +682,7 @@ src/
 │   │   ├── input/
 │   │   │   └── composer_lock.rs
 │   │   ├── rollout_tail/
+│   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
@@ -1388,6 +1389,8 @@ src/
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── rehydration/
+│   │   │   │   ├── child_binding_tests.rs
+│   │   │   │   ├── codex_marker.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
