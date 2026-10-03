@@ -77,7 +77,7 @@ use self::tmux_session_files::{
 pub(crate) use self::tmux_session_files::{stamp_spawn_markers, write_spawn_nonce};
 #[rustfmt::skip]
 #[cfg(test)]
-pub(in crate::services::discord) use self::watcher_lifecycle::{claim_cross_channel_tmux_watcher_for_test, claim_or_replace_watcher, claim_or_reuse_watcher, evict_claim_before_adoption_for_test};
+pub(in crate::services::discord) use self::watcher_lifecycle::{CLAIM_PAUSE, claim_cross_channel_tmux_watcher_for_test, claim_or_replace_watcher, claim_or_reuse_watcher, evict_claim_before_adoption_for_test};
 use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
     HostSnapshot, ThreadFollowUpParent, WatchHost, WatchWithheld, WatcherClaimIncarnation,

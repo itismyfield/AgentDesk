@@ -11,6 +11,7 @@ POST_DEPLOY_SMOKE_EVIDENCE="$scratch/evidence"
 export REL_PORT=1
 relay_calls=0
 durable_calls=0
+turn_calls=0
 api_calls=0
 probe_fail=0
 _post_deploy_smoke_wedge_reset() { :; }
@@ -25,23 +26,25 @@ _post_deploy_smoke_probe_apis() {
 }
 _post_deploy_smoke_check_relay_round_trip() { relay_calls=$((relay_calls + 1)); }
 _post_deploy_smoke_check_durable_record() { durable_calls=$((durable_calls + 1)); }
+_post_deploy_smoke_check_turn_scenarios() { turn_calls=$((turn_calls + 1)); }
 export POST_DEPLOY_SMOKE_SCOPE=api
 _run_post_deploy_functional_smoke
-test "$api_calls:$relay_calls:$durable_calls" = 1:0:0
+test "$api_calls:$relay_calls:$durable_calls:$turn_calls" = 1:0:0:0
 test "$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" = 'not evaluated: operator selected API smoke scope'
+test "$POST_DEPLOY_SMOKE_TURN_COVERAGE" = 'not evaluated: operator selected API smoke scope'
 probe_fail=1
 if _run_post_deploy_functional_smoke; then
     echo 'API failure was hidden' >&2
     exit 1
 fi
-test "$api_calls:$relay_calls:$durable_calls" = 2:0:0
+test "$api_calls:$relay_calls:$durable_calls:$turn_calls" = 2:0:0:0
 probe_fail=0
 export POST_DEPLOY_SMOKE_SCOPE=full
 _run_post_deploy_functional_smoke
-test "$api_calls:$relay_calls:$durable_calls" = 3:1:1
+test "$api_calls:$relay_calls:$durable_calls:$turn_calls" = 3:1:1:1
 unset POST_DEPLOY_SMOKE_SCOPE
 _run_post_deploy_functional_smoke
-test "$api_calls:$relay_calls:$durable_calls" = 4:2:2
+test "$api_calls:$relay_calls:$durable_calls:$turn_calls" = 4:2:2:2
 echo 'PASS: API scope preserves API failures and full/default retain external probes'
 
 eval "$(awk '/^_post_deploy_smoke_optional_accounts_absent\(\) \{$/ {copy=1} copy {print} copy && /^}$/ {exit}' "$root/scripts/deploy-release.sh")"

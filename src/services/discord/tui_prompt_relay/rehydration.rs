@@ -22,6 +22,11 @@ use super::*;
 use crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane;
 use std::collections::HashMap;
 
+#[cfg(unix)]
+mod codex_marker;
+#[cfg(unix)]
+use codex_marker::{CodexTuiMarkerRehydrateDecision, codex_tui_marker_rehydrate_decision};
+
 #[cfg(not(test))]
 use super::resolve_rehydrated_claude_tmux_channel_id as claude_channel;
 #[cfg(not(test))]
@@ -865,7 +870,9 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
     rollout_path: &Path,
     session_id: Option<String>,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
-    if !rollout_path.exists() {
+    if !rollout_path.exists()
+        || crate::services::codex_tui::rollout_index::rollout_is_subagent(rollout_path)
+    {
         return None;
     }
     let start_offset = std::fs::metadata(rollout_path)
@@ -885,36 +892,6 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
         last_offset: start_offset,
         relay_last_offset: Some(relay_last_offset),
     })
-}
-
-#[cfg(unix)]
-#[derive(Debug, PartialEq, Eq)]
-enum CodexTuiMarkerRehydrateDecision {
-    Use {
-        rollout_path: PathBuf,
-        session_id: Option<String>,
-    },
-    TryFallback,
-}
-
-#[cfg(unix)]
-fn codex_tui_marker_rehydrate_decision(
-    marker: &crate::services::codex_tui::session::CodexTuiRolloutMarker,
-    claimed_rollout_paths: &HashSet<PathBuf>,
-    duplicate_marker_paths: &HashSet<PathBuf>,
-) -> CodexTuiMarkerRehydrateDecision {
-    let path = &marker.rollout_path;
-    let claim_path = canonical_rollout_claim_path(path);
-    if path.exists()
-        && !duplicate_marker_paths.contains(&claim_path)
-        && !rollout_path_is_claimed_for_other_session(path, claimed_rollout_paths)
-    {
-        return CodexTuiMarkerRehydrateDecision::Use {
-            rollout_path: path.clone(),
-            session_id: marker.session_id.clone(),
-        };
-    }
-    CodexTuiMarkerRehydrateDecision::TryFallback
 }
 
 #[cfg(unix)]
@@ -948,7 +925,7 @@ pub(in crate::services::discord) fn rehydrated_codex_tui_binding_for_tmux_sessio
         tracing::debug!(
             tmux_session_name,
             rollout_path = %marker.rollout_path.display(),
-            "skipping Codex TUI rehydrate from stale, duplicate, or already-claimed rollout marker; trying markerless fallback if permitted"
+            "skipping Codex TUI rehydrate from child, stale, duplicate, or already-claimed rollout marker; trying markerless fallback if permitted"
         );
     }
     if !allow_markerless_cwd_fallback {
@@ -983,6 +960,9 @@ fn rollout_path_is_claimed_for_other_session(
 
 #[cfg(all(unix, test))]
 mod idempotency_tests;
+
+#[cfg(all(unix, test))]
+mod child_binding_tests;
 
 #[cfg(all(unix, test))]
 mod tests {

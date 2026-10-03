@@ -414,6 +414,10 @@ bash scripts/main-ci-triage.sh --self-test
 # End nightly notification contract.
 fi
 
+if run_check guards "Lib test build swap and memory probe contract"; then
+"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring
+fi
+
 if run_check guards "CI timeout wrapper tests (#4413)"; then
 "$PYTHON" -m unittest tests.test_ci_timeout
 fi
@@ -443,7 +447,8 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_fixtures \
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \
-  scripts.e2e.tui_relay.test_post_deploy_relay_continuity
+  scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
+  scripts.e2e.tui_relay.test_post_deploy_turn_smoke
 "$PYTHON" -m unittest scripts.e2e.test_voice_live_media_smoke
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 fi
@@ -478,7 +483,7 @@ if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 "$PYTHON" -m unittest tests.test_target_empty_identity
-AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
 
@@ -724,6 +729,7 @@ required_shell_suites=(
   tests/test_deploy_smoke_scope.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
+  tests/test_deploy_smoke_turn_scenarios_6561.sh
   tests/test_deploy_verdict_health_axis_6092.sh
   tests/test_required_check_mirror.sh
 )
