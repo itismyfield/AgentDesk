@@ -285,13 +285,13 @@ fn a_stop_leaves_a_turn_admitted_after_the_judged_one_ended() {
             fx.shared.mailboxes.insert_unreachable_for_test(fx.channel);
         };
         let (result, ()) = tokio::join!(stop, unanswered);
-        assert!(result.host_guard_kept(), "unanswered: kept");
         fx.assert_runtime_kept("unanswered").await;
         assert_eq!(
             file_state(&Channel::row_path(fx.channel)),
             row,
             "unanswered: row"
         );
+        assert!(result.host_guard_kept(), "unanswered: kept");
         fx.shared.mailboxes.remove_fixture_for_test(fx.channel);
     });
 }
@@ -305,8 +305,8 @@ fn a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read() {
     run(async {
         let fx = Channel::new(5_340_132_000).await;
         let (result, next) = tokio::join!(fx.force_kill(), fx.admit_successor_after_cancel());
-        assert!(result.host_guard_kept(), "superseded: kept, nothing killed");
         fx.assert_successor_kept(&next, "superseded").await;
+        assert!(result.host_guard_kept(), "superseded: kept, nothing killed");
 
         let fx = Channel::new(5_340_132_100).await;
         let row = file_state(&Channel::row_path(fx.channel));
@@ -319,7 +319,6 @@ fn a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read() {
             shared.mailboxes.remove_fixture_for_test(channel);
         });
         let result = fx.force_kill().await;
-        assert!(result.host_guard_kept(), "unread: kept");
         assert!(
             !fx.judged.cancelled.load(Ordering::SeqCst),
             "unread: not cancelled"
@@ -330,6 +329,7 @@ fn a_force_kill_keeps_a_superseded_turn_and_one_it_could_not_read() {
             row,
             "unread: row as it was"
         );
+        assert!(result.host_guard_kept(), "unread: kept");
         assert!(HOOKS.with_borrow(Vec::is_empty), "both seams were reached");
     });
 }
@@ -379,8 +379,8 @@ fn a_lookup_stop_finishes_only_the_turn_it_judged() {
             match next {
                 Some(next) => fx.assert_successor_kept(&next, case).await,
                 None if case == "unanswered" => {
-                    assert!(result.host_guard_kept(), "{case}: kept");
                     fx.assert_runtime_kept(case).await;
+                    assert!(result.host_guard_kept(), "{case}: kept");
                 }
                 None => {
                     let session = fx.shared.core.lock().await.sessions.get(&channel).cloned();
