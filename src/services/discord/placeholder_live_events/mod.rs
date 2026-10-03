@@ -40,7 +40,7 @@ use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
 #[cfg(test)]
 use status_panel::{CompletedKind, DerivedStatus};
-use status_panel::{StatusPanelState, render_status_panel};
+use status_panel::{StatusPanelState, panel_now, render_status_panel};
 
 #[cfg(test)]
 mod probe_fixtures_tests;
@@ -687,15 +687,6 @@ fn task_notification_success_completion_visible_in_snapshot(
         StatusEvent::WorkflowEnd { .. } => false,
         _ => false,
     })
-}
-
-fn panel_now() -> Instant {
-    #[cfg(test)]
-    {
-        return Instant::now() + test_clock::offset();
-    }
-    #[cfg(not(test))]
-    Instant::now()
 }
 
 #[cfg(test)]
