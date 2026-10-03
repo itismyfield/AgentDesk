@@ -68,8 +68,6 @@ impl CompletionGuard {
         snapshot.recovery_actor = Some(Arc::downgrade(actor));
         snapshot.status_message_id = None;
         snapshot.relay_ownership_only = true;
-        self.note_terminal_projection_settled(true);
-        self.note_terminal_disposition_settled(true);
         let outcome = self
             .turn_finalizer
             .submit_terminal_with_claim_snapshot(

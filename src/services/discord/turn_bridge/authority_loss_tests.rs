@@ -479,6 +479,103 @@ fn displaced_terminal_keeps_successor_actor_even_when_id_and_nonce_match() {
                 assert!(!replacement.cancelled.load(Ordering::Relaxed));
                 assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
                 assert!(events.try_recv().is_err());
+                let mut successor_row = row.clone();
+                successor_row.turn_nonce = replacement.turn_nonce().map(str::to_owned);
+                let mut successor_context = bridge_context(
+                    successor_row.clone(), Arc::new(discord::gateway::HeadlessGateway),
+                );
+                let (successor_guard, mut successor_cleanup) = make_bridge_guards(
+                    &mut successor_context, &successor_row, &shared, &ProviderKind::Codex,
+                );
+                successor_cleanup.defuse();
+                successor_guard.note_terminal_projection_settled(false);
+                successor_guard.note_terminal_disposition_settled(false);
+                let mut snapshot = discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&successor_row);
+                snapshot.recovery_actor = Some(Arc::downgrade(&replacement));
+                snapshot.status_message_id = None;
+                let outcome = shared.turn_finalizer.submit_terminal_with_claim_snapshot(
+                    discord::turn_finalizer::TurnKey::new(
+                        channel, original.get(), shared.restart.current_generation,
+                    ).with_episode_nonce(successor_row.turn_nonce.as_deref()),
+                    ProviderKind::Codex,
+                    discord::turn_finalizer::TerminalEvent::Complete,
+                    discord::turn_finalizer::FinalizeContext::bridge(),
+                    Some(snapshot),
+                    shared.clone(),
+                ).await;
+                assert!(
+                    matches!(outcome, discord::turn_finalizer::FinalizeOutcome::Finalized {
+                        removed_token: Some(ref token), ..
+                    } if Arc::ptr_eq(token, &replacement)),
+                    "the successor must retain its future completion; reuse_nonce={reuse_nonce}"
+                );
+                assert!(shared.mailbox(channel).snapshot().await.cancel_token.is_none());
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+                let mut releases = 0;
+                while let Ok(event) = events.try_recv() {
+                    assert!(
+                        !event.queue_is_eligible(),
+                        "the successor cannot inherit stale settlement; reuse_nonce={reuse_nonce}"
+                    );
+                    assert_eq!(event.channel_id, channel);
+                    assert_eq!(event.turn_id, Some(original.get()));
+                    releases += usize::from(event.phase == discord::turn_completion_events::TurnCompletionPhase::MailboxReleased);
+                }
+                assert_eq!(releases, 1, "reuse_nonce={reuse_nonce}");
+
+                let actor = Arc::new(CancelToken::new());
+                assert!(discord::mailbox_try_start_turn(
+                    &shared, channel, actor.clone(), UserId::new(7), original,
+                ).await);
+                discord::increment_global_active(&shared, "fixture");
+                row.turn_nonce = actor.turn_nonce().map(str::to_owned);
+                discord::inflight::save_inflight_state(&row).unwrap();
+                let key = discord::turn_finalizer::TurnKey::new(
+                    channel, original.get(), shared.restart.current_generation,
+                ).with_episode_nonce(row.turn_nonce.as_deref());
+                let captured = discord::turn_finalizer::claim_normal_episode(
+                    &shared, &ProviderKind::Codex, key, false, Some(actor.clone()),
+                ).await.unwrap().unwrap();
+                assert!(Arc::ptr_eq(captured.finish.removed_token.as_ref().unwrap(), &actor));
+                let successor = Arc::new(CancelToken::new());
+                assert!(discord::mailbox_try_start_turn(
+                    &shared, channel, successor.clone(), UserId::new(7), original,
+                ).await);
+                discord::increment_global_active(&shared, "fixture");
+                let mut successor_row = row.clone();
+                successor_row.turn_nonce = successor.turn_nonce().map(str::to_owned);
+                discord::inflight::save_inflight_state(&successor_row).unwrap();
+                let successor_path = discord::inflight::inflight_state_path(
+                    &discord::inflight::inflight_runtime_root().unwrap(),
+                    &ProviderKind::Codex, channel.get(),
+                );
+                let successor_bytes = std::fs::read(&successor_path).unwrap();
+                let successor_role = ChannelId::new(655_200_700 + u64::from(reuse_nonce));
+                shared.dispatch.role_overrides.insert(channel, successor_role);
+                let mut snapshot = discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&row);
+                snapshot.recovery_actor = Some(Arc::downgrade(&actor));
+                snapshot.status_message_id = None;
+                snapshot.relay_ownership_only = true;
+                let finalized = discord::turn_finalizer::do_finalize_with_release_for_test(
+                    key, ProviderKind::Codex, &discord::turn_finalizer::TerminalEvent::Complete,
+                    discord::turn_finalizer::FinalizeContext::bridge(), Some(&snapshot),
+                    &shared, Some(captured.finish),
+                ).await;
+                assert!(matches!(finalized, discord::turn_finalizer::FinalizeOutcome::Finalized {
+                    removed_token: Some(ref token), ..
+                } if Arc::ptr_eq(token, &actor)));
+                assert!(Arc::ptr_eq(
+                    shared.mailbox(channel).snapshot().await.cancel_token.as_ref().unwrap(),
+                    &successor,
+                ));
+                assert!(!successor.cancelled.load(Ordering::Relaxed));
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+                assert_eq!(std::fs::read(successor_path).unwrap(), successor_bytes);
+                assert_eq!(
+                    shared.dispatch.role_overrides.get(&channel).map(|entry| *entry.value()),
+                    Some(successor_role),
+                    "preclaimed completion must preserve a successor role override; reuse_nonce={reuse_nonce}"
+                );
             }
         });
 }
