@@ -38,7 +38,7 @@ macro_rules! row {
 }
 
 /// Every arm that is not a read, sent to the closed actor.
-fn rows() -> [(&'static str, Request); 15] {
+fn rows() -> [(&'static str, Request); 16] {
     [
         row!("Clear", |old| old.clear(p())),
         row!("PurgeQueue", |old| old.purge_queue(p(), false)),
@@ -59,6 +59,8 @@ fn rows() -> [(&'static str, Request); 15] {
         row!("FinishTurnIfMatches", |old| old
             .finish_turn_if_matches(MessageId::new(ACTIVE), p())),
         row!("FinishCancelledTurn", |old| old.finish_cancelled_turn()),
+        row!("FinishTurnIfToken", |old| old
+            .finish_turn_if_token(None, p())),
         row!("ClearRecoveryMarker", |old| old.clear_recovery_marker()),
         row!("CancelQueued", |old| {
             old.cancel_queued_primary_message(MessageId::new(QUEUED), p())
