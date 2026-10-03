@@ -1,3 +1,6 @@
+// Endpoints are unix socket paths; a `/`-rooted path is not absolute on Windows.
+#![cfg(unix)]
+
 use super::*;
 use crate::config::load_from_path;
 

@@ -1,3 +1,6 @@
+// Herdr runs only on unix; the probe-error case relies on ENOTDIR, which Windows reports as NotFound.
+#![cfg(unix)]
+
 use super::*;
 
 // A seen stop file keeps admission stopped after it is removed; a stop file that cannot be checked
