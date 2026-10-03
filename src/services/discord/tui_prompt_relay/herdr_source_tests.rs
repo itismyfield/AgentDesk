@@ -18,7 +18,7 @@ use crate::services::herdr_launch::{
     HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session, unset_herdr_env_before_exec,
 };
-use crate::services::session_host::RestoreResume;
+use crate::services::session_host::{RestoreResume, ServerWitness};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use crate::services::tui_prompt_dedupe::binding_events::{
@@ -37,7 +37,9 @@ struct Launcher;
 
 impl HerdrLaunchHost for Launcher {
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
-        RestoreResume::Off { generation: 1 }
+        RestoreResume::Off {
+            witness: ServerWitness::for_test(1),
+        }
     }
 
     fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {

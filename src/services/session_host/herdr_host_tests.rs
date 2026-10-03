@@ -7,10 +7,14 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::services::session_host::herdr::contract::HerdrTransportError;
+use crate::services::session_host::herdr::contract::{
+    HerdrTransportError, ServerWitness, Witnessed,
+};
 use crate::services::session_host::herdr::model::{
     ExecutionState, HerdrReadSource, HerdrReply, HerdrResult, PaneState,
 };
+use crate::services::session_host::herdr::observe::RestoreUnverified;
+use crate::services::session_host::herdr::provenance::StartIdentity;
 
 const PANE: &str = "w1-1";
 
@@ -29,43 +33,55 @@ type Step = (HerdrRequest, Scripted);
 struct FakeTransport {
     script: Mutex<VecDeque<Step>>,
     calls: Mutex<Vec<HerdrCall>>,
-    /// Moves to a new connection on every call, like a reconnecting transport.
-    reconnects: bool,
-    generation: AtomicU64,
-    /// E7 readings in order; once empty, Off on the current connection.
+    /// The server each call's connection reaches, in order; once empty, `serving()`.
+    reached: Mutex<VecDeque<Witnessed>>,
+    /// E7 readings in order; once empty, Off naming `serving()`.
     restore: Mutex<VecDeque<RestoreResume>>,
 }
 
-impl HerdrTransport for FakeTransport {
-    fn call(&self, call: &HerdrCall) -> (contract::HerdrOutcome, u64) {
-        self.calls.lock().unwrap().push(call.clone());
-        let generation = if self.reconnects {
-            self.generation.fetch_add(1, Ordering::SeqCst) + 1
-        } else {
-            self.generation.load(Ordering::SeqCst)
-        };
-        (self.reply(call), generation)
-    }
-
-    fn call_on(&self, call: &HerdrCall, generation: u64) -> (contract::HerdrOutcome, u64) {
-        let current = self.generation.load(Ordering::SeqCst);
-        if generation != current {
-            let error = HerdrTransportError::NotSent(format!("connection {current}"));
-            return (Err(error), current);
-        }
-        self.calls.lock().unwrap().push(call.clone());
-        (self.reply(call), current)
+/// The server a fake connection reaches unless a test scripts another.
+fn serving() -> ServerWitness {
+    ServerWitness {
+        socket: "/tmp/h.sock".into(),
+        pid: 4,
+        start: StartIdentity::Darwin {
+            seconds: 1_000,
+            micros: 0,
+        },
     }
 }
 
-fn scripted_restore(transport: &FakeTransport) -> RestoreResume {
+impl HerdrTransport for FakeTransport {
+    fn call(&self, call: &HerdrCall) -> (contract::HerdrOutcome, Witnessed) {
+        self.calls.lock().unwrap().push(call.clone());
+        (self.reply(call), self.reach())
+    }
+
+    fn call_with_witness(
+        &self,
+        call: &HerdrCall,
+        expected: &ServerWitness,
+    ) -> contract::HerdrOutcome {
+        let reached = self.reach();
+        if reached.as_ref() != Ok(expected) {
+            return Err(HerdrTransportError::NotSent(format!("{reached:?}")));
+        }
+        self.calls.lock().unwrap().push(call.clone());
+        self.reply(call)
+    }
+}
+
+fn scripted_restore(transport: &FakeTransport, _endpoint: &HerdrEndpoint) -> RestoreResume {
     let next = transport.restore.lock().unwrap().pop_front();
-    next.unwrap_or(RestoreResume::Off {
-        generation: transport.generation.load(Ordering::SeqCst),
-    })
+    next.unwrap_or(RestoreResume::Off { witness: serving() })
 }
 
 impl FakeTransport {
+    fn reach(&self) -> Witnessed {
+        let next = self.reached.lock().unwrap().pop_front();
+        next.unwrap_or_else(|| Ok(serving()))
+    }
+
     fn reply(&self, call: &HerdrCall) -> contract::HerdrOutcome {
         let next = self.script.lock().unwrap().pop_front();
         let (expected, reply) = next.expect("fake transport called more often than scripted");
@@ -82,19 +98,19 @@ impl FakeTransport {
     }
 }
 
-fn fake(script: Vec<Step>, reconnects: bool) -> HerdrHost<FakeTransport> {
+fn fake(script: Vec<Step>, reached: Vec<Witnessed>) -> HerdrHost<FakeTransport> {
     let endpoint = HerdrEndpoint::new("mac-mini", "pilot", Path::new("/tmp/h.sock"), "adk")
         .expect("valid endpoint");
     let transport = FakeTransport {
         script: Mutex::new(script.into()),
-        reconnects,
+        reached: Mutex::new(reached.into()),
         ..FakeTransport::default()
     };
     HerdrHost::new(endpoint, transport).with_restore_reader(scripted_restore)
 }
 
 fn host(script: Vec<Step>) -> HerdrHost<FakeTransport> {
-    fake(script, false)
+    fake(script, Vec::new())
 }
 
 fn calls(host: &HerdrHost<FakeTransport>) -> Vec<HerdrCall> {
@@ -232,21 +248,38 @@ fn herdr_liveness_needs_a_root_shell_pid() {
 }
 
 #[test]
-fn herdr_process_info_from_another_connection_is_not_liveness() {
-    let herdr = fake(
+fn herdr_process_info_from_another_server_is_not_liveness() {
+    let restarted = ServerWitness {
+        start: StartIdentity::Darwin {
+            seconds: 1_001,
+            micros: 0,
+        },
+        ..serving()
+    };
+    for reached in [
+        vec![Ok(serving()), Ok(restarted)],
+        vec![Ok(serving()), Err(RestoreUnverified::ProcessUnreadable)],
         vec![
-            (snapshot_call(), snapshot(22, &[PANE])),
-            (process_call(), process_info(PANE, json!(4242))),
+            Err(RestoreUnverified::NoPeer),
+            Err(RestoreUnverified::NoPeer),
         ],
-        true,
-    );
-    let observation = herdr.observe(pane());
-    assert_eq!(
-        (observation.execution, observation.shell_pid),
-        (ExecutionState::Unknown, None),
-        "a pid read after a reconnect must not join the earlier snapshot"
-    );
-    assert_eq!(observation.liveness(), HostLiveness::ProbeError);
+    ] {
+        let herdr = fake(
+            vec![
+                (snapshot_call(), snapshot(22, &[PANE])),
+                (process_call(), process_info(PANE, json!(4242))),
+            ],
+            reached.clone(),
+        );
+        let observation = herdr.observe(pane());
+        assert_eq!(observation.presence(), HostPresence::Present);
+        assert_eq!(
+            (observation.execution, observation.shell_pid),
+            (ExecutionState::Unknown, None),
+            "a pid from another or unnamed server must not join the snapshot: {reached:?}"
+        );
+        assert_eq!(observation.liveness(), HostLiveness::ProbeError);
+    }
 }
 
 #[test]
@@ -432,39 +465,106 @@ fn herdr_send_text_keeps_ambiguous_outcomes_indeterminate() {
     }
 }
 
+fn keys_call(keys: &[&str]) -> HerdrRequest {
+    HerdrRequest::PaneSendKeys {
+        pane_id: PANE.into(),
+        keys: keys.iter().map(|key| key.to_string()).collect(),
+    }
+}
+
+// Executor keys reach Herdr under its names in one request, a paste is bracketed and a line
+// carries its Enter; an unknown key, a bad text or a non-Herdr ref sends nothing at all.
 #[test]
-fn herdr_keys_and_non_herdr_refs_make_no_transport_call() {
-    let herdr = host(Vec::new());
-    let unsupported = |op| {
-        Ok(HostMutation::Refused(HostRefusal::Unsupported {
-            kind: HostKind::Herdr,
-            op,
-        }))
-    };
-    assert_eq!(herdr.send_keys(pane(), &["C-c"]), unsupported("send_keys"));
-    assert_eq!(herdr.interrupt(pane()), unsupported("interrupt"));
+fn herdr_keys_map_whole_or_send_nothing() {
+    let executor_keys = ["Enter", "Escape", "C-u", "C-e", "Left", "Right", "BSpace"];
+    let herdr_names = [
+        "enter",
+        "esc",
+        "ctrl+u",
+        "ctrl+e",
+        "left",
+        "right",
+        "backspace",
+    ];
+    let herdr = host(vec![
+        (keys_call(&herdr_names), ok()),
+        (keys_call(&["ctrl+c"]), ok()),
+        (keys_call(&["esc"]), Scripted::Error("invalid_key")),
+        (send_call("\x1b[200~한글\n둘째\x1b[201~"), ok()),
+        (
+            HerdrRequest::PaneSendInput {
+                pane_id: PANE.into(),
+                text: "/clear".into(),
+                keys: vec!["enter".into()],
+            },
+            ok(),
+        ),
+    ]);
+    assert_eq!(
+        herdr.send_keys(pane(), &executor_keys),
+        Ok(HostMutation::Confirmed)
+    );
+    assert_eq!(herdr.interrupt(pane()), Ok(HostMutation::Confirmed));
+    assert!(matches!(
+        herdr.send_keys(pane(), &["Escape"]),
+        Ok(HostMutation::Indeterminate(_))
+    ));
+    assert_eq!(
+        herdr.send_paste(pane(), "한글\n둘째"),
+        Ok(HostMutation::Confirmed)
+    );
+    assert_eq!(
+        herdr.send_line(pane(), "/clear"),
+        Ok(HostMutation::Confirmed)
+    );
+    assert_eq!(calls(&herdr).len(), 5);
+
+    let silent = host(Vec::new());
+    let unsupported = Ok(HostMutation::Refused(HostRefusal::Unsupported {
+        kind: HostKind::Herdr,
+        op: "send_keys",
+    }));
+    for keys in [&["Enter", "C-z"][..], &["enter"], &[]] {
+        assert_eq!(silent.send_keys(pane(), keys), unsupported, "{keys:?}");
+    }
+    let end = format!("a{PASTE_END}b");
+    for refused in [
+        silent.send_paste(pane(), &end),
+        silent.send_line(pane(), "/clear\n"),
+        silent.send_line(pane(), ""),
+    ] {
+        assert!(
+            matches!(
+                refused,
+                Ok(HostMutation::Refused(HostRefusal::Precondition(_)))
+            ),
+            "{refused:?}"
+        );
+    }
     for wrong in [
         HostSessionRef::tmux(PANE),
         HostSessionRef::process(PANE),
         HostSessionRef::herdr_pane(" "),
     ] {
-        assert_eq!(herdr.presence(wrong), HostPresence::ProbeFailed);
-        assert_eq!(herdr.liveness(wrong), HostLiveness::ProbeError);
-        assert!(herdr.send_text(wrong, "x").is_err());
-        assert!(herdr.execution_pid(wrong).is_err());
+        assert_eq!(silent.presence(wrong), HostPresence::ProbeFailed);
+        assert_eq!(silent.liveness(wrong), HostLiveness::ProbeError);
+        assert!(silent.send_text(wrong, "x").is_err());
+        assert!(silent.send_keys(wrong, &["Enter"]).is_err());
+        assert!(silent.send_paste(wrong, "x").is_err());
+        assert!(silent.execution_pid(wrong).is_err());
     }
-    assert!(calls(&herdr).is_empty());
-    let caps = herdr.capabilities();
-    assert!(caps.send_text && caps.capture_screen && !caps.send_keys && !caps.interrupt);
+    assert!(calls(&silent).is_empty());
 }
 
-/// Text, Enter, draft clear (C-e, C-u) and cancel (Escape, interrupt) as the executor sends them.
+/// Text, Enter, draft clear (C-e, C-u), cancel (Escape, interrupt), paste and a command line.
 fn every_input(herdr: &HerdrHost<FakeTransport>) -> Vec<Result<HostMutation, HostError>> {
     let mut outcomes = vec![herdr.send_text(pane(), "x")];
     for keys in [&["Enter"][..], &["C-e", "C-u"], &["Escape"]] {
         outcomes.push(herdr.send_keys(pane(), keys));
     }
     outcomes.push(herdr.interrupt(pane()));
+    outcomes.push(herdr.send_paste(pane(), "x"));
+    outcomes.push(herdr.send_line(pane(), "/clear"));
     outcomes
 }
 
@@ -493,22 +593,28 @@ fn herdr_production_restore_reader_refuses_every_input_before_any_call() {
 }
 
 #[test]
-fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
+fn herdr_input_needs_a_fresh_off_reading_naming_the_server_that_gets_it() {
     let with_readings = |readings: Vec<RestoreResume>| {
         let herdr = host(vec![(send_call("x"), ok())]);
         *herdr.transport.restore.lock().unwrap() = readings.into();
         herdr
     };
-    for reading in [RestoreResume::On, RestoreResume::Unverified] {
-        let herdr = with_readings(vec![reading; 5]);
+    for reading in [
+        RestoreResume::On,
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+    ] {
+        let herdr = with_readings(vec![reading.clone(); 8]);
         for outcome in every_input(&herdr) {
             assert_eq!(outcome, restore_refused(), "{reading:?}");
         }
         assert!(calls(&herdr).is_empty(), "{reading:?}");
     }
 
-    let off = RestoreResume::Off { generation: 0 };
-    let herdr = with_readings(vec![off, RestoreResume::Unverified]);
+    let off = RestoreResume::Off { witness: serving() };
+    let herdr = with_readings(vec![
+        off.clone(),
+        RestoreResume::Unverified(RestoreUnverified::NoPeer),
+    ]);
     assert_eq!(herdr.send_text(pane(), "x"), Ok(HostMutation::Confirmed));
     assert_eq!(
         herdr.send_text(pane(), "x"),
@@ -517,11 +623,15 @@ fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
     );
     assert_eq!(calls(&herdr).len(), 1);
 
+    let replaced = ServerWitness {
+        pid: 5,
+        ..serving()
+    };
     let herdr = with_readings(vec![off]);
-    herdr.transport.generation.store(1, Ordering::SeqCst);
+    *herdr.transport.reached.lock().unwrap() = vec![Ok(replaced)].into();
     assert!(
         matches!(herdr.send_text(pane(), "x"), Err(HostError::Transport(_))),
-        "a reading from before a reconnect admits nothing"
+        "a reading of the replaced server admits nothing on the new one"
     );
     assert!(calls(&herdr).is_empty());
 }
@@ -1401,6 +1511,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/herdr/observe.rs", 0),
         ("src/services/session_host/herdr/transport.rs", 0),
         ("src/services/session_host/herdr/wire.rs", 0),
+        ("src/services/session_host/herdr/provenance.rs", 0),
         ("src/services/session_host/model.rs", 3),
         ("src/services/session_host/resolve.rs", 2),
         ("src/services/session_host/consumer_guard.rs", 2),

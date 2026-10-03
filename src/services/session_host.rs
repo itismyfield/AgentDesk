@@ -6,6 +6,7 @@ mod herdr {
     pub(crate) mod contract;
     pub(crate) mod model;
     pub(crate) mod observe;
+    pub(crate) mod provenance;
     // Unix-socket only; no Windows transport exists.
     #[cfg(unix)]
     pub(crate) mod transport;
@@ -23,7 +24,8 @@ pub(crate) mod test_support;
 mod tmux_host;
 mod traits;
 
-pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume};
+pub(crate) use herdr::contract::ServerWitness;
+pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,
