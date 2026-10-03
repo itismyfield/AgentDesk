@@ -686,7 +686,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             stream_loop::StreamLoopOutcome::AuthorityLost => {
                 inflight_guard.defuse();
                 #[cfg(test)]
-                authority_loss_tests::authority_lost(channel_id);
+                authority_loss_tests::authority_lost(channel_id).await;
                 authority_loss::settle_displaced_terminal(
                     (&provider, &admitted_episode, &cancel_token),
                     (&mut rx, &mut pending_stream_messages),

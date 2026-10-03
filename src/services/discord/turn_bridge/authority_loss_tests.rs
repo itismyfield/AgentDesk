@@ -11,6 +11,7 @@ pub(super) struct TestBarrier {
     pub(super) entered: tokio::sync::Notify,
     pub(super) resume: tokio::sync::Notify,
     pub(super) lost: tokio::sync::Notify,
+    pub(super) observe_resume: tokio::sync::Notify,
 }
 
 static BARRIER: std::sync::Mutex<Option<Arc<TestBarrier>>> = std::sync::Mutex::new(None);
@@ -27,14 +28,15 @@ pub(super) async fn before_stream(channel: ChannelId) {
     }
 }
 
-pub(super) fn authority_lost(channel: ChannelId) {
-    if let Some(barrier) = BARRIER
+pub(super) async fn authority_lost(channel: ChannelId) {
+    let barrier = BARRIER
         .lock()
         .unwrap()
-        .as_ref()
-        .filter(|barrier| barrier.channel == channel)
-    {
+        .clone()
+        .filter(|barrier| barrier.channel == channel);
+    if let Some(barrier) = barrier {
         barrier.lost.notify_one();
+        barrier.observe_resume.notified().await;
     }
 }
 
@@ -176,8 +178,11 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
         .build()
         .unwrap()
         .block_on(async {
-            for terminal_first in [false, true] {
-                let iteration_offset = if terminal_first { 1_000 } else { 0 };
+            for (terminal_first, missing_inflight) in
+                [(false, false), (false, true), (true, true), (true, false)]
+            {
+                let iteration_offset =
+                    u64::from(terminal_first) * 1_000 + u64::from(missing_inflight) * 2_000;
                 let mut shared = discord::make_shared_data_for_tests();
                 let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
                 ui.status_panel_v2_enabled = false;
@@ -233,6 +238,7 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
                     entered: Default::default(),
                     resume: Default::default(),
                     lost: Default::default(),
+                    observe_resume: Default::default(),
                 });
                 *BARRIER.lock().unwrap() = Some(barrier.clone());
                 let mut events =
@@ -309,19 +315,29 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
                 tokio::time::timeout(std::time::Duration::from_secs(5), barrier.lost.notified())
                     .await
                     .unwrap();
+                let snapshot = shared.mailbox(channel).snapshot().await;
+                assert!(
+                    snapshot
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &actor)),
+                    "authority loss must preserve the original actor; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
+                );
+                assert_eq!(snapshot.active_user_message_id, Some(original));
+                assert_eq!(
+                    snapshot.active_turn_kind,
+                    crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent
+                );
+                assert_eq!(std::fs::read(&rebound_path).unwrap(), before);
+                if missing_inflight {
+                    discord::inflight::clear_inflight_state(&ProviderKind::Codex, channel.get());
+                    assert!(!rebound_path.exists());
+                }
                 if !terminal_first {
-                    assert!(
-                        shared
-                            .mailbox(channel)
-                            .snapshot()
-                            .await
-                            .cancel_token
-                            .is_some(),
-                        "authority loss alone must not release a running provider"
-                    );
-                    let _ = tx.send(terminal);
+                    tx.send(terminal).unwrap();
                 }
                 drop(tx);
+                barrier.observe_resume.notify_one();
                 tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx)
                     .await
                     .unwrap()
@@ -350,11 +366,11 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
                 assert_eq!(
                     *gateway.dispatched.lock().unwrap(),
                     vec![queued_id],
-                    "the displaced provider terminal must let the next queued item execute; terminal_first={terminal_first}"
+                    "the displaced provider terminal must let the next queued item execute; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
                 );
                 assert!(
                     queue_eligible,
-                    "the exact original turn must publish queue admission"
+                    "the exact original turn must publish queue admission; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
                 );
                 assert_eq!(
                     gateway
@@ -365,7 +381,7 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
                         .filter(|body| body.contains(BODY))
                         .count(),
                     1,
-                    "the existing publication fence must block the original reader's duplicate; terminal_first={terminal_first}"
+                    "the existing publication fence must block the original reader's duplicate; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
                 );
                 assert_eq!(
                     gateway
@@ -375,13 +391,21 @@ fn displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once() {
                         .iter()
                         .filter(|body| body.as_str() == NEXT)
                         .count(),
-                    1
+                    1,
+                    "the next queued item must execute once; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
                 );
-                assert_eq!(
-                    std::fs::read(rebound_path).unwrap(),
-                    before,
-                    "mailbox completion cannot borrow rebind row mutation authority; terminal_first={terminal_first}"
-                );
+                if missing_inflight {
+                    assert!(
+                        !rebound_path.exists(),
+                        "mailbox completion cannot recreate an inflight row; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
+                    );
+                } else {
+                    assert_eq!(
+                        std::fs::read(rebound_path).unwrap(),
+                        before,
+                        "mailbox completion cannot borrow rebind row mutation authority; terminal_first={terminal_first}, missing_inflight={missing_inflight}"
+                    );
+                }
                 *BARRIER.lock().unwrap() = None;
             }
         });
