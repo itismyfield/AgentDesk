@@ -15,6 +15,11 @@ pub(super) fn prepare_codex_tui_launch_script(
     warm_followup_enabled: bool,
     auth_overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
 ) -> Result<CodexTuiLaunchScript, String> {
+    use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_configured_for_tui_launch};
+    // Refused before any launch I/O; a Herdr channel never gets a tmux session.
+    if herdr_configured_for_tui_launch(report_channel_id) {
+        return Err(HERDR_NOT_ADMITTED.to_string());
+    }
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
         tmux_session_name,

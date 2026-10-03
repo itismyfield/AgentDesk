@@ -18,9 +18,9 @@ pub(super) fn prepare_and_create_claude_tui_session(
     auth_env_lines: &str,
     channel_id: Option<u64>,
 ) -> Result<(String, PreparedIncarnation), String> {
-    use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_admitted_for_claude_launch};
-    // The host is chosen before any launch I/O; only tmux is admitted.
-    if herdr_admitted_for_claude_launch(channel_id) {
+    use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_configured_for_tui_launch};
+    // The host is chosen before any launch I/O; a Herdr channel never gets a tmux session.
+    if herdr_configured_for_tui_launch(channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);

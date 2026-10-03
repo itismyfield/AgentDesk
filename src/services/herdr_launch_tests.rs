@@ -675,7 +675,7 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
         .into();
     let root = tempfile::tempdir().unwrap();
     let ready = |channel| o_ready_at(Some(root.path()), channel);
-    let _gate = force_launch_gate(true, Some(true));
+    let _gate = force_writer_accepts(Some(true));
     let (store, era) = o_store_for_test(root.path(), &[owned]);
     {
         let _owned = force_channels(&channels);
@@ -708,7 +708,7 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
             store_tree(empty.path()).len() == 1,
             "the empty root gains nothing"
         );
-        let _refusing = force_launch_gate(true, Some(false));
+        let _refusing = force_writer_accepts(Some(false));
         assert!(!ready(owned), "the writer does not accept work");
     }
     {

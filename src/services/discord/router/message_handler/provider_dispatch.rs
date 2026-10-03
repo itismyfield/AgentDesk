@@ -11,6 +11,7 @@ use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
+use crate::services::turn_host::{HerdrRefusal, TurnHost};
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
 pub(super) struct StreamingTurn<'a> {
@@ -26,6 +27,8 @@ pub(super) struct StreamingTurn<'a> {
     pub tmux_session_name: Option<&'a str>,
     /// Host-guard verdict for the turn's tmux teardowns, judged before spawn.
     pub teardown: Option<&'a TeardownClearance>,
+    /// The turn's host, judged before spawn; only `Tmux` reaches a provider driver.
+    pub host: &'a TurnHost,
     pub channel_id: u64,
     pub model: Option<&'a str>,
     pub native_fast_mode: Option<bool>,
@@ -42,6 +45,16 @@ pub(super) fn execute(
     turn: StreamingTurn<'_>,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    match turn.host {
+        TurnHost::Tmux => {}
+        TurnHost::Refused(refusal) => return Err(refusal.to_string()),
+        // No Herdr executor is wired yet, and a Herdr turn never falls back to another driver.
+        TurnHost::Herdr(plan) => {
+            let refusal = HerdrRefusal::ExecutorNotWired;
+            tracing::warn!(endpoint = %plan.endpoint.config_key, "{refusal}");
+            return Err(refusal.to_string());
+        }
+    }
     let _execution_guard = crate::services::cluster::execution_capacity::acquire(
         turn.pool,
         turn.provider.as_str(),
@@ -198,6 +211,7 @@ mod tests {
             remote_profile: None,
             tmux_session_name: None,
             teardown: None,
+            host: &TurnHost::Tmux,
             channel_id: 42,
             model: Some("configured-model"),
             native_fast_mode: None,

@@ -2398,6 +2398,13 @@ pub(super) async fn handle_text_message(
         tmux_session_name.as_deref(),
     )
     .await;
+    let turn_host = crate::services::turn_host::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+    )
+    .await;
     tokio::task::spawn_blocking(move || {
         let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
@@ -2417,6 +2424,7 @@ pub(super) async fn handle_text_message(
                             remote_profile: remote_profile.as_ref(),
                             tmux_session_name: tmux_session_name.as_deref(),
                             teardown: teardown_clearance.as_ref(),
+                            host: &turn_host,
                             channel_id: channel_id.get(),
                             model: model_for_turn.as_deref(),
                             native_fast_mode: native_fast_mode_override,
