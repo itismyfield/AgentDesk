@@ -68,6 +68,7 @@ enum StaticSendSource {
     DispatchWatchdog,
     StallWatchdog,
     TuiOAlarm,
+    AdoptFenceForwardNotice,
     AgentdeskCli,
     Operator,
     Dashboard,
@@ -128,6 +129,11 @@ const POLICIES: &[SourcePolicy] = &[
     // a suspected-stall turn — it posts a rate-limited outbox alert.
     policy!(StallWatchdog, "stall_watchdog", LOOPBACK),
     policy!(TuiOAlarm, "tui_o_alarm", LOOPBACK),
+    policy!(
+        AdoptFenceForwardNotice,
+        "adopt_fence_forward_notice",
+        LOOPBACK
+    ),
     policy!(AgentdeskCli, "agentdesk-cli", CLI),
     policy!(Operator, "operator", CLI),
     policy!(Dashboard, "dashboard", DASHBOARD),
@@ -162,6 +168,10 @@ pub fn validate_send_source_for(
 }
 
 #[cfg(test)]
+#[path = "source_registry_scan_tests.rs"]
+mod scan_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{POLICIES, SendCallerClass, validate_send_source_for};
 
@@ -194,6 +204,7 @@ mod tests {
         "dispatch_watchdog",
         "stall_watchdog",
         "tui_o_alarm",
+        "adopt_fence_forward_notice",
     ];
 
     #[test]

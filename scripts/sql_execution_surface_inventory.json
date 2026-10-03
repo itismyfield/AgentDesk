@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "c16e5a20b805efb9370b9c63d7dff1712ac5bf22",
+  "measured_at_sha": "3ae7ee1d491d7b41748d965b1befecd523711501",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26335,6 +26335,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:44681a0e7ed43875614a142d10b0cd3b0f39c8efee417009dd5c010b8bd930b1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f138e2295bb7cc5406e95b4ecd2466286e2cb24b35d43b13e0a88d9f2e8476cf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f1de2db9a56385f25534bc4c640a58f35ed4928ba8fbc44c4f2c79e5d558db10"
     },
     {
       "root": "src",

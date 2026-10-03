@@ -4287,6 +4287,7 @@ services::discord::outbound::send_to_agent::tests::rejects_missing_role_id
 services::discord::outbound::send_to_agent::tests::rejects_unknown_mode
 services::discord::outbound::send_to_agent::tests::trims_role_id_and_respects_explicit_mode
 services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped
+services::discord::outbound::source_registry::scan_tests::every_outbox_producer_source_is_registered
 services::discord::outbound::source_registry::tests::new_sources_are_loopback_only
 services::discord::outbound::source_registry::tests::original_external_contract_and_fail_closed_variants_are_pinned
 services::discord::outbound::source_registry::tests::producer_contract_lists_every_loopback_source
@@ -4843,6 +4844,7 @@ services::discord::recovery_engine::idle_captured_response::tests::idle_partial_
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_accepts_native_stop_hook_with_nullable_session_5071
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_keeps_normalized_result_and_tool_precedence_5071
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_rejects_unproven_or_malformed_captured_terminal_5071
+services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::adoption::tests::an_unaddressable_range_is_recorded_before_it_may_be_fenced
 services::discord::recovery_engine::manual_rebind::adoption::tests::any_rebase_of_a_tui_direct_row_needs_custody_whoever_asked_for_it
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_adopted_transcript_rebind_forces_eof_when_saved_output_missing
@@ -4858,6 +4860,7 @@ services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_initi
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset
+services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_resumes_a_headless_turn_row_without_a_fence_forward
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_with_an_output_path_override_keeps_the_row_offsets_without_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_with_an_output_path_override_rebases_to_eof_only_after_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::tui_direct_adopt_keeps_offsets_only_in_their_own_coordinate_space
