@@ -251,10 +251,13 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
         let mut row = row(channel.get(), &token);
         row.turn_start_offset = Some(0);
         let rollout = root.path().join(format!("{}.jsonl", channel.get()));
-        let native = format!("{}\n", serde_json::json!({
-            "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "fixture-native-turn",
-            "last_agent_message": BODY},
-        }));
+        let native = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "fixture-native-turn",
+                "last_agent_message": BODY},
+            })
+        );
         std::fs::write(&rollout, native.as_bytes()).unwrap();
         let tmux = row.tmux_session_name.as_deref().unwrap();
         crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
@@ -319,11 +322,14 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
         let (killed_tx, killed_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let terminal = StreamMessage::CodexTuiTerminalDone {
-            result: BODY.into(), session_id: Some("fixture-session".into()),
+            result: BODY.into(),
+            session_id: Some("fixture-session".into()),
             rollout_path: rollout.display().to_string(),
             tmux_session_name: row.tmux_session_name.clone().unwrap(),
-            turn_nonce: token.turn_nonce().unwrap().into(), source_start: 0,
-            complete_record_end: native.len() as u64, captured_source: None,
+            turn_nonce: token.turn_nonce().unwrap().into(),
+            source_start: 0,
+            complete_record_end: native.len() as u64,
+            captured_source: None,
         };
         let producer = tokio::task::spawn_blocking(move || {
             let _registration = producer_registration;
@@ -373,7 +379,10 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             shared.tmux_watchers.len() == 0,
             "the original reader remains the only reader"
         );
-        assert_eq!(original_readers.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            original_readers.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         drop(original);
         release_tx.send(()).unwrap();
         producer.await.unwrap();
@@ -382,19 +391,49 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             .unwrap();
         let latched = discord::inflight::load_inflight_state(&provider, channel.get()).unwrap();
         let handed_off = discord::tmux_restart_handoff::start_restart_handoff_from_state(
-            channel, &recorder.http, &shared, &provider, latched, BODY,
-        ).await;
-        assert!(recorder.calls().is_empty(), "no placeholder takeover while the original BODY awaits settlement");
+            channel,
+            &recorder.http,
+            &shared,
+            &provider,
+            latched,
+            BODY,
+        )
+        .await;
+        assert!(
+            recorder.calls().is_empty(),
+            "no placeholder takeover while the original BODY awaits settlement"
+        );
         assert!(discord::inflight::load_inflight_state(&provider, channel.get()).is_some());
         assert!(!handed_off);
-        assert!(is_live(&provider, channel.get()), "provider exit must not end bridge protection");
+        assert!(
+            is_live(&provider, channel.get()),
+            "provider exit must not end bridge protection"
+        );
         assert!(try_recovery(&provider, channel.get()).is_err());
-        assert!(!discord::health::watcher_respawn::retry_pending_watcher_respawn(
-            &registry, &provider, &[shared.clone()], channel, 1_001,
-        ).await);
-        assert_eq!(discord::health::watcher_respawn::live_bridge_respawn_test_counts(channel), [0, 0, 0]);
-        assert_eq!(gateway.bodies.lock().unwrap().iter().filter(|body| body.contains(BODY)).count(),
-            usize::from(!terminal_first));
+        assert!(
+            !discord::health::watcher_respawn::retry_pending_watcher_respawn(
+                &registry,
+                &provider,
+                &[shared.clone()],
+                channel,
+                1_001,
+            )
+            .await
+        );
+        assert_eq!(
+            discord::health::watcher_respawn::live_bridge_respawn_test_counts(channel),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            gateway
+                .bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|body| body.contains(BODY))
+                .count(),
+            usize::from(!terminal_first)
+        );
         assert!(
             gateway.dispatched.lock().unwrap().is_empty(),
             "no next-turn pause before BODY"
@@ -458,23 +497,21 @@ async fn confirmed_original_registers_and_blocks_death_while_n1_rejects_syntheti
     let original = register_or_requeue(&shared, &ProviderKind::Codex, &row, &token)
         .await
         .unwrap();
-    assert!(
-        original.is_some(),
-        "confirmed original execution still registers"
-    );
+    discord::inflight::save_inflight_state(&row).unwrap();
     let recorder = discord::recovery_engine::o_cut_recorder::start(channel.get()).await;
-    assert!(
-        !discord::tmux_restart_handoff::start_restart_handoff_from_state(
+    let handed_off = discord::tmux_restart_handoff::start_restart_handoff_from_state(
             channel,
             &recorder.http,
             &shared,
             &ProviderKind::Codex,
-            row,
+            row.clone(),
             BODY
         )
-        .await
-    );
-    assert!(recorder.calls().is_empty());
+        .await;
+    assert!(recorder.calls().is_empty(), "confirmed death must not take over the placeholder");
+    assert_eq!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap().turn_nonce, row.turn_nonce);
+    assert!(!handed_off);
+    assert!(original.is_some(), "confirmed original execution still registers");
     assert!(
         !discord::tmux::tmux_watcher::liveness::reacquire_watcher_inflight_for_active_stream(
             &ProviderKind::Codex,
@@ -487,7 +524,7 @@ async fn confirmed_original_registers_and_blocks_death_while_n1_rejects_syntheti
             None
         )
     );
-    assert!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).is_none());
+    assert_eq!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap().turn_nonce, row.turn_nonce);
 }
 
 #[tokio::test]
@@ -501,7 +538,14 @@ async fn live_original_blocks_both_pinned_and_unpinned_manual_rebind_before_pref
     let _original = register_original(&ProviderKind::Codex, channel, &token)
         .await
         .unwrap();
-    let pin = discord::inflight::InflightEpisodePin::from_state(&row);
+    discord::inflight::save_inflight_state(&row).unwrap();
+    let durable = discord::inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap();
+    let pin = discord::inflight::InflightEpisodePin::from_state(&durable);
+    let tmux = row.tmux_session_name.as_deref().unwrap();
+    let _alive = crate::services::session_host::test_support::InjectedLivenessGuard::set(
+        crate::services::session_host::HostSessionRef::tmux(tmux),
+        crate::services::session_host::HostLiveness::Live,
+    );
     let recorder = discord::recovery_engine::o_cut_recorder::start(channel).await;
     for expected in [None, Some(&pin)] {
         let result = discord::recovery_engine::rebind_inflight_for_channel(
@@ -509,11 +553,13 @@ async fn live_original_blocks_both_pinned_and_unpinned_manual_rebind_before_pref
             &shared,
             &ProviderKind::Codex,
             channel,
-            None,
+            Some(tmux.to_owned()),
             Default::default(),
             expected,
         )
         .await;
+        assert!(recorder.calls().is_empty(), "no external preflight or takeover while original reader lives");
+        assert_eq!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap().turn_nonce, durable.turn_nonce);
         assert!(
             matches!(
                 result,
@@ -832,4 +878,49 @@ async fn canonical_root_alias_keeps_the_slot_before_and_after_first_row_creation
     discord::inflight::save_inflight_state(&row(channel, &token)).unwrap();
     assert!(try_recovery(&ProviderKind::Codex, channel).is_err());
     drop(original);
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn recovery_first_release_revalidates_actor_and_preserves_successor() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(655_212_001);
+    let mut shared = discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
+    let token = Arc::new(CancelToken::new());
+    let original = row(channel.get(), &token);
+    assert!(discord::mailbox_try_start_turn(&shared, channel, token.clone(), UserId::new(7), MessageId::new(original.user_msg_id)).await);
+    discord::increment_global_active(&shared, "fixture");
+    let recovery = try_recovery(&ProviderKind::Codex, channel.get()).unwrap();
+    let start = register_or_requeue(&shared, &ProviderKind::Codex, &original, &token);
+    tokio::pin!(start);
+    assert!(futures::poll!(&mut start).is_pending());
+    let released = discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        &shared, &ProviderKind::Codex, channel, MessageId::new(original.user_msg_id), original.turn_nonce.clone(), std::time::Instant::now(), Some(token.clone()),
+    ).await;
+    assert!(released.removed_token.is_some());
+    discord::saturating_decrement_global_active(&shared);
+    let successor = Arc::new(CancelToken::new());
+    let successor_id = MessageId::new(original.user_msg_id + 10);
+    assert!(discord::mailbox_try_start_turn(&shared, channel, successor.clone(), UserId::new(7), successor_id).await);
+    discord::increment_global_active(&shared, "fixture successor");
+    drop(recovery);
+    assert!(matches!(start.await, Err(true)));
+    let snapshot = shared.mailbox(channel).snapshot().await;
+    assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &successor));
+    assert_eq!(snapshot.active_user_message_id, Some(successor_id));
+    assert_eq!(snapshot.intervention_queue.len(), 1);
+    assert_eq!(snapshot.intervention_queue[0].message_id.get(), original.user_msg_id);
+    assert!(!is_live(&ProviderKind::Codex, channel.get()));
+}
+
+#[tokio::test]
+async fn other_providers_do_not_register_or_block_recovery() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let token = Arc::new(CancelToken::new());
+    for provider in [ProviderKind::Claude, ProviderKind::Gemini] {
+        assert!(register_original(&provider, 655_213_001, &token).await.unwrap().is_none());
+        assert!(try_recovery(&provider, 655_213_001).unwrap().slot.is_none());
+        assert!(!is_live(&provider, 655_213_001));
+    }
 }

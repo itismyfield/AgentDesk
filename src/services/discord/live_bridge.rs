@@ -38,6 +38,16 @@ tokio::task_local! {
 }
 
 fn enabled() -> bool {
+    #[cfg(not(test))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(configured_enabled)
+    }
+    #[cfg(test)]
+    configured_enabled()
+}
+
+fn configured_enabled() -> bool {
     std::env::var("AGENTDESK_CODEX_LIVE_BRIDGE_GUARD").as_deref() != Ok("0")
 }
 
@@ -161,6 +171,10 @@ pub(super) async fn register_or_requeue(
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, cancel))
                 && snapshot.active_user_message_id.map(|id| id.get()) == Some(state.user_msg_id)
+                && super::inflight::load_inflight_state(provider, state.channel_id).is_none_or(
+                    |current| current.user_msg_id == state.user_msg_id
+                        && current.turn_nonce == state.turn_nonce,
+                )
             {
                 Ok(Some(original))
             } else {
@@ -260,5 +274,5 @@ impl RecoveryRegistration {
 }
 
 #[cfg(test)]
-#[path = "live_bridge/tests.rs"]
+#[path = "live_bridge/guard_tests.rs"]
 mod tests;

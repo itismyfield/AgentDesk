@@ -906,7 +906,7 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── live_bridge/
-│   │   │   └── tests.rs
+│   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
 │   │   ├── meeting_orchestrator/
