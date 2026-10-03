@@ -2,8 +2,6 @@
 
 use std::future::Future;
 
-use poise::serenity_prelude as serenity;
-
 const REACTIONS: [char; 3] = ['\u{23f3}', '\u{2705}', '\u{26a0}'];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,28 +19,6 @@ pub trait ReactionPort: Send + Sync {
         emoji: char,
         present: bool,
     ) -> impl Future<Output = Result<(), String>> + Send;
-}
-
-pub struct DiscordReactions<'a>(pub &'a serenity::Http);
-
-impl ReactionPort for DiscordReactions<'_> {
-    async fn set(
-        &self,
-        channel: u64,
-        message: u64,
-        emoji: char,
-        present: bool,
-    ) -> Result<(), String> {
-        let channel = serenity::ChannelId::new(channel);
-        let message = serenity::MessageId::new(message);
-        let emoji = serenity::ReactionType::Unicode(emoji.to_string());
-        if present {
-            channel.create_reaction(self.0, message, emoji).await
-        } else {
-            channel.delete_reaction(self.0, message, None, emoji).await
-        }
-        .map_err(|error| error.to_string())
-    }
 }
 
 /// Repeated calls converge through Discord's own reaction identity, with no local dedup state.
