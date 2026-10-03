@@ -737,11 +737,10 @@ pub(crate) mod policy_observability_tests {
     async fn queue_truth_disk_stat_error_is_unmeasured() {
         use super::*;
         let temp = tempfile::tempdir().unwrap();
-        // A component beyond the filesystem name limit forces a stat error on
-        // both Unix and Windows, where a non-directory parent can look absent.
-        let invalid_root = temp.path().join("x".repeat(512));
-        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &invalid_root);
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        // An embedded NUL makes metadata lookup fail on every platform.
+        Arc::get_mut(&mut shared).unwrap().token_hash = "invalid\0path".to_string();
         let registry = HealthRegistry::new();
         registry.register("claude".into(), shared.clone()).await;
         let (mailboxes, token) = shared.queue_fixture_parts();
@@ -751,7 +750,10 @@ pub(crate) mod policy_observability_tests {
             .join("claude")
             .join(token)
             .join(format!("{}.json", channel.get()));
-        disk_path.try_exists().expect_err("fixture must fail stat");
+        assert_eq!(
+            disk_path.try_exists().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
         let observed = crate::services::discord::health::snapshot_pending_queue_state(
             &registry, "claude", channel,
         )
