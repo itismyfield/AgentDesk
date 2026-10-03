@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::tui_o::store::rotation::{Rotation, Successor};
+use crate::services::tui_o::store::rotation::Rotation;
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::rotation::{MAX_READERS, RETIRE_QUIET, Sources};
 
@@ -76,7 +76,11 @@ fn h1_adoption_history_restores_relations_without_native_proof_or_boundary_chang
             checkpoint(&harness, 2);
         }
         let cursors: Vec<_> = harness.channel().cursors().cloned().collect();
-        let (mut sources, mut writer, _, _) = resume(&harness, bindings);
+        let init_before = harness.channel().init().clone();
+        let canonical_before = bindings.events.lock().unwrap().clone();
+        let (mut sources, mut writer, _, _) = resume(&harness, bindings.clone());
+        assert_eq!(writer.store().init(), &init_before);
+        assert_eq!(*bindings.events.lock().unwrap(), canonical_before);
         let rotation = writer.store().rotation().unwrap();
         let next = &rotation.successors[&source_key(&ids[0])];
         assert_eq!(
