@@ -461,34 +461,52 @@ def _inside_test_region(offset: int, ranges: Iterable[ModuleRange], external: bo
 
 def _external_test_files(repo_root: Path, coverage, counter: list[int] | None = None, findings: list[Finding] | None = None) -> set[Path]:
     src_root = (repo_root / "src").resolve()
+    declarations: dict[Path, list[tuple[Path | None, bool, Finding]]] = {}
     targets: set[Path] = set()
     for path in sorted(src_root.rglob("*.rs")):
         source = path.read_text("utf-8")
         clean = coverage.strip_rust(source)
         ranges = _module_ranges(source, clean, counter)
-        for match in _ATTR_MOD.finditer(clean):
-            if match.group("term") != ";" or not _CFG_TEST.search(match.group("attrs")):
+        attributes = {match.start("name"): match for match in _ATTR_MOD.finditer(clean)}
+        children = declarations.setdefault(path.resolve(), [])
+        for match in _MOD.finditer(clean):
+            if match.group("term") != ";":
                 continue
-            path_attr = re.search(r"#\s*\[\s*path\s*=", match.group("attrs"))
-            redirect = _PATH_ATTR.match(source, match.start("attrs") + path_attr.start(), match.end("attrs")) if path_attr else None
+            attributed = attributes.get(match.start("name"))
+            attrs = attributed.group("attrs") if attributed else ""
+            is_test = bool(_CFG_TEST.search(attrs)) or _inside_test_region(match.start(), ranges, False)
+            path_attr = re.search(r"#\s*\[\s*path\s*=", attrs)
+            redirect = _PATH_ATTR.match(source, attributed.start("attrs") + path_attr.start(), attributed.end("attrs")) if path_attr else None
             parents = _scope_at(match.start(), ranges)
             if redirect:
                 base = path.with_suffix("") if parents and path.name not in {"mod.rs", "lib.rs", "main.rs"} else path.parent
-                target = base.joinpath(*parents, redirect.group("path"))
-                candidates = (target,)
+                candidates = (base.joinpath(*parents, redirect.group("path")),)
             else:
                 base = path.parent if path.name in {"mod.rs", "lib.rs", "main.rs"} else path.with_suffix("")
                 base = base.joinpath(*parents)
                 name = match.group("name")
                 candidates = (base / f"{name}.rs", base / name / "mod.rs")
             target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
-            if target and target.is_relative_to(src_root):
+            if target and not target.is_relative_to(src_root):
+                target = None
+            location = attributed.start() if attributed else match.start()
+            line = source.count("\n", 0, location) + 1
+            tried = ", ".join(Path(os.path.relpath(candidate, repo_root)).as_posix() for candidate in candidates)
+            finding = Finding("unresolved-external-test-module", f"{path.relative_to(repo_root).as_posix()}:{line}", f"mod {match.group('name')}; did not resolve inside src; tried: {tried}")
+            children.append((target, is_test, finding))
+            if is_test:
+                if target:
+                    targets.add(target)
+                elif findings is not None:
+                    findings.append(finding)
+    pending = list(targets)
+    while pending:
+        for target, is_test, finding in declarations.get(pending.pop(), []):
+            if target and target not in targets:
                 targets.add(target)
-            elif findings is not None:
-                line = source.count("\n", 0, match.start()) + 1
-                tried = ", ".join(Path(os.path.relpath(candidate, repo_root)).as_posix() for candidate in candidates)
-                detail = f"mod {match.group('name')}; did not resolve inside src; tried: {tried}"
-                findings.append(Finding("unresolved-external-test-module", f"{path.relative_to(repo_root).as_posix()}:{line}", detail))
+                pending.append(target)
+            elif target is None and not is_test and findings is not None:
+                findings.append(finding)
     return targets
 
 
@@ -534,8 +552,7 @@ def discover_pg_inventory(
     receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
     real Rust parser would be required to cover those forms without broad false
     positives. It skips ``src/main.rs``, ``src/bin/**`` (the current tree has
-    no such directory), sources injected by ``include!``, and attribute-free
-    external mods inside ``#[cfg(test)]`` inline modules. ``#[ignore]`` tests
+    no such directory), sources injected by ``include!``. ``#[ignore]`` tests
     remain selection/debt because their execution belongs to the ignore ledger.
     """
     repo_root = repo_root.resolve()
@@ -570,6 +587,15 @@ def discover_pg_inventory(
                 drop += 1
             return (*module[: max(0, len(module) - drop)], *parts[drop:])
         return parts
+
+    def import_bindings(module: tuple[str, ...], raw: str):
+        brace = re.fullmatch(r"(?P<base>.+)::\{(?P<items>[^{}]+)\}", raw.strip())
+        expanded = [f"{brace.group('base')}::{item.strip()}" for item in brace.group("items").split(",") if item.strip()] if brace else [raw.strip()]
+        for entry in expanded:
+            target_text, separator, alias = entry.partition(" as ")
+            target = absolute_path(module, target_text)
+            if target:
+                yield alias.strip() if separator else target[-1], target
 
     def nested(offset: int, ranges: Iterable[tuple[int, int]]) -> bool:
         return any(start < offset < end for start, end in ranges)
@@ -618,23 +644,7 @@ def discover_pg_inventory(
                 continue
             physical_module = (*physical_base, *_scope_at(use.start(), ranges))
             module = coverage._normalize_alias_path(physical_module, aliases)
-            raw = use.group("path").strip()
-            expanded: list[str]
-            brace = re.fullmatch(r"(?P<base>.+)::\{(?P<items>[^{}]+)\}", raw)
-            if brace:
-                expanded = [
-                    f"{brace.group('base')}::{item.strip()}"
-                    for item in brace.group("items").split(",")
-                    if item.strip()
-                ]
-            else:
-                expanded = [raw]
-            for entry in expanded:
-                target_text, separator, alias = entry.partition(" as ")
-                target = absolute_path(module, target_text)
-                if not target:
-                    continue
-                binding = alias.strip() if separator else target[-1]
+            for binding, target in import_bindings(module, use.group("path")):
                 if binding == "*":
                     wildcard_uses.setdefault(module, []).append(target[:-1])
                 else:
@@ -708,22 +718,26 @@ def discover_pg_inventory(
         module, name, _ = key
         by_path.setdefault((module, name), set()).add(key)
 
-    def resolve(module: tuple[str, ...], raw: str) -> set[tuple[tuple[str, ...], str, str]]:
+    def resolve(module: tuple[str, ...], raw: str, local_aliases=None, local_wildcards=()) -> set[tuple[tuple[str, ...], str, str]]:
+        bindings = {**use_aliases.get(module, {}), **(local_aliases or {})}
         if "::" in raw:
             parts = tuple(part for part in raw.split("::") if part)
-            alias = use_aliases.get(module, {}).get(parts[0]) if parts else None
+            alias = bindings.get(parts[0]) if parts else None
             target = (*alias, *parts[1:]) if alias else absolute_path(module, raw)
             return by_path.get((target[:-1], target[-1]), set()) if target else set()
+        if raw in (local_aliases or {}):
+            alias = local_aliases[raw]
+            return set(by_path.get((alias[:-1], alias[-1]), set()))
         targets = set(by_path.get((module, raw), set()))
-        alias = use_aliases.get(module, {}).get(raw)
+        alias = bindings.get(raw)
         if alias:
             targets.update(by_path.get((alias[:-1], alias[-1]), set()))
-        for base in wildcard_uses.get(module, []):
+        for base in (*wildcard_uses.get(module, []), *local_wildcards):
             targets.update(by_path.get((base, raw), set()))
         return targets
 
     def resolve_call(
-        module: tuple[str, ...], raw: str
+        module: tuple[str, ...], raw: str, local_aliases=None, local_wildcards=()
     ) -> set[tuple[tuple[str, ...], str, str]]:
         """Resolve a free call or one whole associated-call receiver path.
 
@@ -732,34 +746,45 @@ def discover_pg_inventory(
         ``a::b::TestDatabase`` receiver. Individual qualifier segments are never
         reinterpreted in the caller's module.
         """
-        targets = set(resolve(module, raw))
+        targets = set(resolve(module, raw, local_aliases, local_wildcards))
         receiver, separator, _method = raw.rpartition("::")
         if separator and not targets:
-            targets.update(resolve(module, receiver))
+            targets.update(resolve(module, receiver, local_aliases, local_wildcards))
         return targets
 
     def body_references(
         module: tuple[str, ...], body: str
     ) -> set[tuple[tuple[str, ...], str, str]]:
-        """Extract identical module-scoped references from tests and helpers."""
+        """Resolve body-local imports without leaking aliases into sibling tests."""
+        local_aliases = {}
+        local_wildcards = []
+        visible = list(body)
+        for use in _USE.finditer(body):
+            for binding, target in import_bindings(module, use.group("path")):
+                if binding == "*":
+                    local_wildcards.append(target[:-1])
+                else:
+                    local_aliases[binding] = target
+            visible[use.start():use.end()] = " " * (use.end() - use.start())
+        body = "".join(visible)
         calls = list(_CALL.finditer(body))
         ufcs_calls = list(_UFCS_CALL.finditer(body))
         occupied = [match.span() for match in (*calls, *ufcs_calls)]
         targets = {
             target
             for call in calls
-            for target in resolve_call(module, call.group("path"))
+            for target in resolve_call(module, call.group("path"), local_aliases, local_wildcards)
         }
         targets.update(
             target
             for call in ufcs_calls
-            for target in resolve(module, call.group("type"))
+            for target in resolve(module, call.group("type"), local_aliases, local_wildcards)
         )
         targets.update(
             target
             for mention in _BARE_REFERENCE.finditer(body)
             if not any(start <= mention.start() < end for start, end in occupied)
-            for target in resolve(module, mention.group("name"))
+            for target in resolve(module, mention.group("name"), local_aliases, local_wildcards)
         )
         return targets
 

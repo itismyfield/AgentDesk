@@ -103,7 +103,10 @@ def nightly_contract_problems(text: str) -> list[str]:
     pg = step_of(jobs, "postgres_full", PG_STEP) or {}
     lines = [line.strip() for line in pg.get("run", "").splitlines()]
     env = pg.get("env") or {}
-    need(pg.get("timeout-minutes") == 30, "the PG cargo step lost its 30-minute budget")
+    need(pg.get("timeout-minutes") == 45, "the PG cargo step lost its measured-runtime headroom")
+    job_budget = jobs.get("postgres_full", {}).get("timeout-minutes", 0)
+    step_budgets = sum(step.get("timeout-minutes", 0) for step in jobs.get("postgres_full", {}).get("steps", []))
+    need(job_budget > step_budgets, "the PG job cannot fit its bounded steps plus setup and cleanup")
     need(lines.count(PG_CARGO) == 1, "the PG cargo statement is not one direct line")
     need(FILTER_SOURCE in lines, "the PG step stopped sourcing the canonical filter")
     return problems
@@ -155,7 +158,9 @@ STRUCTURAL_MUTANTS = (
     ("builds every target beside the PostgreSQL lib test",
      lambda t: t.replace(PG_CARGO, PG_CARGO.replace("--lib", "--all-targets"))),
     ("shortens the PostgreSQL step budget",
-     lambda t: t.replace("        timeout-minutes: 30", "        timeout-minutes: 20")),
+     lambda t: t.replace("        timeout-minutes: 45", "        timeout-minutes: 30", 1)),
+    ("leaves no PostgreSQL job budget for E2E and cleanup",
+     lambda t: t.replace("    timeout-minutes: 90", "    timeout-minutes: 45", 1)),
     ("drops the non-PG replay",
      lambda t: t.replace("          run_non_pg_filter_replay\n", "", 1)),
 )
