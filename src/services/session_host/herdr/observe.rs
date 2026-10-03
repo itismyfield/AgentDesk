@@ -85,9 +85,8 @@ pub(crate) fn read_restore_resume<T: HerdrTransport + ?Sized>(
     read_restore_resume_with(transport, endpoint, &super::provenance::OsProvenance)
 }
 
-/// Protocol 22 has no read of effective settings, so `Off` is proven from provenance: the
-/// connected server is a verified version started with this endpoint's config and XDG home,
-/// and that file holds the canonical bytes, written before the server started.
+/// No API reads effective settings, so `Off` is proven from provenance: a verified server
+/// started with this endpoint's config and XDG home, the file canonical and older than it.
 pub(crate) fn read_restore_resume_with<T: HerdrTransport + ?Sized>(
     transport: &T,
     endpoint: &HerdrEndpoint,
