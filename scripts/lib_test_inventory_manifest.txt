@@ -2412,6 +2412,10 @@ services::codex_tui::host_input::tests::a_gate_refusal_is_typed_and_nothing_foll
 services::codex_tui::host_input::tests::a_send_that_may_have_landed_stops_and_is_never_resent
 services::codex_tui::host_input::tests::followup_submit_keeps_the_legacy_tmux_key_order
 services::codex_tui::host_input::tests::non_tmux_targets_get_no_keys_and_no_kill
+services::codex_tui::input::composer_status::tests::current_codex_status_fixture_allows_followup_without_kill
+services::codex_tui::input::composer_status::tests::current_codex_status_fixture_keeps_busy_draft_and_history_guards
+services::codex_tui::input::composer_status::tests::generalized_codex_footer_blocks_submit_during_work_and_approval
+services::codex_tui::input::composer_status::tests::generalized_codex_footer_submits_followup_for_model_and_effort_variants
 services::codex_tui::input::tests::alternate_footer_phrasing_still_matches
 services::codex_tui::input::tests::assistant_output_with_box_drawing_alone_is_not_ready
 services::codex_tui::input::tests::bare_control_bytes_are_rejected
