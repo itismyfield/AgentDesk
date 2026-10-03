@@ -709,6 +709,7 @@ fn write_role_map(root: &std::path::Path, provider: &ProviderKind, channel_id: C
 }
 
 struct TestCatchUpApi {
+    current_user_id: Option<u64>,
     messages: Vec<serenity::Message>,
     phase2_messages: Option<Vec<serenity::Message>>,
     scripted_fetches: Option<Mutex<VecDeque<Result<Vec<serenity::Message>, String>>>>,
@@ -726,6 +727,7 @@ impl TestCatchUpApi {
         let outbox = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
+                current_user_id: Some(CURRENT_BOT_ID),
                 messages,
                 phase2_messages: None,
                 scripted_fetches: None,
@@ -787,7 +789,7 @@ impl TestCatchUpApi {
 #[async_trait::async_trait]
 impl CatchUpDiscordApi for TestCatchUpApi {
     async fn current_user_id(&self) -> Result<Option<u64>, String> {
-        Ok(Some(CURRENT_BOT_ID))
+        Ok(self.current_user_id)
     }
 
     async fn resolve_runtime_channel_binding_status(
@@ -3009,3 +3011,6 @@ fn aged_unauthorized_human_classifies_not_allowed_across_identity_states() {
 
 #[path = "frontier_sweep_tests.rs"]
 mod frontier_sweep_tests;
+
+#[path = "handled_command_tests.rs"]
+mod handled_command_tests;

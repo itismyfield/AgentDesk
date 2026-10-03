@@ -528,6 +528,16 @@ def relay_bodies_limited_to(
         )
 
 
+def relay_marker_hits(window: Window, *, marker: str) -> int:
+    """Count relay messages whose body (banner and chrome stripped) carries ``marker``."""
+
+    return sum(
+        1
+        for message in window.messages
+        if (body := relay_body(message)) is not None and marker in body
+    )
+
+
 def no_duplicate_marker(window: Window, *, marker: str) -> None:
     """Fail if a stable E2E marker appears in more than one relay message.
 
@@ -538,11 +548,7 @@ def no_duplicate_marker(window: Window, *, marker: str) -> None:
     (e.g. ``[E2E:E2:TURN-2]``) is expected exactly once per turn.
     """
 
-    hits = sum(
-        1
-        for message in window.messages
-        if (body := relay_body(message)) is not None and marker in body
-    )
+    hits = relay_marker_hits(window, marker=marker)
     if hits > 1:
         raise AssertionError(
             f"E2E marker {marker!r} appeared in {hits} relay messages "
