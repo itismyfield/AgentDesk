@@ -194,3 +194,85 @@ async fn a_withheld_handoff_records_no_owner_and_a_legacy_one_records_it_before_
         }
     }
 }
+
+/// Parks this thread's next claim before its admission read; a launch then lists `tmux` from
+/// another thread. Resumes the claim once that listing has landed or waits on the handoff.
+fn list_while_claim_parked(tmux: &str) -> std::thread::JoinHandle<std::thread::JoinHandle<()>> {
+    use crate::services::tui_prompt_dedupe::{ADMISSION_PAUSE, HOLD_CONTENDED};
+    let (paused_tx, paused_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    ADMISSION_PAUSE.set(Some((paused_tx, resume_rx)));
+    let tmux = tmux.to_string();
+    std::thread::spawn(move || {
+        let wait = std::time::Duration::from_secs(30);
+        paused_rx
+            .recv_timeout(wait)
+            .expect("the claim reached its admission");
+        let (events_tx, events_rx) = mpsc::channel();
+        let launch = std::thread::spawn(move || {
+            HOLD_CONTENDED.set(Some(events_tx.clone()));
+            install_herdr_execution(&tmux, "p9pre-n1");
+            let _ = events_tx.send("listed");
+        });
+        events_rx
+            .recv_timeout(wait)
+            .expect("the listing landed or waits");
+        resume_tx.send(()).unwrap();
+        launch
+    })
+}
+
+// A launch listing a Legacy pane between the handoff's owner judgement and its claim lands after
+// the claim: the handoff commits owner and watcher together, and the pane is listed afterwards.
+#[tokio::test(flavor = "current_thread")]
+async fn a_listing_inside_a_legacy_handoff_lands_after_its_claim() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let provider = ProviderKind::Codex;
+    // Another pane is listed first, so this thread's claims read the admission map.
+    install_herdr_execution("AgentDesk-codex-p9pre-other", "p9pre-other");
+    for tmux_ready in [false, true] {
+        let channel = 5_340_900 + u64::from(tmux_ready);
+        let case = format!("tmux_ready={tmux_ready}");
+        let tmux = format!("AgentDesk-codex-p9pre-{channel}");
+        let output = format!("/runtime/p9pre-{channel}.jsonl");
+        let mut state = runtime_seed(provider.clone(), channel);
+        state.watcher_owner_channel_id = None;
+        save_inflight_state(&state).expect("seed row");
+        std::fs::write(session_temp_path(&tmux, "generation"), "p9pre").unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.http.cached_bot_token.set("p9pre".into()).unwrap();
+        let incumbent = live_watcher_handle(&tmux, &output);
+        shared
+            .tmux_watchers
+            .insert(ChannelId::new(channel), incumbent);
+
+        let listing = list_while_claim_parked(&tmux);
+        let mut dirty = false;
+        let handoff = message(tmux_ready, &tmux, &output);
+        let observed =
+            dispatch_process_handoff(&shared, &provider, &mut state, handoff, &mut dirty, true)
+                .await;
+        listing.join().unwrap().join().unwrap();
+
+        assert_eq!(observed.outcome, Some(GuardedSaveOutcome::Saved), "{case}");
+        let after = owner_of(&provider, channel, &tmux);
+        assert_eq!(
+            observed.claim_outcome,
+            WatcherHandoffClaimOutcome::ReusedExisting,
+            "{case}: the claim commits with the owner it found durable"
+        );
+        assert!(observed.tmux_handed_off, "{case}");
+        assert_eq!(after, standby_owner(channel), "{case}");
+        assert!(
+            crate::services::tui_prompt_dedupe::herdr_execution_listed(&tmux),
+            "{case}: the launch's listing still lands"
+        );
+    }
+}
