@@ -26339,6 +26339,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f138e2295bb7cc5406e95b4ecd2466286e2cb24b35d43b13e0a88d9f2e8476cf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",

@@ -962,6 +962,7 @@ src/
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
 │   │   │   ├── source_registry.rs
+│   │   │   ├── source_registry_scan_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
@@ -1019,6 +1020,7 @@ src/
 │   │   ├── recovery_engine/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
+│   │   │   │   ├── adoption_notice_pg_tests.rs
 │   │   │   │   ├── codex_tui_replay.rs
 │   │   │   │   ├── coordinate_adoption.rs
 │   │   │   │   ├── coordinate_adoption_tests.rs
