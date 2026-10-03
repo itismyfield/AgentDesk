@@ -70,6 +70,31 @@ pub(super) enum StopTarget {
     },
 }
 
+/// Who settles a stopped turn: only a legacy stop leaves its inflight row for the stop to clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum StopSettlement {
+    Legacy,
+    /// The host was not admitted, by the stop's verdict or by the executor's claim.
+    Refused,
+    /// The host's own source owner still owes the turn's output.
+    #[cfg(test)]
+    HostOwned,
+}
+
+/// What a stop did: whether it recorded a termination, and who settles the turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct StopOutcome {
+    pub(in crate::services::discord) termination_recorded: bool,
+    pub(in crate::services::discord) settlement: StopSettlement,
+}
+
+impl StopOutcome {
+    /// Whether the stopped turn's inflight row may be cleared or its turn finished by fallback.
+    pub(in crate::services::discord) fn may_clear_inflight(&self) -> bool {
+        matches!(self.settlement, StopSettlement::Legacy)
+    }
+}
+
 /// Herdr's answer to an Escape the gate admitted; both outcomes keep the claim spent.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,32 +106,30 @@ pub(super) enum HerdrStopWrite {
 impl StopTarget {
     /// The production verdict: the marker filter alone admits tmux, and no tmux is probed.
     pub(super) fn for_token(token: &CancelToken) -> Self {
-        let Some(name) = token.tmux_session_name() else {
-            return Self::Process;
-        };
-        if crate::services::discord::host_liveness::local_tmux(&name, None) {
-            return Self::LegacyTmux(LegacyTmuxName {
-                name,
-                approved: false,
-            });
-        }
-        let refusal = StopRefusal::Marker;
-        Self::Refused { name, refusal }
+        Self::judge(token.tmux_session_name(), None)
     }
 
-    /// The target a force-kill verdict approved; its host evidence, marker included, was read then.
-    pub(super) fn approved(token: &CancelToken, approved: Option<&str>) -> Self {
-        match token.tmux_session_name() {
-            None => Self::Process,
-            Some(name) if Some(name.as_str()) == approved => Self::LegacyTmux(LegacyTmuxName {
-                name,
-                approved: true,
-            }),
-            Some(name) => {
-                let refusal = StopRefusal::NotApproved;
-                Self::Refused { name, refusal }
+    /// The verdict for a token naming `name`; `approved` is a force-kill verdict's session
+    /// (`Some(None)`: a process turn), whose host evidence, marker included, was read then.
+    pub(super) fn judge(name: Option<String>, approved: Option<Option<&str>>) -> Self {
+        let Some(name) = name else {
+            return Self::Process;
+        };
+        let legacy = |approved| {
+            Self::LegacyTmux(LegacyTmuxName {
+                name: name.clone(),
+                approved,
+            })
+        };
+        let refusal = match approved {
+            Some(approved) if Some(name.as_str()) == approved => return legacy(true),
+            Some(_) => StopRefusal::NotApproved,
+            None if crate::services::discord::host_liveness::local_tmux(&name, None) => {
+                return legacy(false);
             }
-        }
+            None => StopRefusal::Marker,
+        };
+        Self::Refused { name, refusal }
     }
 
     /// Resolved host evidence for a Herdr turn; Unknown and Conflict never become tmux.
@@ -167,6 +190,16 @@ impl StopTarget {
         }
     }
 
+    /// How a stop on this target settles, given whether the executor refused its cleanup.
+    pub(super) fn settlement(&self, host_refused: bool) -> StopSettlement {
+        match self {
+            Self::Process | Self::LegacyTmux(_) if !host_refused => StopSettlement::Legacy,
+            #[cfg(test)]
+            Self::Herdr(_) => StopSettlement::HostOwned,
+            _ => StopSettlement::Refused,
+        }
+    }
+
     /// Any other host keeps its session: a session cleanup becomes a preserve.
     pub(super) fn effective_policy(&self, policy: TmuxCleanupPolicy) -> TmuxCleanupPolicy {
         match policy {
@@ -222,4 +255,4 @@ pub(super) fn not_sent() -> ProviderTurnInterruptOutcome {
 
 #[cfg(test)]
 #[path = "stop_host_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -155,6 +155,7 @@ pub(crate) mod tui_o {
     pub(crate) mod shadow_host;
     pub(crate) mod store;
     pub(crate) mod topology;
+    pub(crate) mod turn_mode;
     pub(crate) mod writer;
 }
 // #3034: 4 residual dead-code items; scoped here so the lint stays

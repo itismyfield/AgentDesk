@@ -736,9 +736,12 @@ _health_json_deploy_nonblocking_ere() {
   # provider whose role the body verifies. A TUI O channel released to Legacy
   # before any store write keeps its output there, so it never blocks. Everything
   # else, including an unrecognised reason, blocks. No comma: the fallback splits on one.
-  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+'
+  # $5 is the post-deploy smoke E2E channel ids (`|`-joined); only for a deploy
+  # verdict, their reader-count alarm is accepted, since the smoke's own !clear raises it.
+  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
+  [ "${2:-0}" = "1" ] && [[ "${5:-}" =~ $ids_re ]] && ere="$ere|tui_o:too_many_readers:(${5})"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
   [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
   printf '%s)$' "$ere"
@@ -746,11 +749,39 @@ _health_json_deploy_nonblocking_ere() {
 
 _health_json_deploy_nonblocking_ere_for_body() {
   # The only way to build the accepted set: structural proof comes from the
-  # body itself, so no caller can reconstruct a policy that drifts.
+  # body itself, so no caller can reconstruct a policy that drifts. The smoke
+  # E2E channels come from DEPLOY_E2E_SMOKE_CHANNEL_IDS, which deploy-release sets.
   local health_json="$1" standby=0 tui
   _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
   tui=$(_health_json_tui_gateway_verified_providers "$health_json")
-  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui"
+  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui" \
+    "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}"
+}
+
+_deploy_e2e_smoke_channel_ids() {
+  # $1 repo, $2 agentdesk.yaml, $3.. smoke E2E cells. Prints their channel ids
+  # `|`-joined via the smoke's own resolver; a cell that does not resolve adds none.
+  local repo="$1" config="$2"
+  shift 2
+  python3 - "$repo" "$config" "$@" 2>/dev/null <<'PY' || true
+import re
+import sys
+from pathlib import Path
+
+repo, config, *cells = sys.argv[1:]
+sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
+from post_deploy_relay_continuity import load_channel_id_from_config
+
+ids = []
+for cell in cells:
+    try:
+        channel_id = load_channel_id_from_config(Path(config), cell)
+    except Exception:
+        continue
+    if re.fullmatch(r"[0-9]+", channel_id) and channel_id not in ids:
+        ids.append(channel_id)
+print("|".join(ids))
+PY
 }
 
 _health_json_deploy_blocking_reasons() {

@@ -680,7 +680,8 @@ src/
 │   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── input/
-│   │   │   └── composer_lock.rs
+│   │   │   ├── composer_lock.rs
+│   │   │   └── composer_status.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs
@@ -796,11 +797,16 @@ src/
 │   │   │   │   ├── tail.rs
 │   │   │   │   └── verdict.rs
 │   │   │   ├── recovery/
+│   │   │   │   ├── live_agent_recovery/
+│   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── stop_judgement/
+│   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── live_agent_recovery.rs
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
+│   │   │   │   ├── stop_judgement.rs
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── relay_auto_heal/
@@ -967,6 +973,7 @@ src/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
 │   │   │   ├── background_task_events.rs
+│   │   │   ├── clock_tests.rs
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
@@ -1264,6 +1271,7 @@ src/
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
+│   │   │   ├── n1a_monitor_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
 │   │   │   ├── tests/
@@ -1318,8 +1326,10 @@ src/
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── jsonl_rotation.rs
+│   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
+│   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
@@ -1387,6 +1397,8 @@ src/
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
+│   │   │   ├── turn_retirement.rs
+│   │   │   ├── turn_retirement_tests.rs
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── rehydration/
@@ -1397,6 +1409,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
@@ -1524,6 +1537,8 @@ src/
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── interrupt_policy.rs
+│   │   │   │   ├── judged_stop.rs
+│   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
@@ -2096,6 +2111,9 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── input_facts/
+│   │   │   │   ├── reactions.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2112,6 +2130,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_tests.rs
+│   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs
@@ -2128,7 +2147,8 @@ src/
 │   │   ├── cutover.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
-│   │   └── topology.rs
+│   │   ├── topology.rs
+│   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
 │   │   │   ├── claude_fold.rs

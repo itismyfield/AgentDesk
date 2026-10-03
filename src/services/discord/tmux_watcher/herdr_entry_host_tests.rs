@@ -70,6 +70,15 @@ fn lapse_onto_herdr_while_parked(h: &Harness, paused: &mpsc::Receiver<()>, pane:
     crate::services::tui_prompt_dedupe::install_herdr_execution(&h.tmux, "p8-entry");
 }
 
+/// Waits for `polls` watcher polls from now; the watcher beats only between reads, so a batch
+/// appended before the first of them has been read and handled by the last.
+async fn polled_since_now(h: &Harness, polls: usize) {
+    for _ in 0..polls {
+        let seen = h.heartbeat();
+        h.until("watcher poll", |h| h.heartbeat() > seen).await;
+    }
+}
+
 fn panel_kept(h: &Harness, panel: serenity::MessageId) -> bool {
     h.discord.lock().unwrap().visible.contains_key(&panel.get())
 }
@@ -166,7 +175,7 @@ async fn a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves
 
 // The terminal preflight parked at its abandonment check while the row lapses and a launch
 // moves the session to Herdr re-reads the host on resume: no capture, no orphan cleanup and,
-// whatever the pane would read, no row re-acquired.
+// whatever the pane would read, no row re-acquired by the tool call that follows the terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel() {
     let test = "a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel";
@@ -187,6 +196,10 @@ async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping
         lapse_onto_herdr_while_parked(&h, &paused, pane);
         resume.send(()).unwrap();
         h.drained("terminal frame").await;
+        // A row-less tool call after the relayed terminal is where a busy pane re-acquires a row,
+        // and with no text to relay nothing clears it again.
+        h.append(tool_only().as_bytes());
+        polled_since_now(&h, 3).await;
         seen.push((
             pane,
             panel_kept(&h, panel),

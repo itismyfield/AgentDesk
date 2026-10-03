@@ -145,7 +145,7 @@ impl super::PlaceholderLiveEvents {
         // codex-review wrong-kill precondition (evicted ✗ A + a same-key live
         // respawn B). Tombstone its match keys BEFORE the retain drops it so the
         // fallback matcher still sees the ownership conflict.
-        let now = std::time::Instant::now();
+        let now = super::panel_now();
         for slot in state.subagents.iter().filter(|slot| {
             slot.is_terminal()
                 && delivered_terminal_ids.contains(&TerminalSlotId::Subagent(slot.identity()))

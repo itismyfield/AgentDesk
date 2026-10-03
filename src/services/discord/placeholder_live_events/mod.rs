@@ -40,7 +40,7 @@ use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
 #[cfg(test)]
 use status_panel::{CompletedKind, DerivedStatus};
-use status_panel::{StatusPanelState, render_status_panel};
+use status_panel::{StatusPanelState, panel_now, render_status_panel};
 
 #[cfg(test)]
 mod probe_fixtures_tests;
@@ -176,7 +176,7 @@ impl PlaceholderLiveEvents {
         // #3477 item 3: stamp the live-content arrival so a render after
         // `TurnCompleted` can tell a fresh late batch (keep 🖥️ Recent) from a
         // stale pre-completion block (suppress on a genuinely idle completed turn).
-        self.last_recent_event_at.insert(channel_id, Instant::now());
+        self.last_recent_event_at.insert(channel_id, panel_now());
         // #3812: stamp the wall-clock arrival so the confidence line's `<t:UNIX:R>`
         // age anchors to a stable point set here, not recomputed per render tick.
         self.last_recent_event_unix
@@ -626,10 +626,7 @@ impl PlaceholderLiveEvents {
                 // instead of by turn length. Slot activity refreshes the TTL
                 // clock (see `SubagentSlot::started_at`), so a live noisy slot
                 // is never force-aborted here.
-                status_panel::force_abort_stuck_subagent_slots(
-                    &mut guard.subagents,
-                    Instant::now(),
-                );
+                status_panel::force_abort_stuck_subagent_slots(&mut guard.subagents, panel_now());
                 guard.clone()
             })
             .unwrap_or_default();
@@ -691,3 +688,7 @@ fn task_notification_success_completion_visible_in_snapshot(
         _ => false,
     })
 }
+
+#[cfg(test)]
+#[path = "clock_tests.rs"]
+mod test_clock;

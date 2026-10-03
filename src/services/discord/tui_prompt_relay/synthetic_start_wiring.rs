@@ -77,6 +77,65 @@ pub(super) async fn post_suppressed_injection_note(
     }
 }
 
+pub(super) async fn post_passive_prompt_notice(
+    shared: &Arc<SharedData>,
+    prompt: &ObservedTuiPrompt,
+    channel: ChannelId,
+    decision: &RelayObservedPromptInjectionDecision,
+    observation: task_notification_prompt::TaskPromptObservation,
+) -> Option<task_notification_prompt::TaskPromptObservation> {
+    let status_only = matches!(
+        decision.injected_class,
+        InjectedPromptClass::TaskNotificationEvent
+    );
+    if !status_only && !crate::services::tui_o::turn_mode::transcript_turns(channel.get()) {
+        return Some(observation);
+    }
+    let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+    let Some(gate) = task_notification_prompt::resolve_gate(
+        shared,
+        prompt,
+        channel,
+        decision.injected_class,
+        &lease,
+        observation,
+    )
+    .await
+    else {
+        return None;
+    };
+    if status_only || gate.card_anchor.is_some() {
+        return None;
+    }
+    if injected_prompt_suppresses_user_turn_lifecycle(
+        decision.injected_class,
+        decision.slash_command_kind.as_deref(),
+    ) {
+        post_suppressed_injection_note(
+            &gate.notify_http,
+            channel,
+            prompt,
+            decision.injected_class,
+            decision.slash_command_kind.as_deref(),
+        )
+        .await;
+        return None;
+    }
+    let content = match decision.slash_command_kind.as_deref() {
+        Some(kind) => {
+            format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt)
+        }
+        None => format_ssh_direct_prompt_notification(
+            &prompt.provider,
+            &prompt.tmux_session_name,
+            &prompt.prompt,
+        ),
+    };
+    let posted = channel.say(&*gate.notify_http, content).await;
+    record_prompt_id_after_post(prompt, posted.as_ref().err());
+    None
+}
+
 /// True only when the POST certainly created no message: rejected before dispatch,
 /// refused by Discord (4xx), or never connected. Timeouts and 5xx stay unknown.
 pub(super) fn discord_post_certainly_unsent(error: &serenity::Error) -> bool {

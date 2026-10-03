@@ -17397,7 +17397,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:1a7bf97a80420cf0bae737609bf5c8e4f66b9f4063f44172f69760559ff5fd42"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:5989cd81b0b757efa5d33af7b62abf7f628a007cf75e1d0f70441467d99775f4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8c3fefd93517f02180bd190842b706bdeefc0fabc8fd4c73ea34019bd8765738"
     },
     {
       "root": "src",
@@ -17416,6 +17434,15 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:a415fefedbf69af2de46223ab6bbe9072747d521467657c7596decd4f9eb443f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6bd8ed438a2909155ab362f746ff4eadadb10a8327fa518ba280e35f880967bd"
     },
     {
       "root": "src",
@@ -26308,6 +26335,33 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:44681a0e7ed43875614a142d10b0cd3b0f39c8efee417009dd5c010b8bd930b1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:71cf32b85c7f46020d63cc5a2cea22483a9725dc0accf2c6f5842f63d9baffd2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3f20de78ccf1b1ead96fff38571a091e84b5d3a18b7fd4f2584cd5fbf68987a3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f2a9e54a0121b60ccf5c82b9320efe06577ab7e3494d5563392fcd3949d1c2f7"
     },
     {
       "root": "src",

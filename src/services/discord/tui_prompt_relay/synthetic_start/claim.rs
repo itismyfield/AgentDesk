@@ -55,6 +55,12 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
     lease: &ExternalInputRelayLease,
     captured_source: Option<&(String, u64)>,
 ) -> (TuiDirectSyntheticTurnClaim, Option<(String, u64)>) {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        return (
+            TuiDirectSyntheticTurnClaim::new(lease.relay_owner, false, 0),
+            None,
+        );
+    }
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     let binding =
@@ -258,4 +264,85 @@ pub(in crate::services::discord) async fn claim_tui_direct_synthetic_turn_for_te
     )
     .await
     .claimed
+}
+
+#[cfg(test)]
+mod n1a_tests {
+    use super::*;
+
+    #[test]
+    fn n1a_synthetic_claim_has_no_row_or_lease_until_unconfirmed() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                for (i, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let channel = ChannelId::new(63250201 + i as u64);
+                    let mut lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+                    lease.turn_id = Some("n1a-claim-fixture".into());
+                    lease.relay_owner = ExternalInputRelayOwner::TmuxWatcher;
+                    let confirmed =
+                        crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
+                    let (claim, _) = claim_tui_direct_synthetic_turn_inner::<true>(
+                        &shared,
+                        &provider,
+                        channel,
+                        "n1a-isolated-claim",
+                        "human prompt",
+                        MessageId::new(7),
+                        &lease,
+                        None,
+                    )
+                    .await;
+                    assert!(
+                        super::super::super::super::inflight::load_inflight_state(
+                            &provider,
+                            channel.get()
+                        )
+                        .is_none(),
+                        "confirmed synthetic producer must leave row absent"
+                    );
+                    assert!(
+                        super::super::super::super::mailbox_snapshot(&shared, channel)
+                            .await
+                            .cancel_token
+                            .is_none()
+                    );
+                    assert!(!claim.claimed);
+                    drop(confirmed);
+                    let (claim, _) = claim_tui_direct_synthetic_turn_inner::<true>(
+                        &shared,
+                        &provider,
+                        channel,
+                        "n1a-isolated-claim",
+                        "human prompt",
+                        MessageId::new(7),
+                        &lease,
+                        None,
+                    )
+                    .await;
+                    assert!(claim.claimed, "Legacy claim remains available");
+                    assert!(
+                        super::super::super::super::inflight::load_inflight_state(
+                            &provider,
+                            channel.get()
+                        )
+                        .is_some()
+                    );
+                }
+            });
+    }
 }

@@ -217,6 +217,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                 &tmux_session_name,
             )
             .await;
+            // No listing lands between this judgement and the claim.
+            #[cfg(unix)]
+            let listing_order =
+                crate::services::tui_prompt_dedupe::herdr_listing_order(&tmux_session_name);
+            #[cfg(unix)]
+            let listing_held = listing_order.lock().unwrap_or_else(|p| p.into_inner());
             #[cfg(unix)]
             let owner_after_admission =
                 crate::services::tui_prompt_dedupe::herdr_claim_may_be_withheld(
@@ -332,6 +338,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                         Some(incarnation),
                     )
                 };
+                #[cfg(unix)]
+                drop(listing_held);
                 #[cfg(not(unix))]
                 let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
                     let _ = handle;

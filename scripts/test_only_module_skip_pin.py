@@ -35,7 +35,12 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/runtime_store_checkpoint_lock_tests.rs",
+        "src/services/discord/tmux/n1a_monitor_tests.rs",
+        "src/services/discord/tmux_watcher/n1a_turn_mode_tests.rs",
+        "src/services/discord/tui_direct_pending_start/turn_retirement_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/n1a_turn_mode_tests.rs",
         "src/services/tui_o/writer/clear_launch_tests.rs",
+        "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
         "src/services/codex_tui/rollout_tail/child_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/child_binding_tests.rs",
@@ -58,6 +63,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/admin_host_guard_tests.rs",
         "src/server/routes/agents_host_guard_tests.rs",
         "src/services/provider_teardown_tests.rs",
+        "src/services/discord/placeholder_live_events/clock_tests.rs",
         "src/services/discord/execution_identity/herdr_observation_tests.rs",
         "src/services/discord/execution_identity/herdr_report_order_tests.rs",
         "src/services/discord/watchers/lifecycle/watch_host_tests.rs",
@@ -304,6 +310,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/queue_io/ledger_settlement_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
+        "src/services/discord/health/recovery/stop_judgement/judged_finish_tests.rs",
+        "src/services/discord/health/recovery/live_agent_recovery/judged_finish_fence_tests.rs",
         "src/server/routes/health_api/unread_tail_attribution_tests.rs",
         "src/server/routes/health_api/tui_output_readiness_tests.rs",
         "src/services/tui_o/writer/writer_tests.rs",
@@ -328,6 +336,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/synthetic_start/claim_entry_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
+        "src/services/discord/turn_bridge/tmux_runtime/judged_stop_tests.rs",
+        "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
     }
 )

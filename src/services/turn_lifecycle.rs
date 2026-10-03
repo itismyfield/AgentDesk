@@ -3,7 +3,9 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::health::{
+    FINISH_UNOBSERVED_PATH, HealthRegistry, TOKEN_SUPERSEDED_PATH,
+};
 use crate::services::discord::host_teardown_gate::{
     ChannelTeardown, backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown,
     row_gate, runtime_target_holds, runtime_teardown,
@@ -90,7 +92,8 @@ pub(crate) struct TurnLifecycleStopResult {
 }
 
 impl TurnLifecycleStopResult {
-    /// The host guard refused the force-kill: nothing was stopped, cleared or killed.
+    /// The host guard kept the session: nothing was stopped, cleared or killed, and the caller
+    /// must change nothing more.
     pub(crate) fn host_guard_kept(&self) -> bool {
         self.lifecycle_path == HOST_GUARD_KEPT_PATH
     }
@@ -329,6 +332,21 @@ async fn stop_turn_with_policy(
     // post-fact-accurate fields, not the hardcoded "queue_preserved=true"
     // contract that masked the 2026-05-04 ch-dd queue-loss incident.
     // A force-kill runs on the verdict taken before it, so nothing here judges the host again.
+    // A preserve stop judges the channel's turn before its first write and keeps a refused host.
+    let keys = (health_registry, target.provider.as_ref(), target.channel_id);
+    let judged = match (
+        verdict.is_none() && !cleanup_policy.should_cleanup_tmux(),
+        keys,
+    ) {
+        (true, (Some(registry), Some(provider), Some(channel))) => {
+            let judge = crate::services::discord::health::judge_provider_channel_stop;
+            Some(judge(registry, provider.as_str(), channel).await)
+        }
+        _ => None,
+    };
+    if let Some(judged) = judged.as_ref().filter(|judged| judged.host_refused()) {
+        return kept_by_host_guard(judged.session());
+    }
     let (tmux_session_observed, backfill, host) = match verdict {
         Some(verdict) => (verdict.observed, verdict.backfill, verdict.host),
         None if cleanup_policy.should_cleanup_tmux() => return kept_by_host_guard(None),
@@ -346,7 +364,6 @@ async fn stop_turn_with_policy(
     }
     // A kill on a channel's runtime stops only the runtime and session its verdict approved.
     let approved = host.approved(&probe_session_owned);
-    let keys = (health_registry, target.provider.as_ref(), target.channel_id);
     if let (true, Some(_), Some(provider), Some(channel)) =
         (cleanup_policy.should_cleanup_tmux(), keys.0, keys.1, keys.2)
     {
@@ -381,7 +398,7 @@ async fn stop_turn_with_policy(
         && crate::services::platform::tmux::has_session(&probe_session_owned);
     let cleanup_tmux = cleanup_policy.should_cleanup_tmux();
 
-    if let (Some(registry), Some(provider), Some(channel_id)) =
+    if let (Some(_), Some(provider), Some(channel_id)) =
         (health_registry, target.provider.as_ref(), target.channel_id)
     {
         let runtime = if cleanup_tmux {
@@ -404,21 +421,22 @@ async fn stop_turn_with_policy(
                 }
                 None => None,
             }
+        } else if let Some(judged) = judged {
+            let stop = crate::services::discord::health::stop_judged_provider_channel;
+            stop(judged, reason, cleanup_policy).await
         } else {
-            crate::services::discord::health::stop_provider_channel_runtime_with_policy(
-                registry,
-                provider.as_str(),
-                channel_id,
-                reason,
-                cleanup_policy,
-            )
-            .await
+            None
         };
         if let Some(runtime) = runtime {
+            use crate::services::discord::health::InflightDisposition;
+            // A stop that was not a legacy one leaves the turn's row and session to its owner.
+            if runtime.inflight == InflightDisposition::PreservedByHostGuard {
+                return kept_by_host_guard(tmux_session_observed);
+            }
             lifecycle_path = runtime.lifecycle_path;
             queue_depth = Some(runtime.queue_depth);
             termination_recorded = runtime.termination_recorded;
-            runtime_persistent_inflight_cleared = runtime.persistent_inflight_cleared;
+            runtime_persistent_inflight_cleared = runtime.inflight == InflightDisposition::Cleared;
             mailbox_foreground_free = Some(runtime.mailbox_foreground_free);
         }
     }
@@ -440,6 +458,14 @@ async fn stop_turn_with_policy(
         if hard_stop.cleanup_path != "runtime_unavailable_fallback" {
             lifecycle_path = hard_stop.cleanup_path;
         }
+    }
+    // A turn whose finish went unobserved is kept; a force-kill never kills a superseded turn's host.
+    match lifecycle_path {
+        HOST_GUARD_KEPT_PATH | FINISH_UNOBSERVED_PATH => {
+            return kept_by_host_guard(tmux_session_observed);
+        }
+        TOKEN_SUPERSEDED_PATH if cleanup_tmux => return kept_by_host_guard(tmux_session_observed),
+        _ => {}
     }
 
     let tmux_killed = if cleanup_tmux {
@@ -929,7 +955,8 @@ async fn force_kill_host_gate(
     }
 }
 
-/// A force-kill the host guard refused: nothing was stopped, cleared or killed.
+/// A stop the host guard kept: nothing was stopped, cleared or killed, and the caller must
+/// change nothing more.
 fn kept_by_host_guard(tmux_session_observed: Option<String>) -> TurnLifecycleStopResult {
     TurnLifecycleStopResult {
         lifecycle_path: HOST_GUARD_KEPT_PATH,

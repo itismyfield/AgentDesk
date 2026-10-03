@@ -45,6 +45,8 @@ mod watcher_cancel;
 mod restore_gate;
 
 mod state;
+#[allow(unused_imports)]
+pub(in crate::services::discord) use state::turn_retirement;
 
 pub(super) use state::{
     AbortCleanupFn, ClaimFn, PENDING_START_BACKSTOP, PENDING_START_CLAIM_RETRY_BACKOFF,

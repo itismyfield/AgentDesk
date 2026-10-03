@@ -262,6 +262,7 @@ pub(super) async fn update_streaming_status_tick(
         // #3107: lazy pane-capture probe — only when inflight is
         // missing (expensive signal stays off the hot path).
         let pane_actively_streaming_for_streaming = inflight_missing_for_streaming
+            && !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
             && watcher_pane_actively_streaming(&tmux_session_name, ctx.host);
         if inflight_missing_for_streaming && pane_actively_streaming_for_streaming {
             // #3107 self-heal: pane live but inflight cleared mid-turn —
@@ -291,6 +292,8 @@ pub(super) async fn update_streaming_status_tick(
                 active_stream_inflight_reacquire_logged = true;
             }
         }
+        #[cfg(all(test, unix))]
+        crate::services::tui_o::turn_mode::test_tick::completed(channel_id.get());
         if should_skip_streaming_placeholder_without_inflight(
             inflight_missing_for_streaming,
             pane_actively_streaming_for_streaming,
