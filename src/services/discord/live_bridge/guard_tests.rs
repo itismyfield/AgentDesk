@@ -666,26 +666,29 @@ async fn actual_dead_original_retains_existing_handoff_and_exact_successor_clean
     );
     assert!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).is_none());
     let successor_token = Arc::new(CancelToken::new());
-    let mut successor = row.clone();
-    successor.turn_nonce = successor_token.turn_nonce().map(str::to_owned);
-    discord::inflight::save_inflight_state(&successor).unwrap();
-    assert!(
-        !discord::tmux_restart_handoff::start_restart_handoff_from_state(
-            channel,
-            &recorder.http,
-            &shared,
-            &ProviderKind::Codex,
-            durable,
-            ""
-        )
-        .await
-    );
-    assert_eq!(
-        discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get())
-            .unwrap()
-            .turn_nonce,
-        successor.turn_nonce
-    );
+    for rebind_origin in [false, true] {
+        let mut successor = row.clone();
+        successor.rebind_origin = rebind_origin;
+        successor.turn_nonce = successor_token.turn_nonce().map(str::to_owned);
+        discord::inflight::save_inflight_state(&successor).unwrap();
+        assert!(
+            !discord::tmux_restart_handoff::start_restart_handoff_from_state(
+                channel,
+                &recorder.http,
+                &shared,
+                &ProviderKind::Codex,
+                durable.clone(),
+                ""
+            )
+            .await
+        );
+        assert_eq!(
+            discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get())
+                .unwrap()
+                .turn_nonce,
+            successor.turn_nonce
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -789,11 +792,17 @@ async fn row_loss_keeps_original_registration_and_blocks_self_heal_until_both_ow
 
 #[test]
 fn original_and_restore_source_coverage_preserves_admission_order() {
-    for source in [
-        include_str!("../router/message_handler/intake_turn.rs"),
-        include_str!("../router/message_handler/headless_turn.rs"),
+    for (source, call) in [
+        (
+            include_str!("../router/message_handler/intake_turn.rs"),
+            "register_or_requeue(",
+        ),
+        (
+            include_str!("../router/message_handler/headless_turn.rs"),
+            "register_headless_original(",
+        ),
     ] {
-        let register = source.find("register_or_requeue(").unwrap();
+        let register = source.find(call).unwrap();
         let create = source[register..]
             .find("save_inflight_state_create_new(")
             .unwrap()

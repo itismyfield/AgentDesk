@@ -5423,6 +5423,7 @@ services::discord::router::message_handler::headless_turn::fresh_routine_tests::
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::tmux_name_selection_prefers_the_routine_label_over_the_channel_name
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::two_dm_routines_on_one_agent_do_not_share_a_tmux_session
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::actual_headless_assembly_selects_only_all_and_headless_shared_sections
+services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_queue
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path

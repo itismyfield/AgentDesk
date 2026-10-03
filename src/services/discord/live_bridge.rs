@@ -162,6 +162,25 @@ pub(super) async fn register_or_requeue(
     state: &InflightTurnState,
     cancel: &Arc<CancelToken>,
 ) -> Result<Option<Arc<OriginalRegistration>>, bool> {
+    register_for_turn(shared, provider, state, cancel, true).await
+}
+
+pub(super) async fn register_without_requeue(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    cancel: &Arc<CancelToken>,
+) -> Result<Option<Arc<OriginalRegistration>>, bool> {
+    register_for_turn(shared, provider, state, cancel, false).await
+}
+
+async fn register_for_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    cancel: &Arc<CancelToken>,
+    requeue_on_deferral: bool,
+) -> Result<Option<Arc<OriginalRegistration>>, bool> {
     let registration = register_original(provider, state.channel_id, cancel).await;
     let registration = match registration {
         Ok(Some(original)) if original.waited_for_recovery => {
@@ -199,6 +218,15 @@ pub(super) async fn register_or_requeue(
                     .cancelled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 super::saturating_decrement_global_active(shared);
+            }
+            if !requeue_on_deferral {
+                tracing::warn!(
+                    channel_id = state.channel_id,
+                    provider = provider.as_str(),
+                    accepted = false,
+                    "original_bridge_start_deferred"
+                );
+                return Err(false);
             }
             let queued = super::mailbox_requeue_inflight_for_followup_retry(
                 shared, provider, channel, state,
