@@ -55,7 +55,7 @@ pub(super) fn claude_channel(tmux: &str) -> Option<u64> {
     }
     resolve_rehydrated_claude_tmux_channel_id(tmux)
 }
-pub(super) fn claude_home() -> Option<PathBuf> {
+pub(crate) fn claude_home() -> Option<PathBuf> {
     view(|v| v.home.clone())
 }
 

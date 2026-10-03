@@ -13,7 +13,11 @@
 
 use super::super::host_defer_gate::mirror_evict_admitted as host_admits;
 use super::super::recovery_engine::host_reconcile::names_another_host;
-use super::launch_script::{claude_tui_launch_transcript, claude_tui_rehydrated_binding};
+#[cfg(unix)]
+pub(super) use super::launch_script::rehydrated_claude_tui_binding_for_tmux_session;
+use super::launch_script::{
+    claude_launch_observation, claude_launch_transcript, claude_tui_rehydrated_binding,
+};
 use super::*;
 use crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane;
 use std::collections::HashMap;
@@ -29,7 +33,7 @@ use crate::services::{
 use claude_pass_tests::{claude_channel, claude_pane_live, claude_session_names};
 #[cfg(test)]
 #[path = "../../claude_tui/hook_server/rehydration_ingress_tests.rs"]
-mod claude_pass_tests;
+pub(super) mod claude_pass_tests;
 
 /// #3105 (codex P1 sub-case B): a tmux session whose dedupe mirror still holds a
 /// stale ClaudeTui binding but which is genuinely dead/orphaned — pane gone AND no
@@ -266,7 +270,7 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
     // authority — the authoritative resolver is owner_channel_for_tmux_session.
     let existing_channel =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
-    let fresh_binding = rehydrated_claude_tui_binding_for_tmux_session(tmux_session_name);
+    let (fresh_binding, launch_context) = claude_launch_observation(tmux_session_name);
     // #3105: prefer the settings-derived (authoritative) channel; only fall
     // back to the dedupe mirror's last-seen channel for the dedupe binding
     // refresh below. The mirror's value must NOT be promoted into the
@@ -381,7 +385,12 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             None => true,
         };
         if should_refresh {
-            if !register_launched_claude_pane(tmux_session_name, channel_id, fresh.clone()) {
+            if !register_launched_claude_pane(
+                tmux_session_name,
+                channel_id,
+                fresh.clone(),
+                launch_context.as_deref(),
+            ) {
                 return;
             }
             tracing::info!(
@@ -628,27 +637,6 @@ pub(crate) fn rehydrate_codex_tui_binding_for_tests(
         false,
         || {},
     )
-}
-
-#[cfg(unix)]
-fn claude_launch_transcript(
-    tmux_session_name: &str,
-) -> Option<crate::services::tui_prompt_dedupe::pending::LaunchTranscript> {
-    #[cfg(test)]
-    let home = claude_pass_tests::claude_home();
-    #[cfg(not(test))]
-    let home: Option<PathBuf> = None;
-    claude_tui_launch_transcript(tmux_session_name, home.as_deref())
-}
-
-#[cfg(unix)]
-pub(super) fn rehydrated_claude_tui_binding_for_tmux_session(
-    tmux_session_name: &str,
-) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
-    let launch = claude_launch_transcript(tmux_session_name)?;
-    let transcript_path = launch.transcript.as_path();
-    (transcript_path.exists())
-        .then(|| claude_tui_rehydrated_binding(&launch.session_id, transcript_path))
 }
 
 #[cfg(unix)]

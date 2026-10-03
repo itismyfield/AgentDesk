@@ -25,8 +25,9 @@ pub(crate) fn register_launched_claude_pane(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
+    context_path: Option<&std::path::Path>,
 ) -> bool {
-    register_claude_pane_with_cause(tmux, channel, binding, Record::Stat, CauseSource::Launch)
+    register_claude_pane_with_cause(tmux, channel, binding, Record::Stat, context_path)
         .is_some_and(Persisted::published)
 }
 
@@ -56,7 +57,7 @@ pub(crate) fn register_claude_pane_with(
     binding: TuiRuntimeBinding,
     record: Record,
 ) -> Option<Persisted> {
-    register_claude_pane_with_cause(tmux, channel, binding, record, CauseSource::Observed)
+    register_claude_pane_with_cause(tmux, channel, binding, record, None)
 }
 
 fn register_claude_pane_with_cause(
@@ -64,15 +65,12 @@ fn register_claude_pane_with_cause(
     channel: u64,
     binding: TuiRuntimeBinding,
     record: Record,
-    cause: CauseSource,
+    context_path: Option<&std::path::Path>,
 ) -> Option<Persisted> {
     let key = pane_key(tmux);
     begin_pane_registration(&key, &binding);
     let registered = crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
-        let cause = match cause {
-            CauseSource::Launch => launch_cause(authority, channel, &binding)?,
-            other => other,
-        };
+        let cause = launch_cause(authority, channel, &binding, context_path)?;
         register_rehydrated_under_source_authority(
             authority, "claude", channel, binding, record, cause,
         )
@@ -85,41 +83,53 @@ fn register_claude_pane_with_cause(
     registered
 }
 
-// A launch observation uses only the current execution's matching immutable context.
-// Refusing a stale selector before append preserves the current nonce's first launch record.
+// The selector and context path come from the same launch script observation.
+// Refuse replaced executions while keeping same-execution continuations observed.
 fn launch_cause(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel: u64,
     binding: &TuiRuntimeBinding,
+    context_path: Option<&std::path::Path>,
 ) -> Option<CauseSource> {
+    let Some(path) = context_path else {
+        return Some(CauseSource::Observed);
+    };
+    let CapturedContext::Captured(context) =
+        HookBindingEnvelope::capture_from_env("claude", |name| {
+            (name == "AGENTDESK_BINDING_CONTEXT").then(|| path.as_os_str().to_owned())
+        })
+        .context
+    else {
+        return None;
+    };
     let tmux = authority.session();
     let nonce = match binding_context::observe_spawn_nonce_marker(tmux) {
         SpawnNonceMarker::Known(nonce) => nonce,
-        SpawnNonceMarker::Absent => return Some(CauseSource::Observed),
-        SpawnNonceMarker::Unreadable => return None,
+        _ => return None,
     };
-    match binding_context::context_presence("claude", &nonce) {
-        binding_context::ContextPresence::Absent => return Some(CauseSource::Observed),
-        binding_context::ContextPresence::Unknown => return None,
-        binding_context::ContextPresence::Present => {}
+    if context.execution_nonce != nonce
+        || binding_context::pane_context(tmux, &nonce).as_ref() != Some(&context)
+        || binding.runtime_kind != RuntimeHandoffKind::ClaudeTui
+        || context.channel_id != Some(channel)
+        || context.owner_runtime_root != crate::services::tmux_common::current_tmux_owner_marker()
+    {
+        return None;
     }
-    let context = binding_context::pane_context(tmux, &nonce)?;
-    let cause = (binding.runtime_kind == RuntimeHandoffKind::ClaudeTui
-        && context.channel_id == Some(channel)
-        && context.owner_runtime_root == crate::services::tmux_common::current_tmux_owner_marker()
-        && binding.session_id.as_deref().is_some_and(|session| {
-            !session.trim().is_empty()
-                && context.expected_native_session_id.as_deref() == Some(session)
-        })
-        && matches!(context.launch_mode.as_str(), "fresh" | "resume"))
-    .then_some(CauseSource::Launch);
+    let cause = if binding.session_id.as_deref().is_some_and(|session| {
+        !session.trim().is_empty() && context.expected_native_session_id.as_deref() == Some(session)
+    }) && matches!(context.launch_mode.as_str(), "fresh" | "resume")
+    {
+        CauseSource::Launch
+    } else {
+        CauseSource::Observed
+    };
     #[cfg(test)]
-    if cause.is_some()
+    if matches!(cause, CauseSource::Launch)
         && crate::services::claude_tui::source_verify::n2b_mutant("clear-launch-observed")
     {
         return Some(CauseSource::Observed);
     }
-    cause
+    Some(cause)
 }
 
 /// `register_claude_pane_with` for a caller that holds the pane's source authority across its

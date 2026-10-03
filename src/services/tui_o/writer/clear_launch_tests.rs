@@ -42,6 +42,26 @@ fn publish(context: BindingContext) {
     .unwrap();
 }
 
+fn observed_context_path(tmux: &str) -> Option<PathBuf> {
+    let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(tmux) else {
+        return None;
+    };
+    let path = crate::config::runtime_root()?
+        .join("runtime/binding_contexts/claude")
+        .join(format!("{nonce}.json"));
+    path.exists().then_some(path)
+}
+
+fn register(tmux: &str, channel: u64, binding: dedupe::TuiRuntimeBinding) -> bool {
+    let path = observed_context_path(tmux);
+    dedupe::pane_registration::register_launched_claude_pane(
+        tmux,
+        channel,
+        binding,
+        path.as_deref(),
+    )
+}
+
 fn launched(a: &str) -> (Harness, PathBuf) {
     let mut path = None;
     let harness = Harness::build(|runtime| {
@@ -109,11 +129,7 @@ async fn fresh_launch_after_clear_posts_once_across_old_tail_and_restart() {
     std::fs::write(&b_path, session_row(&b)).unwrap();
     append(&b_path, &row("b1", "after clear"));
     publish(context(&pane, &b, "fresh"));
-    dedupe::pane_registration::register_launched_claude_pane(
-        pane.tmux,
-        CHANNEL,
-        binding(&b_path, &b),
-    );
+    register(pane.tmux, CHANNEL, binding(&b_path, &b));
     drive.capture();
     drive.deliver().await;
     assert_eq!(
@@ -121,11 +137,7 @@ async fn fresh_launch_after_clear_posts_once_across_old_tail_and_restart() {
         ["old tail", "after clear"],
         "clear body delivered exactly once"
     );
-    dedupe::pane_registration::register_launched_claude_pane(
-        pane.tmux,
-        CHANNEL,
-        binding(&b_path, &b),
-    );
+    register(pane.tmux, CHANNEL, binding(&b_path, &b));
     drive.capture();
     drive.deliver().await;
     drop(drive);
@@ -186,20 +198,12 @@ async fn unseen_resume_and_unproven_launches_keep_their_bodies_pending() {
             publish(ctx);
             std::fs::write(tc::session_temp_path(pane.tmux, "spawn_nonce"), nonce).unwrap();
         }
-        dedupe::pane_registration::register_launched_claude_pane(
-            pane.tmux,
-            CHANNEL,
-            binding(&b_path, &b),
-        );
+        register(pane.tmux, CHANNEL, binding(&b_path, &b));
         let (pending, path) = if scenario == "same_nonce" {
             drive.capture();
             let path = a_path.with_file_name(format!("{c}.jsonl"));
             std::fs::write(&path, session_row(&b)).unwrap();
-            dedupe::pane_registration::register_launched_claude_pane(
-                pane.tmux,
-                CHANNEL,
-                binding(&path, &b),
-            );
+            register(pane.tmux, CHANNEL, binding(&path, &b));
             (b, path)
         } else {
             (b, b_path)
@@ -210,7 +214,7 @@ async fn unseen_resume_and_unproven_launches_keep_their_bodies_pending() {
         assert_eq!(harness.port.posts(), Vec::<String>::new(), "{scenario}");
         let source = source_id_for(&pending, &path).unwrap();
         let rotation = harness.channel().rotation().unwrap();
-        if matches!(scenario, "expected" | "channel" | "pane" | "owner") {
+        if matches!(scenario, "channel" | "pane" | "owner") {
             assert!(
                 rotation.link(&source).is_none(),
                 "{scenario}: no stale source attached"
@@ -263,6 +267,7 @@ async fn replaced_nonce_refuses_stale_launch_without_consuming_the_current_launc
     append(&b_path, &row("stale", "stale body"));
     append(&c_path, &row("current", "current body"));
     publish(context(&pane, &b, "fresh"));
+    let stale_context = observed_context_path(pane.tmux).unwrap();
     let next = PreparedIncarnation::create(context(&pane, &c, "fresh")).unwrap();
     let (started, arrived) = std::sync::mpsc::channel();
     let log_root = pane._root.path().to_path_buf();
@@ -274,11 +279,7 @@ async fn replaced_nonce_refuses_stale_launch_without_consuming_the_current_launc
             tc::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|hook| {
                 *hook = Some(Box::new(move || started.send(()).unwrap()));
             });
-            dedupe::pane_registration::register_launched_claude_pane(
-                "o-superseded-pane",
-                CHANNEL,
-                stale,
-            );
+            register("o-superseded-pane", CHANNEL, stale);
             p5::set_test_root(None);
         });
         arrived
@@ -309,11 +310,17 @@ async fn replaced_nonce_refuses_stale_launch_without_consuming_the_current_launc
         1,
         "current nonce remains unconsumed"
     );
-    dedupe::pane_registration::register_launched_claude_pane(
-        pane.tmux,
-        CHANNEL,
-        binding(&c_path, &c),
+    assert!(
+        !dedupe::pane_registration::register_launched_claude_pane(
+            pane.tmux,
+            CHANNEL,
+            binding(&b_path, &b),
+            Some(&stale_context),
+        ),
+        "a script captured after replacement still cannot name the old execution"
     );
+    assert_eq!(p5::binding_events_since(CHANNEL, 0).unwrap().len(), 1);
+    register(pane.tmux, CHANNEL, binding(&c_path, &c));
     drive.capture();
     drive.deliver().await;
     assert_eq!(
