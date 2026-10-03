@@ -7062,6 +7062,7 @@ services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_l
 services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests::clear_suppresses_the_active_turn_lifecycle_it_already_says_it_is_not
 services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests::human_and_passive_classes_are_unaffected_by_the_kind_aware_gate
 services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests::output_producing_slash_controls_keep_their_active_turn
+services::discord::tui_prompt_relay::launch_script::tests::a_launch_selector_keeps_its_context_when_the_live_nonce_changes
 services::discord::tui_prompt_relay::launch_script::tests::parses_claude_tui_launch_script_content
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_duplicate_mailbox_release
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_event_after_queue_eligible
@@ -7069,6 +7070,7 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_life
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::local_model_observation_wakes_idle_durable_queue_through_production_workers
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_completion_lifecycle_validates_order_and_cardinality
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_live_pane_marked_for_another_host_is_not_adopted_by_name
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_rehydrated_replacement_execution_uses_its_matching_launch_context_once
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
@@ -9946,6 +9948,9 @@ services::tui_o::writer::tests::actor::host_start::a_resume_the_log_keeps_unchan
 services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
+services::tui_o::writer::tests::actor::host_start::clear_launch::fresh_launch_after_clear_posts_once_across_old_tail_and_restart
+services::tui_o::writer::tests::actor::host_start::clear_launch::replaced_nonce_refuses_stale_launch_without_consuming_the_current_launch
+services::tui_o::writer::tests::actor::host_start::clear_launch::unseen_resume_and_unproven_launches_keep_their_bodies_pending
 services::tui_o::writer::tests::actor::host_start::deferred::a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved
 services::tui_o::writer::tests::actor::host_start::deferred::a_busy_legacy_keeps_the_adoption_deferred_and_one_read_serves_the_open_turn
 services::tui_o::writer::tests::actor::host_start::deferred::a_cursor_that_catches_up_without_a_write_lets_the_adoption_through
