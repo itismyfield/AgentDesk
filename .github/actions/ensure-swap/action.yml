@@ -1,0 +1,22 @@
+name: Ensure swap
+description: >-
+  Add a swapfile on Linux runners before a lib test build so memory overflow
+  pages instead of killing the runner. Problems are warnings, never failures.
+inputs:
+  size-gb:
+    description: Swapfile size in GiB; skipped when active swap already reaches it.
+    required: false
+    default: "16"
+  path:
+    description: Swapfile location; an existing file there is never touched.
+    required: false
+    default: /mnt/agentdesk-swapfile
+runs:
+  using: composite
+  steps:
+    - name: Ensure swap
+      shell: bash
+      env:
+        ENSURE_SWAP_SIZE_GB: ${{ inputs.size-gb }}
+        ENSURE_SWAP_PATH: ${{ inputs.path }}
+      run: bash "$GITHUB_ACTION_PATH/ensure-swap.sh"

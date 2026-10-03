@@ -76,6 +76,7 @@ pub(in crate::services) struct CatchUpRetryState {
 mod api;
 mod classification;
 mod frontier_evidence;
+mod handled_command;
 mod phase2;
 pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;
@@ -92,6 +93,7 @@ use classification::{
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
     is_restart_gap_notice,
 };
+use handled_command::{TextCommandEvidence, defer_unrecognized_command, text_command_evidence};
 use phase2::{
     Phase2EnqueueCommit, Phase2Frontier, Phase2RecoveryStats, advance_phase2_checkpoint,
     catch_up_last_item_dedup_is_checkpoint_safe, catch_up_remaining_queue_capacity,
@@ -1053,6 +1055,27 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
             };
             let mid = msg.id.get();
+            // A replied command was consumed live; replaying it would prompt the provider.
+            let command =
+                text_command_evidence(&intervention_text, msg.id, &messages, current_bot_user_id);
+            let outcome = match (outcome, command) {
+                (CatchUpClassification::Recover, TextCommandEvidence::Replied) => {
+                    CatchUpClassification::Settled
+                }
+                (CatchUpClassification::Recover, TextCommandEvidence::ReplierUnknown) => {
+                    let retry_after =
+                        defer_unrecognized_command(&mut frontier, scan_checkpoint, mid);
+                    retry_exhausted |= rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        retry_state,
+                    )
+                    .is_none();
+                    break;
+                }
+                (outcome, _) => outcome,
+            };
             // Check the cap before counting a recover so refused work is not tallied.
             // Keep the checkpoint at the last queued message so newer ids stay retryable.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {

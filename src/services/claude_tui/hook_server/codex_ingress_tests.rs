@@ -316,13 +316,33 @@ fn codex_permanent_rejections_leave_binding_log_and_cursor_untouched() {
     let h = Harness::new();
     write(&h.path, &h.header);
     let stable = h.snapshot();
-    for problem in ["filename", "source", "outside"] {
+    for problem in [
+        "filename",
+        "source",
+        "subagent",
+        "parent_thread_id",
+        "outside",
+    ] {
         let mut payload = h.payload.clone();
         match problem {
             "filename" => payload["transcript_path"] = json!(h.path.with_file_name("wrong.jsonl")),
             "source" => {
                 let mut header = h.header.clone();
                 header["payload"]["source"] = json!("exec");
+                write(&h.path, &header);
+            }
+            "subagent" | "parent_thread_id" => {
+                let captured: Value = serde_json::from_str(include_str!(
+                    "../../../../tests/fixtures/tui_input/codex-subagent-session-meta.json"
+                ))
+                .unwrap();
+                let mut header = h.header.clone();
+                if problem == "subagent" {
+                    header["payload"]["source"] = captured["payload"]["source"].clone();
+                } else {
+                    header["payload"]["parent_thread_id"] =
+                        captured["payload"]["parent_thread_id"].clone();
+                }
                 write(&h.path, &header);
             }
             _ => {
