@@ -8656,6 +8656,7 @@ services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_wi
 services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
 services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
+services::herdr_launch::tests::herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_unconfirmed_panes_pg
 services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
 services::issue_announcements::tests::renders_active_card_with_agent_and_timestamp
 services::issue_announcements::tests::renders_completed_card_for_pr_merge
@@ -9552,6 +9553,11 @@ services::session_forwarding::trusted_target::tests::resolver_answer_is_pinned_o
 services::session_host::consumer_guard::tests::automatic_state_change_verdict_for_every_host_state
 services::session_host::consumer_guard::tests::policy_probe_defers_every_non_legacy_host_without_probing
 services::session_host::consumer_guard::tests::transcript_completion_is_never_blocked_by_host_evidence
+services::session_host::herdr::launch_host::real_tests::herdr_real_server_launch_input_bytes_and_refusals
+services::session_host::herdr::launch_host::tests::provider_candidate_names_one_foreground_process_or_why_not
+services::session_host::herdr::launch_host::tests::socket_launch_refuses_unknown_endpoints_and_bad_requests_before_any_call
+services::session_host::herdr::launch_host::tests::socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane
+services::session_host::herdr::launch_host::tests::socket_launch_types_the_command_into_the_server_that_created_the_pane
 services::session_host::herdr::provenance::tests::e7_config_read_refuses_a_file_changed_or_replaced_mid_read
 services::session_host::herdr::provenance::tests::e7_os_reads_prove_off_for_a_real_bootstrapped_process_only
 services::session_host::herdr::provenance::tests::e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal
