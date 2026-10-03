@@ -1999,7 +1999,10 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
-│   │   │   └── reliability.rs
+│   │   │   ├── reliability.rs
+│   │   │   └── start_deferral.rs
+│   │   ├── discord_log/
+│   │   │   └── failure_alert.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
 │   │   ├── action.rs
@@ -2009,6 +2012,7 @@ src/
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
+│   │   ├── reliability_pg_tests.rs
 │   │   ├── runtime.rs
 │   │   ├── runtime_config.rs
 │   │   ├── script_refs.rs

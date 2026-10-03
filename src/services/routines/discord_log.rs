@@ -17,6 +17,8 @@ use crate::services::discord::outbound::{
 use super::runtime::RoutineRunOutcome;
 use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, RoutineStore};
 
+mod failure_alert;
+
 const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "outcome"];
 
 #[derive(Clone)]

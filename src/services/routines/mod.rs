@@ -27,7 +27,9 @@ pub use loader::{
     RoutineScriptLoader, discover_routine_script_refs, unregistered_routine_script_refs,
 };
 pub use migrated::{is_migrated_launchd_script_ref, validate_migrated_launchd_activation};
-pub use runtime::{execute_claimed_script_run, poll_agent_turns, run_due_tick};
+pub use runtime::{
+    after_startup_grace, execute_claimed_script_run, poll_agent_turns, run_due_tick,
+};
 pub use runtime_config::validate_routine_runtime_config;
 pub use script_refs::registered_routine_script_refs;
 pub use session_control::{RoutineSessionCommand, RoutineSessionController};
@@ -42,6 +44,9 @@ pub(crate) fn fresh_context_guaranteed(
 ) -> bool {
     provider_turn_started && execution_strategy == "fresh"
 }
+
+#[cfg(test)]
+mod reliability_pg_tests;
 
 #[cfg(test)]
 mod tests {

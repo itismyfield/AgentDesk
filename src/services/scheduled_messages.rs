@@ -288,7 +288,11 @@ fn runtime_defer_until(now: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 fn agent_start_error_is_runtime_unavailable(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
+    is_runtime_unavailable_message(&error.to_string())
+}
+
+/// Start errors meaning the provider runtime is not registered or ready yet; routines share it.
+pub(crate) fn is_runtime_unavailable_message(message: &str) -> bool {
     [
         "provider runtime not registered",
         "provider runtime is not ready",

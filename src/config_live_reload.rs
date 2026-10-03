@@ -787,6 +787,12 @@ mod tests {
         new.routines.failure_pause_auto_resume_secs =
             old.routines.failure_pause_auto_resume_secs.wrapping_add(1);
         assert!(restart_required_changes(&old, &new).is_empty());
+
+        new = old.clone();
+        new.routines.startup_grace_secs = old.routines.startup_grace_secs.wrapping_add(1);
+        new.routines.max_consecutive_failures =
+            old.routines.max_consecutive_failures.wrapping_add(1);
+        assert!(restart_required_changes(&old, &new).is_empty());
     }
 
     // Each boot-bound section is surfaced as restart-required, so editing e.g. a
