@@ -5378,4 +5378,4 @@ mod a0_characterization_tests {
 
 #[cfg(unix)]
 #[path = "streaming_harness_tests.rs"]
-mod streaming_harness_tests;
+pub(super) mod streaming_harness_tests;

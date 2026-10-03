@@ -12,7 +12,7 @@ async fn n1a_collector_status_tick_cannot_recreate_confirmed_row() {
     let frontier = seed.len() as u64;
     h.commit(0, frontier);
     h.take_tmux_calls();
-    let tick = streaming_status_tick::n1a_tick_signal(h.channel.get());
+    let tick = n1a_tick_signal(h.channel.get());
     h.spawn(frontier);
     h.append(format!("{}{}", user("direct"), said("still streaming")).as_bytes());
     tokio::time::timeout(Duration::from_secs(30), tick)
@@ -37,7 +37,7 @@ async fn n1a_collector_status_tick_cannot_recreate_confirmed_row() {
 
     let mut legacy = Harness::new(6326, &seed).await;
     legacy.commit(0, frontier);
-    let tick = streaming_status_tick::n1a_tick_signal(legacy.channel.get());
+    let tick = n1a_tick_signal(legacy.channel.get());
     legacy.spawn(frontier);
     legacy.append(format!("{}{}", user("direct"), said("still streaming")).as_bytes());
     tokio::time::timeout(Duration::from_secs(30), tick)
@@ -52,4 +52,24 @@ async fn n1a_collector_status_tick_cannot_recreate_confirmed_row() {
     let task = legacy.watcher.take().unwrap().task;
     task.abort();
     let _ = task.await;
+}
+
+#[cfg(test)]
+static N1A_TICK: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn n1a_tick_signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    *N1A_TICK.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, tx));
+    rx
+}
+
+#[cfg(test)]
+pub(in crate::services::discord::tmux::tmux_watcher) fn n1a_tick_completed(channel: u64) {
+    let mut tick = N1A_TICK.lock().unwrap_or_else(|e| e.into_inner());
+    if tick.as_ref().is_some_and(|(id, _)| *id == channel) {
+        let (_, tx) = tick.take().unwrap();
+        let _ = tx.send(());
+    }
 }
