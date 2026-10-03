@@ -20,7 +20,8 @@ extract_function() {
     ' "$DEPLOY_SH"
 }
 for fn in _post_deploy_smoke_note _post_deploy_smoke_fail \
-    _post_deploy_smoke_log_identity_and_size _post_deploy_smoke_run_turn_scenario \
+    _post_deploy_smoke_log_identity_and_size _post_deploy_smoke_log_head_fingerprint \
+    _post_deploy_smoke_run_turn_scenario \
     _post_deploy_smoke_check_turn_scenarios _report_post_deploy_smoke_failure; do
     body=$(extract_function "$fn")
     [ -n "$body" ] || { echo "FAIL: $fn missing from $DEPLOY_SH" >&2; exit 1; }
@@ -67,6 +68,8 @@ fixture = Path(os.environ["FIXTURES"]) / (
 )
 if mode == "rotated":
     log.unlink()
+elif mode == "rewritten":
+    log.write_text("", encoding="utf-8")
 with log.open("a", encoding="utf-8") as handle:
     handle.write(fixture.read_text(encoding="utf-8"))
 sys.exit(0 if status == "pass" else 1)
@@ -82,13 +85,14 @@ run_case() {
     local root="$TMP_ROOT/$name"
     mkdir -p "$root/release/config" "$root/release/logs" "$root/tmp"
     printf '%s\n' "$config" > "$root/release/config/agentdesk.yaml"
-    printf 'boot line\n' > "$root/release/logs/dcserver.stdout.log"
+    [ "$name" = log_absent ] || printf 'boot line\n' > "$root/release/logs/dcserver.stdout.log"
     (
         for assignment in "$@"; do export "${assignment?}"; done
         export FAKE_ARGV_LOG="$root/argv" FAKE_SERVER_LOG="$root/release/logs/dcserver.stdout.log" FIXTURES
         ADK_REL="$root/release"; REPO="$REPO_ROOT"; ADK_DEFAULT_LOOPBACK=127.0.0.1; REL_PORT=1
         POST_DEPLOY_SMOKE_STAMP=fixture; POST_DEPLOY_SMOKE_EVIDENCE="$root/evidence"
         POST_DEPLOY_SMOKE_TMP_DIR="$root/tmp"; POST_DEPLOY_SMOKE_LOG_PATH="$ADK_REL/logs/dcserver.stdout.log"
+        POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096
         POST_DEPLOY_SMOKE_RELAY_CELL=claude-tui; POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID="$relay_channel"
         POST_DEPLOY_SMOKE_CODEX_TURNS_CELL=codex-tui
         POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S=120; POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S=150
@@ -107,6 +111,9 @@ run_case() {
             esac
             command python3 "$@"
         }
+        if [ "$name" = no_fingerprint ]; then
+            _post_deploy_smoke_log_head_fingerprint() { return 1; }
+        fi
         _notify_channel() { printf '%s\n' "$1" > "$root/alert"; }
         hostname() { echo fixture-node; }
         rc=0
@@ -159,9 +166,13 @@ grep -q '^COVERAGE=E-50=FAIL E-51=pass$' "$root/out" || fail_test "withheld: cov
 grep -q '^FAIL: relay E-50 cell=claude-tui result=FAIL deliveries T1=1 T2=1 AFTER_CLEAR=0 .*AFTER_CLEAR body withheld after !clear (0 deliveries)' "$root/evidence" \
     || fail_test "withheld: FAIL line missing"
 
-# 4. A log rotated mid-run leaves no excerpt: FAIL, never PASS.
-root=$(run_case rotated 1509350490461180105 "$two_cells" 0 FAKE_MODE_E_50=rotated)
-grep -q '^FAIL: relay E-50 .*dcserver log excerpt unavailable' "$root/evidence" || fail_test "rotated: not fail-closed"
+# 4. A log replaced mid-run leaves no excerpt: FAIL, never PASS. A recreated file
+# may reuse the inode (ext4 does) and an in-place rewrite keeps it.
+# No start watermark (log missing, no hash tool) is not evidence either.
+for mode in rotated rewritten log_absent no_fingerprint; do
+    root=$(run_case "$mode" 1509350490461180105 "$two_cells" 0 FAKE_MODE_E_50="$mode")
+    grep -q '^FAIL: relay E-50 .*dcserver log excerpt unavailable' "$root/evidence" || fail_test "$mode: not fail-closed"
+done
 
 # 5. No Codex cell configured: E-51 is a skip note, not a failure.
 root=$(run_case codex_absent 1509350490461180105 "$claude_only" 0)

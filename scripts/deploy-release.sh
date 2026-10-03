@@ -3943,7 +3943,7 @@ _post_deploy_smoke_run_turn_scenario() {
     local output="$ADK_REL/logs/post-deploy-smoke-turns-${POST_DEPLOY_SMOKE_STAMP}"
     local relay_log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-${scenario}.log"
     local excerpt="$POST_DEPLOY_SMOKE_TMP_DIR/dcserver-${scenario}.log"
-    local idle start_stat end_stat start_inode="" start_size="" end_inode="" end_size=""
+    local idle start_stat start_size="" head_bytes=0 start_head=""
     local verdict rc=0 judge_rc=0
     # Same idle proof as E-1, read fresh: an earlier phase may have left the cell busy.
     if ! idle=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py preflight \
@@ -3954,6 +3954,15 @@ _post_deploy_smoke_run_turn_scenario() {
         return 0
     fi
     start_stat=$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH" 2>/dev/null) || start_stat=""
+    read -r _ start_size <<< "$start_stat" || true
+    case "${start_size:-x}" in
+        *[!0-9]*|x) ;;
+        *)
+            head_bytes="$start_size"
+            [ "$head_bytes" -le "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP" ] || head_bytes="$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP"
+            start_head=$(_post_deploy_smoke_log_head_fingerprint "$POST_DEPLOY_SMOKE_LOG_PATH" "$head_bytes" 2>/dev/null) || start_head=""
+            ;;
+    esac
     _post_deploy_smoke_note \
         "relay ${scenario} cell=${cell} channel=${channel_id} deadline=${deadline_s}s output=${output}" \
         || return 1
@@ -3969,20 +3978,13 @@ _post_deploy_smoke_run_turn_scenario() {
             --required-agent-mode real_live --required-coverage-class live
     ) > "$relay_log" 2>&1 || rc=$?
     tail -n 20 "$relay_log" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
-    # Judge only bytes written since the run started; a rotated or truncated
-    # log leaves no excerpt, which the judge reports as FAIL.
-    end_stat=$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH" 2>/dev/null) || end_stat=""
-    read -r start_inode start_size <<< "$start_stat" || true
-    read -r end_inode end_size <<< "$end_stat" || true
-    case "${start_inode:-x}:${start_size:-x}:${end_inode:-x}:${end_size:-x}" in
-        *[!0-9:]*) excerpt="" ;;
-        *)
-            if [ "$start_inode" != "$end_inode" ] || [ "$end_size" -lt "$start_size" ] \
-                || ! tail -c "+$((start_size + 1))" "$POST_DEPLOY_SMOKE_LOG_PATH" > "$excerpt"; then
-                excerpt=""
-            fi
-            ;;
-    esac
+    # Judge only bytes appended since the run started. Rotation can reuse the inode
+    # (ext4 does), so the start head fingerprint decides; a mismatch leaves no excerpt (FAIL).
+    if [ -z "$start_head" ] \
+        || [ "$(_post_deploy_smoke_log_head_fingerprint "$POST_DEPLOY_SMOKE_LOG_PATH" "$head_bytes" 2>/dev/null)" != "$start_head" ] \
+        || ! tail -c "+$((start_size + 1))" "$POST_DEPLOY_SMOKE_LOG_PATH" > "$excerpt"; then
+        excerpt=""
+    fi
     verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge \
         --report "$output/report.${cell}.json" \
         --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
