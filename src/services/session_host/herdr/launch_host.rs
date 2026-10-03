@@ -230,8 +230,7 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
     }
 
     /// Create, check the pane's cwd, read E7 again, then type the command with Enter, each
-    /// on its own connection to the server E7 named. After the create, no failure removes
-    /// or retries the pane.
+    /// sent only to the server E7 named; after the create nothing removes or retries the pane.
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
             return HerdrCreateOutcome::NotSent(detail);
