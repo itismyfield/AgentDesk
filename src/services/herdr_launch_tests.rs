@@ -577,12 +577,8 @@ async fn herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_uncon
             })
         },
     ];
+    seed_row(&pool, None).await;
     for prepare in ineligible {
-        sqlx::query("DELETE FROM sessions")
-            .execute(&pool)
-            .await
-            .unwrap();
-        seed_row(&pool, None).await;
         let host = Arc::new(FakeHost::created("pane-1"));
         let result =
             launch_herdr_session(&pool, launch(Some(endpoint())), prepare, host.clone()).await;
@@ -595,11 +591,6 @@ async fn herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_uncon
         assert_eq!(host.creates.load(Ordering::SeqCst), 0);
     }
 
-    sqlx::query("DELETE FROM sessions")
-        .execute(&pool)
-        .await
-        .unwrap();
-    seed_row(&pool, None).await;
     let host = Arc::new(FakeHost::new(HerdrCreateOutcome::CreatedUnconfirmed {
         pane_id: "pane-9".into(),
         detail: "pane opened in HOME".into(),
