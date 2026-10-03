@@ -345,3 +345,25 @@ impl InteractiveSessionHost for UnconfiguredHerdrHost {
 #[cfg(test)]
 #[path = "herdr_host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn an_unconfigured_herdr_host_refuses_every_operation() {
+        let host = UnconfiguredHerdrHost;
+        let pane = HostSessionRef::herdr_pane("w1-1");
+        let missing = || HostError::Unsupported(HostKind::Herdr, ENDPOINT_MISSING);
+        assert_eq!(host.capabilities(), HostCapabilities::default());
+        assert_eq!(host.presence(pane), HostPresence::ProbeFailed);
+        assert_eq!(host.liveness(pane), HostLiveness::ProbeError);
+        assert_eq!(host.send_text(pane, "x"), Err(missing()));
+        assert_eq!(host.send_keys(pane, &["C-c"]), Err(missing()));
+        assert_eq!(host.interrupt(pane), Err(missing()));
+        assert_eq!(host.capture_screen(pane, 0), Err(missing()));
+        assert_eq!(host.current_working_dir(pane), Err(missing()));
+        assert_eq!(host.execution_pid(pane), Err(missing()));
+    }
+}

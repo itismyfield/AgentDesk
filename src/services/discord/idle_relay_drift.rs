@@ -909,13 +909,13 @@ mod tests {
         let mut map = DRIFT_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let mut state = DriftState::new(now - DRIFT_STATE_TTL - Duration::from_secs(1));
+        let mut state = DriftState::new(now);
         state.pending_emission_count = 4;
         state.pending_provider = Some("claude".to_string());
         state.pending_channel_id = Some(channel_id);
         map.insert(tmux.to_string(), state);
 
-        purge_expired_locked(&mut map, now);
+        purge_expired_locked(&mut map, now + DRIFT_STATE_TTL + Duration::from_secs(1));
         assert!(
             !map.contains_key(tmux),
             "expired drift state must be removed"

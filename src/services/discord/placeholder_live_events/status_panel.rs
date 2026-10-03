@@ -105,7 +105,7 @@ impl StatusPanelState {
         self.tasks.clear();
         // #4396 r3: the cleared subagents leave the state — tombstone their keys
         // so fallback matching retains the ownership conflict after session reset.
-        let now = std::time::Instant::now();
+        let now = super::panel_now();
         for slot in &self.subagents {
             self.recently_evicted_subagent_keys
                 .push_slot_keys(slot, now);
@@ -162,7 +162,7 @@ impl StatusPanelState {
         // #3473: turn-boundary reconciliation — force a TTL-expired stuck
         // background task to `aborted` BEFORE the retain filter so it is dropped
         // here instead of sitting ⏳ forever.
-        let now = std::time::Instant::now();
+        let now = super::panel_now();
         force_abort_stuck_background_task_slots(&mut self.tasks, now);
         force_abort_stuck_subagent_slots(&mut self.subagents, now);
         let tasks = self
@@ -293,7 +293,7 @@ impl StatusPanelState {
                     agent_id: provided_agent_id,
                     background,
                     ordinal,
-                    started_at: std::time::Instant::now(),
+                    started_at: super::panel_now(),
                 });
                 self.status = DerivedStatus::SubagentRunning { desc };
                 trim_subagents(
@@ -309,7 +309,7 @@ impl StatusPanelState {
                     .find(|slot| slot.finished.is_none())
                 {
                     slot.recent = Some(normalize_summary(&summary));
-                    slot.started_at = std::time::Instant::now(); // #4396: alive — reset the TTL clock.
+                    slot.started_at = super::panel_now(); // #4396: alive — reset the TTL clock.
                     self.status = DerivedStatus::SubagentRunning {
                         desc: slot.desc.clone(),
                     };
@@ -530,7 +530,7 @@ impl StatusPanelState {
                     kind: CompletedKind::from_background(background),
                 };
                 self.background_agent_pending = background_agent_pending;
-                self.completed_at = Some(std::time::Instant::now()); // #3477 item 3
+                self.completed_at = Some(super::panel_now()); // #3477 item 3
             }
             StatusEvent::Heartbeat => {
                 if matches!(self.status, DerivedStatus::Running) {
@@ -552,7 +552,7 @@ impl StatusPanelState {
             if !summary.trim().is_empty() {
                 slot.recent = Some(summary);
             }
-            slot.started_at = std::time::Instant::now(); // #4396: alive — reset the TTL clock.
+            slot.started_at = super::panel_now(); // #4396: alive — reset the TTL clock.
         }
     }
 
@@ -769,6 +769,15 @@ fn trim_subagents(slots: &mut Vec<SubagentSlot>, tombstones: &mut SubagentKeyTom
             .unwrap_or(0);
         // #4396 r3: the trimmed slot leaves the state — tombstone its keys.
         let removed = slots.remove(remove_index);
-        tombstones.push_slot_keys(&removed, std::time::Instant::now());
+        tombstones.push_slot_keys(&removed, super::panel_now());
     }
+}
+
+pub(super) fn panel_now() -> std::time::Instant {
+    #[cfg(test)]
+    {
+        return std::time::Instant::now() + super::test_clock::offset();
+    }
+    #[cfg(not(test))]
+    std::time::Instant::now()
 }

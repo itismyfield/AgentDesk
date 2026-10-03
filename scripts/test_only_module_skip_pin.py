@@ -35,6 +35,7 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/tui_o/writer/clear_launch_tests.rs",
+        "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
         "src/services/codex_tui/rollout_tail/child_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/child_binding_tests.rs",
@@ -59,6 +60,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/admin_host_guard_tests.rs",
         "src/server/routes/agents_host_guard_tests.rs",
         "src/services/provider_teardown_tests.rs",
+        "src/services/discord/placeholder_live_events/clock_tests.rs",
         "src/services/discord/execution_identity/herdr_observation_tests.rs",
         "src/services/discord/execution_identity/herdr_report_order_tests.rs",
         "src/services/discord/watchers/lifecycle/watch_host_tests.rs",

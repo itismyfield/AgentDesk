@@ -680,7 +680,8 @@ src/
 │   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── input/
-│   │   │   └── composer_lock.rs
+│   │   │   ├── composer_lock.rs
+│   │   │   └── composer_status.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs
@@ -968,6 +969,7 @@ src/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
 │   │   │   ├── background_task_events.rs
+│   │   │   ├── clock_tests.rs
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
@@ -2103,6 +2105,9 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── input_facts/
+│   │   │   │   ├── reactions.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2119,6 +2124,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_tests.rs
+│   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs

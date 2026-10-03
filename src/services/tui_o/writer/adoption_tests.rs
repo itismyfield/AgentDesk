@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;

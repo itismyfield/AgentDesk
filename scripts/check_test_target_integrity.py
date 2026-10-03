@@ -78,6 +78,10 @@ SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "exec
 # tests are outside this parser. These exact, named differences are reviewed
 # data; any drift on either side fails --verify-lib-inventory.
 LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
+    "services::tui_o::store::windows_tests::enabling_the_store_is_refused_without_directory_fsync",
+    "services::session_host::herdr_host::windows_tests::an_unconfigured_herdr_host_refuses_every_operation",
+    "services::claude_tui::hook_server::observation_ingress::windows_tests::a_claude_transcript_without_supported_file_identity_is_refused",
+    "services::claude_tui::hook_server::observation_ingress::windows_tests::a_rollout_without_supported_file_identity_is_refused",
     "runtime_layout::windows_links::tests::windows_junction_paths_are_literal_and_removal_preserves_target",
     "runtime_layout::windows_links::tests::windows_optional_file_alias_never_copies_or_hardlinks_content",
     "services::dispatched_sessions::output::tests::windows_missing_process_is_unavailable_instead_of_empty_tmux_success",

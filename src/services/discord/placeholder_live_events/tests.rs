@@ -7885,6 +7885,7 @@ fn task_notification_xml_keyless_idless_terminal_still_dropped_at_bridge() {
 // unfinished slots closes B and fails this test.
 #[test]
 fn idless_end_with_desc_shared_by_finished_slot_never_closes_the_live_respawn() {
+    let _clock = test_clock::Guard::new();
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
     let events = PlaceholderLiveEvents::default();
@@ -7909,9 +7910,10 @@ fn idless_end_with_desc_shared_by_finished_slot_never_closes_the_live_respawn() 
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.subagents[0].started_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+        guard.subagents[0].started_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
     }
     let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
@@ -8050,6 +8052,7 @@ fn idless_end_with_agent_id_shared_by_finished_slot_never_closes_the_live_slot()
 // fails this test.
 #[test]
 fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
+    let _clock = test_clock::Guard::new();
     use super::completion_footer::{SlotKey, TerminalSlotId};
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
@@ -8074,9 +8077,10 @@ fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.subagents[0].started_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+        guard.subagents[0].started_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
     }
     let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
@@ -9288,6 +9292,7 @@ fn task_card_summary_preserves_newlines() {
 // forever; a fresh slot in the same turn is untouched (normal completion path).
 #[test]
 fn stuck_background_task_slot_force_aborted_at_turn_boundary() {
+    let _clock = test_clock::Guard::new();
     use super::task_panel::{STUCK_BACKGROUND_TASK_TTL, force_abort_stuck_background_task_slots};
 
     let events = PlaceholderLiveEvents::default();
@@ -9319,9 +9324,10 @@ fn stuck_background_task_slot_force_aborted_at_turn_boundary() {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let stale_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+        let stale_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
         let stuck = guard
             .tasks
             .iter_mut()
@@ -9329,8 +9335,7 @@ fn stuck_background_task_slot_force_aborted_at_turn_boundary() {
             .expect("stuck slot");
         stuck.created_at = stale_at;
         // The direct helper aborts exactly the stale slot, not the fresh one.
-        let aborted =
-            force_abort_stuck_background_task_slots(&mut guard.tasks, std::time::Instant::now());
+        let aborted = force_abort_stuck_background_task_slots(&mut guard.tasks, panel_now());
         assert_eq!(aborted, 1, "only the stale slot is aborted");
         assert_eq!(
             guard
@@ -9357,6 +9362,7 @@ fn stuck_background_task_slot_force_aborted_at_turn_boundary() {
 // while a fresh background slot survives as a residual.
 #[test]
 fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
+    let _clock = test_clock::Guard::new();
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
     let events = PlaceholderLiveEvents::default();
@@ -9385,9 +9391,10 @@ fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let stale_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+        let stale_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
         guard
             .tasks
             .iter_mut()
@@ -9429,6 +9436,7 @@ fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
 // fresh background subagent survives as a residual.
 #[test]
 fn stuck_background_subagent_slot_dropped_on_turn_boundary_reconciliation() {
+    let _clock = test_clock::Guard::new();
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
     let events = PlaceholderLiveEvents::default();
@@ -9461,9 +9469,10 @@ fn stuck_background_subagent_slot_dropped_on_turn_boundary_reconciliation() {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let stale_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+        let stale_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
         guard
             .subagents
             .iter_mut()
@@ -9505,6 +9514,7 @@ fn stuck_background_subagent_slot_dropped_on_turn_boundary_reconciliation() {
 // delivery.
 #[test]
 fn stuck_background_subagent_slot_force_aborted_and_evicted() {
+    let _clock = test_clock::Guard::new();
     use super::status_panel::force_abort_stuck_subagent_slots;
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
@@ -9521,10 +9531,6 @@ fn stuck_background_subagent_slot_force_aborted_and_evicted() {
         },
     );
 
-    let now = std::time::Instant::now();
-    let stale_at = now
-        .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-        .expect("monotonic clock far enough past origin");
     {
         let entry = events
             .status_by_channel
@@ -9533,6 +9539,11 @@ fn stuck_background_subagent_slot_force_aborted_and_evicted() {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stale_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
+        let now = panel_now();
         let slot = guard
             .subagents
             .iter_mut()
@@ -9613,6 +9624,7 @@ fn fresh_background_subagent_slot_preserved_by_ttl_sweep() {
 // is older than the stuck-slot TTL.
 #[test]
 fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
+    let _clock = test_clock::Guard::new();
     use super::status_panel::force_abort_stuck_subagent_slots;
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
@@ -9640,10 +9652,6 @@ fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
         },
     );
 
-    let now = std::time::Instant::now();
-    let stale_at = now
-        .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-        .expect("monotonic clock far enough past origin");
     let entry = events
         .status_by_channel
         .get(&channel_id)
@@ -9651,6 +9659,11 @@ fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
     let mut guard = entry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stale_at = test_clock::aged_stamp(
+        &mut guard,
+        STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+    );
+    let now = panel_now();
     let slot = guard
         .subagents
         .iter_mut()
@@ -9676,6 +9689,7 @@ fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
 // unfinished and fails this test; the fresh slot proves the sweep stays scoped.
 #[test]
 fn stuck_background_subagent_swept_on_periodic_panel_render_tick() {
+    let _clock = test_clock::Guard::new();
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
     let events = PlaceholderLiveEvents::default();
@@ -9708,9 +9722,10 @@ fn stuck_background_subagent_swept_on_periodic_panel_render_tick() {
             .iter_mut()
             .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_4396_tick_stuck"))
             .expect("stuck subagent slot")
-            .started_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+            .started_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
     }
 
     // The periodic panel edit tick (NOT a turn boundary).
@@ -9752,6 +9767,7 @@ fn stuck_background_subagent_swept_on_periodic_panel_render_tick() {
 // test.
 #[test]
 fn subagent_activity_refreshes_ttl_clock_so_live_slots_survive_render_sweep() {
+    let _clock = test_clock::Guard::new();
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
 
     let events = PlaceholderLiveEvents::default();
@@ -9779,9 +9795,10 @@ fn subagent_activity_refreshes_ttl_clock_so_live_slots_survive_render_sweep() {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let stale_at = std::time::Instant::now()
-            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
-            .expect("monotonic clock far enough past origin");
+        let stale_at = test_clock::aged_stamp(
+            &mut guard,
+            STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60),
+        );
         for slot in guard.subagents.iter_mut() {
             slot.started_at = stale_at;
         }

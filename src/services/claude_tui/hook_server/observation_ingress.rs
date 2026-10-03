@@ -278,3 +278,67 @@ pub(crate) fn refusal(
 #[cfg(test)]
 #[path = "observation_ingress_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_tests {
+    use crate::services::claude_tui::source_verify::{
+        ClaudeHookSource, SourceHistory, SourceRejection, SourceVerdict, observe_transcript,
+        verify_claude_source,
+    };
+    use crate::services::codex_tui::session::source_observation::{
+        CodexHookSourceClaim, CodexHookSourceRejection, CodexRolloutSource,
+        verify_codex_hook_source,
+    };
+
+    #[test]
+    fn a_claude_transcript_without_supported_file_identity_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let path = project.join(format!("{id}.jsonl"));
+        let first = serde_json::json!({"type": "mode", "sessionId": id});
+        std::fs::write(&path, format!("{first}\n")).unwrap();
+        let source = ClaudeHookSource {
+            event: "session-start".into(),
+            session_id: id.clone(),
+            transcript_path: path.clone(),
+            start_source: Some("startup".into()),
+            published_at: None,
+        };
+        let opened = observe_transcript(&path).unwrap();
+        assert_eq!(
+            verify_claude_source(
+                &source,
+                root.path(),
+                Ok(&opened),
+                &id,
+                None,
+                &SourceHistory::default(),
+            ),
+            SourceVerdict::Rejected(SourceRejection::IdentityUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_rollout_without_supported_file_identity_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let path = root.path().join(format!("rollout-{id}.jsonl"));
+        let meta = serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": id, "cwd": root.path(), "source": "cli", "originator": "codex_cli_rs"}
+        });
+        std::fs::write(&path, format!("{meta}\n")).unwrap();
+        let claim = CodexHookSourceClaim {
+            session_id: &id,
+            transcript_path: Some(&path),
+            expected_source: CodexRolloutSource::Cli,
+        };
+        assert_eq!(
+            verify_codex_hook_source(root.path(), &claim),
+            Err(CodexHookSourceRejection::RolloutUnavailable)
+        );
+    }
+}

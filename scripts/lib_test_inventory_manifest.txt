@@ -1823,6 +1823,8 @@ services::claude_tui::hook_server::observation_ingress::tests::a_repeat_hook_of_
 services::claude_tui::hook_server::observation_ingress::tests::a_tmux_pane_switch_never_looks_up_the_herdr_hold
 services::claude_tui::hook_server::observation_ingress::tests::an_unmapped_hook_is_refused_until_the_first_discovery_pass_finishes
 services::claude_tui::hook_server::observation_ingress::tests::discovery_grace_uses_the_production_sixty_second_boundary
+services::claude_tui::hook_server::observation_ingress::windows_tests::a_claude_transcript_without_supported_file_identity_is_refused
+services::claude_tui::hook_server::observation_ingress::windows_tests::a_rollout_without_supported_file_identity_is_refused
 services::claude_tui::hook_server::relay_receipts::tests::ledger_retention_covers_every_deliverable_request
 services::claude_tui::hook_server::relay_receipts::tests::managed_inflight_deadline_never_reissues_fresh
 services::claude_tui::hook_server::relay_receipts::tests::managed_missing_freshness_never_inserts_and_legacy_survives
@@ -2413,6 +2415,10 @@ services::codex_tui::host_input::tests::a_gate_refusal_is_typed_and_nothing_foll
 services::codex_tui::host_input::tests::a_send_that_may_have_landed_stops_and_is_never_resent
 services::codex_tui::host_input::tests::followup_submit_keeps_the_legacy_tmux_key_order
 services::codex_tui::host_input::tests::non_tmux_targets_get_no_keys_and_no_kill
+services::codex_tui::input::composer_status::tests::current_codex_status_fixture_allows_followup_without_kill
+services::codex_tui::input::composer_status::tests::current_codex_status_fixture_keeps_busy_draft_and_history_guards
+services::codex_tui::input::composer_status::tests::generalized_codex_footer_blocks_submit_during_work_and_approval
+services::codex_tui::input::composer_status::tests::generalized_codex_footer_submits_followup_for_model_and_effort_variants
 services::codex_tui::input::tests::alternate_footer_phrasing_still_matches
 services::codex_tui::input::tests::assistant_output_with_box_drawing_alone_is_not_ready
 services::codex_tui::input::tests::bare_control_bytes_are_rejected
@@ -9552,6 +9558,7 @@ services::session_host::herdr_host::tests::name_only_scan_follows_reexports_and_
 services::session_host::herdr_host::tests::name_only_teardown_calls_stay_on_the_reviewed_list
 services::session_host::herdr_host::tests::session_target_guard_stays_behind_the_keyed_gate
 services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
+services::session_host::herdr_host::windows_tests::an_unconfigured_herdr_host_refuses_every_operation
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead
@@ -9948,6 +9955,7 @@ services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsy
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
+services::tui_o::store::windows_tests::enabling_the_store_is_refused_without_directory_fsync
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted
@@ -9958,6 +9966,13 @@ services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_
 services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
 services::tui_o::writer::adoption::tests::past_sources_over_the_boot_budget_are_not_adopted
+services::tui_o::writer::input_facts::tests::anonymous_openers_and_sidechain_contamination_fail_closed
+services::tui_o::writer::input_facts::tests::channels_are_isolated_and_partial_or_corrupt_supply_is_not_idle
+services::tui_o::writer::input_facts::tests::claude_parent_tools_and_background_notification_ignore_child_file
+services::tui_o::writer::input_facts::tests::codex_parent_stays_open_during_child_completion_and_foreign_closer
+services::tui_o::writer::input_facts::tests::delayed_supply_replays_order_and_never_exposes_backlog_idle
+services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_supply_only_the_new_parent
+services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -10200,13 +10215,14 @@ services::tui_prompt_dedupe::tests::advance_offset_rejects_mismatched_path_when_
 services::tui_prompt_dedupe::tests::advances_runtime_binding_offset_for_same_output_path
 services::tui_prompt_dedupe::tests::advances_runtime_binding_relay_offset_separately_from_runtime_path
 services::tui_prompt_dedupe::tests::candidate_observation_checks_all_pending_forms_before_direct_publish
-services::tui_prompt_dedupe::tests::claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset
-services::tui_prompt_dedupe::tests::claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind
 services::tui_prompt_dedupe::tests::clear_external_input_relay_lease_if_generation_matches_preserves_newer_unassigned
 services::tui_prompt_dedupe::tests::clear_external_input_relay_lease_if_matches_preserves_newer_turn
 services::tui_prompt_dedupe::tests::clears_runtime_binding_by_tmux_session
 services::tui_prompt_dedupe::tests::codex_and_qwen_keep_claude_interrupt_text_as_user_prompt
 services::tui_prompt_dedupe::tests::codex_distinct_message_entry_ids_publish_distinct_direct_prompts
+services::tui_prompt_dedupe::tests::continuation_tests::claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset
+services::tui_prompt_dedupe::tests::continuation_tests::claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind
+services::tui_prompt_dedupe::tests::continuation_tests::hook_re_report_restates_the_adopted_session_authority
 services::tui_prompt_dedupe::tests::dedup_suppressed_candidate_does_not_record_entry_id
 services::tui_prompt_dedupe::tests::deferred_anchor_completion_is_isolated_by_provider_and_session
 services::tui_prompt_dedupe::tests::deferred_anchor_completion_is_not_cross_consumed_by_a_different_turn_same_key
@@ -10227,7 +10243,6 @@ services::tui_prompt_dedupe::tests::extracts_codex_rollout_top_level_entry_id
 services::tui_prompt_dedupe::tests::extracts_codex_rollout_user_message_text
 services::tui_prompt_dedupe::tests::extracts_non_meta_claude_array_user_message_after_slash_command
 services::tui_prompt_dedupe::tests::extracts_qwen_jsonl_user_message_text
-services::tui_prompt_dedupe::tests::hook_re_report_restates_the_adopted_session_authority
 services::tui_prompt_dedupe::tests::ignores_claude_interrupt_marker_without_relay_lease
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_interrupt_marker_user_message_text
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_meta_user_message_text
