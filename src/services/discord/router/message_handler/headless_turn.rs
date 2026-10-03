@@ -901,7 +901,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         false,
     );
     let original_registration =
-        match register_or_requeue(shared, &provider, &deferred_state, &cancel_token).await {
+        match register_headless_original(shared, &provider, &deferred_state, &cancel_token).await {
             Ok(registration) => registration,
             Err(true) => {
                 return Ok(HeadlessTurnStartOutcome {
@@ -1132,6 +1132,15 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     })
 }
 
+async fn register_headless_original(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    cancel: &Arc<CancelToken>,
+) -> Result<Option<Arc<crate::services::discord::live_bridge::OriginalRegistration>>, bool> {
+    register_or_requeue(shared, provider, state, cancel).await
+}
+
 #[cfg(test)]
 mod recovery_context_take_order_tests {
     use super::super::super::super::prompt_builder::{
@@ -1139,6 +1148,49 @@ mod recovery_context_take_order_tests {
     };
     use super::super::super::super::settings::RoleBinding;
     use poise::serenity_prelude::ChannelId;
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_queue() {
+        use crate::services::discord::{self, inflight::InflightTurnState, live_bridge};
+        use crate::services::provider::{CancelToken, ProviderKind};
+        use poise::serenity_prelude::{MessageId, UserId};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let channel = ChannelId::new(655_212_001);
+        let mut shared = discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
+        let token = Arc::new(CancelToken::new());
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex, channel.get(), None, 7, 11, 12,
+            "headless routine".into(), None, None, None, None, 0,
+        );
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
+        state.silent_turn = true;
+        state.delivery_bot = Some("routine-bot".into());
+        state.source = crate::dispatch::Source::Voice;
+        assert!(discord::mailbox_try_start_turn(
+            &shared, channel, token.clone(), UserId::new(7), MessageId::new(11),
+        ).await);
+        discord::increment_global_active(&shared, "fixture");
+        let recovery = live_bridge::try_recovery(&ProviderKind::Codex, channel.get()).unwrap();
+        let start = tokio::time::Instant::now();
+        assert!(matches!(
+            super::register_headless_original(&shared, &ProviderKind::Codex, &state, &token).await,
+            Err(false)
+        ), "headless must return retryable start failure instead of consuming a user requeue");
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(5));
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        assert!(snapshot.cancel_token.is_none());
+        assert!(snapshot.intervention_queue.is_empty(), "no foreground turn can consume headless input");
+        assert!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).is_none());
+        assert!(state.silent_turn);
+        assert_eq!(state.delivery_bot.as_deref(), Some("routine-bot"));
+        assert_eq!(state.source, crate::dispatch::Source::Voice);
+        assert!(!live_bridge::is_live(&ProviderKind::Codex, channel.get()));
+        drop(recovery);
+    }
 
     fn recovery_context_take_call() -> String {
         format!(

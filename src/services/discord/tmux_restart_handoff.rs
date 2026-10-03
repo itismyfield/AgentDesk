@@ -736,6 +736,8 @@ mod o_cut_tests {
                     );
                     state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
                     state.rebind_origin = rebind_origin;
+                    state.turn_nonce = Some("handoff-adoption".into());
+                    crate::services::discord::inflight::save_inflight_state(&state).unwrap();
                     let handled = super::start_restart_handoff_from_state(
                         ChannelId::new(CHANNEL),
                         &recorder.http,
@@ -746,6 +748,14 @@ mod o_cut_tests {
                     )
                     .await;
                     assert!(handled);
+                    assert!(
+                        crate::services::discord::inflight::load_inflight_state(
+                            &ProviderKind::Codex,
+                            CHANNEL,
+                        )
+                        .is_none(),
+                        "completed handoff must clear its exact row, rebind={rebind_origin}"
+                    );
                     recorder.calls()
                 }
             };
