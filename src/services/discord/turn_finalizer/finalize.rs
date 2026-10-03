@@ -38,6 +38,7 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
     released: Option<crate::services::turn_orchestrator::FinishTurnResult>,
 ) -> FinalizeOutcome {
     let operator_release = matches!(event, TerminalEvent::OperatorRelease(_));
+    let preclaimed_release = released.is_some();
     #[cfg(test)]
     super::test_panic_hook::maybe_panic_in_finalize();
     let Ok(expected_actor) = super::cleanup::captured_recovery_actor(submit_snapshot) else {
@@ -278,8 +279,8 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
         relay_owner_kind,
     );
 
-    let has_pending_after_voice = if operator_release {
-        // A successor can be admitted after the operator CAS. Preserve its
+    let has_pending_after_voice = if preclaimed_release {
+        // A successor can be admitted after the preclaim CAS. Preserve its
         // channel-scoped routing, watchdog and voice state.
         finish.has_pending
     } else if guarded_finish_missed {

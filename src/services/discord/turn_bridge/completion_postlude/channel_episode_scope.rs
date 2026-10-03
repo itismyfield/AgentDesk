@@ -460,12 +460,19 @@ mod tests {
                 "services/discord/router/message_handler/headless_turn.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
+                "services/discord/turn_bridge/authority_loss_tests.rs",
                 "services/discord/turn_bridge/entry_abort_mailbox_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
             ],
             "every bridge entry file must declare its mailbox token-registration contract"
         );
 
+        let displaced = include_str!("../authority_loss_tests.rs");
+        assert_eq!(displaced.matches(&spawn).count(), 1);
+        assert!(displaced.contains("mailbox_try_start_turn(\n                        &shared,\n                        channel,\n                        actor.clone(),"));
+        assert!(
+            displaced.contains("spawn_turn_bridge(shared.clone(), actor.clone(), rx, context)")
+        );
         let intake = include_str!("../../router/message_handler/intake_turn.rs");
         let headless = include_str!("../../router/message_handler/headless_turn.rs");
         let recovery = include_str!("../../recovery_engine/restore_inflight.rs");

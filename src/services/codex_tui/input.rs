@@ -104,9 +104,11 @@ use tokio::sync::Notify;
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_lock;
+mod composer_status;
 #[allow(unused_imports)]
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
+use composer_status::line_is_codex_fast_context_status;
 
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
@@ -1482,19 +1484,6 @@ fn line_is_dim_legacy_codex_prompt(line: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn line_is_codex_fast_context_status(line: &str) -> bool {
-    let parts: Vec<&str> = line.split('·').map(str::trim).collect();
-    parts.len() == 3
-        && matches!(parts[0], "Fast on" | "Fast off")
-        && !parts[1].is_empty()
-        && parts[2]
-            .strip_prefix("Context ")
-            .and_then(|value| value.strip_suffix("% left"))
-            .is_some_and(|percent| {
-                !percent.is_empty() && percent.chars().all(|ch| ch.is_ascii_digit())
-            })
-}
-
 fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
     const ACTIVE_TURN_BOTTOM_WINDOW: usize = 6;
 
@@ -2636,6 +2625,66 @@ The documentation example ends with:
             codex_visible_prompt_draft_backspace_budget(&snapshot),
             Some(19)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_codex_status_fixture_allows_followup_without_kill() {
+        use super::super::host_input::spy::{SpyGuard, SpyState};
+        let pane = include_str!("../../../tests/fixtures/tui_input/codex-0.160.0-idle.ansi");
+        let guard = SpyGuard::install(SpyState {
+            captures: [pane, pane, pane, pane]
+                .into_iter()
+                .map(|p| Some(p.to_string()))
+                .collect(),
+            ..SpyState::default()
+        });
+        let session = "composer-current-fixture";
+        let snapshot = prompt_readiness_snapshot(session);
+        assert!(
+            snapshot.composer_marker_detected,
+            "actual composer must be ready: {snapshot:?}"
+        );
+        let ready =
+            wait_until_codex_tui_input_ready(session, PromptReadinessKind::PostTurnHandoff, None);
+        assert!(ready.is_ok(), "{ready:?}");
+        assert!(matches!(
+            submit_codex_followup_prompt(session, "fixture follow-up", None),
+            CodexFollowupPromptSubmitOutcome::Submitted
+        ));
+        let calls = guard.calls();
+        assert_eq!(
+            calls.iter().filter(|c| c.as_str() == "keys:Enter").count(),
+            1
+        );
+        assert_eq!(calls.iter().filter(|c| c.starts_with("kill")).count(), 0);
+    }
+
+    #[test]
+    fn current_codex_status_fixture_keeps_busy_draft_and_history_guards() {
+        let idle = include_str!("../../../tests/fixtures/tui_input/codex-0.160.0-idle.ansi");
+        let draft = include_str!("../../../tests/fixtures/tui_input/codex-0.160.0-draft.ansi");
+        let (marker, has_draft, _) = prompt_readiness_from_ansi_pane(draft);
+        assert!(!marker);
+        assert!(has_draft);
+        for pane in [
+            idle.replace("Context 97% left", "Context unknown"),
+            idle.replace("Fast off", "slow prose"),
+            idle.replace("GPT-6.1-Sol xhigh", "assistant prose"),
+            idle.replace(
+                "Worked for 2s • 7:26 AM",
+                "• Working (2s • esc to interrupt)",
+            ),
+            format!(
+                "{idle}
+new output
+new output
+new output
+new output"
+            ),
+        ] {
+            assert!(!prompt_readiness_from_ansi_pane(&pane).0, "{pane}");
+        }
+        assert!(!prompt_readiness_from_ansi_pane("Worked for 6s • 6:26 AM").0);
     }
 
     #[test]

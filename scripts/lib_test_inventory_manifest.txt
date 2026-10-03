@@ -2447,6 +2447,8 @@ services::codex_tui::input::tests::control_characters_are_rejected
 services::codex_tui::input::tests::copied_tui_frame_in_assistant_output_during_active_turn_is_not_ready
 services::codex_tui::input::tests::current_codex_busy_pane_is_not_ready
 services::codex_tui::input::tests::current_codex_idle_pane_uses_dim_evidence_to_override_plain_draft
+services::codex_tui::input::tests::current_codex_status_fixture_allows_followup_without_kill
+services::codex_tui::input::tests::current_codex_status_fixture_keeps_busy_draft_and_history_guards
 services::codex_tui::input::tests::detects_box_drawing_classifier_on_pure_edge_line
 services::codex_tui::input::tests::emoji_and_korean_stay_literal
 services::codex_tui::input::tests::empty_prompt_is_rejected
@@ -7401,6 +7403,9 @@ services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_fro
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
+services::discord::turn_bridge::authority_loss_tests::displaced_codex_terminal_releases_exact_mailbox_and_dispatches_next_once
+services::discord::turn_bridge::authority_loss_tests::displaced_terminal_keeps_successor_actor_even_when_id_and_nonce_match
+services::discord::turn_bridge::authority_loss_tests::rejected_displaced_terminal_cannot_borrow_mailbox_completion
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals

@@ -680,7 +680,8 @@ src/
 │   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── input/
-│   │   │   └── composer_lock.rs
+│   │   │   ├── composer_lock.rs
+│   │   │   └── composer_status.rs
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
@@ -1524,6 +1525,8 @@ src/
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
+│   │   │   ├── authority_loss.rs
+│   │   │   ├── authority_loss_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
 │   │   │   ├── bridge_entry_persist.rs

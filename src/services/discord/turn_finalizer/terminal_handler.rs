@@ -27,7 +27,7 @@ pub(super) async fn handle_terminal(
     } else {
         key
     };
-    let released = if let TerminalEvent::OperatorRelease(release) = &event {
+    let mut released = if let TerminalEvent::OperatorRelease(release) = &event {
         let Some(finish) = release.claim(shared, &provider, key).await else {
             return FinalizeOutcome::AlreadyFinalized;
         };
@@ -75,6 +75,36 @@ pub(super) async fn handle_terminal(
         if channel_has_live_turn {
             return FinalizeOutcome::AlreadyFinalized;
         }
+    }
+
+    let displaced_bridge = key.episode.is_some()
+        && key.user_msg_id != 0
+        && matches!(event, TerminalEvent::Complete)
+        && !ctx.clear_inflight
+        && ctx.allow_completion_cleanup
+        && claim_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.relay_ownership_only && snapshot.recovery_actor.is_some()
+        });
+    if displaced_bridge {
+        if ledger
+            .get(&ledger_key)
+            .is_some_and(|entry| entry.phase != Phase::Pending)
+        {
+            return FinalizeOutcome::AlreadyFinalized;
+        }
+        let Ok(Some(expected_actor)) = cleanup::captured_recovery_actor(claim_snapshot.as_ref())
+        else {
+            return FinalizeOutcome::AlreadyFinalized;
+        };
+        // Claim the captured actor before touching its ledger or admission edges.
+        // A same-episode replacement retains its own pending completion authority.
+        let Ok(Some(capture)) =
+            episode::claim_normal_episode(shared, &provider, key, false, Some(expected_actor))
+                .await
+        else {
+            return FinalizeOutcome::AlreadyFinalized;
+        };
+        released = Some(capture.finish);
     }
 
     let pending = take_exact_pending_completion_admission(pending_admission, ledger_key);
@@ -206,6 +236,22 @@ pub(super) async fn handle_terminal(
             if matches!(event, TerminalEvent::OperatorRelease(_)) {
                 entry.completion_admission.operator_released = true;
                 entry.completion_admission.queue_eligible_published = false;
+            }
+            if displaced_bridge
+                && matches!(
+                    outcome,
+                    FinalizeOutcome::Finalized {
+                        removed_token: Some(_),
+                        ..
+                    }
+                )
+            {
+                entry
+                    .completion_admission
+                    .note_terminal_projection_settled(true);
+                entry
+                    .completion_admission
+                    .note_terminal_disposition_settled(true);
             }
             note_mailbox_release_after_finalize(&outcome, entry, shared);
             outcome

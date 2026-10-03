@@ -1060,23 +1060,28 @@ mod tests {
             .find("completion_guard.relinquish_bridge_authority()")
             .map(|offset| authority_lost + offset)
             .expect("authority loss suppresses the stale completion broadcast");
-        let defuse = caller[relinquish..]
+        let defuse = caller[authority_lost..]
             .find("inflight_guard.defuse()")
-            .map(|offset| relinquish + offset)
+            .map(|offset| authority_lost + offset)
             .expect("authority loss suppresses stale durable cleanup");
-        let early_return = caller[defuse..]
-            .find("return;")
+        let observer = caller[defuse..]
+            .find("authority_loss::settle_displaced_terminal")
             .map(|offset| defuse + offset)
-            .expect("authority loss exits the bridge immediately");
+            .expect("the original reader retains terminal observation without publishing output");
+        let early_return = caller[relinquish..]
+            .find("return;")
+            .map(|offset| relinquish + offset)
+            .expect("authority loss exits before visible finalization");
         let finalize = caller[outcome_match..]
             .find("post_loop_finalize::run_post_loop_finalize")
             .map(|offset| outcome_match + offset)
             .expect("normal bridge still has visible finalization");
 
         assert!(
-            authority_lost < relinquish
-                && relinquish < defuse
-                && defuse < early_return
+            authority_lost < defuse
+                && defuse < observer
+                && observer < relinquish
+                && relinquish < early_return
                 && early_return < finalize
         );
     }
