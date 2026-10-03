@@ -1246,12 +1246,10 @@ mod tests {
         )
         .expect("claude rebind without transcript candidate should use wrapper output path");
 
-        assert_eq!(
-            result.output_path,
-            crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl")
-        );
+        let (expected_output_path, expected_input_fifo) = tmux_runtime_paths(tmux_session_name);
+        assert_eq!(result.output_path, expected_output_path);
         assert_eq!(result.synthetic_initial_offset, 0);
-        assert!(result.input_fifo_path.is_some());
+        assert_eq!(result.input_fifo_path, Some(expected_input_fifo));
         assert_eq!(result.runtime_kind, None);
         assert_eq!(
             result.session_id.as_deref(),

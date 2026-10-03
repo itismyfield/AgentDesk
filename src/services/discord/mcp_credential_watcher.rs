@@ -493,22 +493,16 @@ mod tests {
     fn watched_paths_exclude_oauth_token_file() {
         // #3554: the OAuth token file is rewritten on every access-token refresh and
         // carries no MCP signal, so it must not be watched.
-        let paths = credential_paths_with_overrides(None, Some(PathBuf::from("/home/u")));
-        let rendered: Vec<String> = paths
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
+        let home = PathBuf::from("/home/u");
+        let paths = credential_paths_with_overrides(None, Some(home.clone()));
+        assert!(paths.contains(&home.join(".claude.json")), "{paths:?}");
         assert!(
-            rendered.iter().any(|p| p.ends_with("/home/u/.claude.json")),
-            "{rendered:?}"
+            paths.contains(&home.join(".claude").join(".mcp.json")),
+            "{paths:?}"
         );
         assert!(
-            rendered.iter().any(|p| p.ends_with(".claude/.mcp.json")),
-            "{rendered:?}"
-        );
-        assert!(
-            !rendered.iter().any(|p| p.ends_with(".credentials.json")),
-            "token file must not be watched: {rendered:?}"
+            !paths.contains(&home.join(".claude").join(".credentials.json")),
+            "token file must not be watched: {paths:?}"
         );
     }
 

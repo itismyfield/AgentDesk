@@ -778,11 +778,7 @@ struct LastMessageIdFileLock {
 
 impl Drop for LastMessageIdFileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let _ = self._file.unlock();
     }
 }
 
@@ -801,14 +797,7 @@ fn lock_last_message_id_path(path: &Path) -> Result<LastMessageIdFileLock, Strin
         .create(true)
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-    }
+    file.lock().map_err(|error| error.to_string())?;
     Ok(LastMessageIdFileLock { _file: file })
 }
 
@@ -836,6 +825,8 @@ pub(super) fn save_last_message_id(provider: &str, channel_id: u64, message_id: 
     let checkpoint = read_last_message_id(&path)
         .map(|existing| existing.max(message_id))
         .unwrap_or(message_id);
+    #[cfg(test)]
+    checkpoint_lock_tests::after_read();
     best_effort_atomic_write_logged(
         &path,
         &checkpoint.to_string(),
@@ -844,6 +835,10 @@ pub(super) fn save_last_message_id(provider: &str, channel_id: u64, message_id: 
             .channel_id(channel_id),
     );
 }
+
+#[cfg(test)]
+#[path = "runtime_store_checkpoint_lock_tests.rs"]
+mod checkpoint_lock_tests;
 
 /// Save all last_message_ids from a map (used during SIGTERM).
 pub(super) fn save_all_last_message_ids(provider: &str, ids: &std::collections::HashMap<u64, u64>) {
