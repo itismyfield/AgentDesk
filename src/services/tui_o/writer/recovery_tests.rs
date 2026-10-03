@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::tui_o::store::rotation::Rotation;
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::rotation::{MAX_READERS, RETIRE_QUIET, Sources};
 

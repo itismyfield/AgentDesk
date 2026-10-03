@@ -276,9 +276,10 @@ impl<B: BindingEvents> Sources<B> {
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
         if let Some(events) = self.read_log(writer, 0) {
-            let checkpoint = self.checkpoint.or_else(|| {
-                binding_baseline(&events, |source| writer.store().cursor(source).is_some())
-            });
+            let store = writer.store();
+            let checkpoint = self
+                .checkpoint
+                .or_else(|| binding_baseline(&events, |source| store.cursor(source).is_some()));
             if let Some(checkpoint) = checkpoint {
                 self.restore_hops(writer, &events, checkpoint)?;
             }
