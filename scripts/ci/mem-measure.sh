@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs a command and reports its peak RSS (GNU time) and system memory on stderr.
+# Runs a command and reports its peak RSS (GNU time), memory and disk on stderr.
 # Stdout and the exit status are the command's own, so pipelines keep their meaning.
 set -uo pipefail
 
@@ -39,6 +39,7 @@ pswpout_after="$(swapped_out_pages)"
     swapped=$((pswpout_after - pswpout_before))
   fi
   echo "mem-measure ${label}: rc=${rc} max_rss_kib=${max_rss:-unavailable} elapsed=${elapsed:-unavailable} swapped_out_pages=${swapped}"
-  free -m || true
+  # Runs whatever the command's status, so a failed build still records memory and disk.
+  bash "$(dirname "${BASH_SOURCE[0]}")/resource-snapshot.sh" "after-${label}" || true
 } >&2
 exit "$rc"

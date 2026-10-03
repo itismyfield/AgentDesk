@@ -10,8 +10,11 @@ warn() {
   printf '::warning title=ensure-swap::%s\n' "$*"
 }
 
+snapshot="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/ci/resource-snapshot.sh"
+
+# Memory and disk state before the build; mem-measure prints the same after it.
 report() {
-  free -m || true
+  bash "$snapshot" before-build || true
   swapon --show || true
 }
 

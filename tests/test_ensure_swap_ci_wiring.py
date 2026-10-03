@@ -60,6 +60,18 @@ def builds_lib_tests(step: dict, job: dict) -> bool:
     return "ci-script-checks.sh" in run and shard == "cargo"
 
 
+def expected_df(target: Path) -> str:
+    """The df -h line a fake df prints: /, /mnt (or its parent), nearest existing target."""
+    mnt = "/mnt" if os.path.exists("/mnt") else "/"
+    while not target.exists():
+        target = target.parent
+    return f"DF-H / {mnt} {target}"
+
+
+# Prints the paths df -h was asked about; the -Pm free-space probe gets a table.
+FAKE_DF_H = '[ "$1" = "-h" ] && { shift; echo "DF-H $*"; exit 0; }\n'
+
+
 def write_tool(directory: Path, name: str, body: str) -> None:
     path = directory / name
     path.write_text("#!/usr/bin/env bash\n" + textwrap.dedent(body), "utf-8")
@@ -129,7 +141,7 @@ class EnsureSwapBehavior(unittest.TestCase):
             echo "Mem:          15990        2000       13990"
             echo "Swap:         {swap_mib}           0        {swap_mib}"
         """)
-        write_tool(bin_dir, "df", f"""\
+        write_tool(bin_dir, "df", FAKE_DF_H + f"""\
             echo "Filesystem 1048576-blocks Used Available Capacity Mounted on"
             echo "/dev/sdb1 75000 5000 {avail_mib} 7% /mnt"
         """)
@@ -146,11 +158,14 @@ class EnsureSwapBehavior(unittest.TestCase):
         """)
         swap_path = tmp / "mnt" / "agentdesk-swapfile"
         swap_path.parent.mkdir()
+        (tmp / "ws").mkdir()
+        self.target = tmp / "ws" / "target"
         env = {
             **os.environ,
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "ENSURE_SWAP_SIZE_GB": size_gb,
             "ENSURE_SWAP_PATH": str(swap_path),
+            "CARGO_TARGET_DIR": str(self.target),
         }
         proc = subprocess.run(["bash", str(ENSURE_SWAP)], env=env, text=True,
                               capture_output=True, check=False)
@@ -175,6 +190,15 @@ class EnsureSwapBehavior(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(path.exists())
         self.assertIn("Swap:", proc.stdout)
+
+    def test_memory_and_disk_are_recorded_before_the_build(self) -> None:
+        for swap_mib in (4096, 16384):
+            with self.subTest(swap_mib=swap_mib):
+                proc, _, _ = self.run_swap(swap_mib=swap_mib)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = proc.stdout.splitlines()
+                self.assertIn(expected_df(self.target), lines)
+                self.assertTrue(any(line.startswith("Swap:") for line in lines))
 
     def test_failed_swapon_warns_removes_its_file_and_keeps_the_job(self) -> None:
         proc, calls, path = self.run_swap(fail_swapon=True)
@@ -204,6 +228,8 @@ class MemMeasureBehavior(unittest.TestCase):
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_tool(bin_dir, "free", 'echo "Swap:  16384  512  15872"\n')
+        write_tool(bin_dir, "df", FAKE_DF_H)
+        self.target = tmp / "target"
         fake_time = bin_dir / "gnu-time"
         # Mirrors GNU time: -v -o FILE [--] CMD, exit status of CMD.
         write_tool(bin_dir, "gnu-time", """\
@@ -218,6 +244,7 @@ class MemMeasureBehavior(unittest.TestCase):
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "MEM_MEASURE_TIME_BIN": str(fake_time) if gnu_time else str(tmp / "missing"),
             "RUNNER_TEMP": str(tmp),
+            "CARGO_TARGET_DIR": str(self.target),
         }
         return subprocess.run(
             ["bash", str(MEM_MEASURE), "probe", "--", "bash", "-c", command],
@@ -235,6 +262,15 @@ class MemMeasureBehavior(unittest.TestCase):
                     self.assertEqual(proc.returncode, status)
                     self.assertIn(f"mem-measure probe: rc={status}".encode(), proc.stderr)
                     self.assertIn(b"Swap:", proc.stderr)
+
+    def test_memory_and_disk_are_recorded_after_the_build_even_when_it_fails(self) -> None:
+        for status in (0, 3):
+            with self.subTest(status=status):
+                proc = self.run_measure(f"exit {status}", gnu_time=True)
+                self.assertEqual(proc.returncode, status)
+                lines = proc.stderr.decode().splitlines()
+                summary = lines.index(next(l for l in lines if l.startswith("mem-measure probe:")))
+                self.assertIn(expected_df(self.target), lines[summary + 1:])
 
     def test_peak_rss_is_reported_from_gnu_time(self) -> None:
         proc = self.run_measure("exit 0", gnu_time=True)
