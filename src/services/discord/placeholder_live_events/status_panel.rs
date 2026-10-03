@@ -772,3 +772,12 @@ fn trim_subagents(slots: &mut Vec<SubagentSlot>, tombstones: &mut SubagentKeyTom
         tombstones.push_slot_keys(&removed, super::panel_now());
     }
 }
+
+pub(super) fn panel_now() -> std::time::Instant {
+    #[cfg(test)]
+    {
+        return std::time::Instant::now() + super::test_clock::offset();
+    }
+    #[cfg(not(test))]
+    std::time::Instant::now()
+}
