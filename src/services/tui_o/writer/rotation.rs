@@ -275,6 +275,14 @@ impl<B: BindingEvents> Sources<B> {
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
+        if let Some(events) = self.read_log(writer, 0) {
+            let checkpoint = self.checkpoint.or_else(|| {
+                binding_baseline(&events, |source| writer.store().cursor(source).is_some())
+            });
+            if let Some(checkpoint) = checkpoint {
+                self.restore_hops(writer, &events, checkpoint)?;
+            }
+        }
         let mut cursors: Vec<_> = writer.store().cursors().cloned().collect();
         cursors.sort_by_key(|cursor| {
             let seq = self.rotation.link(&cursor.source).map_or(0, |l| l.seq);
@@ -341,6 +349,30 @@ impl<B: BindingEvents> Sources<B> {
         self.flush(writer)
     }
 
+    fn restore_hops<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        events: &[BindingEvent],
+        checkpoint: u64,
+    ) -> Result<(), WriterAlarm> {
+        for (expected, event) in (1..).zip(events.iter().take_while(|e| e.seq <= checkpoint)) {
+            if event.seq != expected {
+                return Err(WriterAlarm::BindingGap { expected, found: event.seq });
+            }
+            if event.channel_id != self.channel || event.provider != self.provider {
+                return Err(halt("historical binding names another channel or provider"));
+            }
+        }
+        let changed = super::historical_hops::restore(
+            &mut self.rotation, events, checkpoint,
+            |source| writer.store().cursor(source).is_some(),
+        );
+        if changed {
+            writer.store().write_rotation(&self.rotation).map_err(halted("historical rotation"))?;
+        }
+        Ok(())
+    }
+
     /// Takes each unproven record's missing pane and seq from the last applied hop of its old
     /// source; a record that hop does not match stays unproven.
     fn restore_legacy_hops(&mut self) {
@@ -357,7 +389,7 @@ impl<B: BindingEvents> Sources<B> {
         let applied = &events[..events.partition_point(|e| e.seq <= checkpoint)];
         for (key, next) in self.rotation.successors.iter().filter(|(_, n)| legacy(n)) {
             let last = applied.iter().rev().find_map(|e| {
-                hop(e, &events)
+                hop(e, applied)
                     .filter(|(old, _)| source_key(old) == *key)
                     .map(|h| (e, h))
             });
@@ -488,6 +520,13 @@ impl<B: BindingEvents> Sources<B> {
         let seq = binding_baseline(&events, |source| store.cursor(source).is_some()).ok_or_else(
             || halt("no binding baseline: no event binds a source attached at the switch"),
         )?;
+        self.restore_hops(writer, &events, seq)?;
+        for reader in &mut self.readers {
+            if let Some(next) = self.rotation.successors.get(&source_key(&reader.source)) {
+                reader.rotated_at.get_or_insert(Instant::now());
+                reader.drain_to = next.drain_to.filter(|end| reader.capture.as_ref().is_some_and(|c| c.captured_through() < *end));
+            }
+        }
         let seeded = writer.store().set_binding_checkpoint(seq);
         seeded.map_err(halted("binding checkpoint"))?;
         self.checkpoint = Some(seq);
@@ -880,11 +919,6 @@ impl<B: BindingEvents> Sources<B> {
         writer: &mut ChannelWriter<P, L, A>,
     ) -> Result<(), WriterAlarm> {
         let now = Instant::now();
-        let count = self.readers.iter().filter(|r| r.reading()).count();
-        if count > MAX_READERS && !self.readers_alarmed {
-            writer.alarm(WriterAlarm::TooManyReaders { count });
-        }
-        self.readers_alarmed = count > MAX_READERS;
         let captured = self.readers.iter().filter(|r| r.captured_any);
         let captured: HashSet<String> = captured.map(|r| source_key(&r.source)).collect();
         let mut grew_back = Vec::new();
@@ -936,6 +970,12 @@ impl<B: BindingEvents> Sources<B> {
             self.unretire(writer, &source)?;
             writer.alarm(WriterAlarm::RetiredSourceGrew { source });
         }
+        let count = self.readers.iter().filter(|r| r.reading()).count();
+        if count > MAX_READERS && !self.readers_alarmed {
+            writer.alarm(WriterAlarm::TooManyReaders { count });
+        }
+        self.readers_alarmed = count > MAX_READERS;
+        writer.reconcile_reader_count(count);
         Ok(())
     }
 
