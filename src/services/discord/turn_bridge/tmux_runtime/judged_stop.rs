@@ -127,8 +127,9 @@ impl ChannelStop {
         self.target.legacy_name().map(LegacyTmuxName::as_str)
     }
 
-    pub(in crate::services::discord) fn is_token(&self, token: &Arc<CancelToken>) -> bool {
-        Arc::ptr_eq(&self.token, token)
+    /// The judged token, which keys the finish that may follow the stop.
+    pub(in crate::services::discord) fn token(&self) -> &Arc<CancelToken> {
+        &self.token
     }
 
     /// Cancels the judged token only while it is still the channel's turn, then records the

@@ -52,7 +52,9 @@ impl FollowUp {
         Box::pin(async move {
             match self {
                 Self::FinishOwned => {
-                    discord::mailbox_finish_owned_turn(shared, provider, channel).await;
+                    let peek = discord::MailboxLookup::Peek;
+                    discord::mailbox_finish_judged_turn(shared, provider, channel, None, peek)
+                        .await;
                 }
                 Self::FinishCancelled => {
                     discord::mailbox_finish_cancelled_turn(shared, channel).await;

@@ -25,6 +25,50 @@ impl RuntimeTurnStopResult {
             mailbox_foreground_free: false,
         }
     }
+
+    /// The judged turn ended and another took the channel: the stop left the successor alone.
+    pub(crate) fn token_superseded(queue_depth: usize, termination_recorded: bool) -> Self {
+        Self {
+            lifecycle_path: TOKEN_SUPERSEDED_PATH,
+            had_active_turn: true,
+            queue_depth,
+            inflight: InflightDisposition::NotNeeded,
+            termination_recorded,
+            mailbox_foreground_free: false,
+        }
+    }
+
+    /// The finish went unobserved: the turn, its row and session are kept as a refused host's.
+    pub(crate) fn finish_unobserved(queue_depth: usize) -> Self {
+        Self {
+            lifecycle_path: FINISH_UNOBSERVED_PATH,
+            inflight: InflightDisposition::PreservedByHostGuard,
+            ..Self::preserved_by_host_guard(queue_depth)
+        }
+    }
+}
+
+/// A stop whose judged turn was replaced before its finish; the channel stays locked.
+pub(crate) const TOKEN_SUPERSEDED_PATH: &str = "token-superseded";
+/// A stop whose finish the channel's actor did not answer; nothing was cleared.
+pub(crate) const FINISH_UNOBSERVED_PATH: &str = "finish-unobserved";
+
+impl super::HardStopRuntimeResult {
+    pub(crate) fn token_superseded(has_pending_queue: bool) -> Self {
+        Self {
+            cleanup_path: TOKEN_SUPERSEDED_PATH,
+            has_pending_queue,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn finish_unobserved() -> Self {
+        Self {
+            cleanup_path: FINISH_UNOBSERVED_PATH,
+            had_active_turn: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// What a runtime stop did with the channel's persistent inflight row.

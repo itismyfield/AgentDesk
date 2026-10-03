@@ -104,6 +104,8 @@ pub(crate) async fn stop_channel_runtime(
     approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
     let stop = ChannelStop::judge(shared, provider, channel_id, approved, false).await;
+    #[cfg(test)]
+    super::judged_finish_hook::after_judge(channel_id).await;
     let policy = cleanup_policy;
     let run = super::stop_judged_channel_runtime;
     run(shared, provider, channel_id, stop, reason, policy, approved).await
@@ -114,6 +116,20 @@ pub(super) async fn host_guard_preserved(
     shared: &SharedData,
     channel: ChannelId,
 ) -> RuntimeTurnStopResult {
+    preserved(
+        shared,
+        channel,
+        RuntimeTurnStopResult::preserved_by_host_guard,
+    )
+    .await
+}
+
+/// The result of a stop that leaves the channel's turn in place, by `kept`, at the queue's depth.
+pub(super) async fn preserved(
+    shared: &SharedData,
+    channel: ChannelId,
+    kept: impl FnOnce(usize) -> RuntimeTurnStopResult,
+) -> RuntimeTurnStopResult {
     let snapshot = discord::mailbox_snapshot(shared, channel).await;
-    RuntimeTurnStopResult::preserved_by_host_guard(snapshot.intervention_queue.len())
+    kept(snapshot.intervention_queue.len())
 }
