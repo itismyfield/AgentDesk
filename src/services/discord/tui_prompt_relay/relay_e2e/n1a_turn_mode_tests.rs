@@ -313,7 +313,10 @@ fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
             .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "1")
             .status()
             .unwrap();
-        assert!(status.success(), "isolated footer maintenance fixture failed");
+        assert!(
+            status.success(),
+            "isolated footer maintenance fixture failed"
+        );
         return;
     }
     run(async {
@@ -363,6 +366,13 @@ fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
                 .is_some_and(|block| block.contains("n1a footer task")),
             "confirmed idle must rehydrate live footer slots: {footer:?}"
         );
+        let generation = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+            tmux,
+            "generation",
+        ));
+        assert!(generation.starts_with(h.root.path()));
+        std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+        std::fs::write(&generation, "harness-generation").unwrap();
         let old_end = transcript.len() as u64 + 1000;
         crate::services::discord::outbound::delivery_record::write_delivered_frontier(
             &ProviderKind::Claude, CHANNEL_ID, tmux,
