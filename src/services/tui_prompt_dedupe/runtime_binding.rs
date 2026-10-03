@@ -11,6 +11,7 @@ pub(crate) use codex_hook::{
 };
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
+pub(crate) use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -220,24 +221,6 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     #[rustfmt::skip]
     let registered = crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| register_rehydrated_tmux_runtime_binding_under_source_authority(authority, provider, channel_id, binding));
     registered
-}
-
-pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
-    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    provider: &str,
-    channel_id: u64,
-    binding: TuiRuntimeBinding,
-) -> bool {
-    let record = Record::Stat;
-    register_rehydrated_under_source_authority(
-        authority,
-        provider,
-        channel_id,
-        binding,
-        record,
-        CauseSource::Observed,
-    )
-    .is_some_and(Persisted::published)
 }
 
 /// `None` when nothing was published; otherwise what the record left, published only if it says so.

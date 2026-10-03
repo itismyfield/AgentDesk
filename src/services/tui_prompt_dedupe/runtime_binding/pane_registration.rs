@@ -30,6 +30,24 @@ pub(crate) fn register_launched_claude_pane(
         .is_some_and(Persisted::published)
 }
 
+pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    channel_id: u64,
+    binding: TuiRuntimeBinding,
+) -> bool {
+    let record = Record::Stat;
+    register_rehydrated_under_source_authority(
+        authority,
+        provider,
+        channel_id,
+        binding,
+        record,
+        CauseSource::Observed,
+    )
+    .is_some_and(Persisted::published)
+}
+
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
 /// an unpublished `Persisted` when the pane's pin refused it.
 pub(crate) fn register_claude_pane_with(

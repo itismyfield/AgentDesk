@@ -15,6 +15,7 @@ use super::super::host_defer_gate::mirror_evict_admitted as host_admits;
 use super::super::recovery_engine::host_reconcile::names_another_host;
 use super::launch_script::{claude_tui_launch_transcript, claude_tui_rehydrated_binding};
 use super::*;
+use crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane;
 use std::collections::HashMap;
 
 #[cfg(not(test))]
@@ -380,12 +381,7 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             None => true,
         };
         if should_refresh {
-            let registered = crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane(
-                tmux_session_name,
-                channel_id,
-                fresh.clone(),
-            );
-            if !registered {
+            if !register_launched_claude_pane(tmux_session_name, channel_id, fresh.clone()) {
                 return;
             }
             tracing::info!(
