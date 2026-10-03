@@ -221,7 +221,7 @@ class EnsureSwapBehavior(unittest.TestCase):
 
 
 class MemMeasureBehavior(unittest.TestCase):
-    def run_measure(self, command: str, *, gnu_time: bool):
+    def run_measure(self, command: str, *, gnu_time: bool, proc_root: Path | None = None):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         tmp = Path(scratch.name)
@@ -246,6 +246,8 @@ class MemMeasureBehavior(unittest.TestCase):
             "RUNNER_TEMP": str(tmp),
             "CARGO_TARGET_DIR": str(self.target),
         }
+        if proc_root is not None:
+            env["MEM_MEASURE_PROC_ROOT"] = str(proc_root)
         return subprocess.run(
             ["bash", str(MEM_MEASURE), "probe", "--", "bash", "-c", command],
             env=env, capture_output=True, check=False,
@@ -277,6 +279,22 @@ class MemMeasureBehavior(unittest.TestCase):
         self.assertIn(b"max_rss_kib=4242", proc.stderr)
         fallback = self.run_measure("exit 0", gnu_time=False)
         self.assertIn(b"max_rss_kib=unavailable", fallback.stderr)
+
+    def test_peak_processes_are_named_largest_first_with_the_rustc_crate(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        proc = Path(scratch.name)
+        for pid, name, hwm in ((101, "rustc", 2097152), (102, "rust-lld", 3000),
+                               (103, "cargo", 500), (104, "rustc", 40)):
+            (proc / str(pid)).mkdir()
+            (proc / str(pid) / "status").write_text(
+                f"Name:\t{name}\nPid:\t{pid}\nVmHWM:\t{hwm} kB\n", "utf-8")
+        (proc / "101" / "cmdline").write_bytes(b"rustc\0--crate-name\0agentdesk\0--test\0")
+        sampled = self.run_measure("exit 0", gnu_time=True, proc_root=proc)
+        self.assertIn(
+            b"peak_procs=rustc/agentdesk+test=2097152,rust-lld=3000,cargo=500\n", sampled.stderr)
+        missing = self.run_measure("exit 0", gnu_time=True, proc_root=proc / "missing")
+        self.assertIn(b"peak_procs=unavailable\n", missing.stderr)
 
 
 if __name__ == "__main__":
