@@ -3756,6 +3756,7 @@ services::discord::inflight::removal::boot_custody_tests::an_earlier_turn_start_
 services::discord::inflight::removal::boot_custody_tests::an_unparseable_pending_start_keeps_its_channel_and_is_not_complete
 services::discord::inflight::removal::boot_custody_tests::an_unwritable_custody_root_does_not_stop_the_reaper
 services::discord::inflight::removal::boot_custody_tests::custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows
+services::discord::inflight::removal::boot_custody_tests::n1a_boot_custody_copy_precedes_retirement_without_delivery_completion
 services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_direct_row_leaves_a_custody_copy
 services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
 services::discord::inflight::removal::custody_notice_tests::a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg
@@ -6218,6 +6219,7 @@ services::discord::tmux::lifecycle_stage_pause_matrix_tests::gate_outcomes_never
 services::discord::tmux::monitor_auto_turn_signal_tests::finish_monitor_auto_turn_if_claimed_releases_mailbox_token
 services::discord::tmux::monitor_auto_turn_signal_tests::monitor_auto_turn_inflight_persists_actor_episode_nonce
 services::discord::tmux::monitor_auto_turn_signal_tests::monitor_auto_turn_wait_wakes_on_turn_finished_signal
+services::discord::tmux::n1a_monitor_tests::n1a_monitor_producers_leave_no_row_or_lease_when_confirmed
 services::discord::tmux::placeholder_suppression::evidence::tests::winner_bound_frontier_does_not_delete_losing_anchor_4911
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::active_bridge_exposed_body_preserves_instead_of_internal_label
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::active_bridge_footer_only_placeholder_preserves_bridge_target_without_label
@@ -6636,6 +6638,7 @@ services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::n1a_turn_mode_tests::n1a_collector_status_tick_cannot_recreate_confirmed_row
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_mid_turn_cutover_shows_no_post_cutover_body
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
@@ -6964,6 +6967,13 @@ services::discord::tui_direct_abort_marker::tests::terminal_commit_cover_require
 services::discord::tui_direct_abort_marker::tests::tombstone_cover_stamp_survives_delivery_failure_and_evidence_gc
 services::discord::tui_direct_abort_marker::tests::unparseable_marker_is_quarantined_not_relooped
 services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_mismatch_is_silent_but_evidence_rejection_warns_once
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_covers_monitor_rebind_and_watcher_synthetics
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_delete_contention_returns_residue_for_retry
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_post_snapshot_io_error_is_retryable
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_preserves_real_discord_row_and_other_channels
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_race_preserves_the_replacement_snapshot
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_read_failure_leaves_population_untouched
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_removes_synthetic_residue_without_delivery_evidence
 services::discord::tui_direct_pending_start::tests::abandoned_presence_clear_keeps_durable_record
 services::discord::tui_direct_pending_start::tests::abort_pin_prefers_last_view_identity_over_successor_row
 services::discord::tui_direct_pending_start::tests::anchor_slot_rig_teardown_preserves_absent_root
@@ -7114,6 +7124,9 @@ services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::recent_
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_returns_the_ids_nearest_the_cursor_newest_first
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_manual_rebind_creates_rows_only_on_unconfirmed_channels
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_resent_after_a_relay_without_a_post_is_announced_once
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns
@@ -7143,6 +7156,7 @@ services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_foreign_session
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_fresh_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan
+services::discord::tui_prompt_relay::synthetic_start::claim::n1a_tests::n1a_synthetic_claim_has_no_row_or_lease_until_unconfirmed
 services::discord::tui_prompt_relay::synthetic_start::stale_reclaim::claim_entry_tests::claim_entry_reclaims_a_finished_readopted_owner_and_starts_the_new_turn
 services::discord::tui_prompt_relay::synthetic_start::tests::admitted_source_witness_advances_only_the_original_allocation
 services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_is_refused_for_want_of_a_witness
@@ -9905,6 +9919,9 @@ services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
+services::tui_o::turn_mode::tests::n1a_configuration_cannot_confirm_a_channel
+services::tui_o::turn_mode::tests::n1a_only_confirmation_enables_turn_mode
+services::tui_o::turn_mode::tests::n1a_output_adoption_and_readiness_do_not_confirm_turn_mode
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted
 services::tui_o::writer::adoption::tests::a_prompt_past_legacys_frontier_is_reported_undelivered

@@ -262,6 +262,7 @@ pub(super) async fn update_streaming_status_tick(
         // #3107: lazy pane-capture probe — only when inflight is
         // missing (expensive signal stays off the hot path).
         let pane_actively_streaming_for_streaming = inflight_missing_for_streaming
+            && !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
             && watcher_pane_actively_streaming(&tmux_session_name, ctx.host);
         if inflight_missing_for_streaming && pane_actively_streaming_for_streaming {
             // #3107 self-heal: pane live but inflight cleared mid-turn —
@@ -291,6 +292,8 @@ pub(super) async fn update_streaming_status_tick(
                 active_stream_inflight_reacquire_logged = true;
             }
         }
+        #[cfg(test)]
+        n1a_tick_completed(channel_id.get());
         if should_skip_streaming_placeholder_without_inflight(
             inflight_missing_for_streaming,
             pane_actively_streaming_for_streaming,
@@ -962,4 +965,24 @@ pub(super) async fn update_streaming_status_tick(
     }
 
     StreamingStatusTickOutcome::Fallthrough
+}
+
+#[cfg(test)]
+static N1A_TICK: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(super) fn n1a_tick_signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    *N1A_TICK.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, tx));
+    rx
+}
+
+#[cfg(test)]
+fn n1a_tick_completed(channel: u64) {
+    let mut tick = N1A_TICK.lock().unwrap_or_else(|e| e.into_inner());
+    if tick.as_ref().is_some_and(|(id, _)| *id == channel) {
+        let (_, tx) = tick.take().unwrap();
+        let _ = tx.send(());
+    }
 }

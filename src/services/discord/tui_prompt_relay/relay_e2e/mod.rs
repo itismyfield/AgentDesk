@@ -14,6 +14,8 @@
 
 mod catch_up_pagination_e2e;
 mod discord_mock;
+#[path = "n1a_turn_mode_tests.rs"]
+mod n1a_turn_mode;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
 mod queue_recovery_e2e;

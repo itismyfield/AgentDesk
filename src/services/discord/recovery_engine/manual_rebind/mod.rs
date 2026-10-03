@@ -722,6 +722,11 @@ async fn rebind_inflight_for_channel_inner(
             });
         existing
     } else {
+        if crate::services::tui_o::turn_mode::transcript_turns(channel_id) {
+            return Err(RebindError::Internal(
+                "transcript turn mode refuses synthetic rebind creation".into(),
+            ));
+        }
         // Build and persist the new inflight state. No request_owner / msg_ids
         // apply because this recovery has no originating Discord message.
         //

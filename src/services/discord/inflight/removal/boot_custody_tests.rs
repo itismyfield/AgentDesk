@@ -395,3 +395,46 @@ async fn a_transcript_turn_over_the_copy_cap_is_recorded_not_copied() {
         (0, true)
     );
 }
+
+#[tokio::test]
+async fn n1a_boot_custody_copy_precedes_retirement_without_delivery_completion() {
+    let env = Env::new();
+    let (out, offset) = transcript(&env, "n1a-custody.jsonl", "prior\n", "unposted\n");
+    let channel = 63250301;
+    let mut state = tui_direct_row(channel, &out, offset);
+    state.set_restart_mode(InflightRestartMode::DrainRestart);
+    state.restart_generation = Some(G - 1);
+    let path = env.seed(&state, 0);
+    boot().await;
+    assert!(
+        path.exists(),
+        "normal reaper preserves the replacement handoff"
+    );
+    let episode = episodes(&env)
+        .remove(&channel)
+        .expect("real boot custody copy");
+    let copied = copy_of(&episode, "row").expect("custody preserves row bytes");
+    let held: InflightTurnState = serde_json::from_slice(&copied).unwrap();
+    assert!(!held.terminal_delivery_committed);
+    let retired =
+        crate::services::discord::tui_direct_pending_start::turn_retirement::retire_channel(
+            &CLAUDE, channel,
+        )
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "mode retirement follows custody and the normal reaper"
+    );
+    assert!(!retired.retry_pending);
+    assert_eq!(copy_of(&episode, "row"), Some(copied));
+    assert!(load_inflight_state(&CLAUDE, channel).is_none());
+    assert!(
+        crate::services::discord::tui_direct_abort_marker::load_commit_tombstones(
+            "claude", channel
+        )
+        .is_empty()
+    );
+    assert!(!crate::services::tui_o::turn_mode::transcript_turns(
+        channel
+    ));
+}

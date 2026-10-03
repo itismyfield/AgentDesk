@@ -1260,6 +1260,7 @@ src/
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
+│   │   │   ├── n1a_monitor_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
 │   │   │   ├── tests/
@@ -1316,6 +1317,7 @@ src/
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
+│   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
@@ -1383,6 +1385,8 @@ src/
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
+│   │   │   ├── turn_retirement.rs
+│   │   │   ├── turn_retirement_tests.rs
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── rehydration/
@@ -1391,6 +1395,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
@@ -2115,7 +2120,8 @@ src/
 │   │   ├── cutover.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
-│   │   └── topology.rs
+│   │   ├── topology.rs
+│   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
 │   │   │   ├── claude_fold.rs

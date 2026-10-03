@@ -169,10 +169,7 @@ pub(super) const CLAUDE_IDLE_TICK_PHASES: [ClaudeIdleTickPhase; 2] = [
 /// and their order is expressible as data. Panes with a live inflight row are
 /// skipped here, which is what makes the preceding settle phase load-bearing.
 #[cfg(unix)]
-async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
-    // Rebound to an owned `Arc` so the moved body's `&shared` call sites stay
-    // byte-identical to what they were inside the `async move` block.
-    let shared = shared_ref.clone();
+pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
     for (tmux_session_name, binding) in
         crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(RuntimeHandoffKind::ClaudeTui)
     {
@@ -185,6 +182,9 @@ async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
             // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
             continue;
         };
+        if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+            continue;
+        }
         if let Some(row) =
             super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
         {

@@ -53,6 +53,9 @@ use super::{
 #[path = "execution_identity.rs"]
 pub(in crate::services::discord) mod execution_identity;
 mod monitor_auto_turn_inflight;
+#[cfg(test)]
+#[path = "tmux/n1a_monitor_tests.rs"]
+mod n1a_monitor_tests;
 #[path = "tmux_placeholder_suppression/mod.rs"]
 mod placeholder_suppression;
 #[path = "tmux_reattach_offsets.rs"]
@@ -1010,6 +1013,14 @@ async fn start_monitor_auto_turn_when_available(
     data_start_offset: u64,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> MonitorAutoTurnStart {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        return MonitorAutoTurnStart {
+            acquired: false,
+            deferred: false,
+            synthetic_message_id: None,
+            ledger_generation: None,
+        };
+    }
     let mut deferred = false;
     let synthetic_message_id = MessageId::new(data_start_offset.max(1));
 

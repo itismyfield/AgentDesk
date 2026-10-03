@@ -433,24 +433,17 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     let injected_class = relay_prompt_decision.injected_class;
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
-    if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
-        // #4567: structured task lifecycle records retain their status-card
-        // authority, but have no positive user-input provenance. Resolve the
-        // card without recording a generic external lease; in particular, do
-        // not let a killed notification mint an anchor, mailbox token, or
-        // synthetic inflight that can fence the next real prompt.
-        let status_only_lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
-        let _ = task_notification_prompt::resolve_gate(
-            shared,
-            &prompt,
-            channel_id,
-            injected_class,
-            &status_only_lease,
-            task_notification,
-        )
-        .await;
+    let Some(task_notification) = synthetic_start_wiring::post_passive_prompt_notice(
+        shared,
+        &prompt,
+        channel_id,
+        &relay_prompt_decision,
+        task_notification,
+    )
+    .await
+    else {
         return;
-    }
+    };
     // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
     let live_events = &shared.ui.placeholder_live_events;
     live_events.set_turn_request_anchor(channel_id, None, None);
