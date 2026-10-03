@@ -9911,6 +9911,7 @@ services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsy
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
+services::tui_o::store::windows_tests::enabling_the_store_is_refused_without_directory_fsync
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted

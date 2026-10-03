@@ -318,6 +318,31 @@ impl ChannelStore {
 }
 
 #[cfg(test)]
+#[cfg(windows)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn enabling_the_store_is_refused_without_directory_fsync() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config = StoreConfig { enabled: true };
+        assert!(!PARENT_DIR_FSYNC_FLUSHES);
+        assert_eq!(
+            OStore::open_checked(&config, runtime.path(), PARENT_DIR_FSYNC_FLUSHES)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Unsupported)
+        );
+        assert!(!runtime.path().join(STORE_DIR_NAME).exists());
+        assert!(
+            OStore::open_if_enabled(&StoreConfig { enabled: false }, runtime.path())
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
 #[cfg(unix)]
 mod tests {
     use super::*;
@@ -526,31 +551,6 @@ mod tests {
         assert_eq!(
             (last.ledger().anchor(), last.ledger().unresolved()),
             (300, None)
-        );
-    }
-}
-
-#[cfg(test)]
-#[cfg(windows)]
-mod windows_tests {
-    use super::*;
-
-    #[test]
-    fn enabling_the_store_is_refused_without_directory_fsync() {
-        let runtime = tempfile::tempdir().unwrap();
-        let config = StoreConfig { enabled: true };
-        assert!(!PARENT_DIR_FSYNC_FLUSHES);
-        assert_eq!(
-            OStore::open_checked(&config, runtime.path(), PARENT_DIR_FSYNC_FLUSHES)
-                .err()
-                .map(|error| error.kind()),
-            Some(io::ErrorKind::Unsupported)
-        );
-        assert!(!runtime.path().join(STORE_DIR_NAME).exists());
-        assert!(
-            OStore::open_if_enabled(&StoreConfig { enabled: false }, runtime.path())
-                .unwrap()
-                .is_none()
         );
     }
 }
