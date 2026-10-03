@@ -556,6 +556,9 @@ db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
+db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
+db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
+db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_create_boundaries_protect_live_owner
 db::postgres::test_db_reclaim::tests::pg_reclaim_dead_owner_young_database_is_reclaimed_immediately
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
@@ -2089,6 +2092,11 @@ services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_an
 services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
+services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
+services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
+services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
+services::cluster::channel_home::tests::channel_home_items_have_no_production_caller
+services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching

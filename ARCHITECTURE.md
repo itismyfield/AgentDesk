@@ -190,6 +190,8 @@ src/
 │   ├── meetings.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
+│   ├── o_channel_homes.rs
+│   ├── o_channel_homes_tests.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs
@@ -652,6 +654,8 @@ src/
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
+│   │   ├── channel_home.rs
+│   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── intake_preflight.rs

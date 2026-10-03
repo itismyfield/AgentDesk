@@ -675,6 +675,11 @@
       "path": "migrations/postgres/0132_drop_office_tables.sql",
       "sha256": "84a8836d815fbcf2c56c8aeeedc4aab46a29fb3dd64af34d2b771115bbf88680",
       "version": 132
+    },
+    {
+      "path": "migrations/postgres/0133_o_channel_homes.sql",
+      "sha256": "8abee1a7c56480b0f90954c1c64bb0a725104313e143d8d66bcd67941b6b79c2",
+      "version": 133
     }
   ],
   "version": 1

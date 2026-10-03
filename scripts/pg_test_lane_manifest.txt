@@ -19,6 +19,7 @@ src/db/intake_outbox_delivery_proof.rs
 src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
 src/db/o_channel_activation.rs
+src/db/o_channel_homes_tests.rs
 src/db/postgres.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
@@ -75,6 +76,7 @@ src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
+src/services/cluster/channel_home_tests.rs
 src/services/cluster/execution_capacity/tests.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
@@ -138,6 +140,8 @@ src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
 src/services/discord/tmux_watcher/streaming_baseline_tests.rs
 src/services/discord/tui_prompt_relay/herdr_source_tests.rs
 src/services/discord/tui_prompt_relay/rehydration.rs
+src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
+src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
@@ -147,6 +151,7 @@ src/services/discord/turn_bridge/resume_pin_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
 src/services/discord/watchers/dispatched_origin_ghost_tests.rs
@@ -203,6 +208,7 @@ db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
 db::o_channel_activation::postgres_tests
+db::o_channel_homes::tests
 db::postgres::test_db_reclaim::tests
 db::postgres::tests
 db::prompt_manifests::tests
@@ -264,6 +270,7 @@ services::auto_queue::runtime::slot_reset_host_pg_tests::host
 services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
+services::cluster::channel_home::tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
 services::cluster::intake_router_hook::agent_execution_node_tests
@@ -331,6 +338,8 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux_reaper::host_guard_tests
 services::discord::tui_prompt_relay::herdr_source::tests
 services::discord::tui_prompt_relay::rehydration::tests::host_defer
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
 services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -340,6 +349,7 @@ services::discord::turn_bridge::resume_pin_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
+services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
 services::discord::turn_teardown_clearance::tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
@@ -601,6 +611,9 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
+db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
+db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
+db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_create_boundaries_protect_live_owner
 db::postgres::test_db_reclaim::tests::pg_reclaim_dead_owner_young_database_is_reclaimed_immediately
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
@@ -912,6 +925,7 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_future_iterations_before_touching_git_pg
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
+services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
 services::cluster::intake_router_hook::agent_execution_node_tests::agent_primary_inherits_into_thread_with_bounded_fallback_without_moving_owner_pg
@@ -1176,6 +1190,9 @@ services::discord::tui_prompt_relay::herdr_source::tests::herdr_launch_attach_lo
 services::discord::tui_prompt_relay::herdr_source::tests::herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_pg
 services::discord::tui_prompt_relay::herdr_source::tests::the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg
 services::discord::tui_prompt_relay::rehydration::tests::host_defer::a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor
@@ -1230,6 +1247,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
+services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_consumes_legacy_flagged_local_only_fallback_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_falls_back_to_durable_pg_row

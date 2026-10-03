@@ -1,0 +1,347 @@
+//! A delegated channel's home gate. The `o_channel_homes` row decides who holds the channel;
+//! this process opens its gate only from its own successful renewal write, never from a read.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::future::Future;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use sqlx::PgPool;
+use tokio::time::Instant;
+
+use crate::db::o_channel_homes::{self, ChannelHome, HeldHome, HomeError, HomeState, HomeWrite};
+use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+
+/// How often a holder renews its lease.
+pub(crate) const RENEW_EVERY: Duration = Duration::from_secs(5);
+/// A holder closes its own gate this long after sending its last successful renewal (H).
+pub(crate) const HOLD_FOR: Duration = Duration::from_secs(20);
+/// An operator may force a holder out only once its lease is this stale: F = H + the 180s O piece
+/// lease, well past the 60s delivery abort that ends the holder's last POST.
+pub(crate) const FORCE_AFTER: Duration = Duration::from_secs(HOLD_FOR.as_secs() + 180);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HomeIntake {
+    /// New intake, turns, placement and commands are accepted.
+    Open,
+    /// Draining: only pieces already owed may still be posted.
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HomeOwnership {
+    /// `home_epoch` is the row's epoch; `gate_epoch` is the inner gate's local acquisition count,
+    /// the value its admission hands to the writer. The two are linked only here.
+    Owned {
+        home_epoch: i64,
+        gate_epoch: u64,
+        intake: HomeIntake,
+    },
+    Lost,
+}
+
+/// Why a renewal result did not open or extend the gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmRefused {
+    /// Another channel's or holder's write.
+    Foreign,
+    /// Its send is already H old, or no newer than the last close.
+    Late,
+    /// The holder already gave this epoch up with a final `close`.
+    Retired,
+    /// An older epoch than the one held.
+    Superseded,
+}
+
+struct Held {
+    home_epoch: i64,
+    gate_epoch: u64,
+    renew_sent: Instant,
+}
+
+#[derive(Default)]
+struct HomeLocal {
+    held: Option<Held>,
+    /// Intake stays closed for this epoch once a drain closes it or the row says drain.
+    intake_closed: Option<i64>,
+    /// A final `close` retires the epoch for good.
+    retired: Option<i64>,
+    /// Renewals sent before the last close or loss never reopen the gate.
+    closed_at: Option<Instant>,
+}
+
+pub(crate) struct HomeGate {
+    channel_id: String,
+    holder: String,
+    gate: Arc<OwnershipGate>,
+    local: Mutex<HomeLocal>,
+}
+
+impl HomeGate {
+    /// Starts `Lost`; only [`HomeGate::confirm`] opens it.
+    pub(crate) fn new(channel_id: &str, holder: &str) -> Self {
+        Self {
+            channel_id: channel_id.to_string(),
+            holder: holder.to_string(),
+            gate: Arc::new(OwnershipGate::default()),
+            local: Mutex::default(),
+        }
+    }
+
+    /// The admission primitive a writer posts through; it is `Owned` exactly when this home is.
+    pub(crate) fn gate(&self) -> Arc<OwnershipGate> {
+        Arc::clone(&self.gate)
+    }
+
+    fn locked(&self) -> MutexGuard<'_, HomeLocal> {
+        self.local.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn drop_hold(&self, local: &mut HomeLocal, at: Instant) {
+        local.held = None;
+        local.closed_at = Some(at);
+        self.gate.close();
+    }
+
+    fn expire(&self, local: &mut HomeLocal, now: Instant) -> bool {
+        let due = local
+            .held
+            .as_ref()
+            .is_some_and(|held| now.saturating_duration_since(held.renew_sent) >= HOLD_FOR);
+        if due {
+            self.drop_hold(local, now);
+        }
+        due
+    }
+
+    fn read(&self, local: &HomeLocal) -> HomeOwnership {
+        let Some(held) = local.held.as_ref() else {
+            return HomeOwnership::Lost;
+        };
+        if self.gate.current()
+            != (GatewayOwnership::Owned {
+                epoch: held.gate_epoch,
+            })
+        {
+            return HomeOwnership::Lost;
+        }
+        let intake = if local.intake_closed == Some(held.home_epoch) {
+            HomeIntake::Closed
+        } else {
+            HomeIntake::Open
+        };
+        HomeOwnership::Owned {
+            home_epoch: held.home_epoch,
+            gate_epoch: held.gate_epoch,
+            intake,
+        }
+    }
+
+    pub(crate) fn ownership(&self) -> HomeOwnership {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        self.read(&local)
+    }
+
+    /// The deadline at which the current hold lapses, if any.
+    pub(crate) fn expiry(&self) -> Option<Instant> {
+        self.locked()
+            .held
+            .as_ref()
+            .map(|held| held.renew_sent + HOLD_FOR)
+    }
+
+    /// Closes the gate once H has passed since the last successful renewal was sent.
+    pub(crate) fn expire_if_due(&self, now: Instant) -> bool {
+        self.expire(&mut self.locked(), now)
+    }
+
+    /// Applies a successful renewal sent at `sent`: opens the gate on a new epoch, or extends
+    /// the hold on the same one. A result arriving H after its send never opens anything.
+    pub(crate) fn confirm(
+        &self,
+        written: &HeldHome,
+        sent: Instant,
+    ) -> Result<HomeOwnership, ConfirmRefused> {
+        let mut local = self.locked();
+        let now = Instant::now();
+        self.expire(&mut local, now);
+        if written.channel_id() != self.channel_id || written.holder() != self.holder {
+            return Err(ConfirmRefused::Foreign);
+        }
+        let epoch = written.epoch();
+        if local.retired.is_some_and(|retired| epoch <= retired) {
+            return Err(ConfirmRefused::Retired);
+        }
+        let late = now.saturating_duration_since(sent) >= HOLD_FOR
+            || local.closed_at.is_some_and(|closed| sent <= closed);
+        if late {
+            return Err(ConfirmRefused::Late);
+        }
+        match self.read(&local) {
+            HomeOwnership::Owned { home_epoch, .. } if home_epoch > epoch => {
+                return Err(ConfirmRefused::Superseded);
+            }
+            HomeOwnership::Owned { home_epoch, .. } if home_epoch == epoch => {
+                if let Some(held) = local.held.as_mut() {
+                    held.renew_sent = held.renew_sent.max(sent);
+                }
+            }
+            _ => {
+                let gate_epoch = self.gate.acquired();
+                local.held = Some(Held {
+                    home_epoch: epoch,
+                    gate_epoch,
+                    renew_sent: sent,
+                });
+            }
+        }
+        if written.state() != HomeState::Worker {
+            local.intake_closed = Some(epoch);
+        }
+        Ok(self.read(&local))
+    }
+
+    /// A renewal at `epoch` matched no row: the row no longer names this holder there.
+    pub(crate) fn renewal_stale(&self, epoch: i64) {
+        let mut local = self.locked();
+        if local
+            .held
+            .as_ref()
+            .is_some_and(|held| held.home_epoch == epoch)
+        {
+            self.drop_hold(&mut local, Instant::now());
+        }
+    }
+
+    /// Stops new intake for the held epoch while the gate keeps admitting owed pieces.
+    pub(crate) fn close_intake(&self) {
+        let mut local = self.locked();
+        if let Some(epoch) = local.held.as_ref().map(|held| held.home_epoch) {
+            local.intake_closed = Some(epoch);
+        }
+    }
+
+    /// The final close before a leaving write: no later renewal reopens this epoch.
+    pub(crate) fn close(&self) {
+        let mut local = self.locked();
+        if let Some(epoch) = local.held.as_ref().map(|held| held.home_epoch) {
+            local.retired = Some(epoch);
+        }
+        self.drop_hold(&mut local, Instant::now());
+    }
+
+    /// Runs `hand_off` under the gate lock with the row epoch, only while this home is held.
+    pub(crate) fn admit<T>(&self, hand_off: impl FnOnce(i64) -> T) -> Option<T> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        let held = local.held.as_ref()?;
+        let (home_epoch, gate_epoch) = (held.home_epoch, held.gate_epoch);
+        self.gate
+            .admit(|epoch| (epoch == gate_epoch).then(|| hand_off(home_epoch)))
+            .flatten()
+    }
+}
+
+/// What a booting node read for one channel. Reading never opens the gate.
+#[derive(Debug)]
+pub(crate) enum BootHome {
+    /// No row: the gateway rules apply.
+    Gateway,
+    Row(ChannelHome),
+    /// The read failed: the channel holds and the gate stays `Lost`.
+    Unreadable(HomeError),
+}
+
+impl BootHome {
+    /// The epoch this node should start renewing at, when the row names it holder.
+    pub(crate) fn lease_epoch(&self, holder: &str) -> Option<i64> {
+        match self {
+            Self::Row(home) if home.holder.as_deref() == Some(holder) => Some(home.epoch),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) async fn boot_home(pool: &PgPool, home: &HomeGate) -> BootHome {
+    match o_channel_homes::read_home(pool, &home.channel_id).await {
+        Ok(None) => BootHome::Gateway,
+        Ok(Some(row)) => BootHome::Row(row),
+        Err(error) => BootHome::Unreadable(error),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum LeaseRound {
+    Renewed(HomeOwnership),
+    Refused(ConfirmRefused),
+    /// The row no longer names this holder at the epoch; the gate is closed.
+    Stale,
+    /// The write failed; the hold lapses at its deadline unless a later renewal lands.
+    Failed(HomeError),
+    /// The hold lapsed while the write was still pending.
+    Expired,
+}
+
+/// One renewal: the gate closes at its deadline even while `renewal` is still pending.
+pub(crate) async fn lease_round(
+    home: &HomeGate,
+    epoch: i64,
+    sent: Instant,
+    renewal: impl Future<Output = Result<HomeWrite<HeldHome>, HomeError>>,
+) -> LeaseRound {
+    let deadline = home.expiry();
+    let lapse = async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        result = renewal => match result {
+            Ok(HomeWrite::Applied(written)) => match home.confirm(&written, sent) {
+                Ok(ownership) => LeaseRound::Renewed(ownership),
+                Err(refused) => LeaseRound::Refused(refused),
+            },
+            Ok(HomeWrite::Stale) => {
+                home.renewal_stale(epoch);
+                LeaseRound::Stale
+            }
+            Err(error) => {
+                home.expire_if_due(Instant::now());
+                LeaseRound::Failed(error)
+            }
+        },
+        () = lapse => {
+            home.expire_if_due(Instant::now());
+            LeaseRound::Expired
+        }
+    }
+}
+
+/// The holder's lease loop at `epoch`; ends when the row stops naming it. Not started yet.
+pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
+    loop {
+        let sent = Instant::now();
+        let renewal = o_channel_homes::renew(&pool, &home.channel_id, &home.holder, epoch);
+        if let LeaseRound::Stale = lease_round(&home, epoch, sent, renewal).await {
+            return;
+        }
+        let pause = tokio::time::sleep(RENEW_EVERY);
+        match home.expiry() {
+            Some(deadline) => {
+                tokio::select! {
+                    () = pause => {}
+                    () = tokio::time::sleep_until(deadline) => {
+                        home.expire_if_due(Instant::now());
+                    }
+                }
+            }
+            None => pause.await,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "channel_home_tests.rs"]
+mod tests;
