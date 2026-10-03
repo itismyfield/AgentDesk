@@ -890,6 +890,27 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
+    let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
+        shared,
+        &provider,
+        &inflight_state,
+        &cancel_token,
+    )
+    .await
+    {
+        Ok(registration) => registration,
+        Err(true) => {
+            return Ok(HeadlessTurnStartOutcome {
+                turn_id: reservation.turn_id(channel_id),
+                status: HeadlessTurnStartStatus::Consumed,
+            });
+        }
+        Err(false) => {
+            return Err(HeadlessTurnStartError::Internal(
+                "original bridge start deferred; retry enqueue refused".into(),
+            ));
+        }
+    };
     super::intake_turn::inflight_create_log::log_create_new_inflight_outcome(
         crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state),
         &provider,
@@ -991,7 +1012,9 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         tmux_session_name.as_deref(),
     )
     .await;
+    let producer_registration = original_registration.clone();
     tokio::task::spawn_blocking(move || {
+        let _original_registration = producer_registration;
         let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
             provider_execution_context,

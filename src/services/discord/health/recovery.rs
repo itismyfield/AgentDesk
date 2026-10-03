@@ -1092,6 +1092,7 @@ pub async fn clear_idle_tmux_stale_turn(
 ) -> Option<IdleTmuxStaleTurnRepairResult> {
     let repair_started_at = Instant::now();
     let provider = ProviderKind::from_str(provider_name)?;
+    let _recovery = discord::live_bridge::try_recovery(&provider, channel_id).ok()?;
     let inflight_clear_state =
         load_idle_tmux_stale_turn_inflight_clear_candidate(&provider, channel_id)?;
     if !crate::services::discord::relay_recovery::idle_tmux_repair_state_ready_for_input(
@@ -1994,6 +1995,11 @@ pub(crate) async fn run_stall_watchdog_pass(
                         // written this channel's row yields UserMsgMismatch and
                         // is preserved; planned-restart / rebind-origin rows are
                         // skipped. We only ever delete THIS leaked turn's row.
+                        let Ok(_recovery) =
+                            discord::live_bridge::try_recovery(provider, channel_id.get())
+                        else {
+                            continue;
+                        };
                         let clear_outcome = discord::inflight::clear_inflight_state_if_matches(
                             provider,
                             channel_id.get(),

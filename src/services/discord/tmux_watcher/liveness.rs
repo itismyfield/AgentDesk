@@ -482,7 +482,7 @@ pub(in crate::services::discord) fn build_watcher_reacquire_inflight_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn reacquire_watcher_inflight_for_active_stream(
+pub(in crate::services::discord) fn reacquire_watcher_inflight_for_active_stream(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -497,6 +497,11 @@ pub(super) fn reacquire_watcher_inflight_for_active_stream(
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         return false;
     }
+    let Ok(_recovery) =
+        crate::services::discord::live_bridge::try_recovery(provider, channel_id.get())
+    else {
+        return false;
+    };
     // The streaming-edit target is the placeholder/status-panel message still
     // owned by this watcher; pin it as `current_msg_id` so edits + the terminal
     // ack resolve a target instead of MissingTarget.

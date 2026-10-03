@@ -816,7 +816,8 @@ src/
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── watcher_respawn/
-│   │   │   │   └── idle_relay_absence.rs
+│   │   │   │   ├── idle_relay_absence.rs
+│   │   │   │   └── live_bridge_guard.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
@@ -904,6 +905,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── live_bridge/
+│   │   │   └── tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
 │   │   ├── meeting_orchestrator/
@@ -1024,6 +1027,7 @@ src/
 │   │   │   │   ├── coordinate_adoption_tests.rs
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── herdr_withheld_tests.rs
+│   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
 │   │   │   │   ├── test_barriers.rs
@@ -1702,6 +1706,7 @@ src/
 │   │   ├── inflight_heartbeat_sweeper.rs
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
+│   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
 │   │   ├── mailbox_probe.rs
 │   │   ├── mcp_credential_watcher.rs
