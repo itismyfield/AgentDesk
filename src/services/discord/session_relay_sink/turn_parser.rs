@@ -35,6 +35,10 @@ pub(in crate::services::discord) struct SessionRelayParser {
     /// not. Cross-delivery duplicates stay the send point's job (the delivered
     /// content fingerprint and the committed-range re-gate).
     turn_source_end: Option<u64>,
+    /// Identity of the active source turn. A missing terminal record must not
+    /// let its accumulated prose leak into the next turn; non-terminal frames
+    /// can carry the same pinned identity as the eventual terminal frame.
+    turn_identity: Option<(u64, String, u64)>,
 }
 
 impl Default for SessionRelayParser {
@@ -53,6 +57,7 @@ impl Default for SessionRelayParser {
             buffer_source_segments: VecDeque::new(),
             relay_source_stamp: None,
             turn_source_end: None,
+            turn_identity: None,
         }
     }
 }
@@ -95,6 +100,7 @@ impl SessionRelayParser {
             }
             self.source_generation_mtime_ns = Some(generation);
         }
+        self.observe_turn_identity(frame);
         self.fold_frame_payload(frame);
 
         let channel_id = match frame.binding.channel_id.parse::<u64>() {
@@ -331,6 +337,40 @@ impl SessionRelayParser {
         }
     }
 
+    fn observe_turn_identity(&mut self, frame: &StreamFrame) {
+        let Some(start_offset) = frame.turn_start_offset else {
+            return;
+        };
+        let identity = (
+            frame.turn_user_msg_id,
+            frame.turn_started_at.clone(),
+            start_offset,
+        );
+        if self
+            .turn_identity
+            .as_ref()
+            .is_some_and(|current| current != &identity)
+        {
+            tracing::warn!(
+                provider = frame.binding.provider.as_str(),
+                channel_id = %frame.binding.channel_id,
+                tmux_session = %frame.session_name,
+                previous_user_msg_id = self.turn_identity.as_ref().map(|turn| turn.0),
+                next_user_msg_id = identity.0,
+                previous_start_offset = self.turn_identity.as_ref().map(|turn| turn.2),
+                next_start_offset = identity.2,
+                "session-bound relay parser discarded unterminated response at turn identity change"
+            );
+            // The new pinned turn boundary is stronger than a missing old
+            // terminal record. Drop both accumulated prose and any partial
+            // JSON line from the prior turn before folding this frame.
+            self.buffer.clear();
+            self.buffer_source_segments.clear();
+            self.reset_turn();
+        }
+        self.turn_identity = Some(identity);
+    }
+
     pub(super) fn reset_turn(&mut self) {
         self.stream_state = StreamLineState::new();
         self.full_response.clear();
@@ -343,6 +383,7 @@ impl SessionRelayParser {
         }
         self.relay_source_stamp = None;
         self.turn_source_end = None;
+        self.turn_identity = None;
     }
 }
 
