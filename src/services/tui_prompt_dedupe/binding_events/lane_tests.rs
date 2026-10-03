@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::claude_tui::hook_server::adoption_retry::{

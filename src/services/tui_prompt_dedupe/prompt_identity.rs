@@ -162,7 +162,7 @@ fn settle_hook_prompt_id(prompt: &ObservedTuiPrompt, announced: bool) {
     }
 }
 
-/// Test-only: backdates every content, uuid and prompt-id record for one key.
+/// Ages the content, uuid and prompt-id records while preserving other keys' ages.
 #[cfg(test)]
 pub(crate) fn age_observed_prompt_records_for_tests(
     provider: &str,
@@ -171,6 +171,7 @@ pub(crate) fn age_observed_prompt_records_for_tests(
 ) {
     let key = PromptKey::new(provider, tmux_session_name);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.aged_stamp_for_tests(by);
     for entry in state
         .recent_observed_by_tmux
         .entry(key.clone())

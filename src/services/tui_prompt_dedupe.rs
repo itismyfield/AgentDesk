@@ -6,7 +6,11 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(test))]
+use std::time::Instant;
+#[cfg(test)]
+pub(crate) use test_clock::Instant;
 use tokio::sync::broadcast;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -318,3 +322,96 @@ pub use runtime_binding::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_clock {
+    use super::*;
+    use std::ops::{Add, AddAssign, Sub, SubAssign};
+
+    // The shared state and Tokio workers must observe the same test clock.
+    static OFFSET: Mutex<Duration> = Mutex::new(Duration::ZERO);
+
+    fn offset() -> std::sync::MutexGuard<'static, Duration> {
+        OFFSET.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub(crate) struct Instant(std::time::Instant);
+
+    impl Instant {
+        pub(crate) fn now() -> Self {
+            Self(std::time::Instant::now() + *offset())
+        }
+
+        pub(crate) fn reset() {
+            *offset() = Duration::ZERO;
+        }
+
+        pub(crate) fn elapsed(self) -> Duration {
+            Self::now().duration_since(self)
+        }
+
+        pub(crate) fn duration_since(self, earlier: Self) -> Duration {
+            self.0.duration_since(earlier.0)
+        }
+    }
+
+    impl Add<Duration> for Instant {
+        type Output = Self;
+        fn add(self, by: Duration) -> Self {
+            Self(self.0 + by)
+        }
+    }
+    impl AddAssign<Duration> for Instant {
+        fn add_assign(&mut self, by: Duration) {
+            self.0 += by;
+        }
+    }
+    impl Sub<Duration> for Instant {
+        type Output = Self;
+        fn sub(self, by: Duration) -> Self {
+            Self(self.0 - by)
+        }
+    }
+    impl SubAssign<Duration> for Instant {
+        fn sub_assign(&mut self, by: Duration) {
+            self.0 -= by;
+        }
+    }
+
+    impl TuiPromptDedupeState {
+        // Move the clock and existing stamps forward together, preserving their ages.
+        pub(super) fn aged_stamp_for_tests(&mut self, age: Duration) -> Instant {
+            let recorded = Instant::now();
+            macro_rules! shift {
+                ($($field:ident),*) => { $(
+                    for entry in self.$field.values_mut() { entry.recorded_at += age; }
+                )* };
+            }
+            macro_rules! shift_queues {
+                ($($field:ident),*) => { $(
+                    for queue in self.$field.values_mut() {
+                        for entry in queue { entry.recorded_at += age; }
+                    }
+                )* };
+            }
+            shift!(
+                tmux_by_provider_session,
+                channel_by_tmux,
+                runtime_by_tmux,
+                prompt_anchor_by_tmux,
+                ssh_direct_observation_by_tmux,
+                external_input_relay_lease_by_tmux,
+                deferred_anchor_completion_by_tmux
+            );
+            shift_queues!(
+                pending_by_tmux,
+                recent_observed_by_tmux,
+                relayed_entry_ids_by_tmux,
+                relayed_prompt_ids_by_tmux
+            );
+            *offset() += age;
+            recorded
+        }
+    }
+}

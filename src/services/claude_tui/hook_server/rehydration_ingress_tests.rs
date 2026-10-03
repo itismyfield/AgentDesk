@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::services::claude_tui::hook_server::observation_ingress::tests::*;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::*, binding_events::*};

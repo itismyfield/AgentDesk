@@ -176,7 +176,7 @@ impl PlaceholderLiveEvents {
         // #3477 item 3: stamp the live-content arrival so a render after
         // `TurnCompleted` can tell a fresh late batch (keep 🖥️ Recent) from a
         // stale pre-completion block (suppress on a genuinely idle completed turn).
-        self.last_recent_event_at.insert(channel_id, Instant::now());
+        self.last_recent_event_at.insert(channel_id, panel_now());
         // #3812: stamp the wall-clock arrival so the confidence line's `<t:UNIX:R>`
         // age anchors to a stable point set here, not recomputed per render tick.
         self.last_recent_event_unix
@@ -626,10 +626,7 @@ impl PlaceholderLiveEvents {
                 // instead of by turn length. Slot activity refreshes the TTL
                 // clock (see `SubagentSlot::started_at`), so a live noisy slot
                 // is never force-aborted here.
-                status_panel::force_abort_stuck_subagent_slots(
-                    &mut guard.subagents,
-                    Instant::now(),
-                );
+                status_panel::force_abort_stuck_subagent_slots(&mut guard.subagents, panel_now());
                 guard.clone()
             })
             .unwrap_or_default();
@@ -690,4 +687,56 @@ fn task_notification_success_completion_visible_in_snapshot(
         StatusEvent::WorkflowEnd { .. } => false,
         _ => false,
     })
+}
+
+fn panel_now() -> Instant {
+    #[cfg(test)]
+    {
+        return Instant::now() + test_clock::offset();
+    }
+    #[cfg(not(test))]
+    Instant::now()
+}
+
+#[cfg(test)]
+mod test_clock {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static OFFSET: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    pub(super) fn offset() -> Duration {
+        OFFSET.get()
+    }
+
+    pub(super) struct Guard(Duration);
+    impl Guard {
+        pub(super) fn new() -> Self {
+            let previous = OFFSET.replace(Duration::ZERO);
+            Self(previous)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OFFSET.set(self.0);
+        }
+    }
+
+    pub(super) fn aged_stamp(state: &mut StatusPanelState, age: Duration) -> Instant {
+        let recorded = panel_now();
+        for slot in &mut state.tasks {
+            slot.created_at += age;
+        }
+        for slot in &mut state.subagents {
+            slot.started_at += age;
+        }
+        state
+            .recently_evicted_subagent_keys
+            .forward_date_for_tests(age);
+        OFFSET.set(OFFSET.get() + age);
+        recorded
+    }
 }

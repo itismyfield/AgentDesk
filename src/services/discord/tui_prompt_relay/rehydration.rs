@@ -17,14 +17,14 @@ use super::launch_script::{claude_tui_launch_transcript, claude_tui_rehydrated_b
 use super::*;
 use std::collections::HashMap;
 
-#[cfg(not(test))]
+#[cfg(any(not(test), not(unix)))]
 use super::resolve_rehydrated_claude_tmux_channel_id as claude_channel;
-#[cfg(not(test))]
+#[cfg(any(not(test), not(unix)))]
 use crate::services::{
     platform::tmux::list_session_names as claude_session_names,
     tmux_diagnostics::tmux_session_has_live_pane as claude_pane_live,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use claude_pass_tests::{claude_channel, claude_pane_live, claude_session_names};
 #[cfg(test)]
 #[path = "../../claude_tui/hook_server/rehydration_ingress_tests.rs"]
@@ -635,9 +635,9 @@ pub(crate) fn rehydrate_codex_tui_binding_for_tests(
 fn claude_launch_transcript(
     tmux_session_name: &str,
 ) -> Option<crate::services::tui_prompt_dedupe::pending::LaunchTranscript> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let home = claude_pass_tests::claude_home();
-    #[cfg(not(test))]
+    #[cfg(any(not(test), not(unix)))]
     let home: Option<PathBuf> = None;
     claude_tui_launch_transcript(tmux_session_name, home.as_deref())
 }
