@@ -3444,17 +3444,23 @@ mod remote_settings_tests {
 mod shared_test_env_lock_tests {
     #[test]
     fn acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             let _lock = super::test_env_lock::acquire_shared_test_env_lock();
+            ready_tx.send(()).expect("signal first lock acquisition");
+            start_rx.recv().expect("start reentry proof");
             let reentry = std::panic::catch_unwind(|| {
                 let _nested = super::test_env_lock::acquire_shared_test_env_lock();
             });
             tx.send(reentry.is_err()).expect("send reentry result");
         });
 
+        ready_rx.recv().expect("first lock must be acquired");
+        start_tx.send(()).expect("trigger same-thread reentry");
         let panicked = rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(std::time::Duration::from_secs(30))
             .expect("same-thread reentry must panic before waiting on the mutex");
         assert!(
             panicked,
