@@ -533,4 +533,72 @@ async fn p2_4_failed_tend_keeps_prior_health_evidence_until_a_successful_pass() 
     reopened.tend(&mut writer).unwrap();
     assert_eq!(counts.lock().unwrap().last(), Some(&MAX_READERS));
     assert!(!active(&health).contains(&format!("tui_o:too_many_readers:{CHANNEL}")));
+
+    failed_regrowth_defers_overcount_until_success();
+}
+
+fn failed_regrowth_defers_overcount_until_success() {
+    let (harness, ids, bindings) = fixture(MAX_READERS + 1);
+    for (i, source) in ids.iter().enumerate() {
+        append(&source.path, &row(&format!("m{i}"), "body"));
+    }
+    let (mut sources, mut writer, mut deriver, _) = resume(&harness, bindings.clone());
+    sources
+        .capture(&mut writer, &mut deriver, &mut VecDeque::new())
+        .unwrap();
+    writer.store().set_retired(&ids[0], true).unwrap();
+    drop(writer);
+    let (mut writer, health, counts) = health_writer(&harness);
+    let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone());
+    sources
+        .resume(&mut writer, &mut deriver, &mut VecDeque::new())
+        .unwrap();
+    sources.tend(&mut writer).unwrap();
+    assert_eq!(counts.lock().unwrap().last(), Some(&MAX_READERS));
+    append(&ids[0].path, &row("late", "regrowth"));
+    let cursor = harness
+        ._runtime
+        .path()
+        .join("o_store")
+        .join(CHANNEL.to_string())
+        .join("cursor")
+        .join(format!("{}.json", source_key(&ids[0])));
+    let bytes = std::fs::read(&cursor).unwrap();
+    std::fs::remove_file(&cursor).unwrap();
+    std::fs::create_dir(&cursor).unwrap();
+    let result = sources.tend(&mut writer);
+    std::fs::remove_dir(&cursor).unwrap();
+    std::fs::write(&cursor, bytes).unwrap();
+    assert!(result.is_err());
+    assert_eq!(counts.lock().unwrap().as_slice(), &[MAX_READERS]);
+    assert!(
+        !active(&health).contains(&format!("tui_o:too_many_readers:{CHANNEL}")),
+        "failed regrowth publishes neither recovery nor a new overcount activation"
+    );
+    drop(writer);
+    let sink = HealthSink {
+        router: Arc::new(crate::services::tui_o::alarm::AlarmRouter::new(
+            None,
+            None,
+            health.clone(),
+        )),
+        reconciled: counts.clone(),
+    };
+    let mut writer = ChannelWriter::new(
+        harness.channel(),
+        harness.gate.clone(),
+        harness.port.clone(),
+        harness.lease.clone(),
+        sink,
+    );
+    let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings);
+    sources
+        .resume(&mut writer, &mut deriver, &mut VecDeque::new())
+        .unwrap();
+    sources.tend(&mut writer).unwrap();
+    assert_eq!(counts.lock().unwrap().last(), Some(&(MAX_READERS + 1)));
+    assert!(
+        active(&health).contains(&format!("tui_o:too_many_readers:{CHANNEL}")),
+        "new overcount activates on the next successful tend"
+    );
 }
