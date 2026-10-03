@@ -37,6 +37,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::intake_outbox_dispatched_audit::postgres_tests
   --skip db::o_channel_activation::postgres_tests
+  --skip db::o_channel_homes::tests
   --skip db::postgres::test_db_reclaim::tests
   --skip db::postgres::tests
   --skip db::prompt_manifests::tests
@@ -98,6 +99,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::tests
   --skip services::automation_candidate_materializer::iteration_result_tests
   --skip services::cluster::attachment_transfer::storage_tests
+  --skip services::cluster::channel_home::tests
   --skip services::cluster::execution_capacity::tests
   --skip services::cluster::intake_preflight::tests
   --skip services::cluster::intake_router_hook::agent_execution_node_tests
@@ -343,6 +345,10 @@ NON_PG_FILTER_REPLAY=(
   services::auto_queue::tests::auto_queue_status_surfaces_review_cycle_clock
   services::auto_queue::tests::thread_link_view_only_builds_url_for_discord_snowflakes
   services::cluster::attachment_transfer::storage_tests::attachment_upload_reference_preserves_legacy_json_and_enforces_size_limits
+  services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
+  services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
+  services::cluster::channel_home::tests::channel_home_items_have_no_production_caller
+  services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
@@ -704,6 +710,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox_dispatch_stamp::tests
   db::intake_outbox_dispatched_audit::postgres_tests
   db::o_channel_activation::postgres_tests
+  db::o_channel_homes::tests
   db::postgres::test_db_reclaim::tests
   db::postgres::tests
   db::prompt_manifests::tests
@@ -765,6 +772,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::tests
   services::automation_candidate_materializer::iteration_result_tests
   services::cluster::attachment_transfer::storage_tests
+  services::cluster::channel_home::tests
   services::cluster::execution_capacity::tests
   services::cluster::intake_preflight::tests
   services::cluster::intake_router_hook::agent_execution_node_tests
