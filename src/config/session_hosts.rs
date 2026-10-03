@@ -16,8 +16,8 @@ const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHostsConfig {
-    #[serde(default, skip_serializing_if = "HerdrHostsConfig::is_empty")]
-    pub herdr: HerdrHostsConfig,
+    #[serde(default, skip_serializing_if = "HerdrSection::is_empty")]
+    pub herdr: HerdrSection,
 }
 
 impl SessionHostsConfig {
@@ -28,15 +28,15 @@ impl SessionHostsConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct HerdrHostsConfig {
+pub struct HerdrSection {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub endpoints: BTreeMap<String, HerdrEndpointConfig>,
+    pub endpoints: BTreeMap<String, EndpointConfig>,
     /// Discord channel id to endpoint key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub channels: BTreeMap<String, String>,
 }
 
-impl HerdrHostsConfig {
+impl HerdrSection {
     pub fn is_empty(&self) -> bool {
         self.endpoints.is_empty() && self.channels.is_empty()
     }
@@ -44,7 +44,7 @@ impl HerdrHostsConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct HerdrEndpointConfig {
+pub struct EndpointConfig {
     /// The `cluster.instance_id` of the only node that may run this endpoint.
     pub execution_node: String,
     pub socket_path: PathBuf,
@@ -54,7 +54,7 @@ pub struct HerdrEndpointConfig {
 
 /// One configured endpoint, named by its config key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrEndpoint {
+pub(crate) struct ChannelEndpoint {
     pub key: String,
     pub execution_node: String,
     pub socket_path: PathBuf,
@@ -66,7 +66,7 @@ pub(crate) struct HerdrEndpoint {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BootSessionHosts {
     config: SessionHostsConfig,
-    channels: BTreeMap<u64, HerdrEndpoint>,
+    channels: BTreeMap<u64, ChannelEndpoint>,
     local_node: Option<String>,
 }
 
@@ -80,7 +80,7 @@ impl BootSessionHosts {
         })
     }
 
-    pub(crate) fn herdr_endpoint(&self, channel: u64) -> Option<&HerdrEndpoint> {
+    pub(crate) fn herdr_endpoint(&self, channel: u64) -> Option<&ChannelEndpoint> {
         self.channels.get(&channel)
     }
 
@@ -88,7 +88,7 @@ impl BootSessionHosts {
         self.local_node.as_deref()
     }
 
-    pub(crate) fn channels(&self) -> &BTreeMap<u64, HerdrEndpoint> {
+    pub(crate) fn channels(&self) -> &BTreeMap<u64, ChannelEndpoint> {
         &self.channels
     }
 
@@ -98,7 +98,7 @@ impl BootSessionHosts {
 }
 
 /// Every endpoint complete with absolute paths, every channel a registered TUI on a known endpoint.
-pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, HerdrEndpoint>> {
+pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
     let herdr = &config.session_hosts.herdr;
     for (key, endpoint) in &herdr.endpoints {
         let at = format!("session_hosts.herdr.endpoints.{key}");
@@ -134,7 +134,7 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, HerdrEndpoint>> 
             anyhow::bail!("{CHANNELS_KEY}: channel {channel} names unknown endpoint {key:?}");
         };
         bound_as_tui(config, channel)?;
-        let endpoint = HerdrEndpoint {
+        let endpoint = ChannelEndpoint {
             key: key.clone(),
             execution_node: endpoint.execution_node.trim().to_owned(),
             socket_path: endpoint.socket_path.clone(),
@@ -204,7 +204,7 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
     read(BOOT.get())
 }
 
-pub(crate) fn herdr_endpoint(channel: u64) -> Option<HerdrEndpoint> {
+pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
@@ -229,7 +229,7 @@ pub(crate) fn force_for_test(
     local_node: Option<&str>,
     channels: &[(u64, &str)],
 ) -> ForcedSessionHosts {
-    let endpoint = |execution_node: &str| HerdrEndpoint {
+    let endpoint = |execution_node: &str| ChannelEndpoint {
         key: format!("{execution_node}-endpoint"),
         execution_node: execution_node.to_owned(),
         socket_path: "/adk/herdr/agentdesk.sock".into(),

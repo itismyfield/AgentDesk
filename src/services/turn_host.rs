@@ -3,7 +3,7 @@
 
 use sqlx::PgPool;
 
-use crate::config::session_hosts::{self, HerdrEndpoint};
+use crate::config::session_hosts::{self, ChannelEndpoint};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedObservation, HostedRecord, HostedState,
     load_hosted_execution_pg,
@@ -125,7 +125,7 @@ async fn configured_turn(
     provider: &ProviderKind,
     channel_id: u64,
     session_key: Option<&str>,
-    endpoint: HerdrEndpoint,
+    endpoint: ChannelEndpoint,
 ) -> Result<HerdrTurnPlan, HerdrRefusal> {
     if *provider != ProviderKind::Claude {
         let provider = provider.as_str().to_owned();
