@@ -681,7 +681,8 @@ src/
 │   ├── codex_tui/
 │   │   ├── input/
 │   │   │   ├── composer_lock.rs
-│   │   │   └── composer_status.rs
+│   │   │   ├── composer_status.rs
+│   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs

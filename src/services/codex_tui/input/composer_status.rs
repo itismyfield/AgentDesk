@@ -1,5 +1,5 @@
 pub(super) fn line_is_codex_fast_context_status(line: &str) -> bool {
-    let parts: Vec<&str> = line.split('·').map(str::trim).collect();
+    let parts = status_parts(line);
     if parts.len() == 3 && matches!(parts[0], "Fast on" | "Fast off") {
         return !parts[1].is_empty() && context_percent(parts[2]).is_some();
     }
@@ -7,11 +7,39 @@ pub(super) fn line_is_codex_fast_context_status(line: &str) -> bool {
 }
 
 pub(super) fn line_is_codex_model_first_status(line: &str) -> bool {
-    let parts: Vec<&str> = line.split('·').map(str::trim).collect();
-    model_first_status(&parts)
+    model_first_status(&status_parts(line))
+}
+
+fn status_parts(line: &str) -> Vec<&str> {
+    strip_warning_notice(line)
+        .split('·')
+        .map(str::trim)
+        .collect()
+}
+
+/// Codex right-aligns `⚠ N warning(s) · f2 to view` on the status row and cuts the row to fit.
+fn strip_warning_notice(line: &str) -> &str {
+    let Some((status, notice)) = line
+        .trim_end()
+        .strip_suffix("· f2 to view")
+        .and_then(|rest| rest.rsplit_once('⚠'))
+    else {
+        return line;
+    };
+    let notice: Vec<&str> = notice.split_ascii_whitespace().collect();
+    let counted = notice.len() == 2
+        && !notice[0].is_empty()
+        && notice[0].bytes().all(|ch| ch.is_ascii_digit())
+        && matches!(notice[1], "warning" | "warnings");
+    if counted { status } else { line }
 }
 
 fn model_first_status(parts: &[&str]) -> bool {
+    // A row cut with `…` keeps the intact head; the cut part must still be a prefix of its slot.
+    let (parts, cut) = match parts.split_last() {
+        Some((last, head)) if last.ends_with('…') => (head, last.strip_suffix('…')),
+        _ => (parts, None),
+    };
     let Some(fast) = parts
         .iter()
         .skip(1)
@@ -22,17 +50,43 @@ fn model_first_status(parts: &[&str]) -> bool {
     };
     // Model and optional effort are opaque identifiers; the footer structure is the evidence.
     let model: Vec<&str> = parts[0].split_ascii_whitespace().collect();
-    fast > 0
-        && (1..=2).contains(&model.len())
+    let head = (1..=2).contains(&model.len())
         && model.iter().all(|token| identifier(token))
-        && parts[1..fast].iter().all(|part| quota(part))
-        && parts.get(fast + 1).is_some_and(|part| {
-            context_percent(part)
-                .and_then(|n| n.parse::<u8>().ok())
-                .is_some_and(|n| n <= 100)
-        })
-        && parts.len() <= fast + 3
-        && parts[fast + 2..].iter().all(|part| context_window(part))
+        && parts[1..fast].iter().all(|part| quota(part));
+    let context = |part: &&str| {
+        context_percent(part)
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| n <= 100)
+    };
+    let Some(cut) = cut else {
+        return head
+            && parts.get(fast + 1).is_some_and(context)
+            && parts.len() <= fast + 3
+            && parts[fast + 2..].iter().all(|part| context_window(part));
+    };
+    head && match parts.len() - fast {
+        1 => context_prefix(cut),
+        2 => parts.get(fast + 1).is_some_and(context) && context_window_prefix(cut),
+        _ => false,
+    }
+}
+
+fn context_prefix(cut: &str) -> bool {
+    let Some(rest) = cut.strip_prefix("Context ") else {
+        return "Context ".starts_with(cut);
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    rest.is_empty() || (digits > 0 && "% left".starts_with(&rest[digits..]))
+}
+
+fn context_window_prefix(cut: &str) -> bool {
+    let digits = cut
+        .bytes()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == b'.')
+        .count();
+    let rest = &cut[digits..];
+    let rest = rest.strip_prefix(['K', 'M']).unwrap_or(rest);
+    cut.is_empty() || (digits > 0 && " window".starts_with(rest))
 }
 
 fn identifier(value: &str) -> bool {
@@ -129,6 +183,11 @@ mod tests {
             idle.replace("258K window", "assistant prose"),
             idle.replace("Context 97% left", "Context +97% left"),
             idle.replace("GPT-6.1-Sol xhigh", "assistant prose here"),
+            idle.replace("Context 97% left · 258K window", "Context unknown…"),
+            idle.replace(
+                "weekly 99% left · Fast off · Context 97% left",
+                "weekly 99% l…",
+            ),
             idle.replace(
                 "Worked for 2s • 7:26 AM",
                 "• Working (2s • esc to interrupt)",

@@ -2419,6 +2419,9 @@ services::codex_tui::input::composer_status::tests::current_codex_status_fixture
 services::codex_tui::input::composer_status::tests::current_codex_status_fixture_keeps_busy_draft_and_history_guards
 services::codex_tui::input::composer_status::tests::generalized_codex_footer_blocks_submit_during_work_and_approval
 services::codex_tui::input::composer_status::tests::generalized_codex_footer_submits_followup_for_model_and_effort_variants
+services::codex_tui::input::inline_banner::tests::banner_that_survives_one_escape_gets_no_second_escape_or_input
+services::codex_tui::input::inline_banner::tests::blocking_menu_above_the_composer_gets_no_escape
+services::codex_tui::input::inline_banner::tests::security_banner_pane_is_ready_and_followup_dismisses_it_once
 services::codex_tui::input::tests::alternate_footer_phrasing_still_matches
 services::codex_tui::input::tests::assistant_output_with_box_drawing_alone_is_not_ready
 services::codex_tui::input::tests::bare_control_bytes_are_rejected

@@ -105,6 +105,7 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_lock;
 mod composer_status;
+mod inline_banner;
 #[allow(unused_imports)]
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
@@ -1177,8 +1178,15 @@ fn submit_codex_followup_prompt_under_lock(
     // Take one final canonical snapshot immediately before mutating the
     // composer so a just-arrived user draft or active turn is never appended
     // to or submitted as the Discord follow-up.
-    let final_snapshot = prompt_readiness_snapshot(session_name);
-    if !snapshot_allows_warm_followup_submit(&final_snapshot) {
+    let mut final_snapshot = prompt_readiness_snapshot(session_name);
+    if snapshot_allows_warm_followup_submit(&final_snapshot)
+        && inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
+    {
+        final_snapshot = inline_banner::dismiss_action_banner_once(session_name);
+    }
+    if !snapshot_allows_warm_followup_submit(&final_snapshot)
+        || inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
+    {
         return CodexFollowupPromptSubmitOutcome::NotSubmitted {
             error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
         };
