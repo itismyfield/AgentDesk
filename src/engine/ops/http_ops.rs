@@ -543,8 +543,20 @@ mod tests {
         std::thread::spawn(move || {
             if let Ok((mut sock, _)) = listener.accept() {
                 let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut req = Vec::new();
                 let mut buf = [0u8; 4096];
-                let _ = sock.read(&mut buf); // drain request (best effort)
+                loop {
+                    match sock.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                    if let Some(pos) = find_subslice(&req, b"\r\n\r\n") {
+                        let body_len = parse_content_length(&req[..pos]).unwrap_or(0);
+                        if req.len() >= pos + 4 + body_len {
+                            break;
+                        }
+                    }
+                }
                 let _ = sock.write_all(&response);
                 let _ = sock.flush();
                 std::thread::sleep(keep_open);

@@ -118,6 +118,14 @@ pub(crate) enum TuiDirectAdoptOffsets {
     FenceForward(AdoptFenceForwardCause),
 }
 
+/// A row a TUI-direct prompt started. Headless turns share the synthetic owner but are
+/// bridge-owned `Managed` turns, so the owner alone does not identify one.
+fn is_tui_direct_row(row: &inflight::InflightTurnState) -> bool {
+    row.request_owner_user_id
+        == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        && row.turn_source == inflight::TurnSource::ExternalInput
+}
+
 /// `None` leaves rows other than a TUI-direct row adopted onto a Claude transcript to
 /// [`claude_tui_force_initial_offset_for_adopted_transcript`].
 pub(crate) fn tui_direct_adopt_offsets(
@@ -126,8 +134,7 @@ pub(crate) fn tui_direct_adopt_offsets(
     output_path: &str,
     latest_lease_turn_id: Option<&str>,
 ) -> Option<TuiDirectAdoptOffsets> {
-    if existing.request_owner_user_id
-        != crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+    if !is_tui_direct_row(existing)
         || runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
         || claude_rebind_transcript_path(output_path).is_none()
     {
@@ -169,10 +176,8 @@ pub(crate) fn tui_direct_fence_cause(
     rebase: Option<u64>,
     operator_override: bool,
 ) -> Option<AdoptFenceForwardCause> {
-    let owner = existing?.request_owner_user_id;
-    rebase.filter(|_| {
-        owner == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
-    })?;
+    let existing = existing?;
+    rebase.filter(|_| is_tui_direct_row(existing))?;
     Some(match adopt {
         _ if operator_override => AdoptFenceForwardCause::OperatorOverride,
         Some(TuiDirectAdoptOffsets::FenceForward(cause)) => cause,
@@ -468,6 +473,10 @@ pub(crate) fn rebind_output_paths_same(left: &str, right: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "adoption_notice_pg_tests.rs"]
+mod notice_pg_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -711,7 +720,7 @@ mod tests {
         let base = tui_direct_row(6_159_001, "AgentDesk-claude-6159-cc", transcript);
         const ROTATED: &str = "/tmp/71590000-0000-4000-8000-000000000000.jsonl";
         let mismatch = Some(FenceForward(CoordinateSpaceMismatch));
-        let cases: [(Edit, Option<&str>, Option<TuiDirectAdoptOffsets>); 8] = [
+        let cases: [(Edit, Option<&str>, Option<TuiDirectAdoptOffsets>); 9] = [
             (|_| {}, None, Some(FenceForward(TurnIdentityUnknown))),
             (|_| {}, Some("turn-a"), Some(Preserve)),
             (|_| {}, Some("turn-b"), Some(FenceForward(NewerTurnMixed))),
@@ -728,6 +737,11 @@ mod tests {
             ),
             (|row| row.runtime_kind = None, None, mismatch),
             (|row| row.request_owner_user_id = 456, Some("turn-b"), None),
+            (
+                |row| row.turn_source = inflight::TurnSource::Managed,
+                Some("turn-a"),
+                None,
+            ),
         ];
         for (index, (edit, lease, expected)) in cases.into_iter().enumerate() {
             let mut row = base.clone();
@@ -885,6 +899,12 @@ mod tests {
             tui_direct_fence_cause(Some(&owned), None, Some(7), true),
             None
         );
+        let mut headless = row.clone();
+        headless.turn_source = inflight::TurnSource::Managed;
+        assert_eq!(
+            tui_direct_fence_cause(Some(&headless), None, Some(7), true),
+            None
+        );
     }
 
     #[tokio::test]
@@ -947,6 +967,8 @@ mod tests {
         Operator,
         /// A live turn appends these bytes after the rebind's stat, just before custody reads.
         Grow(&'static str),
+        /// The row is a headless turn: same synthetic owner, but a bridge-owned `Managed` turn.
+        Headless,
     }
 
     /// Drives `rebind_inflight_for_channel` for a TUI-direct row resting at `turn_start_offset`
@@ -957,7 +979,7 @@ mod tests {
         use crate::services::tui_prompt_dedupe as dedupe;
         use std::sync::atomic::Ordering::SeqCst;
         let (mut lease_turn_id, mut committed, mut grow) = (None, 0, None);
-        let (mut custody, mut operator) = (false, false);
+        let (mut custody, mut operator, mut headless) = (false, false, false);
         let mut row_runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
         for knob in knobs {
             match *knob {
@@ -967,6 +989,7 @@ mod tests {
                 Knob::Custody => custody = true,
                 Knob::Operator => operator = true,
                 Knob::Grow(tail) => grow = Some(tail),
+                Knob::Headless => headless = true,
             }
         }
         let _lock = crate::config::shared_test_env_lock()
@@ -999,6 +1022,9 @@ mod tests {
         let path = transcript.to_str().unwrap();
         let mut row = tui_direct_row(channel_id, &session, path);
         row.runtime_kind = row_runtime_kind;
+        if headless {
+            row.turn_source = inflight::TurnSource::Managed;
+        }
         assert!(inflight::save_inflight_state_if_absent(&row).expect("persist row"));
         if let Some(turn_id) = lease_turn_id {
             let mut lease = dedupe::ExternalInputRelayLease::unassigned(Some(channel_id));
@@ -1123,6 +1149,33 @@ mod tests {
         );
         let needles = ["cause=turn_identity_unknown", "BACKLOG_BODY_6159"];
         assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    /// A headless turn's watcher respawn has no lease either, but its bridge owns the turn: the
+    /// rebind resumes from the row instead of fencing it forward and raising the invariant.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_resumes_a_headless_turn_row_without_a_fence_forward() {
+        let channel_id = 6_304_000_010_u64;
+        let knobs = [Knob::Headless, Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "headless", &knobs) else {
+            return;
+        };
+        assert!(rebind.eof > 4_096, "the unread range is not empty");
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(4_096),
+            "the unread range is not skipped"
+        );
+        assert!(fence_forwards(channel_id).is_empty(), "nothing was fenced");
+        let violations = rebind.events.iter().filter(|event| {
+            event.event_type == "invariant_violation"
+                && event
+                    .payload
+                    .to_string()
+                    .contains(ADOPT_FENCE_FORWARD_INVARIANT)
+        });
+        assert_eq!(violations.count(), 0);
     }
 
     #[cfg(unix)]

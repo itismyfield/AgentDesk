@@ -14,14 +14,15 @@ fn lease(channel_id: ChannelId, tmux: &str) -> ExternalInputRelayLease {
     crate::services::tui_prompt_dedupe::record_external_input_turn_lease("claude", tmux, lease)
 }
 
-// The idle tail's reader judges its session by host evidence: a tmux session that is gone
-// ends the read at once, while a session marked for another host keeps the transcript poll.
+// A missing tmux session ends the reader; another host keeps polling without a tmux probe.
 #[tokio::test]
 async fn the_idle_tail_reads_a_session_dead_only_through_its_tmux_host() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
     for (n, marker) in [None, Some("herdr")].into_iter().enumerate() {
         let tmux = format!("AgentDesk-claude-p5c-idle-tail-{n}");
+        let fake = FakeTmux::install(&tmux);
+        fake.mark_missing();
         let channel = ChannelId::new(940_000_000_005_340 + n as u64);
         if let Some(body) = marker {
             let path = crate::services::tmux_common::session_temp_path(&tmux, "host_kind");
@@ -30,6 +31,17 @@ async fn the_idle_tail_reads_a_session_dead_only_through_its_tmux_host() {
         }
         let transcript = dir.path().join(format!("tail-{n}.jsonl"));
         std::fs::write(&transcript, "").unwrap();
+        let probe = idle_tail_probe(&tmux, transcript.to_str().unwrap());
+        assert_eq!((probe.is_alive)(), marker.is_some(), "{marker:?}");
+        let calls = fake.take_calls();
+        if marker.is_some() {
+            assert!(
+                calls.is_empty(),
+                "another host must not probe tmux: {calls:?}"
+            );
+            continue;
+        }
+        assert!(calls.iter().any(|call| call.starts_with("has-session")));
         let tail = run_claude_idle_response_tail(
             crate::services::discord::make_shared_data_for_tests(),
             tmux.clone(),
@@ -39,11 +51,15 @@ async fn the_idle_tail_reads_a_session_dead_only_through_its_tmux_host() {
             "direct input".to_string(),
             lease(channel, &tmux),
         );
-        let ended = tokio::time::timeout(Duration::from_secs(3), tail)
+        let ended = tokio::time::timeout(Duration::from_secs(30), tail)
             .await
             .is_ok();
-        assert_eq!(ended, marker.is_none(), "{marker:?}");
-        // Removing the transcript ends a reader the timeout left polling.
+        assert!(ended, "the reader must end after confirmed session absence");
+        assert!(
+            fake.take_calls()
+                .iter()
+                .any(|call| call.starts_with("has-session"))
+        );
         std::fs::remove_file(&transcript).unwrap();
     }
 }

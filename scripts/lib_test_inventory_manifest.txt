@@ -4304,6 +4304,7 @@ services::discord::outbound::send_to_agent::tests::rejects_missing_role_id
 services::discord::outbound::send_to_agent::tests::rejects_unknown_mode
 services::discord::outbound::send_to_agent::tests::trims_role_id_and_respects_explicit_mode
 services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped
+services::discord::outbound::source_registry::scan_tests::every_outbox_producer_source_is_registered
 services::discord::outbound::source_registry::tests::new_sources_are_loopback_only
 services::discord::outbound::source_registry::tests::original_external_contract_and_fail_closed_variants_are_pinned
 services::discord::outbound::source_registry::tests::producer_contract_lists_every_loopback_source
@@ -4860,6 +4861,7 @@ services::discord::recovery_engine::idle_captured_response::tests::idle_partial_
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_accepts_native_stop_hook_with_nullable_session_5071
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_keeps_normalized_result_and_tool_precedence_5071
 services::discord::recovery_engine::jsonl_extract::captured_claude_recovery_tests::bounded_claude_recovery_rejects_unproven_or_malformed_captured_terminal_5071
+services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::adoption::tests::an_unaddressable_range_is_recorded_before_it_may_be_fenced
 services::discord::recovery_engine::manual_rebind::adoption::tests::any_rebase_of_a_tui_direct_row_needs_custody_whoever_asked_for_it
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_adopted_transcript_rebind_forces_eof_when_saved_output_missing
@@ -4875,6 +4877,7 @@ services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_initi
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset
+services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_resumes_a_headless_turn_row_without_a_fence_forward
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_with_an_output_path_override_keeps_the_row_offsets_without_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_with_an_output_path_override_rebases_to_eof_only_after_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::tui_direct_adopt_keeps_offsets_only_in_their_own_coordinate_space
@@ -5696,6 +5699,7 @@ services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests
 services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::unchanged_generation_inside_the_window_holds
 services::discord::runtime_bootstrap::voice::voice_bootstrap_tests::manual_join_only_config_starts_rejoin_supervisor_and_routes_rejoin
 services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_write_returns_error_for_unwritable_parent_path
+services::discord::runtime_store::checkpoint_lock_tests::checkpoint_lock_keeps_max_across_a_paused_low_writer
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
@@ -8029,6 +8033,7 @@ services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_times_out_when_child_keeps_running
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io

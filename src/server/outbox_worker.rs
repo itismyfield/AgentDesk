@@ -58,21 +58,7 @@ pub(super) async fn message_outbox_loop(
             }
             next_gc_at = std::time::Instant::now() + Duration::from_secs(3600);
         }
-        if drain_message_outbox_batch_once(pg_pool.as_ref(), Some(&claim_owner), {
-            let health_registry = health_registry.clone();
-            let pg_pool = pg_pool.clone();
-            move |row| {
-                let health_registry = health_registry.clone();
-                let pg_pool = pg_pool.clone();
-                async move {
-                    outbox_actionable_delivery::deliver(&health_registry, pg_pool.as_ref(), &row)
-                        .await
-                }
-            }
-        })
-        .await
-            == 0
-        {
+        if drain_message_outbox_once(&pg_pool, &health_registry, &claim_owner).await == 0 {
             // No work: increase interval (up to max)
             poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
             continue;
@@ -80,4 +66,24 @@ pub(super) async fn message_outbox_loop(
         // Work found: reset to fast polling
         poll_interval = Duration::from_millis(500);
     }
+}
+
+/// One claim/deliver/settle cycle with the production delivery; returns the rows claimed.
+pub(crate) async fn drain_message_outbox_once(
+    pg_pool: &Arc<PgPool>,
+    health_registry: &Arc<HealthRegistry>,
+    claim_owner: &str,
+) -> usize {
+    drain_message_outbox_batch_once(pg_pool.as_ref(), Some(claim_owner), {
+        let health_registry = health_registry.clone();
+        let pg_pool = pg_pool.clone();
+        move |row| {
+            let health_registry = health_registry.clone();
+            let pg_pool = pg_pool.clone();
+            async move {
+                outbox_actionable_delivery::deliver(&health_registry, pg_pool.as_ref(), &row).await
+            }
+        }
+    })
+    .await
 }

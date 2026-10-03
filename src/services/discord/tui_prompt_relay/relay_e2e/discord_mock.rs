@@ -17,7 +17,7 @@ use serenity::cache::Cache;
 use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::Notify;
 
-pub(in crate::services::discord::tui_prompt_relay) const CHANNEL_ID: u64 = 940_487_400_000_001;
+pub(in crate::services::discord) const CHANNEL_ID: u64 = 940_487_400_000_001;
 pub(super) const USER_ID: u64 = 940_487_400_000_002;
 pub(super) const BOT_ID: u64 = 940_487_400_000_003;
 const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
@@ -45,9 +45,9 @@ pub(in crate::services::discord::tui_prompt_relay) enum NoteAnswer {
 /// production call the mock cannot answer fails an assertion instead of
 /// silently degrading a scenario into a weaker one.
 #[derive(Clone)]
-pub(super) struct DiscordMockState {
+pub(in crate::services::discord) struct DiscordMockState {
     pub(super) placeholder_posts: Arc<AtomicUsize>,
-    pub(super) local_note_posts: Arc<AtomicUsize>,
+    pub(in crate::services::discord) local_note_posts: Arc<AtomicUsize>,
     pub(super) first_placeholder_arrived: Arc<Notify>,
     pub(super) release_first_placeholder: Arc<Notify>,
     pub(super) park_first_placeholder: Arc<AtomicBool>,
@@ -57,7 +57,7 @@ pub(super) struct DiscordMockState {
     pub(super) hold_next_note: Arc<AtomicBool>,
     pub(super) note_held: Arc<Notify>,
     pub(super) release_held_note: Arc<Notify>,
-    pub(super) unhandled: Arc<Mutex<Vec<String>>>,
+    pub(in crate::services::discord) unhandled: Arc<Mutex<Vec<String>>>,
     /// Channel history `GET /messages` pages over. Empty until a scenario
     /// seeds it, which is the "nothing to catch up" answer.
     pub(super) history: Arc<Mutex<Vec<Value>>>,
@@ -68,7 +68,7 @@ pub(super) struct DiscordMockState {
 }
 
 impl DiscordMockState {
-    pub(super) fn new() -> Self {
+    pub(in crate::services::discord) fn new() -> Self {
         Self {
             placeholder_posts: Arc::new(AtomicUsize::new(0)),
             local_note_posts: Arc::new(AtomicUsize::new(0)),
@@ -416,7 +416,7 @@ async fn gateway_socket(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
 }
 
-pub(super) async fn start(
+pub(in crate::services::discord) async fn start(
     state: DiscordMockState,
 ) -> (String, String, tokio::task::JoinHandle<()>) {
     let app = Router::new()
@@ -447,7 +447,10 @@ impl serenity::framework::Framework for NoopFramework {
     async fn dispatch(&self, _ctx: serenity::Context, _event: serenity::FullEvent) {}
 }
 
-pub(super) async fn serenity_context(proxy: String, gateway_url: String) -> serenity::Context {
+pub(in crate::services::discord) async fn serenity_context(
+    proxy: String,
+    gateway_url: String,
+) -> serenity::Context {
     let http = Arc::new(
         serenity::HttpBuilder::new("test-token")
             .proxy(proxy)

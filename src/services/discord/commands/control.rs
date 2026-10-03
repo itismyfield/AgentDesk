@@ -618,6 +618,10 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
 
     let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
     match super::super::turn_bridge::begin_command_stop(shared, provider, channel_id, false).await {
+        CommandStop::Session(stop) => {
+            ctx.say(super::STOPPING_RESPONSE).await?;
+            stop.interrupt("/stop").await;
+        }
         CommandStop::Stop(stop) => {
             ctx.say(super::STOPPING_RESPONSE).await?;
 

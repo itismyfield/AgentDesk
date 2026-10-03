@@ -965,6 +965,7 @@ src/
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
 │   │   │   ├── source_registry.rs
+│   │   │   ├── source_registry_scan_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
@@ -1022,6 +1023,7 @@ src/
 │   │   ├── recovery_engine/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
+│   │   │   │   ├── adoption_notice_pg_tests.rs
 │   │   │   │   ├── codex_tui_replay.rs
 │   │   │   │   ├── coordinate_adoption.rs
 │   │   │   │   ├── coordinate_adoption_tests.rs
@@ -1547,6 +1549,8 @@ src/
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
 │   │   │   │   ├── process_table.rs
+│   │   │   │   ├── session_stop.rs
+│   │   │   │   ├── session_stop_tests.rs
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
@@ -1755,6 +1759,7 @@ src/
 │   │   ├── role_map_enrichment.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── runtime_store_checkpoint_lock_tests.rs
 │   │   ├── semantic_boundaries.rs
 │   │   ├── session_banner.rs
 │   │   ├── session_canonical_identity.rs
