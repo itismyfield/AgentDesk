@@ -99,6 +99,11 @@ pub(super) fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
+    // No listing lands between this owner judgement and the claim.
+    #[cfg(unix)]
+    let listing_order = crate::services::tui_prompt_dedupe::herdr_listing_order(&tmux_session_name);
+    #[cfg(unix)]
+    let listing_held = listing_order.lock().unwrap_or_else(|p| p.into_inner());
     // A claim the Herdr admission may withhold stamps only the runtime locator first; its owner
     // and relay owner wait for the admitted claim. Every other claim keeps main's order.
     #[cfg(unix)]
@@ -228,6 +233,8 @@ pub(super) fn handle_watcher_runtime_handoff(
             Some(incarnation),
         )
     };
+    #[cfg(unix)]
+    drop(listing_held);
     #[cfg(not(unix))]
     let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
         let _ = handle;

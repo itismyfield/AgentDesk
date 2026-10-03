@@ -26339,6 +26339,33 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:71cf32b85c7f46020d63cc5a2cea22483a9725dc0accf2c6f5842f63d9baffd2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3f20de78ccf1b1ead96fff38571a091e84b5d3a18b7fd4f2584cd5fbf68987a3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f2a9e54a0121b60ccf5c82b9320efe06577ab7e3494d5563392fcd3949d1c2f7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/relay_recovery_circuit_alert_producer.rs",
       "api": "sqlx::query",
       "symbol": "query",

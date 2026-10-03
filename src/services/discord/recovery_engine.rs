@@ -494,8 +494,8 @@ pub enum RebindError {
         tmux_session: String,
         runtime_kind: RuntimeHandoffKind,
     },
-    /// The pane is a Herdr execution no reconcile admitted: the row was written but no
-    /// watcher was claimed, spawned or reused for it. 409.
+    /// The pane is a Herdr execution no reconcile admitted: refused before any write, or, when
+    /// the admission is withdrawn mid-rebind, with the row written; no watcher is claimed. 409.
     WatcherWithheld { tmux_session: String },
     /// `tmux_session` not provided and no in-memory session supplies a
     /// channel_name — cannot derive the canonical tmux session name. 400.
