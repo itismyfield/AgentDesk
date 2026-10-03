@@ -4,13 +4,46 @@ pub struct RuntimeTurnStopResult {
     pub lifecycle_path: &'static str,
     pub had_active_turn: bool,
     pub queue_depth: usize,
-    pub persistent_inflight_cleared: bool,
+    pub inflight: InflightDisposition,
     pub termination_recorded: bool,
     /// #5176 — whether this stop actually took the mailbox foreground anchor.
     /// `true` also covers "the mailbox was already free when we checked": the
     /// contract this field reports is *ownership released*, and the caller only
     /// needs to know whether the channel is still locked.
     pub mailbox_foreground_free: bool,
+}
+
+impl RuntimeTurnStopResult {
+    /// The host guard kept the judged turn: nothing was cancelled, finished or cleared.
+    pub(crate) fn preserved_by_host_guard(queue_depth: usize) -> Self {
+        Self {
+            lifecycle_path: "host-guard-preserved",
+            had_active_turn: true,
+            queue_depth,
+            inflight: InflightDisposition::PreservedByHostGuard,
+            termination_recorded: false,
+            mailbox_foreground_free: false,
+        }
+    }
+}
+
+/// What a runtime stop did with the channel's persistent inflight row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InflightDisposition {
+    Cleared,
+    NotNeeded,
+    /// The stop was not a legacy one: the row stays for the turn's owner, and no caller clears it.
+    PreservedByHostGuard,
+}
+
+impl InflightDisposition {
+    pub(crate) fn cleared_if(cleared: bool) -> Self {
+        if cleared {
+            Self::Cleared
+        } else {
+            Self::NotNeeded
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -982,6 +982,12 @@ pub async fn stop_agent_turn(
         &format!("사용자가 {id} 에이전트 턴 수동 중단 (POST /api/agents/{id}/turn/stop)"),
     )
     .await;
+    // A turn the host guard kept is running on: its session is not marked disconnected.
+    if lifecycle.host_guard_kept() {
+        let (error, unsupported) = ("session host is not legacy tmux", "session_host_not_tmux");
+        let body = json!({"error": error, "unsupported": unsupported, "session_key": session_key});
+        return (StatusCode::CONFLICT, Json(body));
+    }
 
     mark_session_disconnected_pg(pool, &session_key).await;
 

@@ -42,6 +42,8 @@ mod voice;
 pub(super) const STOPPING_RESPONSE: &str = "중지하고 있어요...";
 pub(super) const ALREADY_STOPPING_RESPONSE: &str = "이미 중지 중이에요.";
 pub(super) const NO_ACTIVE_TURN_RESPONSE: &str = "중지할 활성 턴이 없어요.";
+pub(super) const HOST_REFUSED_STOP_RESPONSE: &str =
+    "이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요.";
 pub(super) const SESSION_CLEARED_RESPONSE: &str = "세션을 초기화했어요.";
 
 pub(super) fn session_started_response(path: &str) -> String {
