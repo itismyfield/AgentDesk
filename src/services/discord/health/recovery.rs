@@ -350,12 +350,9 @@ async fn stop_judged_channel_runtime(
     cleanup_policy: discord::TmuxCleanupPolicy,
     approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
-    // A turn that could not be read is kept as a refused host's is, unless a force-kill verdict
-    // already approved its host.
-    let stop = match stop {
-        Ok(stop) => stop,
-        Err(_) if approved.is_some() => None,
-        Err(_) => return host_guard_preserved(shared, channel_id).await,
+    // A turn that could not be read is kept as a refused host's is.
+    let Ok(stop) = stop else {
+        return host_guard_preserved(shared, channel_id).await;
     };
     let (shared, provider) = (shared.clone(), provider.clone());
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();

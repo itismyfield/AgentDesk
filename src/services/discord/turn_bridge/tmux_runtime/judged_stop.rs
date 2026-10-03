@@ -14,8 +14,8 @@ use crate::services::turn_orchestrator::CancelActiveTurnResult;
 /// The reason the channel cancel records on the token and its tombstone.
 const CANCEL_REASON: &str = "mailbox_cancel_active_turn";
 
-/// The turn could not be judged: its mailbox or its inflight row failed to read. Nothing was
-/// written, and the stop keeps the turn as it keeps a refused host's.
+/// The turn could not be judged: its inflight row failed to read or parse. Nothing was written,
+/// and the stop keeps the turn as it keeps a refused host's.
 #[derive(Debug)]
 pub(in crate::services::discord) struct StopUnobserved(String);
 
@@ -55,9 +55,9 @@ impl ChannelStop {
         let Some(handle) = shared.mailbox_peek(channel) else {
             return Ok(None);
         };
-        let token = handle.cancel_token().await;
-        let token = token.map_err(|_| unobserved(channel, "mailbox unreachable".to_string()))?;
-        let Some(token) = token else {
+        // An actor that cannot answer holds no token to judge: the stop goes on as with no turn,
+        // and the cancel reports what it could not observe as null.
+        let Some(token) = handle.cancel_token().await.ok().flatten() else {
             return Ok(None);
         };
         let bound = token.tmux_session_name();
