@@ -129,11 +129,15 @@ pub(super) use task_notification_lifecycle::{
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
 pub(super) use tmux_runtime::bind_cancel_token_tmux_runtime;
 pub(super) use tmux_runtime::cancel_active_token;
-pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::tmux_generation_file_mtime_ns;
-pub(super) use tmux_runtime::{stop_active_turn, stop_approved_turn};
+pub(super) use tmux_runtime::{
+    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, keeps_turn,
+};
+pub(super) use tmux_runtime::{
+    stop_active_turn, stop_active_turn_with_outcome, stop_approved_turn,
+};
 pub(in crate::services::discord) use two_message_panel::{
     two_message_should_reanchor_panel_on_rollover, two_message_status_edit_generation_is_stale,
 };

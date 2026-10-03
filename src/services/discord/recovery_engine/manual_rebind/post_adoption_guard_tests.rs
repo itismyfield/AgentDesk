@@ -688,3 +688,8 @@ fn relay_setup_failure_rollbacks_are_exact_episode_guarded() {
         origin_before
     );
 }
+
+// Watcher claims, and so Herdr admission, exist only on Unix.
+#[cfg(unix)]
+#[path = "herdr_withheld_tests.rs"]
+mod herdr_withheld;

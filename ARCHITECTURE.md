@@ -680,8 +680,10 @@ src/
 │   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── input/
-│   │   │   └── composer_lock.rs
+│   │   │   ├── composer_lock.rs
+│   │   │   └── composer_status.rs
 │   │   ├── rollout_tail/
+│   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
@@ -800,6 +802,7 @@ src/
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
+│   │   │   │   ├── stop_judgement.rs
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── relay_auto_heal/
@@ -1015,6 +1018,7 @@ src/
 │   │   │   │   ├── coordinate_adoption.rs
 │   │   │   │   ├── coordinate_adoption_tests.rs
 │   │   │   │   ├── episode_handoff.rs
+│   │   │   │   ├── herdr_withheld_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
 │   │   │   │   ├── test_barriers.rs
@@ -1317,6 +1321,7 @@ src/
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── jsonl_rotation.rs
+│   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── n1a_turn_mode_tests.rs
@@ -1392,6 +1397,8 @@ src/
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── rehydration/
+│   │   │   │   ├── child_binding_tests.rs
+│   │   │   │   ├── codex_marker.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
@@ -1465,6 +1472,7 @@ src/
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
+│   │   │   │   ├── herdr_owner_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
@@ -1524,6 +1532,8 @@ src/
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── interrupt_policy.rs
+│   │   │   │   ├── judged_stop.rs
+│   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
@@ -2057,8 +2067,11 @@ src/
 │   │   ├── bounded_tmux_tests.rs
 │   │   ├── durability_tests.rs
 │   │   ├── durable.rs
+│   │   ├── handover.rs
 │   │   ├── ledger.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   ├── rows.rs
+│   │   └── rows_tests.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
@@ -2092,6 +2105,9 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── input_facts/
+│   │   │   │   ├── reactions.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2108,6 +2124,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_tests.rs
+│   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs

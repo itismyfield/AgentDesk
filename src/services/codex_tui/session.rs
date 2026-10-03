@@ -129,6 +129,11 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
     if tmux_session_name.is_empty() {
         return Ok(());
     }
+    if super::rollout_index::rollout_is_subagent(rollout_path) {
+        tracing::warn!(tmux_session_name, rollout_path = %rollout_path.display(),
+            "refusing Codex TUI marker for a subagent rollout");
+        return Err("cannot persist a Codex TUI marker for a subagent rollout".to_string());
+    }
     let rollout_start_offset = preserved_rollout_start_offset_for_marker(
         tmux_session_name,
         rollout_path,
@@ -205,6 +210,10 @@ fn install_binding(
             );
             return false;
         }
+        source_observation::observe(&rollout_path, session_id.as_deref());
+        if dedupe::codex_tui_binding_is_subagent(tmux_session_name, &binding) {
+            return false;
+        }
         if let Err(error) = write_codex_tui_rollout_marker_under_source_authority(
             authority,
             &rollout_path,
@@ -218,7 +227,6 @@ fn install_binding(
             );
             return true;
         }
-        source_observation::observe(&rollout_path, session_id.as_deref());
         if launched {
             dedupe::register_launched_tmux_runtime_binding_under_source_authority(
                 authority, binding,
@@ -811,7 +819,7 @@ mod tests {
             ),
         ] {
             let meta = serde_json::json!({"type":"session_meta","payload":{
-                "id":metadata_id,"source":source,"parent_thread_id":parent}});
+                "id":metadata_id,"cwd":root,"source":source,"parent_thread_id":parent}});
             std::fs::write(&path, format!("{meta}\n")).unwrap();
             assert_eq!(source_observation::observe(&path, Some(&id)), expected);
             let before = std::fs::read(&path).unwrap();
@@ -825,12 +833,24 @@ mod tests {
                 last_offset: 42,
                 relay_last_offset: None,
             };
+            clear_tmux_runtime_binding("AgentDesk-d1d1-observer");
+            let marker_path = crate::services::tmux_common::session_temp_path(
+                "AgentDesk-d1d1-observer",
+                crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+            );
+            let _ = std::fs::remove_file(marker_path);
             install_codex_tui_runtime_binding("AgentDesk-d1d1-observer", Some(42), binding);
             let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
             assert!(text.contains(&format!("verdict=\"{expected}\"")), "{text}");
             assert!(
                 text.contains("launch_verified=false") && text.contains("source_metadata_only")
             );
+            if expected == "child" {
+                assert!(runtime_binding_for_tmux_session("AgentDesk-d1d1-observer").is_none());
+                assert!(read_codex_tui_rollout_marker("AgentDesk-d1d1-observer").is_none());
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                continue;
+            }
             let installed = runtime_binding_for_tmux_session("AgentDesk-d1d1-observer").unwrap();
             assert_eq!(installed.output_path, path.display().to_string());
             assert_eq!(installed.session_id.as_deref(), Some(id.as_str()));

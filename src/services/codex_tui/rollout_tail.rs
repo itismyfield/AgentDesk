@@ -704,6 +704,9 @@ pub fn rollout_candidates_for_cwd_since(
         let Some(meta) = item.meta.as_ref() else {
             continue;
         };
+        if meta.is_subagent() {
+            continue;
+        }
         let session_cwd =
             std::fs::canonicalize(&meta.cwd).unwrap_or_else(|_| PathBuf::from(&meta.cwd));
         if session_cwd != canonical_cwd {
@@ -1477,6 +1480,9 @@ fn heuristic_finalize_allowed(
     }
     false
 }
+
+#[cfg(test)]
+mod child_binding_tests;
 
 #[cfg(test)]
 mod tests {

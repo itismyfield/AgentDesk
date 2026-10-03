@@ -831,7 +831,7 @@ async fn rebind_inflight_for_channel_inner(
         )
         .await?;
 
-    let (watcher_spawned, watcher_replaced) = {
+    let (watcher_spawned, watcher_replaced, watcher_withheld) = {
         #[cfg(unix)]
         {
             let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -852,7 +852,7 @@ async fn rebind_inflight_for_channel_inner(
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
-            let (watcher_should_spawn, watcher_replaced) = claim_rebind_watcher(
+            let claimed = claim_rebind_watcher(
                 &shared.tmux_watchers,
                 discord_channel_id,
                 handle,
@@ -865,6 +865,7 @@ async fn rebind_inflight_for_channel_inner(
                 ),
                 host,
             );
+            let (watcher_should_spawn, watcher_replaced) = claimed.unwrap_or((false, false));
             if watcher_should_spawn {
                 if let Some(PendingCodexTuiRebindRelay {
                     rollout_path,
@@ -957,11 +958,11 @@ async fn rebind_inflight_for_channel_inner(
                     ),
                 );
             }
-            (watcher_should_spawn, watcher_replaced)
+            (watcher_should_spawn, watcher_replaced, claimed.is_err())
         }
         #[cfg(not(unix))]
         {
-            (false, false)
+            (false, false, false)
         }
     };
     drop(locked_episode);
@@ -976,6 +977,11 @@ async fn rebind_inflight_for_channel_inner(
         );
     }
 
+    if watcher_withheld {
+        return Err(RebindError::WatcherWithheld {
+            tmux_session: tmux_session_name,
+        });
+    }
     Ok(RebindOutcome {
         tmux_session: tmux_session_name,
         channel_id,
