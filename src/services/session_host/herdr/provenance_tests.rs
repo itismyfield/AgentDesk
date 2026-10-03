@@ -142,6 +142,12 @@ fn reading(seen: Seen, os: Scripted, home: Option<&str>) -> RestoreResume {
 #[test]
 fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
     use RestoreUnverified as Why;
+    // These fixtures use Unix socket paths, which Windows rejects as non-absolute before any E7.
+    if cfg!(windows) {
+        let refused = HerdrEndpoint::new("mac-mini", "pilot", Path::new(SOCKET), "adk");
+        assert!(refused.is_err(), "{refused:?}");
+        return;
+    }
     let good = || (Ok(hello("0.9.3", at(2_000))), Ok(server(77, 1_000)));
     let with = |change: fn(&mut Scripted)| {
         let mut os = bootstrapped();
