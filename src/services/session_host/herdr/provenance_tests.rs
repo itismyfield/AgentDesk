@@ -6,42 +6,38 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
-use crate::services::session_host::herdr::contract::{HerdrOutcome, HerdrTransport, ServerPeer};
+use crate::services::session_host::herdr::contract::{
+    HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed,
+};
 use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint};
 use crate::services::session_host::herdr::observe::{
     CANONICAL_CONFIG, RestoreResume, read_restore_resume_with,
 };
 
 const HOME: &str = "/srv/herdr-home";
+const SOCKET: &str = "/tmp/h.sock";
 
-/// A transport that only names its peer: each `server_peer` pops the next reading.
-struct PeerOnly(Mutex<Vec<Result<ServerPeer, RestoreUnverified>>>);
-
-impl HerdrTransport for PeerOnly {
-    fn call(&self, _call: &HerdrCall) -> (HerdrOutcome, u64) {
-        unreachable!("E7 sends no request")
-    }
-
-    fn call_on(&self, _call: &HerdrCall, _generation: u64) -> (HerdrOutcome, u64) {
-        unreachable!("E7 sends no request")
-    }
-
-    fn server_peer(&self) -> Result<ServerPeer, RestoreUnverified> {
-        let mut peers = self.0.lock().unwrap();
-        if peers.len() > 1 {
-            peers.remove(0)
-        } else {
-            peers[0].clone()
-        }
-    }
+/// A transport that only says hello and names servers, as E7 needs.
+struct E7Only {
+    hello: Result<ServerHello, RestoreUnverified>,
+    last: Witnessed,
 }
 
-fn peer(pid: u32, version: &str, connected_at: SystemTime) -> ServerPeer {
-    ServerPeer {
-        generation: 4,
-        pid,
-        version: version.to_string(),
-        connected_at,
+impl HerdrTransport for E7Only {
+    fn call(&self, _call: &HerdrCall) -> (HerdrOutcome, Witnessed) {
+        unreachable!("E7 sends no request")
+    }
+
+    fn call_with_witness(&self, _call: &HerdrCall, _expected: &ServerWitness) -> HerdrOutcome {
+        unreachable!("E7 sends no request")
+    }
+
+    fn hello(&self) -> Result<ServerHello, RestoreUnverified> {
+        self.hello.clone()
+    }
+
+    fn server_witness(&self) -> Witnessed {
+        self.last.clone()
     }
 }
 
@@ -49,10 +45,34 @@ fn at(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
+fn started(seconds: u64) -> ProcessStart {
+    ProcessStart {
+        identity: StartIdentity::Darwin { seconds, micros: 0 },
+        wall_clock: at(seconds),
+    }
+}
+
+fn server(pid: u32, seconds: u64) -> ServerWitness {
+    ServerWitness {
+        socket: SOCKET.into(),
+        pid,
+        start: started(seconds).identity,
+    }
+}
+
+fn hello(version: &str, connected_at: SystemTime) -> ServerHello {
+    ServerHello {
+        witness: server(77, 1_000),
+        started: at(1_000),
+        version: version.to_string(),
+        connected_at,
+    }
+}
+
 /// OS answers for one server; `starts` pops a value per read, the last one repeating.
 #[derive(Clone)]
 struct Scripted {
-    starts: Vec<Result<SystemTime, RestoreUnverified>>,
+    starts: Vec<Result<ProcessStart, RestoreUnverified>>,
     env: BTreeMap<&'static str, Vec<String>>,
     config: Result<ConfigRead, RestoreUnverified>,
 }
@@ -60,7 +80,7 @@ struct Scripted {
 struct FakeOs(Mutex<Scripted>);
 
 impl ServerProvenance for FakeOs {
-    fn process_start(&self, _pid: u32) -> Result<SystemTime, RestoreUnverified> {
+    fn process_start(&self, _pid: u32) -> Result<ProcessStart, RestoreUnverified> {
         let mut os = self.0.lock().unwrap();
         if os.starts.len() > 1 {
             os.starts.remove(0)
@@ -87,7 +107,7 @@ impl ServerProvenance for FakeOs {
 
 fn bootstrapped() -> Scripted {
     Scripted {
-        starts: vec![Ok(at(1_000))],
+        starts: vec![Ok(started(1_000))],
         env: BTreeMap::from([
             ("HERDR_CONFIG_PATH", vec![format!("{HOME}/config.toml")]),
             ("XDG_CONFIG_HOME", vec![format!("{HOME}/xdg")]),
@@ -100,28 +120,29 @@ fn bootstrapped() -> Scripted {
 }
 
 fn endpoint(home: Option<&str>) -> HerdrEndpoint {
-    let endpoint =
-        HerdrEndpoint::new("mac-mini", "pilot", Path::new("/tmp/h.sock"), "adk").unwrap();
+    let endpoint = HerdrEndpoint::new("mac-mini", "pilot", Path::new(SOCKET), "adk").unwrap();
     match home {
         Some(home) => endpoint.with_herdr_home(Path::new(home)).unwrap(),
         None => endpoint,
     }
 }
 
-fn reading(
-    peers: Vec<Result<ServerPeer, RestoreUnverified>>,
-    os: Scripted,
-    home: Option<&str>,
-) -> RestoreResume {
-    let transport = PeerOnly(Mutex::new(peers));
+/// One E7 reading: the hello, then the last request-free connection's server.
+type Seen = (Result<ServerHello, RestoreUnverified>, Witnessed);
+
+fn reading(seen: Seen, os: Scripted, home: Option<&str>) -> RestoreResume {
+    let transport = E7Only {
+        hello: seen.0,
+        last: seen.1,
+    };
     read_restore_resume_with(&transport, &endpoint(home), &FakeOs(Mutex::new(os)))
 }
 
-// E7 reads Off only from the connected server's full provenance; every other case names why.
+// E7 reads Off only from one server's full provenance; every other case names why.
 #[test]
 fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
     use RestoreUnverified as Why;
-    let good = || Ok(peer(77, "0.9.3", at(2_000)));
+    let good = || (Ok(hello("0.9.3", at(2_000))), Ok(server(77, 1_000)));
     let with = |change: fn(&mut Scripted)| {
         let mut os = bootstrapped();
         change(&mut os);
@@ -142,39 +163,55 @@ fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
         os
     };
     assert_eq!(
-        reading(vec![good()], bootstrapped(), Some(HOME)),
-        RestoreResume::Off { generation: 4 }
+        reading(good(), bootstrapped(), Some(HOME)),
+        RestoreResume::Off {
+            witness: server(77, 1_000)
+        }
     );
     let home_config = format!("{HOME}/config.toml");
-    type Case<'a> = (Vec<Result<ServerPeer, Why>>, Scripted, Option<&'a str>, Why);
+    let last = |last: Witnessed| (good().0, last);
+    let elsewhere = ServerHello {
+        witness: ServerWitness {
+            socket: "/tmp/other.sock".into(),
+            ..server(77, 1_000)
+        },
+        ..hello("0.9.3", at(2_000))
+    };
+    type Case<'a> = (Seen, Scripted, Option<&'a str>, Why);
     let cases: Vec<Case> = vec![
         (
-            vec![Err(Why::NoPeer)],
+            (Err(Why::NoPeer), Ok(server(77, 1_000))),
             bootstrapped(),
             Some(HOME),
             Why::NoPeer,
         ),
         (
-            vec![Ok(peer(77, "0.9.0", at(2_000)))],
+            (Ok(hello("0.9.0", at(2_000))), Ok(server(77, 1_000))),
             bootstrapped(),
             Some(HOME),
             Why::VersionNotVerified,
         ),
-        (vec![good()], bootstrapped(), None, Why::NotBootstrapped),
+        (good(), bootstrapped(), None, Why::NotBootstrapped),
         (
-            vec![good()],
+            (Ok(elsewhere), Ok(server(77, 1_000))),
+            bootstrapped(),
+            Some(HOME),
+            Why::NotBootstrapped,
+        ),
+        (
+            good(),
             env("HERDR_CONFIG_PATH", &["/Users/u/.config/herdr/config.toml"]),
             Some(HOME),
             Why::NotBootstrapped,
         ),
         (
-            vec![good()],
+            good(),
             env("XDG_CONFIG_HOME", &[]),
             Some(HOME),
             Why::NotBootstrapped,
         ),
         (
-            vec![good()],
+            good(),
             env(
                 "HERDR_CONFIG_PATH",
                 &[&home_config, "/elsewhere/config.toml"],
@@ -183,31 +220,31 @@ fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
             Why::NotBootstrapped,
         ),
         (
-            vec![good()],
-            with(|os| os.starts = vec![Ok(at(1_000)), Ok(at(1_500))]),
+            good(),
+            with(|os| os.starts = vec![Ok(started(1_500))]),
             Some(HOME),
             Why::ProcessChanged,
         ),
         (
-            vec![Ok(peer(77, "0.9.3", at(999)))],
+            (Ok(hello("0.9.3", at(999))), Ok(server(77, 1_000))),
             bootstrapped(),
             Some(HOME),
             Why::ProcessChanged,
         ),
         (
-            vec![good()],
+            good(),
             with(|os| os.starts = vec![Err(Why::ProcessUnreadable)]),
             Some(HOME),
             Why::ProcessUnreadable,
         ),
         (
-            vec![good()],
+            good(),
             with(|os| os.config = Err(Why::ConfigMissing)),
             Some(HOME),
             Why::ConfigMissing,
         ),
         (
-            vec![good()],
+            good(),
             config(
                 b"[session]\nresume_agents_on_restore = false\n[[[broken\n",
                 at(900),
@@ -216,7 +253,7 @@ fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
             Why::ConfigNotCanonical,
         ),
         (
-            vec![good()],
+            good(),
             config(
                 b"[session]\nresume_agents_on_restore = \"false\"\n",
                 at(900),
@@ -225,41 +262,68 @@ fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
             Why::ConfigNotCanonical,
         ),
         (
-            vec![good()],
+            good(),
             config(CANONICAL_CONFIG, at(999)),
             Some(HOME),
             Why::ConfigChangedSinceStart,
         ),
         (
-            vec![good()],
+            good(),
             config(CANONICAL_CONFIG, at(1_200)),
             Some(HOME),
             Why::ConfigChangedSinceStart,
         ),
         (
-            vec![
-                good(),
-                Ok(ServerPeer {
-                    generation: 5,
-                    ..peer(77, "0.9.3", at(2_000))
-                }),
-            ],
+            last(Ok(server(78, 1_000))),
             bootstrapped(),
             Some(HOME),
-            Why::Reconnected,
+            Why::ServerChanged,
         ),
         (
-            vec![good(), Err(Why::NoPeer)],
+            last(Ok(server(77, 1_001))),
             bootstrapped(),
             Some(HOME),
-            Why::Reconnected,
+            Why::ServerChanged,
+        ),
+        (
+            last(Err(Why::ProcessUnreadable)),
+            bootstrapped(),
+            Some(HOME),
+            Why::ProcessUnreadable,
         ),
     ];
-    for (peers, os, home, why) in cases {
-        let got = reading(peers, os, home);
+    for (seen, os, home, why) in cases {
+        let got = reading(seen, os, home);
         assert_eq!(got, RestoreResume::Unverified(why), "{why:?}");
-        assert_eq!(got.admitted_generation(), None);
+        assert_eq!(got.admitted_witness(), None);
     }
+}
+
+// A config rewritten or replaced while it is read is never taken as read.
+#[cfg(unix)]
+#[test]
+fn e7_config_read_refuses_a_file_changed_or_replaced_mid_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, CANONICAL_CONFIG).unwrap();
+    let bytes = read_config_between(&path, || {}).map(|read| read.bytes);
+    assert_eq!(bytes, Ok(CANONICAL_CONFIG.to_vec()));
+    let rewrite = || std::fs::write(&path, CANONICAL_CONFIG).unwrap();
+    assert_eq!(
+        read_config_between(&path, rewrite),
+        Err(RestoreUnverified::ConfigChanged),
+        "same bytes rewritten in place"
+    );
+    let replace = || {
+        let fresh = dir.path().join("fresh.toml");
+        std::fs::write(&fresh, CANONICAL_CONFIG).unwrap();
+        std::fs::rename(&fresh, &path).unwrap();
+    };
+    assert_eq!(
+        read_config_between(&path, replace),
+        Err(RestoreUnverified::ConfigChanged),
+        "another file renamed over the path"
+    );
 }
 
 #[test]
@@ -345,7 +409,7 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
     ]);
     let pid = server.0.id();
     let os = OsProvenance;
-    let started = os.process_start(pid).unwrap();
+    let started = os.process_start(pid).unwrap().wall_clock;
     assert!(
         started + Duration::from_secs(2) > before
             && started < SystemTime::now() + Duration::from_secs(1),
@@ -357,9 +421,32 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
     );
     std::thread::sleep(Duration::from_millis(1_100));
     let home_str = home.to_str().unwrap();
-    let transport = |pid| PeerOnly(Mutex::new(vec![Ok(peer(pid, "0.9.3", SystemTime::now()))]));
-    let read = |pid| read_restore_resume_with(&transport(pid), &endpoint(Some(home_str)), &os);
-    assert_eq!(read(pid), RestoreResume::Off { generation: 4 });
+    let named = |pid| {
+        let start = os.process_start(pid)?;
+        let witness = ServerWitness {
+            socket: SOCKET.into(),
+            pid,
+            start: start.identity,
+        };
+        let hello = ServerHello {
+            witness: witness.clone(),
+            started: start.wall_clock,
+            version: "0.9.3".into(),
+            connected_at: SystemTime::now(),
+        };
+        Ok((hello, witness))
+    };
+    let read = |pid| match named(pid) {
+        Ok((hello, witness)) => {
+            let transport = E7Only {
+                hello: Ok(hello),
+                last: Ok(witness),
+            };
+            read_restore_resume_with(&transport, &endpoint(Some(home_str)), &os)
+        }
+        Err(why) => RestoreResume::Unverified(why),
+    };
+    assert!(matches!(read(pid), RestoreResume::Off { witness } if witness.pid == pid));
 
     std::fs::write(&config, CANONICAL_CONFIG).unwrap();
     assert_eq!(

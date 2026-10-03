@@ -18,7 +18,7 @@ use crate::services::herdr_launch::{
     HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session, unset_herdr_env_before_exec,
 };
-use crate::services::session_host::RestoreResume;
+use crate::services::session_host::{RestoreResume, ServerWitness};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use crate::services::tui_prompt_dedupe::binding_events::{
@@ -37,7 +37,9 @@ struct Launcher;
 
 impl HerdrLaunchHost for Launcher {
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
-        RestoreResume::Off { generation: 1 }
+        RestoreResume::Off {
+            witness: ServerWitness::for_test(1),
+        }
     }
 
     fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {
@@ -130,7 +132,9 @@ impl Herdr {
     /// Launches `session` through the production Herdr launch, with the Claude TUI's own
     /// settings and script preparation; returns the execution nonce.
     fn launch(&mut self, session: &str) -> String {
-        let dir = self.ingress.path("cwd");
+        // The launch refuses a cwd that is not an existing directory before Pending.
+        let dir = self.ingress.path("cwd").with_extension("");
+        std::fs::create_dir_all(&dir).unwrap();
         let prepare = |prepared: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
             let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
                 tmux_session_name: prepared.context.tmux_session.clone(),

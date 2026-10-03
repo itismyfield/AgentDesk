@@ -20,7 +20,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 pub(crate) use crate::services::session_host::RESTORE_RESUME_NOT_OFF;
-use crate::services::session_host::{HostKind, RestoreResume};
+use crate::services::session_host::{HostKind, RestoreResume, ServerWitness};
 use crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
 use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::{
@@ -94,8 +94,8 @@ pub(crate) struct HerdrCreateRequest {
     pub label: String,
     pub cwd: PathBuf,
     pub command: String,
-    /// The connection that read resume-on-restore off just before; only it may carry the create.
-    pub restore_off_generation: u64,
+    /// The server that read resume-on-restore off just before; only it may get the create.
+    pub restore_off_witness: ServerWitness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,21 +245,24 @@ fn admit(endpoint: Option<&HerdrLaunchEndpoint>) -> Result<&HerdrLaunchEndpoint,
 }
 
 /// E7: a server that resumes agents on restore could relaunch behind the stored execution.
-async fn restore_off_generation(
+async fn restore_off_witness(
     host: &Arc<dyn HerdrLaunchHost>,
     endpoint: &HerdrLaunchEndpoint,
-) -> Option<u64> {
+) -> Option<ServerWitness> {
     let endpoint = endpoint.clone();
     on_blocking_thread(host, move |host| host.restore_resume(&endpoint))
         .await?
-        .admitted_generation()
+        .admitted_witness()
 }
 
-/// What the launch text alone shows: an absolute cwd and one line of command, since the
-/// command is typed into the pane followed by Enter. Whether the cwd exists is the host's check.
+/// An existing absolute cwd and one line of command, since the command is typed into the
+/// pane followed by Enter. Herdr opens a missing cwd in HOME without an error.
 pub(crate) fn launch_command_eligible(cwd: &Path, command: &str) -> Result<(), String> {
     if !cwd.is_absolute() || cwd.to_str().is_none() {
         return Err(format!("cwd {} is not an absolute path", cwd.display()));
+    }
+    if !cwd.is_dir() {
+        return Err(format!("cwd {} is not a directory", cwd.display()));
     }
     if command.trim().is_empty() || command.chars().any(char::is_control) {
         return Err("command is not one line of text".to_string());
@@ -286,7 +289,7 @@ pub(crate) async fn launch_herdr_session(
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
-    if restore_off_generation(&host, &endpoint).await.is_none() {
+    if restore_off_witness(&host, &endpoint).await.is_none() {
         return Err(HerdrLaunchError::Unsupported(RESTORE_RESUME_NOT_OFF));
     }
     let owner = launch.owner;
@@ -324,7 +327,7 @@ pub(crate) async fn launch_herdr_session(
         .map_err(|error| HerdrLaunchError::Marker(error.to_string()))?;
 
     // Read again right before create: the first reading may predate a reconnect or reload.
-    let Some(restore_off_generation) = restore_off_generation(&host, &endpoint).await else {
+    let Some(restore_off_witness) = restore_off_witness(&host, &endpoint).await else {
         return Err(HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into()));
     };
     let request = HerdrCreateRequest {
@@ -332,7 +335,7 @@ pub(crate) async fn launch_herdr_session(
         label: owner.logical_key.clone(),
         cwd: command.cwd,
         command: command.command,
-        restore_off_generation,
+        restore_off_witness,
     };
     let created = on_blocking_thread(&host, move |host| host.create(&request)).await;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {

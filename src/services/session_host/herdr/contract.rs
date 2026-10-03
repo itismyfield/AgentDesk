@@ -10,6 +10,7 @@ use super::model::{
     HerdrPane, HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
 };
 use super::observe::RestoreUnverified;
+use super::provenance::StartIdentity;
 use crate::services::session_host::model::{HostError, HostMutation};
 
 /// Upper bound on history lines one capture may request.
@@ -24,25 +25,59 @@ pub(crate) enum HerdrTransportError {
 
 pub(crate) type HerdrOutcome = Result<HerdrReply, HerdrTransportError>;
 
-/// One request, one reply; framing and connection reuse belong to the transport.
+/// One request per connection: Herdr answers one and closes, so the transport dials anew
+/// for each call, and every answer comes with the server that gave it.
 pub(crate) trait HerdrTransport: Send + Sync {
-    /// The outcome and the generation of the connection that carried it, read
-    /// together so a concurrent reconnect cannot relabel the reply.
-    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64);
-    /// Sends `call` only on the open connection with `generation`; otherwise `NotSent`.
-    fn call_on(&self, call: &HerdrCall, generation: u64) -> (HerdrOutcome, u64);
-    /// The process across the current connection, opening one if none is open. A
-    /// transport that cannot name its peer never lets E7 read `Off`.
-    fn server_peer(&self) -> Result<ServerPeer, RestoreUnverified> {
+    /// A read-only call and the server its connection reached, read on that connection so
+    /// no later reading relabels the reply. A mutation is refused unsent.
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed);
+    /// Writes `call` only on a connection whose server is `expected`; a different or
+    /// unreadable server gets 0 bytes and `NotSent`.
+    fn call_with_witness(&self, call: &HerdrCall, expected: &ServerWitness) -> HerdrOutcome;
+    /// A ping on its own connection. A transport that cannot name its peer never lets E7
+    /// read `Off`.
+    fn hello(&self) -> Result<ServerHello, RestoreUnverified> {
+        Err(RestoreUnverified::NoPeer)
+    }
+    /// The server across a fresh connection that carries no request.
+    fn server_witness(&self) -> Witnessed {
         Err(RestoreUnverified::NoPeer)
     }
 }
 
-/// The server at the other end of one connection, as read when it was opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ServerPeer {
-    pub generation: u64,
+/// The server behind one configured socket. Connections that reach the same socket, pid
+/// and start reach the same server; when or how often it was dialled is not part of it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ServerWitness {
+    pub socket: PathBuf,
     pub pid: u32,
+    pub start: StartIdentity,
+}
+
+#[cfg(test)]
+impl ServerWitness {
+    /// A server for tests outside this module, which cannot build a start identity.
+    pub(crate) fn for_test(pid: u32) -> Self {
+        Self {
+            socket: "/tmp/herdr-test.sock".into(),
+            pid,
+            start: StartIdentity::Darwin {
+                seconds: 1_000,
+                micros: 0,
+            },
+        }
+    }
+}
+
+/// The server one connection reached, or why it could not be named.
+pub(crate) type Witnessed = Result<ServerWitness, RestoreUnverified>;
+
+/// What a ping on its own connection showed: that server, its wall-clock start, the
+/// version it reported and when the connection was made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServerHello {
+    pub witness: ServerWitness,
+    pub started: SystemTime,
     pub version: String,
     pub connected_at: SystemTime,
 }

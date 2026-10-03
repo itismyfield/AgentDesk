@@ -7,11 +7,14 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::services::session_host::herdr::contract::HerdrTransportError;
+use crate::services::session_host::herdr::contract::{
+    HerdrTransportError, ServerWitness, Witnessed,
+};
 use crate::services::session_host::herdr::model::{
     ExecutionState, HerdrReadSource, HerdrReply, HerdrResult, PaneState,
 };
 use crate::services::session_host::herdr::observe::RestoreUnverified;
+use crate::services::session_host::herdr::provenance::StartIdentity;
 
 const PANE: &str = "w1-1";
 
@@ -30,43 +33,55 @@ type Step = (HerdrRequest, Scripted);
 struct FakeTransport {
     script: Mutex<VecDeque<Step>>,
     calls: Mutex<Vec<HerdrCall>>,
-    /// Moves to a new connection on every call, like a reconnecting transport.
-    reconnects: bool,
-    generation: AtomicU64,
-    /// E7 readings in order; once empty, Off on the current connection.
+    /// The server each call's connection reaches, in order; once empty, `serving()`.
+    reached: Mutex<VecDeque<Witnessed>>,
+    /// E7 readings in order; once empty, Off naming `serving()`.
     restore: Mutex<VecDeque<RestoreResume>>,
 }
 
+/// The server a fake connection reaches unless a test scripts another.
+fn serving() -> ServerWitness {
+    ServerWitness {
+        socket: "/tmp/h.sock".into(),
+        pid: 4,
+        start: StartIdentity::Darwin {
+            seconds: 1_000,
+            micros: 0,
+        },
+    }
+}
+
 impl HerdrTransport for FakeTransport {
-    fn call(&self, call: &HerdrCall) -> (contract::HerdrOutcome, u64) {
+    fn call(&self, call: &HerdrCall) -> (contract::HerdrOutcome, Witnessed) {
         self.calls.lock().unwrap().push(call.clone());
-        let generation = if self.reconnects {
-            self.generation.fetch_add(1, Ordering::SeqCst) + 1
-        } else {
-            self.generation.load(Ordering::SeqCst)
-        };
-        (self.reply(call), generation)
+        (self.reply(call), self.reach())
     }
 
-    fn call_on(&self, call: &HerdrCall, generation: u64) -> (contract::HerdrOutcome, u64) {
-        let current = self.generation.load(Ordering::SeqCst);
-        if generation != current {
-            let error = HerdrTransportError::NotSent(format!("connection {current}"));
-            return (Err(error), current);
+    fn call_with_witness(
+        &self,
+        call: &HerdrCall,
+        expected: &ServerWitness,
+    ) -> contract::HerdrOutcome {
+        let reached = self.reach();
+        if reached.as_ref() != Ok(expected) {
+            return Err(HerdrTransportError::NotSent(format!("{reached:?}")));
         }
         self.calls.lock().unwrap().push(call.clone());
-        (self.reply(call), current)
+        self.reply(call)
     }
 }
 
 fn scripted_restore(transport: &FakeTransport, _endpoint: &HerdrEndpoint) -> RestoreResume {
     let next = transport.restore.lock().unwrap().pop_front();
-    next.unwrap_or(RestoreResume::Off {
-        generation: transport.generation.load(Ordering::SeqCst),
-    })
+    next.unwrap_or(RestoreResume::Off { witness: serving() })
 }
 
 impl FakeTransport {
+    fn reach(&self) -> Witnessed {
+        let next = self.reached.lock().unwrap().pop_front();
+        next.unwrap_or_else(|| Ok(serving()))
+    }
+
     fn reply(&self, call: &HerdrCall) -> contract::HerdrOutcome {
         let next = self.script.lock().unwrap().pop_front();
         let (expected, reply) = next.expect("fake transport called more often than scripted");
@@ -83,19 +98,19 @@ impl FakeTransport {
     }
 }
 
-fn fake(script: Vec<Step>, reconnects: bool) -> HerdrHost<FakeTransport> {
+fn fake(script: Vec<Step>, reached: Vec<Witnessed>) -> HerdrHost<FakeTransport> {
     let endpoint = HerdrEndpoint::new("mac-mini", "pilot", Path::new("/tmp/h.sock"), "adk")
         .expect("valid endpoint");
     let transport = FakeTransport {
         script: Mutex::new(script.into()),
-        reconnects,
+        reached: Mutex::new(reached.into()),
         ..FakeTransport::default()
     };
     HerdrHost::new(endpoint, transport).with_restore_reader(scripted_restore)
 }
 
 fn host(script: Vec<Step>) -> HerdrHost<FakeTransport> {
-    fake(script, false)
+    fake(script, Vec::new())
 }
 
 fn calls(host: &HerdrHost<FakeTransport>) -> Vec<HerdrCall> {
@@ -233,21 +248,38 @@ fn herdr_liveness_needs_a_root_shell_pid() {
 }
 
 #[test]
-fn herdr_process_info_from_another_connection_is_not_liveness() {
-    let herdr = fake(
+fn herdr_process_info_from_another_server_is_not_liveness() {
+    let restarted = ServerWitness {
+        start: StartIdentity::Darwin {
+            seconds: 1_001,
+            micros: 0,
+        },
+        ..serving()
+    };
+    for reached in [
+        vec![Ok(serving()), Ok(restarted)],
+        vec![Ok(serving()), Err(RestoreUnverified::ProcessUnreadable)],
         vec![
-            (snapshot_call(), snapshot(22, &[PANE])),
-            (process_call(), process_info(PANE, json!(4242))),
+            Err(RestoreUnverified::NoPeer),
+            Err(RestoreUnverified::NoPeer),
         ],
-        true,
-    );
-    let observation = herdr.observe(pane());
-    assert_eq!(
-        (observation.execution, observation.shell_pid),
-        (ExecutionState::Unknown, None),
-        "a pid read after a reconnect must not join the earlier snapshot"
-    );
-    assert_eq!(observation.liveness(), HostLiveness::ProbeError);
+    ] {
+        let herdr = fake(
+            vec![
+                (snapshot_call(), snapshot(22, &[PANE])),
+                (process_call(), process_info(PANE, json!(4242))),
+            ],
+            reached.clone(),
+        );
+        let observation = herdr.observe(pane());
+        assert_eq!(observation.presence(), HostPresence::Present);
+        assert_eq!(
+            (observation.execution, observation.shell_pid),
+            (ExecutionState::Unknown, None),
+            "a pid from another or unnamed server must not join the snapshot: {reached:?}"
+        );
+        assert_eq!(observation.liveness(), HostLiveness::ProbeError);
+    }
 }
 
 #[test]
@@ -561,7 +593,7 @@ fn herdr_production_restore_reader_refuses_every_input_before_any_call() {
 }
 
 #[test]
-fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
+fn herdr_input_needs_a_fresh_off_reading_naming_the_server_that_gets_it() {
     let with_readings = |readings: Vec<RestoreResume>| {
         let herdr = host(vec![(send_call("x"), ok())]);
         *herdr.transport.restore.lock().unwrap() = readings.into();
@@ -571,16 +603,16 @@ fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
         RestoreResume::On,
         RestoreResume::Unverified(RestoreUnverified::NoPeer),
     ] {
-        let herdr = with_readings(vec![reading; 8]);
+        let herdr = with_readings(vec![reading.clone(); 8]);
         for outcome in every_input(&herdr) {
             assert_eq!(outcome, restore_refused(), "{reading:?}");
         }
         assert!(calls(&herdr).is_empty(), "{reading:?}");
     }
 
-    let off = RestoreResume::Off { generation: 0 };
+    let off = RestoreResume::Off { witness: serving() };
     let herdr = with_readings(vec![
-        off,
+        off.clone(),
         RestoreResume::Unverified(RestoreUnverified::NoPeer),
     ]);
     assert_eq!(herdr.send_text(pane(), "x"), Ok(HostMutation::Confirmed));
@@ -591,11 +623,15 @@ fn herdr_input_needs_a_fresh_off_reading_on_the_connection_that_carries_it() {
     );
     assert_eq!(calls(&herdr).len(), 1);
 
+    let replaced = ServerWitness {
+        pid: 5,
+        ..serving()
+    };
     let herdr = with_readings(vec![off]);
-    herdr.transport.generation.store(1, Ordering::SeqCst);
+    *herdr.transport.reached.lock().unwrap() = vec![Ok(replaced)].into();
     assert!(
         matches!(herdr.send_text(pane(), "x"), Err(HostError::Transport(_))),
-        "a reading from before a reconnect admits nothing"
+        "a reading of the replaced server admits nothing on the new one"
     );
     assert!(calls(&herdr).is_empty());
 }

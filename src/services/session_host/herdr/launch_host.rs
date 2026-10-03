@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::contract::{self, CreatedPane, ForegroundProcesses, HerdrOutcome, HerdrTransport};
+use super::contract::{self, CreatedPane, ForegroundProcesses, HerdrTransport, ServerWitness};
 use super::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::observe::{self, RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
 use super::transport::{HerdrSocketConfig, HerdrSocketTransport};
@@ -68,7 +68,7 @@ fn same_dir(requested: &Path, reported: Option<&str>) -> bool {
 }
 
 impl SocketHerdrLaunchHost {
-    /// No I/O: each endpoint's socket is opened by its first E7 reading.
+    /// No I/O: every call dials its own connection.
     pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
         let endpoints = endpoints
             .into_iter()
@@ -81,17 +81,6 @@ impl SocketHerdrLaunchHost {
             endpoints,
             next_id: AtomicU64::new(1),
             read_restore: observe::read_restore_resume,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_restore_reader(
-        self,
-        read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
-    ) -> Self {
-        Self {
-            read_restore,
-            ..self
         }
     }
 
@@ -118,16 +107,17 @@ impl SocketHerdrLaunchHost {
         }
     }
 
-    /// E7 read again on the connection the caller's reading named, never another one.
+    /// E7 read afresh, and it must name the server the caller's reading named: a new
+    /// server that also reads `Off` is not the one this launch was checked against.
     fn still_off(
         &self,
         (endpoint, transport): &(HerdrEndpoint, HerdrSocketTransport),
-        generation: u64,
+        witness: &ServerWitness,
     ) -> Result<(), String> {
         match (self.read_restore)(transport, endpoint) {
-            RestoreResume::Off { generation: now } if now == generation => Ok(()),
+            RestoreResume::Off { witness: now } if now == *witness => Ok(()),
             other => Err(format!(
-                "{RESTORE_RESUME_NOT_OFF}: {other:?} after connection {generation}"
+                "{RESTORE_RESUME_NOT_OFF}: {other:?}, checked {witness:?}"
             )),
         }
     }
@@ -137,7 +127,7 @@ impl SocketHerdrLaunchHost {
         let call = self.call(HerdrRequest::PaneProcessInfo {
             pane_id: pane_id.to_string(),
         });
-        let (outcome, _): (HerdrOutcome, u64) = transport.call(&call);
+        let (outcome, _) = transport.call(&call);
         let (root, foreground) = match contract::foreground_result(&call, outcome, pane_id) {
             Ok(read) => read,
             Err(error) => return ProviderCandidate::ReadFailed(format!("{error:?}")),
@@ -164,8 +154,8 @@ impl SocketHerdrLaunchHost {
         let Some(configured) = self.endpoint(&request.endpoint) else {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
         };
-        let generation = request.restore_off_generation;
-        if let Err(detail) = self.still_off(configured, generation) {
+        let witness = &request.restore_off_witness;
+        if let Err(detail) = self.still_off(configured, witness) {
             return HerdrCreateOutcome::NotSent(detail);
         }
         let transport = &configured.1;
@@ -174,7 +164,7 @@ impl SocketHerdrLaunchHost {
             label: request.label.clone(),
             focus: false,
         });
-        let (outcome, _) = transport.call_on(&call, generation);
+        let outcome = transport.call_with_witness(&call, witness);
         let pane = match contract::created_result(&call, outcome) {
             CreatedPane::Root(pane) => pane,
             CreatedPane::NotSent(detail) => return HerdrCreateOutcome::NotSent(detail),
@@ -187,7 +177,7 @@ impl SocketHerdrLaunchHost {
         if !same_dir(&request.cwd, pane.cwd.as_deref()) {
             return unconfirmed(format!("pane opened in {:?}", pane.cwd));
         }
-        if let Err(detail) = self.still_off(configured, generation) {
+        if let Err(detail) = self.still_off(configured, witness) {
             return unconfirmed(detail);
         }
         let call = self.call(HerdrRequest::PaneSendInput {
@@ -195,7 +185,7 @@ impl SocketHerdrLaunchHost {
             text: request.command.clone(),
             keys: vec!["enter".to_string()],
         });
-        let (outcome, _) = transport.call_on(&call, generation);
+        let outcome = transport.call_with_witness(&call, witness);
         match contract::mutation_result(&call, outcome, &pane.pane_id) {
             Ok(HostMutation::Confirmed) => HerdrCreateOutcome::Created {
                 pane_id: pane.pane_id.clone(),
@@ -239,18 +229,12 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         }
     }
 
-    /// Create, check the pane's cwd, read E7 again, then type the command with Enter, all
-    /// on the connection E7 read. After the create, no failure removes or retries the pane.
+    /// Create, check the pane's cwd, read E7 again, then type the command with Enter, each
+    /// on its own connection to the server E7 named. After the create, no failure removes
+    /// or retries the pane.
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
             return HerdrCreateOutcome::NotSent(detail);
-        }
-        // Herdr opens a missing cwd in HOME without an error, so it is never asked to.
-        if !request.cwd.is_dir() {
-            return HerdrCreateOutcome::NotSent(format!(
-                "cwd {} is not a directory",
-                request.cwd.display()
-            ));
         }
         self.create_eligible(request)
     }

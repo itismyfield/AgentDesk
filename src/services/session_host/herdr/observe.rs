@@ -1,16 +1,17 @@
 //! Read-side policy: the ping/pong handshake check, bounded read-only retries, the rule
-//! that one observation never spans two connections, and the E7 restore-resume reading.
+//! that one observation never spans two servers, and the E7 restore-resume reading.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use super::contract::{HerdrOutcome, HerdrTransport};
+use super::contract::{HerdrOutcome, HerdrTransport, ServerWitness, Witnessed};
 use super::model::{
     ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest,
     HerdrResult, VERIFIED_HERDR_VERSIONS,
 };
+use super::provenance::ProcessStart;
 use crate::services::session_host::model::HostError;
 
 pub(crate) const RESTORE_RESUME_NOT_OFF: &str = "restore_resume_not_off";
@@ -21,10 +22,10 @@ pub(crate) const CANONICAL_CONFIG: &[u8] = b"[session]\nresume_agents_on_restore
 const START_MARGIN: Duration = Duration::from_secs(1);
 
 /// The running server's effective `[session] resume_agents_on_restore`. `Off` needs the
-/// connected server's provenance: started from the canonical config, unchanged since.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// server's provenance, started from the canonical config, and names that server.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RestoreResume {
-    Off { generation: u64 },
+    Off { witness: ServerWitness },
     On,
     Unverified(RestoreUnverified),
 }
@@ -32,7 +33,7 @@ pub(crate) enum RestoreResume {
 /// Why a reading is not `Off`; every failed or unsupported observation lands here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreUnverified {
-    /// No connection, or its peer process could not be read.
+    /// No connection, no handshake, or its peer process could not be read.
     NoPeer,
     VersionNotVerified,
     PlatformUnsupported,
@@ -47,15 +48,15 @@ pub(crate) enum RestoreUnverified {
     /// The file changed while it was read.
     ConfigChanged,
     ConfigChangedSinceStart,
-    /// The connection or its peer changed between the first and last check.
-    Reconnected,
+    /// A fresh connection reached another server than the one checked.
+    ServerChanged,
 }
 
 impl RestoreResume {
-    /// The connection a create or input may use; anything but `Off` admits none.
-    pub(crate) fn admitted_generation(self) -> Option<u64> {
+    /// The only server a create or input may reach; anything but `Off` admits none.
+    pub(crate) fn admitted_witness(self) -> Option<ServerWitness> {
         match self {
-            Self::Off { generation } => Some(generation),
+            Self::Off { witness } => Some(witness),
             Self::On | Self::Unverified(_) => None,
         }
     }
@@ -70,8 +71,7 @@ pub(crate) struct ConfigRead {
 
 /// OS reads E7 needs about the server process and its config file.
 pub(crate) trait ServerProvenance {
-    /// Wall-clock start of `pid`.
-    fn process_start(&self, pid: u32) -> Result<SystemTime, RestoreUnverified>;
+    fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified>;
     /// Every value `pid`'s environment holds for `key`.
     fn process_env(&self, pid: u32, key: &str) -> Result<Vec<String>, RestoreUnverified>;
     fn read_config(&self, path: &Path) -> Result<ConfigRead, RestoreUnverified>;
@@ -93,48 +93,54 @@ pub(crate) fn read_restore_resume_with<T: HerdrTransport + ?Sized>(
     provenance: &dyn ServerProvenance,
 ) -> RestoreResume {
     match prove_restore_off(transport, endpoint, provenance) {
-        Ok(generation) => RestoreResume::Off { generation },
+        Ok(witness) => RestoreResume::Off { witness },
         Err(reason) => RestoreResume::Unverified(reason),
     }
 }
 
+/// The ping connection names the server; its version, env, config and start are checked;
+/// a last connection that carries no request must still reach that same server.
 fn prove_restore_off<T: HerdrTransport + ?Sized>(
     transport: &T,
     endpoint: &HerdrEndpoint,
     provenance: &dyn ServerProvenance,
-) -> Result<u64, RestoreUnverified> {
+) -> Result<ServerWitness, RestoreUnverified> {
     use RestoreUnverified as Why;
-    let peer = transport.server_peer()?;
-    if !VERIFIED_HERDR_VERSIONS.contains(&peer.version.as_str()) {
+    let hello = transport.hello()?;
+    let witness = hello.witness;
+    if witness.socket != endpoint.socket_path() {
+        return Err(Why::NotBootstrapped);
+    }
+    if hello.started > hello.connected_at {
+        return Err(Why::ProcessChanged);
+    }
+    if !VERIFIED_HERDR_VERSIONS.contains(&hello.version.as_str()) {
         return Err(Why::VersionNotVerified);
     }
     let home = endpoint.herdr_home().ok_or(Why::NotBootstrapped)?;
     let config = home.join("config.toml");
     let xdg = home.join("xdg");
-    let started = provenance.process_start(peer.pid)?;
     let env_matches = |key, expected: &Path| -> Result<bool, Why> {
-        let values = provenance.process_env(peer.pid, key)?;
+        let values = provenance.process_env(witness.pid, key)?;
         Ok(values.len() == 1 && Path::new(&values[0]) == expected)
     };
-    let bootstrapped =
-        env_matches("HERDR_CONFIG_PATH", &config)? && env_matches("XDG_CONFIG_HOME", &xdg)?;
-    if provenance.process_start(peer.pid)? != started || started > peer.connected_at {
-        return Err(Why::ProcessChanged);
-    }
-    if !bootstrapped {
+    if !(env_matches("HERDR_CONFIG_PATH", &config)? && env_matches("XDG_CONFIG_HOME", &xdg)?) {
         return Err(Why::NotBootstrapped);
     }
     let read = provenance.read_config(&config)?;
     if read.bytes != CANONICAL_CONFIG {
         return Err(Why::ConfigNotCanonical);
     }
-    if read.modified + START_MARGIN >= started {
+    if read.modified + START_MARGIN >= hello.started {
         return Err(Why::ConfigChangedSinceStart);
     }
-    match transport.server_peer() {
-        Ok(last) if last == peer => Ok(peer.generation),
-        _ => Err(Why::Reconnected),
+    if provenance.process_start(witness.pid)?.identity != witness.start {
+        return Err(Why::ProcessChanged);
     }
+    if transport.server_witness()? != witness {
+        return Err(Why::ServerChanged);
+    }
+    Ok(witness)
 }
 
 /// What a verified pong reported. Only E7 reads the version; the handshake does not.
@@ -174,28 +180,29 @@ pub(crate) fn hello_result(
     }
 }
 
-/// Repeats a read-only attempt until it gets any reply or `deadline` passes.
-pub(crate) fn retry_read(
+/// Repeats a read-only attempt until it gets any reply or `deadline` passes; the result
+/// keeps whatever the answering attempt returned alongside its outcome.
+pub(crate) fn retry_read<W>(
     deadline: Instant,
     backoff: Duration,
-    mut attempt: impl FnMut() -> (HerdrOutcome, u64),
-) -> (HerdrOutcome, u64) {
+    mut attempt: impl FnMut() -> (HerdrOutcome, W),
+) -> (HerdrOutcome, W) {
     loop {
-        let (outcome, generation) = attempt();
+        let (outcome, seen) = attempt();
         if outcome.is_ok() || Instant::now() + backoff >= deadline {
-            return (outcome, generation);
+            return (outcome, seen);
         }
         thread::sleep(backoff);
     }
 }
 
-/// Execution evidence read on another connection than the snapshot is dropped.
-pub(crate) fn fence_generation(
+/// Execution evidence joins a snapshot only when both replies name the same known server.
+pub(crate) fn fence_witness(
     observation: HerdrObservation,
-    snapshot_generation: u64,
-    process_generation: u64,
+    snapshot: &Witnessed,
+    process: &Witnessed,
 ) -> HerdrObservation {
-    if snapshot_generation == process_generation {
+    if matches!((snapshot, process), (Ok(a), Ok(b)) if a == b) {
         return observation;
     }
     HerdrObservation {

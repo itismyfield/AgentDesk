@@ -12,10 +12,27 @@ use super::observe::{ConfigRead, RestoreUnverified, ServerProvenance};
 /// Larger than any canonical config; a bigger file is not read past this.
 const CONFIG_READ_LIMIT: u64 = 4096;
 
+/// A process start in the units its platform reports. Equality is the identity check, so
+/// it never compares a converted clock; a zero reading is never an identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum StartIdentity {
+    /// macOS `proc_bsdinfo` start: epoch seconds and microseconds.
+    Darwin { seconds: u64, micros: u64 },
+    /// Linux `/proc/<pid>/stat` start: clock ticks after boot.
+    LinuxTicks(u64),
+}
+
+/// A process start: its identity, and the wall-clock time E7 compares other times with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessStart {
+    pub identity: StartIdentity,
+    pub wall_clock: SystemTime,
+}
+
 pub(crate) struct OsProvenance;
 
 impl ServerProvenance for OsProvenance {
-    fn process_start(&self, pid: u32) -> Result<SystemTime, RestoreUnverified> {
+    fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
         process_start(pid)
     }
 
@@ -34,9 +51,16 @@ impl ServerProvenance for OsProvenance {
     }
 }
 
-/// Bytes and mtime come from one open file whose metadata is the same before and after
-/// the read and still matches the path, so a write or replace during the read is caught.
 fn read_config(path: &Path) -> Result<ConfigRead, RestoreUnverified> {
+    read_config_between(path, || {})
+}
+
+/// Bytes and mtime come from one open file whose metadata is the same before and after
+/// the read and still matches the path; `between` runs right after the bytes are read.
+fn read_config_between(
+    path: &Path,
+    between: impl FnOnce(),
+) -> Result<ConfigRead, RestoreUnverified> {
     let unreadable = |_| RestoreUnverified::ConfigUnreadable;
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -57,6 +81,7 @@ fn read_config(path: &Path) -> Result<ConfigRead, RestoreUnverified> {
         .take(CONFIG_READ_LIMIT + 1)
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
+    between();
     let after = file.metadata().map_err(unreadable)?;
     let at_path = std::fs::metadata(path).map_err(unreadable)?;
     if !same_file_state(&before, &after) || !same_file_state(&before, &at_path) {
@@ -114,7 +139,7 @@ fn procargs2_environ(raw: &[u8]) -> Option<Vec<String>> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn process_start(pid: u32) -> Result<SystemTime, RestoreUnverified> {
+fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     use std::mem::MaybeUninit;
     let mut info: MaybeUninit<libc::proc_bsdinfo> = MaybeUninit::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
@@ -133,18 +158,26 @@ fn process_start(pid: u32) -> Result<SystemTime, RestoreUnverified> {
     }
     // SAFETY: proc_pidinfo filled the whole struct.
     let info = unsafe { info.assume_init() };
-    Ok(macos_start(info.pbi_start_tvsec, info.pbi_start_tvusec))
+    let (seconds, micros) = (info.pbi_start_tvsec, info.pbi_start_tvusec);
+    if seconds == 0 {
+        return Err(RestoreUnverified::ProcessUnreadable);
+    }
+    Ok(ProcessStart {
+        identity: StartIdentity::Darwin { seconds, micros },
+        wall_clock: macos_start(seconds, micros),
+    })
 }
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn process_start(pid: u32) -> Result<SystemTime, RestoreUnverified> {
+fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     let unreadable = RestoreUnverified::ProcessUnreadable;
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| unreadable)?;
     let ticks = stat
         .rsplit_once(") ")
         .and_then(|(_, rest)| rest.split_whitespace().nth(19))
         .and_then(|field| field.parse::<u64>().ok())
+        .filter(|ticks| *ticks > 0)
         .ok_or(unreadable)?;
     let boot = std::fs::read_to_string("/proc/stat").map_err(|_| unreadable)?;
     let boot_seconds = boot
@@ -155,11 +188,14 @@ fn process_start(pid: u32) -> Result<SystemTime, RestoreUnverified> {
     // SAFETY: sysconf only reads a configuration value.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     let hz = u64::try_from(hz).map_err(|_| unreadable)?;
-    linux_start(ticks, hz, boot_seconds).ok_or(unreadable)
+    Ok(ProcessStart {
+        identity: StartIdentity::LinuxTicks(ticks),
+        wall_clock: linux_start(ticks, hz, boot_seconds).ok_or(unreadable)?,
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn process_start(_pid: u32) -> Result<SystemTime, RestoreUnverified> {
+fn process_start(_pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     Err(RestoreUnverified::PlatformUnsupported)
 }
 
@@ -264,6 +300,15 @@ pub(crate) fn socket_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub(crate) fn socket_peer_pid(_stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     None
+}
+
+/// The pid and start of the process that accepted this connection.
+#[cfg(unix)]
+pub(crate) fn socket_peer(
+    stream: &std::os::unix::net::UnixStream,
+) -> Result<(u32, ProcessStart), RestoreUnverified> {
+    let pid = socket_peer_pid(stream).ok_or(RestoreUnverified::NoPeer)?;
+    Ok((pid, process_start(pid)?))
 }
 
 #[cfg(test)]

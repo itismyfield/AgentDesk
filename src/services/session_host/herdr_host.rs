@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::herdr::contract::{self, HerdrTransport};
+use super::herdr::contract::{self, HerdrTransport, ServerWitness, Witnessed};
 use super::herdr::model::{
     ControlPlane, ENDPOINT_MISSING, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest,
 };
-use super::herdr::observe::{self, RESTORE_RESUME_NOT_OFF, RestoreResume};
+use super::herdr::observe::{self, RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
 use super::model::{
     HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence, HostRefusal,
     HostSessionRef,
@@ -85,18 +85,18 @@ impl<T: HerdrTransport> HerdrHost<T> {
         }
     }
 
-    /// The call, its outcome and the generation of the connection that answered.
-    fn call(&self, request: HerdrRequest) -> (HerdrCall, contract::HerdrOutcome, u64) {
+    /// The call, its outcome and the server whose connection answered.
+    fn call(&self, request: HerdrRequest) -> (HerdrCall, contract::HerdrOutcome, Witnessed) {
         let call = self.next_call(request);
-        let (outcome, generation) = self.transport.call(&call);
-        (call, outcome, generation)
+        let (outcome, witness) = self.transport.call(&call);
+        (call, outcome, witness)
     }
 
-    /// E7 before any input: only a fresh read of resume-on-restore off admits it, and
-    /// only on the connection that read it, so a reconnect drops the earlier reading.
-    fn restore_off(&self) -> Result<u64, HostMutation> {
+    /// E7 before any input: only a fresh read of resume-on-restore off admits it, and only
+    /// to the server that reading named, so a replaced server gets nothing.
+    fn restore_off(&self) -> Result<ServerWitness, HostMutation> {
         (self.read_restore)(&self.transport, &self.endpoint)
-            .admitted_generation()
+            .admitted_witness()
             .ok_or_else(|| {
                 HostMutation::Refused(HostRefusal::Precondition(
                     RESTORE_RESUME_NOT_OFF.to_string(),
@@ -104,14 +104,14 @@ impl<T: HerdrTransport> HerdrHost<T> {
             })
     }
 
-    /// One mutation, after E7, on the connection that read it; `request` is checked first.
+    /// One mutation, after E7, to the server E7 named; `request` is checked first.
     fn mutate(&self, pane: &str, request: HerdrRequest) -> Result<HostMutation, HostError> {
-        let generation = match self.restore_off() {
-            Ok(generation) => generation,
+        let witness = match self.restore_off() {
+            Ok(witness) => witness,
             Err(refusal) => return Ok(refusal),
         };
         let call = self.next_call(request);
-        let (outcome, _) = self.transport.call_on(&call, generation);
+        let outcome = self.transport.call_with_witness(&call, &witness);
         contract::mutation_result(&call, outcome, pane)
     }
 
@@ -164,28 +164,29 @@ impl<T: HerdrTransport> HerdrHost<T> {
         adapt(&call, outcome, pane)
     }
 
-    /// The snapshot observation and the generation of the connection it came from.
-    fn observe_pane(&self, session: HostSessionRef<'_>) -> (HerdrObservation, u64) {
+    /// The snapshot observation and the server whose connection gave it.
+    fn observe_pane(&self, session: HostSessionRef<'_>) -> (HerdrObservation, Witnessed) {
         let Ok(pane) = pane_id(session) else {
-            return (HerdrObservation::failed(ControlPlane::Reachable), 0);
+            let observation = HerdrObservation::failed(ControlPlane::Reachable);
+            return (observation, Err(RestoreUnverified::NoPeer));
         };
-        let (call, outcome, generation) = self.call(HerdrRequest::SessionSnapshot {});
+        let (call, outcome, witness) = self.call(HerdrRequest::SessionSnapshot {});
         (
             contract::snapshot_observation(&call, outcome, pane),
-            generation,
+            witness,
         )
     }
 
     pub(crate) fn observe(&self, session: HostSessionRef<'_>) -> HerdrObservation {
-        let (observation, snapshot_generation) = self.observe_pane(session);
+        let (observation, snapshot_witness) = self.observe_pane(session);
         let (Ok(pane), HostPresence::Present) = (pane_id(session), observation.presence()) else {
             return observation;
         };
-        let (call, outcome, process_generation) = self.call(HerdrRequest::PaneProcessInfo {
+        let (call, outcome, process_witness) = self.call(HerdrRequest::PaneProcessInfo {
             pane_id: pane.to_string(),
         });
         let observation = contract::with_process_info(observation, &call, outcome, pane);
-        observe::fence_generation(observation, snapshot_generation, process_generation)
+        observe::fence_witness(observation, &snapshot_witness, &process_witness)
     }
 }
 

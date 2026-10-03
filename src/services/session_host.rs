@@ -27,6 +27,7 @@ mod tmux_host;
 mod traits;
 
 // Dormant: activation constructs it for a configured endpoint.
+pub(crate) use herdr::contract::ServerWitness;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
