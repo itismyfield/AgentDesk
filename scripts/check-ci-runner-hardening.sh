@@ -634,7 +634,7 @@ script_check_execution = effective_execution(
 expected_script_check_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [8, 9],
+    "protected_indices" => [9, 10],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -680,7 +680,7 @@ expected_script_check_execution = {
   ),
 }
 unless script_check_execution["protected_step_inventory"] == expected_script_check_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [8, 9] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(script_check_execution, expected_script_check_execution)
@@ -742,7 +742,7 @@ writer_wiring_execution = effective_execution(
 expected_writer_wiring_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [8, 9],
+    "protected_indices" => [9, 10],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -766,7 +766,7 @@ expected_writer_wiring_execution = {
   "effective_env" => expected_workflow_env,
 }
 unless writer_wiring_execution["protected_step_inventory"] == expected_writer_wiring_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [8, 9] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
@@ -915,12 +915,13 @@ targets = {
     # #5230 re-pins after replacing repeated PostgreSQL skip literals with the
     # shared non-pg-test-filter source; job names, conditions, and timeouts are
     # unchanged, and the exact commands below pin each source/use pair.
-    "job_sha256" => "ee22751e613fae89b25fa9e6c3237388666ceb867eda5a33f0dc1c9e460d452d",
+    # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
+    "job_sha256" => "9f9393864d4b8bbd9ce50bb38b2074f464e601653e48f04b3ed374127f4c406a",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
-          "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
+          "bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
         "timeout_minutes" => 20,
       },
@@ -991,7 +992,8 @@ targets = {
     # source-verified non-PG false positives after the adjudicated sweep.
     # #6104 re-pins after renaming the replay call; its list is now generated
     # from the PG manifest instead of hand-kept.
-    "job_sha256" => "c94384bd806521e5f796bbdd0d9b813841131ce8c4e3c80d5bcde36bbc541bc9",
+    # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
+    "job_sha256" => "8a73d261db9578fe4ca5899371307928111dba3d982e0ec038cb119072820e8c",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => [
@@ -1009,7 +1011,8 @@ targets = {
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "6ea23c9f5dd58b547b88d3c3489df0d0aac31c2c2b0acc3dcff8418d191740e1",
+    # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
+    "job_sha256" => "8a0325441633cb188248a717980fa25b56be515b92d9e45de48f630453948617",
     "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -1040,7 +1043,8 @@ targets = {
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "06c4f7b845152711cba75deb7bd02ac019fb863a0a10aef7722e3ec5bc4a7712",
+    # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
+    "job_sha256" => "cab07156ce825daeba30cc83dfb2c963cb3ca949d814d7b0b949a57433a7911c",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
@@ -1125,12 +1129,13 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
-    "job_sha256" => "78a1ac49014cc9ce58aa7aec6d2ae86295b0b5cafec65cccb3bf37b5f8a0bd7f",
+    # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
+    "job_sha256" => "dfab413f16cb8751ca2d8521dc1a18c39c0739b9565c7d7041ea7a847b5d7935",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
-          "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
+          "bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
         "timeout_minutes" => 20,
       },

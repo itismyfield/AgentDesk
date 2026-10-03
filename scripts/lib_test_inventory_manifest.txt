@@ -2506,6 +2506,10 @@ services::codex_tui::rollout_index::tests::signature_miss_reuses_surviving_file_
 services::codex_tui::rollout_index::tests::tree_signature_changes_when_rollout_added
 services::codex_tui::rollout_index::tests::warm_lookup_end_to_end_reuses_cache
 services::codex_tui::rollout_index::tests::warm_scan_reuses_cached_header_without_reread
+services::codex_tui::rollout_tail::child_binding_tests::child_only_launch_publishes_no_binding_or_marker
+services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refuses_both_child_indicators
+services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
+services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
@@ -2794,6 +2798,8 @@ services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9_unprocessed_m_is_recovered_once_it_leaves_the_queue
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint
+services::discord::catch_up::classification_order_tests::handled_command_tests::sweep_defers_a_command_when_own_identity_is_unknown
+services::discord::catch_up::classification_order_tests::handled_command_tests::sweep_skips_replied_commands_and_recovers_everything_else
 services::discord::catch_up::classification_order_tests::ledger_suppresses_the_restart_gap_notice_for_an_answered_message
 services::discord::catch_up::classification_order_tests::notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false
 services::discord::catch_up::classification_order_tests::phase1_allowed_automation_too_old_is_dead_lettered_without_authorization
@@ -7063,13 +7069,16 @@ services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_l
 services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests::clear_suppresses_the_active_turn_lifecycle_it_already_says_it_is_not
 services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests::human_and_passive_classes_are_unaffected_by_the_kind_aware_gate
 services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests::output_producing_slash_controls_keep_their_active_turn
+services::discord::tui_prompt_relay::launch_script::tests::a_launch_selector_keeps_its_context_when_the_live_nonce_changes
 services::discord::tui_prompt_relay::launch_script::tests::parses_claude_tui_launch_script_content
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_duplicate_mailbox_release
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_event_after_queue_eligible
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_queue_eligible_before_mailbox_release
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::local_model_observation_wakes_idle_durable_queue_through_production_workers
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_completion_lifecycle_validates_order_and_cardinality
+services::discord::tui_prompt_relay::rehydration::child_binding_tests::child_marker_rehydrate_publishes_no_child_and_fallback_excludes_it
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_live_pane_marked_for_another_host_is_not_adopted_by_name
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_rehydrated_replacement_execution_uses_its_matching_launch_context_once
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
@@ -9890,6 +9899,9 @@ services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_
 services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_one_pass
 services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published_file_and_its_crash_alias_untouched
+services::tui_o::store::ledger::lock_tests::operator_child
+services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
+services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
 services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
 services::tui_o::store::rotation::tests::rotation_fields_are_invisible_to_a_reader_of_the_plain_source_map
@@ -9944,6 +9956,9 @@ services::tui_o::writer::tests::actor::host_start::a_resume_the_log_keeps_unchan
 services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
+services::tui_o::writer::tests::actor::host_start::clear_launch::fresh_launch_after_clear_posts_once_across_old_tail_and_restart
+services::tui_o::writer::tests::actor::host_start::clear_launch::replaced_nonce_refuses_stale_launch_without_consuming_the_current_launch
+services::tui_o::writer::tests::actor::host_start::clear_launch::unseen_resume_and_unproven_launches_keep_their_bodies_pending
 services::tui_o::writer::tests::actor::host_start::deferred::a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved
 services::tui_o::writer::tests::actor::host_start::deferred::a_busy_legacy_keeps_the_adoption_deferred_and_one_read_serves_the_open_turn
 services::tui_o::writer::tests::actor::host_start::deferred::a_cursor_that_catches_up_without_a_write_lets_the_adoption_through

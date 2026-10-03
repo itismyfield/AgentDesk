@@ -7,10 +7,13 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod codex_hook;
 pub(crate) use codex_hook::{
-    codex_tail_source_retired, observe_codex_hook, publish_unless_codex_tail_retired,
+    codex_tail_source_retired, codex_tui_binding_is_subagent, observe_codex_hook,
+    publish_unless_codex_tail_retired, register_launched_tmux_runtime_binding,
+    register_launched_tmux_runtime_binding_under_source_authority,
 };
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
+pub(crate) use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -140,24 +143,6 @@ pub(crate) fn register_tmux_runtime_binding_under_source_authority(
         .is_some_and(Persisted::published)
 }
 
-/// Launch paths let the execution's context name the cause of a new source.
-pub(crate) fn register_launched_tmux_runtime_binding(
-    tmux_session_name: &str,
-    binding: TuiRuntimeBinding,
-) {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
-    });
-}
-
-pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
-    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    binding: TuiRuntimeBinding,
-) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
-        .is_some_and(Persisted::published)
-}
-
 /// Persists the binding event first; nothing is published on failure (`None`) or when a pin refuses.
 fn publish_runtime_binding(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -171,6 +156,9 @@ fn publish_runtime_binding(
         return None;
     }
     if binding.relay_output_path().trim().is_empty() {
+        return None;
+    }
+    if codex_tui_binding_is_subagent(tmux_session_name, &binding) {
         return None;
     }
     with_runtime_binding_state_under_source_authority(authority, |state| {
@@ -222,17 +210,6 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     registered
 }
 
-pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
-    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    provider: &str,
-    channel_id: u64,
-    binding: TuiRuntimeBinding,
-) -> bool {
-    let record = Record::Stat;
-    register_rehydrated_under_source_authority(authority, provider, channel_id, binding, record)
-        .is_some_and(Persisted::published)
-}
-
 /// `None` when nothing was published; otherwise what the record left, published only if it says so.
 fn register_rehydrated_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -240,6 +217,7 @@ fn register_rehydrated_under_source_authority(
     channel_id: u64,
     binding: TuiRuntimeBinding,
     record: Record,
+    cause: CauseSource,
 ) -> Option<Persisted> {
     let provider = normalize_provider(provider);
     let tmux_session_name = authority.session();
@@ -253,7 +231,6 @@ fn register_rehydrated_under_source_authority(
     }
     let binding = codex_hook::restored_source(authority, &provider, channel_id, binding)?;
     let session_id = binding.session_id.clone();
-    let cause = CauseSource::Observed;
     let persisted = publish_runtime_binding(authority, binding, Some(channel_id), cause, record)?;
     if !persisted.published() {
         return Some(persisted);

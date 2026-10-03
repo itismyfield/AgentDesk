@@ -682,6 +682,7 @@ src/
 │   │   ├── input/
 │   │   │   └── composer_lock.rs
 │   │   ├── rollout_tail/
+│   │   │   ├── child_binding_tests.rs
 │   │   │   └── parser.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
@@ -704,6 +705,8 @@ src/
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
+│   │   │   ├── handled_command.rs
+│   │   │   ├── handled_command_tests.rs
 │   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── retry_state.rs
@@ -1387,6 +1390,8 @@ src/
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── rehydration/
+│   │   │   │   ├── child_binding_tests.rs
+│   │   │   │   ├── codex_marker.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
@@ -2081,6 +2086,7 @@ src/
 │   │   ├── store/
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
+│   │   │   ├── ledger_lock_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
@@ -2092,6 +2098,7 @@ src/
 │   │   │   ├── adoption.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_tests.rs

@@ -1,0 +1,43 @@
+id: E-51
+title: Codex 연속 턴 → !clear → 새 세션 턴, 턴마다 본문 정확히 1회
+agent_mode: real_live
+coverage_class: live
+cells: [codex-tui, codex-pipe]
+isolation: required
+acceptance_criteria:
+  - T1·T2 are consecutive turns; T2 is a warm follow-up on the live pane and each marker arrives exactly once
+  - "!clear goes through the normal Discord text-command path and is acknowledged"
+  - The first turn after !clear (AFTER_CLEAR) arrives exactly once (0 = withheld, 2+ = duplicate)
+  - The post-deploy smoke judge also requires zero composer_not_detected readiness timeouts, unexpected tmux kills and cold-resume fallbacks in the dcserver log
+notes: |
+  Post-deploy smoke scenario. Every input is a marker-bearing Discord post
+  (send_discord_prompt), the same path an operator uses; nothing is cancelled
+  or reset. T1/T2 waits exceed the 45 s warm follow-up readiness timeout so a
+  failed warm follow-up still logs its kill and cold-resume fallback before
+  the run ends.
+report_marker_counts:
+  - "[E2E:E51:{run_id}:T1]"
+  - "[E2E:E51:{run_id}:T2]"
+  - "[E2E:E51:{run_id}:AFTER_CLEAR]"
+steps:
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E51:{run_id}:T1] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E51:{run_id}:T1]"
+    timeout_s: 75
+  - wait_idle_s: 2
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E51:{run_id}:T2] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E51:{run_id}:T2]"
+    timeout_s: 75
+  - send_discord_prompt: "!clear [E2E:E51:{run_id}:CLEAR]"
+  - wait_for_raw_discord_text: "세션을 초기화했어요."
+    timeout_s: 20
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E51:{run_id}:AFTER_CLEAR] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E51:{run_id}:AFTER_CLEAR]"
+    timeout_s: 60
+assertions:
+  - text_present: "[E2E:E51:{run_id}:T1]"
+  - text_present: "[E2E:E51:{run_id}:T2]"
+  - text_present: "[E2E:E51:{run_id}:AFTER_CLEAR]"
+  - no_duplicate_marker: "[E2E:E51:{run_id}:T1]"
+  - no_duplicate_marker: "[E2E:E51:{run_id}:T2]"
+  - no_duplicate_marker: "[E2E:E51:{run_id}:AFTER_CLEAR]"
+  - no_duplicate_content: true

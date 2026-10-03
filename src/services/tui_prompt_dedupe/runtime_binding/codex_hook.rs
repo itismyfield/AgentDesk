@@ -1,6 +1,41 @@
 //! Verifies and publishes Codex hook sources under the existing pane authority.
 
 use super::*;
+
+/// Launch paths let the execution's context name the cause of a new source.
+pub(crate) fn register_launched_tmux_runtime_binding(
+    tmux_session_name: &str,
+    binding: TuiRuntimeBinding,
+) {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
+    });
+}
+
+pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    binding: TuiRuntimeBinding,
+) -> bool {
+    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
+        .is_some_and(Persisted::published)
+}
+
+/// Child rollouts cannot supply the output source of a Codex TUI pane.
+pub(crate) fn codex_tui_binding_is_subagent(
+    tmux_session_name: &str,
+    binding: &TuiRuntimeBinding,
+) -> bool {
+    let child = binding.runtime_kind == RuntimeHandoffKind::CodexTui
+        && crate::services::codex_tui::rollout_index::rollout_is_subagent(std::path::Path::new(
+            &binding.output_path,
+        ));
+    if child {
+        tracing::warn!(tmux_session_name, rollout_path = %binding.output_path,
+            "refusing Codex TUI runtime binding to a subagent rollout");
+    }
+    child
+}
+
 use crate::services::claude_tui::hook_server::adoption_retry::{DurableKind, NotDurableReason};
 use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, NotApplicableReason, UnavailableReason,

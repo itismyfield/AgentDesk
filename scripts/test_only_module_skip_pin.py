@@ -34,7 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/writer/clear_launch_tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
+        "src/services/codex_tui/rollout_tail/child_binding_tests.rs",
+        "src/services/discord/tui_prompt_relay/rehydration/child_binding_tests.rs",
         "src/config/writer_channels_tests.rs",
         "src/server/routes/pipeline_stage_save_tests.rs",
         "src/services/pipeline_routes/stage_validation_tests.rs",
@@ -140,6 +143,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/catch_up/claim_cas_tests.rs",
         "src/services/discord/catch_up/classification_order_tests.rs",
         "src/services/discord/catch_up/frontier_sweep_tests.rs",
+        "src/services/discord/catch_up/handled_command_tests.rs",
         "src/services/discord/catch_up/merged_alias_tests.rs",
         "src/services/discord/commands/inspect/tests.rs",
         "src/services/discord/delivery_lease_cell/exact_lease/tests.rs",
@@ -303,6 +307,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/server/routes/health_api/tui_output_readiness_tests.rs",
         "src/services/tui_o/writer/writer_tests.rs",
         "src/services/tui_o/writer/actor_tests.rs",
+        "src/services/tui_o/store/ledger_lock_tests.rs",
         "src/services/tui_o/store/rotation_tests.rs",
         "src/services/tui_o/writer/rotation_tests.rs",
         "src/services/tui_input/bounded_tmux_tests.rs",
