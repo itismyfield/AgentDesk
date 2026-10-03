@@ -216,33 +216,105 @@ async fn a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg() {
     pg_db.drop().await;
 }
 
-/// Source text with every `#[cfg(test)]` item removed.
+/// `text` with comment, string and char literal bodies blanked, byte offsets unchanged.
+fn mask_literals(text: &str) -> Vec<u8> {
+    let (b, mut out) = (text.as_bytes(), text.as_bytes().to_vec());
+    let ident = |at: usize| at < b.len() && (b[at].is_ascii_alphanumeric() || b[at] == b'_');
+    let mut blank = |from: usize, to: usize| out[from..to].iter_mut().for_each(|c| *c = b' ');
+    let mut i = 0;
+    while i < b.len() {
+        let next = b.get(i + 1).copied();
+        let end = match b[i] {
+            b'/' if next == Some(b'/') => b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |k| i + k),
+            b'/' if next == Some(b'*') => {
+                let (mut depth, mut k) = (0usize, i);
+                while k + 1 < b.len() {
+                    match (b[k], b[k + 1]) {
+                        (b'/', b'*') => (depth, k) = (depth + 1, k + 2),
+                        (b'*', b'/') => (depth, k) = (depth - 1, k + 2),
+                        _ => k += 1,
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                k
+            }
+            b'r' if !ident(i.wrapping_sub(1))
+                || (i >= 1 && b[i - 1] == b'b' && !ident(i.wrapping_sub(2))) =>
+            {
+                let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+                if b.get(i + 1 + hashes) != Some(&b'"') {
+                    i += 1;
+                    continue;
+                }
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = i + 2 + hashes;
+                text[body..]
+                    .find(&close)
+                    .map_or(b.len(), |k| body + k + close.len())
+            }
+            b'"' => {
+                let mut k = i + 1;
+                while k < b.len() && b[k] != b'"' {
+                    k += if b[k] == b'\\' { 2 } else { 1 };
+                }
+                k + 1
+            }
+            b'\'' if next == Some(b'\\') => b[i + 2..]
+                .iter()
+                .position(|&c| c == b'\'')
+                .map_or(b.len(), |k| i + 3 + k),
+            b'\'' => match text[i + 1..].chars().next() {
+                Some(ch) if b.get(i + 1 + ch.len_utf8()) == Some(&b'\'') => i + 2 + ch.len_utf8(),
+                _ => i + 1,
+            },
+            _ => i + 1,
+        };
+        let end = end.min(b.len());
+        if end > i + 1 {
+            blank(i, end);
+        }
+        i = end;
+    }
+    out
+}
+
+/// Source text with every `#[cfg(test)]` item removed; an item that never closes fails.
 fn production_text(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(at) = rest.find("#[cfg(test)]") {
-        out.push_str(&rest[..at]);
-        let item = &rest[at..];
-        let end = match (item.find(';'), item.find('{')) {
+    let masked = mask_literals(text);
+    let find = |from: usize, needle: &[u8]| {
+        masked[from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|k| from + k)
+    };
+    let (mut out, mut kept) = (String::new(), 0);
+    while let Some(at) = find(kept, b"#[cfg(test)]") {
+        out.push_str(&text[kept..at]);
+        let end = match (find(at, b";"), find(at, b"{")) {
             (Some(semi), Some(open)) if semi < open => semi + 1,
             (_, Some(open)) => {
                 let mut depth = 0usize;
-                let close = item[open..].char_indices().find_map(|(offset, ch)| {
-                    match ch {
-                        '{' => depth += 1,
-                        '}' => depth -= 1,
+                let close = masked[open..].iter().position(|&c| {
+                    match c {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
                         _ => {}
                     }
-                    (depth == 0).then_some(open + offset)
+                    depth == 0
                 });
-                close.map_or(item.len(), |close| close + 1)
+                open + 1 + close.expect("a #[cfg(test)] item never closes")
             }
             (Some(semi), None) => semi + 1,
-            (None, None) => item.len(),
+            (None, None) => panic!("a #[cfg(test)] item never ends"),
         };
-        rest = &item[end..];
+        kept = end;
     }
-    out.push_str(rest);
+    out.push_str(&text[kept..]);
     out
 }
 
@@ -270,8 +342,11 @@ fn channel_home_items_have_no_production_caller() {
         "lease_round",
         "run_lease",
     ];
-    let probe = production_text("fn a() {}\n#[cfg(test)]\nmod t { fn b() { c(); } }\nfn d() {}");
-    assert!(probe.contains("fn a()") && probe.contains("fn d()") && !probe.contains("fn b()"));
+    let probe = production_text(concat!(
+        "fn a() {}\n#[cfg(test)]\nmod t { fn b() { c(\"{\", '{', r#\"}\"#); } // }\n }",
+        "\nfn d<'x>(_: &'x str) { e('}') }"
+    ));
+    assert!(probe.contains("fn a()") && probe.contains("fn d<") && !probe.contains("fn b()"));
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut stack = vec![root.join("src")];
