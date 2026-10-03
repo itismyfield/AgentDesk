@@ -29,7 +29,8 @@ rustc_label() {
 sample_peaks() {
   {
     cat "$peaks"
-    cat "$proc_root"/[0-9]*/status 2>/dev/null | awk '
+    # A process can exit between the glob and the read; that must not discard the whole sample.
+    { cat "$proc_root"/[0-9]*/status 2>/dev/null || true; } | awk '
       $1 == "Name:" { if (pid != "") print pid, hwm, name; name = $2; pid = ""; hwm = 0 }
       $1 == "Pid:" { pid = $2 }
       $1 == "VmHWM:" { hwm = $2 }

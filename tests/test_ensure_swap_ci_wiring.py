@@ -290,6 +290,11 @@ class MemMeasureBehavior(unittest.TestCase):
             (proc / str(pid) / "status").write_text(
                 f"Name:\t{name}\nPid:\t{pid}\nVmHWM:\t{hwm} kB\n", "utf-8")
         (proc / "101" / "cmdline").write_bytes(b"rustc\0--crate-name\0agentdesk\0--test\0")
+        # Stands in for a process that exits between the glob and the read.
+        (proc / "105").mkdir()
+        gone = proc / "105" / "status"
+        gone.write_text("Name:\tsh\nPid:\t105\nVmHWM:\t1 kB\n", "utf-8")
+        gone.chmod(0)
         sampled = self.run_measure("exit 0", gnu_time=True, proc_root=proc)
         self.assertIn(
             b"peak_procs=rustc/agentdesk+test=2097152,rust-lld=3000,cargo=500\n", sampled.stderr)
