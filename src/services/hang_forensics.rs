@@ -655,10 +655,23 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let responder = std::thread::spawn(move || {
-            use std::io::Write;
+            use std::io::{Read, Write};
             let (mut stream, _) = listener.accept().expect("accept");
-            let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n");
-            let _ = stream.flush();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("request deadline");
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).expect("read health request");
+                request.push(byte[0]);
+                assert!(request.len() <= 4096, "health request must be bounded");
+            }
+            assert!(request.starts_with(b"GET /api/health HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                .expect("write response");
+            stream.flush().expect("flush response");
         });
 
         let outcome = probe_health_once(&addr, "127.0.0.1", Duration::from_secs(2));

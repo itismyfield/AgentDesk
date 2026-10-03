@@ -202,6 +202,7 @@ jobs:
   postgres_full:
     name: PostgreSQL full tests
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
@@ -241,12 +242,14 @@ jobs:
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
 
-      # 30 minutes is the old 15 + 15 arithmetic budget, not measured runtime: selected lib tests grow 385 -> 636 and PG-connected tests 276 -> 422 under `--test-threads=1`.
+      # The measured build plus serial PG suite takes just over 30 minutes;
+      # leave 15 minutes of headroom and keep the later E2E within the job budget.
+
       # `--lib` like `just test-postgres`: the PG filter selects nothing elsewhere, and building
       # all targets at once got the runner killed for memory (exit 143, #4245). e2e runs below.
       - name: cargo test (PostgreSQL bootstrap and routes)
         id: pg_cargo_test
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         env:
           PG_DIAG_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.resource_diagnostics == true }}

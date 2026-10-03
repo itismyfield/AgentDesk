@@ -273,6 +273,49 @@ class NonPgFilterContract(unittest.TestCase):
 
 
 class DetectionMutation(FixtureCase):
+    def test_pg_fixture_descendants_and_local_imports_never_enter_replay(self) -> None:
+        self.fx.write_source(
+            "src/lib.rs",
+            "#[cfg(all(test, unix))] mod suite;\n"
+            "#[cfg(test)] mod support { pub fn postgres() { TestPostgresDb::new(); } }\n",
+        )
+        self.fx.write_source("src/suite/mod.rs", "mod leaf;\n")
+        self.fx.write_source(
+            "src/suite/leaf.rs",
+            "use crate::support::postgres;\n"
+            "#[test] fn imported_fixture_pg() { postgres(); }\n"
+            "#[test] fn local_fixture_pg() { use crate::support::{postgres as connect}; connect(); }\n"
+            "#[test] fn pure_pg() {}\n",
+        )
+        expected = {"suite::leaf::imported_fixture_pg", "suite::leaf::local_fixture_pg"}
+        inventory = membership.discover_pg_inventory(self.root)
+        self.assertEqual(set(inventory.tests), expected)
+        (self.root / membership.MANIFEST_REL).write_text(membership.render_manifest(inventory))
+        (self.root / membership.LIB_TEST_INVENTORY_REL).write_text(
+            "[tests]\n" + "\n".join(sorted(expected | {"suite::leaf::pure_pg"})) + "\n"
+        )
+        _, replay = membership.non_pg_selection(self.root)
+        self.assertEqual(set(replay), {"suite::leaf::pure_pg"})
+
+    def test_function_local_pg_import_is_scoped_to_its_caller(self) -> None:
+        self.fx.write_source(
+            "src/lib.rs",
+            "#[cfg(test)] mod support { pub fn postgres() { TestPostgresDb::new(); } }\n"
+            "#[cfg(test)] mod pure { pub fn postgres() {} }\n"
+            "#[cfg(test)] mod tests {\n"
+            "use crate::pure::postgres;\n"
+            "fn helper() { use crate::support::{postgres as connect}; connect(); }\n"
+            "#[test] fn local_pg() { use crate::support::{postgres}; postgres(); }\n"
+            "#[test] fn helper_pg() { helper(); }\n"
+            "#[test] fn unused_pg() { use crate::support::{postgres}; }\n"
+            "#[test] fn plain_pg() { postgres(); }\n"
+            "}\n",
+        )
+        self.assertEqual(
+            set(membership.discover_pg_inventory(self.root).tests),
+            {"tests::local_pg", "tests::helper_pg"},
+        )
+
     def test_seed_detection_and_production_counterexample(self) -> None:
         self.fx.write_source(
             "src/service.rs",

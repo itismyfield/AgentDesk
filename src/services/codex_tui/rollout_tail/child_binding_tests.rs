@@ -51,7 +51,9 @@ fn write(root: &Path, header: &Value, modified: u64) -> PathBuf {
     let id = header["payload"]["id"].as_str().unwrap();
     let path = root.join(format!("rollout-{id}.jsonl"));
     std::fs::write(&path, format!("{header}\n")).unwrap();
-    std::fs::File::open(&path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(modified))
         .unwrap();
