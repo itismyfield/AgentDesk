@@ -3,6 +3,7 @@ use super::*;
 /// Claim under the single-watcher policy. Normal recovery reuses a live
 /// same-session watcher; a proven crossed Codex turn forces a fresh generation.
 /// `Err` is a withheld Herdr pane: nothing spawned, replaced or reused.
+#[cfg(unix)]
 pub(super) fn claim_rebind_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
@@ -36,10 +37,27 @@ pub(super) fn claim_rebind_watcher(
     claim.map(|claim| (claim.should_spawn(), claim.replaced_existing()))
 }
 
+/// The rebind's channel, judged before its first write: `ChannelIdZero` for a zero id, then the
+/// Herdr admission below.
+pub(super) async fn admit_channel(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_override: &Option<String>,
+) -> Result<ChannelId, RebindError> {
+    let channel_id = crate::services::discord::inflight::opt_channel_id(channel_id)
+        .ok_or(RebindError::ChannelIdZero)?;
+    #[cfg(unix)]
+    admitted(shared, provider, channel_id, tmux_session_override).await?;
+    #[cfg(not(unix))]
+    let _ = (shared, provider, tmux_session_override);
+    Ok(channel_id)
+}
+
 /// `WatcherWithheld` when the Herdr admission would withhold the pane's claim now, read before the
 /// rebind's first write so a repeat changes nothing; any other or still unnamed pane passes.
 #[cfg(unix)]
-pub(super) async fn admitted(
+async fn admitted(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
