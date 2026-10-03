@@ -513,6 +513,20 @@ fn herdr_socket_hello_checks_protocol_not_version() {
         vec![Err(RestoreUnverified::ProcessUnreadable)],
     );
     assert_eq!(unnamed.hello(), Err(RestoreUnverified::ProcessUnreadable));
+    // A peer that started after the connection was made is a reused pid: no ping goes out.
+    let reused = ProcessStart {
+        identity: StartIdentity::Darwin {
+            seconds: 9,
+            micros: 0,
+        },
+        wall_clock: SystemTime::now() + Duration::from_secs(3_600),
+    };
+    let server = serve(vec![pong("0.9.3")]);
+    let transport = transport_with(&server, config(), vec![Ok((7, reused))]);
+    assert_eq!(transport.hello(), Err(RestoreUnverified::ProcessChanged));
+    thread::sleep(Duration::from_millis(50));
+    let sent: Vec<usize> = server.conns().iter().map(|seen| seen.bytes).collect();
+    assert_eq!(sent, [0], "no ping to a reused pid");
 }
 
 #[test]

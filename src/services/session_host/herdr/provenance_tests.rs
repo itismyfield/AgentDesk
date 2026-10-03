@@ -357,19 +357,87 @@ fn procargs2_environment_starts_after_the_exec_path_and_every_argument() {
     assert_eq!(procargs2_environ(&raw[..3]), None);
 }
 
+// Linux reads `/proc/<pid>/environ` empty for a zombie or a process still inside exec.
+#[test]
+fn linux_environ_never_reads_an_empty_environment_as_one_without_the_key() {
+    assert_eq!(
+        linux_environ(b"HERDR_CONFIG_PATH=/good/config.toml\0XDG_CONFIG_HOME=/good/xdg\0"),
+        Ok(vec![
+            "HERDR_CONFIG_PATH=/good/config.toml".to_string(),
+            "XDG_CONFIG_HOME=/good/xdg".to_string(),
+        ])
+    );
+    for empty in [&b""[..], b"\0", b"\0\0"] {
+        assert_eq!(
+            linux_environ(empty),
+            Err(RestoreUnverified::ProcessUnreadable),
+            "{empty:?}"
+        );
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 /// A child running this test binary, killed when dropped. macOS hides the environment of
 /// platform binaries such as `/bin/sleep`, so the child is a binary like the Herdr server.
-struct Child(std::process::Child);
+struct Child {
+    process: std::process::Child,
+    stderr: PathBuf,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Child {
+    fn failure(&self, what: &str) -> String {
+        let stderr = std::fs::read_to_string(&self.stderr).unwrap_or_default();
+        format!("child {} {what}; stderr:\n{stderr}", self.process.id())
+    }
+
+    /// Fails with the child's own stderr unless it is still running.
+    fn assert_alive(&mut self) {
+        if let Some(status) = self.process.try_wait().unwrap() {
+            panic!("{}", self.failure(&format!("exited {status}")));
+        }
+    }
+
+    /// Waits until the child's test body wrote `ready`: its exec is over, so its
+    /// environment is in place. Linux reads the environment empty before that.
+    fn wait_ready(&mut self, ready: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !ready.exists() {
+            self.assert_alive();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{}",
+                self.failure("never ready")
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.assert_alive();
+    }
+
+    /// Kills the child and waits until it has exited without reaping it, so its pid
+    /// names a zombie.
+    #[allow(unsafe_code)]
+    fn kill_unreaped(&mut self) {
+        self.process.kill().unwrap();
+        let pid = self.process.id() as libc::id_t;
+        // SAFETY: `info` is a zeroed siginfo_t that waitid fills; WNOWAIT leaves the child.
+        let waited = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT)
+        };
+        assert_eq!(waited, 0, "{}", self.failure("could not be waited for"));
+    }
+}
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for Child {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.process.kill();
+        let _ = self.process.wait();
     }
 }
 
+/// Set in the child, naming the file its test body writes once it runs.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CHILD_FLAG: &str = "ADK_E7_PROVENANCE_CHILD";
 
@@ -383,7 +451,8 @@ fn set_modified(path: &Path, modified: SystemTime) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
-    if std::env::var_os(CHILD_FLAG).is_some() {
+    if let Some(ready) = std::env::var_os(CHILD_FLAG) {
+        std::fs::write(ready, b"").unwrap();
         std::thread::sleep(Duration::from_secs(30));
         return;
     }
@@ -394,20 +463,31 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
     set_modified(&config, SystemTime::now() - Duration::from_secs(60));
     let test = module_path!().split_once("::").unwrap().1;
     let test = format!("{test}::e7_os_reads_prove_off_for_a_real_bootstrapped_process_only");
-    let spawn = |env: &[(&str, PathBuf)]| {
+    let spawn = |name: &str, env: &[(&str, PathBuf)]| {
+        let ready = home.join(format!("{name}.ready"));
+        let stderr = home.join(format!("{name}.stderr"));
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", &test, "--test-threads=1"]);
-        command.env_clear().env(CHILD_FLAG, "1");
+        command.args(["--exact", &test, "--test-threads=1", "--nocapture"]);
+        command.env_clear().env(CHILD_FLAG, &ready);
         command.envs(env.iter().map(|(key, value)| (key, value)));
         command.stdout(std::process::Stdio::null());
-        Child(command.spawn().unwrap())
+        command.stderr(std::fs::File::create(&stderr).unwrap());
+        let mut child = Child {
+            process: command.spawn().unwrap(),
+            stderr,
+        };
+        child.wait_ready(&ready);
+        child
     };
     let before = SystemTime::now();
-    let server = spawn(&[
-        ("HERDR_CONFIG_PATH", config.clone()),
-        ("XDG_CONFIG_HOME", home.join("xdg")),
-    ]);
-    let pid = server.0.id();
+    let mut server = spawn(
+        "server",
+        &[
+            ("HERDR_CONFIG_PATH", config.clone()),
+            ("XDG_CONFIG_HOME", home.join("xdg")),
+        ],
+    );
+    let pid = server.process.id();
     let os = OsProvenance;
     let started = os.process_start(pid).unwrap().wall_clock;
     assert!(
@@ -417,7 +497,9 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
     );
     assert_eq!(
         os.process_env(pid, "HERDR_CONFIG_PATH"),
-        Ok(vec![config.display().to_string()])
+        Ok(vec![config.display().to_string()]),
+        "{}",
+        server.failure("env")
     );
     std::thread::sleep(Duration::from_millis(1_100));
     let home_str = home.to_str().unwrap();
@@ -456,18 +538,28 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
     );
     set_modified(&config, SystemTime::now() - Duration::from_secs(60));
     std::fs::write(home.join("other.toml"), b"x").unwrap();
-    let elsewhere = spawn(&[
-        ("HERDR_CONFIG_PATH", home.join("other.toml")),
-        ("XDG_CONFIG_HOME", home.join("xdg")),
-    ]);
+    let elsewhere = spawn(
+        "elsewhere",
+        &[
+            ("HERDR_CONFIG_PATH", home.join("other.toml")),
+            ("XDG_CONFIG_HOME", home.join("xdg")),
+        ],
+    );
     assert_eq!(
-        read(elsewhere.0.id()),
+        read(elsewhere.process.id()),
         RestoreResume::Unverified(RestoreUnverified::NotBootstrapped)
     );
     std::fs::remove_file(&config).unwrap();
+    server.assert_alive();
     assert_eq!(
         read(pid),
         RestoreResume::Unverified(RestoreUnverified::ConfigMissing)
+    );
+    server.kill_unreaped();
+    assert_eq!(
+        os.process_env(pid, "HERDR_CONFIG_PATH"),
+        Err(RestoreUnverified::ProcessUnreadable),
+        "a dead server's environment is unreadable, never one without the key"
     );
     drop(server);
     assert_eq!(
