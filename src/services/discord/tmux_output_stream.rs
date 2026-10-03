@@ -667,7 +667,9 @@ fn should_skip_pre_turn_line(
     )
 }
 
-fn terminal_kind_for_json_evidence(value: &serde_json::Value) -> Option<WatcherTerminalKind> {
+pub(in crate::services::discord) fn terminal_kind_for_json_evidence(
+    value: &serde_json::Value,
+) -> Option<WatcherTerminalKind> {
     match value.get("type").and_then(|t| t.as_str()) {
         Some("result") => Some(WatcherTerminalKind::HardResult),
         Some("system")
@@ -679,7 +681,9 @@ fn terminal_kind_for_json_evidence(value: &serde_json::Value) -> Option<WatcherT
     }
 }
 
-fn watcher_user_event_is_prompt_boundary(value: &serde_json::Value) -> bool {
+pub(in crate::services::discord) fn watcher_user_event_is_prompt_boundary(
+    value: &serde_json::Value,
+) -> bool {
     if value
         .get("isMeta")
         .and_then(serde_json::Value::as_bool)

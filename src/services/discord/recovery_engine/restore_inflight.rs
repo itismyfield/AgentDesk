@@ -88,14 +88,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     // its bound is the next boot that successfully advances the epoch. An allocation-
     // provenance witness belongs to #5482.
     for mut state in states {
-        if matches!(
-            crate::services::agent_recovery::channel_recovery_intake(
-                provider,
-                &state.channel_id.to_string()
-            )
-            .await,
-            Some(crate::services::agent_recovery::RecoveryIntake::Skip)
-        ) {
+        if super::runtime::restore_leaves_row(provider, shared, &state).await {
             continue;
         }
         // #897 round-4 High: rebind_origin inflights are synthetic
@@ -684,7 +677,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 )
                 .await;
                 let finish_mailbox_on_completion =
-                    reregister_active_turn_from_inflight(shared, &state).await;
+                    reregister_restart_adopted_turn_from_inflight(shared, &state).await;
 
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
@@ -1832,7 +1825,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             )
             .await;
             let finish_mailbox_on_completion =
-                reregister_active_turn_from_inflight(shared, &state).await;
+                reregister_restart_adopted_turn_from_inflight(shared, &state).await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
             // `readopted_from_inflight`, which the watcher-yield escape hatch honours

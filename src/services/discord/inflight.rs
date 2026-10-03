@@ -221,7 +221,7 @@ pub(in crate::services::discord) use self::clear_store::{
     clear_inflight_state_if_matches_identity_turn_nonce,
     clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence,
     clear_rebind_origin_for_reconcile, clear_rebind_origin_inflight_state_if_matches_identity,
-    refresh_inflight_last_offset_if_matches_identity,
+    clear_restart_marked_episode, refresh_inflight_last_offset_if_matches_identity,
     request_inflight_abandon_for_captured_episode, row_is_current_generation,
 };
 // `clear_*_in_root` seams reached by inflight-core in production (health recovery
@@ -231,6 +231,8 @@ pub(super) use self::clear_store::{
 };
 // `normalize_response_sent_offset` is consumed by the `watcher_state` sibling in
 // production, so it stays re-imported here at the parent's original private seam.
+#[cfg(test)]
+pub(in crate::services::discord) use self::clear_store::FAIL_NEXT_IDENTITY_REMOVE;
 use self::clear_store::normalize_response_sent_offset;
 // Explicit-root clear seams reached only by the parent's / siblings' test modules.
 #[cfg(test)]

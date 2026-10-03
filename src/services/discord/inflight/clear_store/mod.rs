@@ -14,7 +14,11 @@ mod abandon;
 mod identity;
 pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
 mod reconcile_gate;
-pub(in crate::services::discord) use identity::clear_inflight_state_for_captured_episode;
+#[cfg(test)]
+pub(in crate::services::discord) use identity::FAIL_NEXT_IDENTITY_REMOVE;
+pub(in crate::services::discord) use identity::{
+    clear_inflight_state_for_captured_episode, clear_restart_marked_episode,
+};
 
 pub(in crate::services::discord) use self::abandon::request_inflight_abandon_for_captured_episode;
 pub(crate) use self::abandon::{

@@ -462,6 +462,22 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         }
 
+        // The inflight restore's decision: a row another intake owns, or whose retirement
+        // failed, keeps its channel out of this restore instead of starting it rowless.
+        use super::super::super::recovery::{BootRow, boot_row_decision};
+        let row = super::super::super::inflight::load_inflight_state(&provider, channel_id.get());
+        let decision = match row.as_ref() {
+            Some(state) => Some(boot_row_decision(&provider, &shared, state).await),
+            None => None,
+        };
+        if decision == Some(BootRow::Leave) {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                "watcher skip — inflight row left as is"
+            );
+            continue;
+        }
+
         // #148: Only register in owned_sessions after passing QUARANTINE + live-pane checks.
         // Earlier registration blocked new session creation for quarantined/dead channels.
         owned_sessions
@@ -470,9 +486,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         let mut restored_turn = None;
         let mut thread_parent = None;
-        let initial_offset = if let Some(state) =
-            super::super::super::inflight::load_inflight_state(&provider, channel_id.get())
-        {
+        let initial_offset = if let Some(state) = row.filter(|_| decision == Some(BootRow::Adopt)) {
             thread_parent = thread_follow_up_parent_channel_id(
                 *channel_id,
                 state.logical_channel_id,
@@ -494,7 +508,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     continue;
                 }
                 let finish_mailbox_on_completion =
-                    super::super::super::recovery::reregister_active_turn_from_inflight(
+                    super::super::super::recovery::reregister_restart_adopted_turn_from_inflight(
                         &shared, &state,
                     )
                     .await;
