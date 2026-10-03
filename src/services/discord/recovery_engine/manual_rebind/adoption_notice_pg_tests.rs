@@ -37,6 +37,7 @@ async fn fence_forward_notice_lands_one_outbox_row_pg() {
         4_096,
     );
     row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    row.turn_source = inflight::TurnSource::ExternalInput;
     row.turn_start_offset = Some(4_096);
     let facts = AdoptFenceForward {
         cause: AdoptFenceForwardCause::TurnIdentityUnknown,

@@ -4860,6 +4860,7 @@ services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_initi
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset
+services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_resumes_a_headless_turn_row_without_a_fence_forward
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_with_an_output_path_override_keeps_the_row_offsets_without_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_with_an_output_path_override_rebases_to_eof_only_after_custody
 services::discord::recovery_engine::manual_rebind::adoption::tests::tui_direct_adopt_keeps_offsets_only_in_their_own_coordinate_space
