@@ -1,0 +1,42 @@
+id: E-50
+title: Claude 연속 턴 → !clear → 새 세션 턴, 턴마다 본문 정확히 1회
+agent_mode: real_live
+coverage_class: live
+cells: [claude-tui, claude-pipe]
+isolation: required
+acceptance_criteria:
+  - T1·T2 are consecutive turns on one live session; each marker arrives exactly once
+  - "!clear goes through the normal Discord text-command path and is acknowledged"
+  - The first turn after !clear (AFTER_CLEAR) arrives exactly once (0 = withheld, 2+ = duplicate)
+  - The post-deploy smoke judge also requires zero unexpected tmux kills and cold-resume fallbacks in the dcserver log
+notes: |
+  Post-deploy smoke scenario. Every input is a marker-bearing Discord post
+  (send_discord_prompt), the same path an operator uses; nothing is cancelled
+  or reset. The deploy smoke runs it with --no-reset-before-each under a phase
+  deadline and judges report marker_counts plus the dcserver log excerpt.
+report_marker_counts:
+  - "[E2E:E50:{run_id}:T1]"
+  - "[E2E:E50:{run_id}:T2]"
+  - "[E2E:E50:{run_id}:AFTER_CLEAR]"
+steps:
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E50:{run_id}:T1] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E50:{run_id}:T1]"
+    timeout_s: 60
+  - wait_idle_s: 2
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E50:{run_id}:T2] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E50:{run_id}:T2]"
+    timeout_s: 60
+  - send_discord_prompt: "!clear [E2E:E50:{run_id}:CLEAR]"
+  - wait_for_raw_discord_text: "세션을 초기화했어요."
+    timeout_s: 20
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E50:{run_id}:AFTER_CLEAR] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E50:{run_id}:AFTER_CLEAR]"
+    timeout_s: 50
+assertions:
+  - text_present: "[E2E:E50:{run_id}:T1]"
+  - text_present: "[E2E:E50:{run_id}:T2]"
+  - text_present: "[E2E:E50:{run_id}:AFTER_CLEAR]"
+  - no_duplicate_marker: "[E2E:E50:{run_id}:T1]"
+  - no_duplicate_marker: "[E2E:E50:{run_id}:T2]"
+  - no_duplicate_marker: "[E2E:E50:{run_id}:AFTER_CLEAR]"
+  - no_duplicate_content: true

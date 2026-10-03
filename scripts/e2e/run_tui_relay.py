@@ -138,6 +138,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "recent_relay",
     "sample_raw",
     "recent_raw",
+    "marker_counts",
     "tmux_key_sequences",
     "direct_input_prompts",
     "concurrent_prompt_batches",
@@ -902,6 +903,18 @@ def _update_record_window_snapshot(
     record["recent_raw"] = [
         _message_debug_summary(message) for message in window.raw_messages[-8:]
     ]
+
+
+def _record_marker_counts(
+    record: dict[str, Any],
+    window: assertions.Window,
+    markers: list[str],
+) -> None:
+    # Relay hits per declared marker as last observed; 0 means not delivered yet, 2+ a duplicate.
+    if markers:
+        record["marker_counts"] = {
+            marker: assertions.relay_marker_hits(window, marker=marker) for marker in markers
+        }
 
 
 def _merge_record_into_result(
@@ -3404,6 +3417,10 @@ def run_one_cell(
         )
 
     setup_marker = f"### E2E SETUP {scenario_id} cell={cell} run={run_id}"
+    marker_targets = [
+        str(marker).replace("{run_id}", run_id)
+        for marker in scenario.get("report_marker_counts") or []
+    ]
     record: dict[str, Any] = {
         "assertions": [],
         "agent_mode": declared_agent_mode,
@@ -3688,6 +3705,7 @@ def run_one_cell(
                 debug_label=f"{scenario.get('id')}::{cell}::wait_for_text:{needle[:32]}",
             )
             _ingest_observed(observed)
+            _record_marker_counts(record, window, marker_targets)
             if not found:
                 diagnostic = _collect_wait_timeout_diagnostics(
                     base_url=client.base_url,
@@ -3744,6 +3762,7 @@ def run_one_cell(
                 debug_label=f"{scenario.get('id')}::{cell}::wait_for_raw:{needle[:32]}",
             )
             _ingest_observed(observed)
+            _record_marker_counts(record, window, marker_targets)
             if not found:
                 diagnostic = _collect_wait_timeout_diagnostics(
                     base_url=client.base_url,
@@ -4039,6 +4058,7 @@ def run_one_cell(
         final_rows = _ingest_snapshot()
 
     _update_record_window_snapshot(record, window)
+    _record_marker_counts(record, window, marker_targets)
 
     try:
         if e36 is not None:

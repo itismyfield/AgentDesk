@@ -133,31 +133,6 @@ class FixtureValidation(unittest.TestCase):
             violations,
         )
 
-    def test_clear_body_held_fixture_detects_issue_6551(self):
-        evidence = smoke._load_fixture("clear-body-held")  # noqa: SLF001
-
-        violations = smoke.validate_fixture_evidence(evidence)
-
-        self.assertTrue(
-            any("clear_body_held=true" in violation for violation in violations),
-            violations,
-        )
-        self.assertTrue(
-            any("issue #6551" in violation for violation in violations),
-            violations,
-        )
-
-    def test_codex_warm_kill_fixture_detects_issue_6552(self):
-        evidence = smoke._load_fixture("codex-warm-kill")  # noqa: SLF001
-
-        violations = smoke.validate_fixture_evidence(evidence)
-
-        self.assertTrue(
-            any("relay_stall_state=tmux_alive_relay_dead" in violation for violation in violations),
-            violations,
-        )
-        self.assertIn("codex", evidence.get("cell", "").lower())
-
 
 class DriverReportValidation(unittest.TestCase):
     def test_driver_report_requires_e9_and_e19_evidence(self):

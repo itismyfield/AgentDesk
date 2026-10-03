@@ -443,7 +443,8 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_fixtures \
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \
-  scripts.e2e.tui_relay.test_post_deploy_relay_continuity
+  scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
+  scripts.e2e.tui_relay.test_post_deploy_turn_smoke
 "$PYTHON" -m unittest scripts.e2e.test_voice_live_media_smoke
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 fi
@@ -724,6 +725,7 @@ required_shell_suites=(
   tests/test_deploy_smoke_scope.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
+  tests/test_deploy_smoke_turn_scenarios_6561.sh
   tests/test_deploy_verdict_health_axis_6092.sh
   tests/test_required_check_mirror.sh
 )
