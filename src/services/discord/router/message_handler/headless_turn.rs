@@ -983,19 +983,19 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let turn_host = crate::services::turn_host::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+    )
+    .await;
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
         &provider,
         channel_id.get(),
         adk_session_key.as_deref(),
         tmux_session_name.as_deref(),
-    )
-    .await;
-    let turn_host = crate::services::turn_host::for_turn(
-        shared.pg_pool.as_ref(),
-        &provider,
-        channel_id.get(),
-        adk_session_key.as_deref(),
     )
     .await;
     tokio::task::spawn_blocking(move || {
