@@ -203,7 +203,6 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
             capture_screen: true,
             current_working_dir: true,
             execution_pid: true,
-            ..HostCapabilities::default()
         }
     }
 

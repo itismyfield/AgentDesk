@@ -440,8 +440,8 @@ fn keys_call(keys: &[&str]) -> HerdrRequest {
     }
 }
 
-// Executor key names reach Herdr under its own names in one request; an unknown key,
-// a bad text or a non-Herdr ref sends nothing at all.
+// Executor keys reach Herdr under its names in one request, a paste is bracketed and a line
+// carries its Enter; an unknown key, a bad text or a non-Herdr ref sends nothing at all.
 #[test]
 fn herdr_keys_map_whole_or_send_nothing() {
     let executor_keys = ["Enter", "Escape", "C-u", "C-e", "Left", "Right", "BSpace"];
@@ -458,6 +458,15 @@ fn herdr_keys_map_whole_or_send_nothing() {
         (keys_call(&herdr_names), ok()),
         (keys_call(&["ctrl+c"]), ok()),
         (keys_call(&["esc"]), Scripted::Error("invalid_key")),
+        (send_call("\x1b[200~한글\n둘째\x1b[201~"), ok()),
+        (
+            HerdrRequest::PaneSendInput {
+                pane_id: PANE.into(),
+                text: "/clear".into(),
+                keys: vec!["enter".into()],
+            },
+            ok(),
+        ),
     ]);
     assert_eq!(
         herdr.send_keys(pane(), &executor_keys),
@@ -468,7 +477,15 @@ fn herdr_keys_map_whole_or_send_nothing() {
         herdr.send_keys(pane(), &["Escape"]),
         Ok(HostMutation::Indeterminate(_))
     ));
-    assert_eq!(calls(&herdr).len(), 3);
+    assert_eq!(
+        herdr.send_paste(pane(), "한글\n둘째"),
+        Ok(HostMutation::Confirmed)
+    );
+    assert_eq!(
+        herdr.send_line(pane(), "/clear"),
+        Ok(HostMutation::Confirmed)
+    );
+    assert_eq!(calls(&herdr).len(), 5);
 
     let silent = host(Vec::new());
     let unsupported = Ok(HostMutation::Refused(HostRefusal::Unsupported {

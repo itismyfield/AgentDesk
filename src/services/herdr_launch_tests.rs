@@ -557,7 +557,8 @@ async fn herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_uncon
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let ineligible: [fn(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>; 3] = [
+    type Prepare = fn(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>;
+    let ineligible: [Prepare; 3] = [
         |_| {
             Ok(HerdrLaunchCommand {
                 cwd: "/tmp".into(),

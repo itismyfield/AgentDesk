@@ -1,5 +1,6 @@
 //! E7: the restore-off proof over scripted readings, and the OS reads on this platform.
 use std::collections::BTreeMap;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -145,7 +146,8 @@ fn e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal() {
         RestoreResume::Off { generation: 4 }
     );
     let home_config = format!("{HOME}/config.toml");
-    let cases: Vec<(Vec<Result<ServerPeer, Why>>, Scripted, Option<&str>, Why)> = vec![
+    type Case<'a> = (Vec<Result<ServerPeer, Why>>, Scripted, Option<&'a str>, Why);
+    let cases: Vec<Case> = vec![
         (
             vec![Err(Why::NoPeer)],
             bootstrapped(),
@@ -291,10 +293,12 @@ fn procargs2_environment_starts_after_the_exec_path_and_every_argument() {
     assert_eq!(procargs2_environ(&raw[..3]), None);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 /// A child running this test binary, killed when dropped. macOS hides the environment of
 /// platform binaries such as `/bin/sleep`, so the child is a binary like the Herdr server.
 struct Child(std::process::Child);
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -302,8 +306,10 @@ impl Drop for Child {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const CHILD_FLAG: &str = "ADK_E7_PROVENANCE_CHILD";
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn set_modified(path: &Path, modified: SystemTime) {
     let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
     file.set_modified(modified).unwrap();
