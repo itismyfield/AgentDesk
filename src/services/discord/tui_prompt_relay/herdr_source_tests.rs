@@ -725,3 +725,196 @@ fn the_o_switch_takes_a_herdr_channel_only_on_the_source_its_launch_logged_pg() 
         }
     }
 }
+
+/// The gateway side of an O writer host reading the binding log the launch wrote; the posts
+/// survive a restart so each result's posts can be counted.
+struct LaunchedLog {
+    posts: Arc<crate::services::tui_o::writer::host::test_io::Posts>,
+    alarms: crate::services::tui_o::writer::host::test_io::Alarms,
+}
+
+impl crate::services::tui_o::writer::host::HostIo for LaunchedLog {
+    type Port = crate::services::tui_o::writer::host::test_io::Posts;
+    type Lease = crate::services::tui_o::writer::host::test_io::AnyLease;
+    type Alarms = crate::services::tui_o::writer::host::test_io::Alarms;
+    type Bindings = crate::services::tui_o::writer::binding::ChannelBindingLog;
+
+    fn port(&self) -> impl Future<Output = Arc<Self::Port>> + Send {
+        std::future::ready(Arc::clone(&self.posts))
+    }
+
+    fn lease(&self) -> Self::Lease {
+        crate::services::tui_o::writer::host::test_io::AnyLease
+    }
+
+    fn alarms(&self) -> Self::Alarms {
+        self.alarms.clone()
+    }
+
+    fn bindings(
+        &self,
+        channel: u64,
+        provider: crate::services::tui_o::shadow::ShadowProvider,
+    ) -> Arc<Self::Bindings> {
+        Arc::new(crate::services::tui_o::writer::binding::ChannelBindingLog::new(channel, provider))
+    }
+
+    fn activation_facts(
+        &self,
+        _: u64,
+        _: crate::services::tui_o::shadow::ShadowProvider,
+    ) -> impl Future<
+        Output = Result<crate::services::tui_o::writer::activation::ActivationFacts, String>,
+    > + Send {
+        std::future::ready(Ok(Default::default()))
+    }
+
+    fn local_custody(
+        &self,
+        _: u64,
+        _: crate::services::tui_o::shadow::ShadowProvider,
+    ) -> Result<crate::services::tui_o::writer::host::Custody, String> {
+        Ok(crate::services::tui_o::writer::host::Custody::Free)
+    }
+
+    fn legacy(&self) -> Arc<dyn crate::services::tui_o::writer::adoption::LegacyView> {
+        Arc::new(crate::services::tui_o::writer::adoption::NoLegacy)
+    }
+
+    fn legacy_busy(&self, _: u64) -> impl Future<Output = bool> + Send {
+        std::future::ready(false)
+    }
+
+    fn relaying(&self, _: u64) -> bool {
+        false
+    }
+}
+
+// A Herdr launch on a channel O owns: the writer posts its result, and after a stop with the next
+// result unread, the restarted host takes its store back and posts each result once.
+#[test]
+fn a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::shadow::ShadowProvider;
+    use crate::services::tui_o::writer::actor::POLL_INTERVAL;
+    use crate::services::tui_o::writer::host::{HostParts, Readiness, start};
+    let herdr = &mut Herdr::new("o-resume");
+    let (channel, logical) = (herdr.channel, herdr.logical().to_owned());
+    // Legacy's pane started an empty session before O took the channel.
+    let legacy = uuid();
+    let legacy_path = herdr.ingress.path(&legacy);
+    std::fs::write(&legacy_path, b"").unwrap();
+    dedupe::register_tmux_channel(&logical, channel);
+    dedupe::register_launched_tmux_runtime_binding(
+        &logical,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: legacy_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(legacy.clone()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+
+    let runtime_root = crate::config::runtime_root().unwrap();
+    let _selected =
+        crate::services::tui_o::cutover::test_override::force_candidates(&[(channel, ClaudeTui)]);
+    let gate = Arc::new(crate::services::tui_o::ownership::OwnershipGate::default());
+    gate.acquired();
+    let posts = Arc::new(crate::services::tui_o::writer::host::test_io::Posts::default());
+    let writer = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let polls = |count: u32| {
+        writer.block_on(async { tokio::time::sleep(POLL_INTERVAL * count).await });
+    };
+    let host = || {
+        let io = Arc::new(LaunchedLog {
+            posts: Arc::clone(&posts),
+            alarms: Default::default(),
+        });
+        let parts = || HostParts {
+            io: Arc::clone(&io),
+            runtime_root: Some(runtime_root.clone()),
+            gate: Arc::clone(&gate),
+            readiness: Arc::new(Readiness::default()),
+        };
+        let tasks = writer.block_on(async { start(ShadowProvider::Claude, true, parts) });
+        (io, tasks)
+    };
+    let halted = |io: &LaunchedLog| {
+        let raised = io.alarms.0.lock().unwrap();
+        let halted = raised.iter().filter(|(_, alarm)| {
+            matches!(
+                alarm,
+                crate::services::tui_o::writer::WriterAlarm::Halted { .. }
+            )
+        });
+        halted.cloned().collect::<Vec<_>>()
+    };
+    let (io, tasks) = host();
+    polls(3);
+    assert_eq!(halted(&io), []);
+    // The writer's readiness is this host's own, so the launch gate is told it accepts work.
+    let _launch_gate = crate::services::herdr_launch::force_launch_gate(true, Some(true));
+    assert!(
+        crate::services::herdr_launch::herdr_admitted_for_claude_launch(Some(channel)),
+        "O owns the channel on a seeded store: {:?}",
+        io.alarms.0.lock().unwrap()
+    );
+
+    let a = uuid();
+    let transcript = herdr.ingress.transcript(&a);
+    let nonce = herdr.launch(&a);
+    let reader = herdr.pane(&nonce, |_| {});
+    let attached = herdr.launched(&nonce, &a, &reader);
+    assert!(
+        matches!(attached, HerdrSourceAttach::Published { bound: true, .. }),
+        "{attached:?}"
+    );
+    let result = |id: &str, text: &str| {
+        let row = json!({
+            "type": "assistant", "uuid": format!("u-{id}"), "apiBlockIndex": 0,
+            "message": {"id": id, "content": [{"type": "text", "text": text}]},
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
+    };
+    polls(3);
+    result("m1", "posted before the stop");
+    polls(3);
+    assert_eq!(
+        posts.to(channel),
+        ["posted before the stop"],
+        "{:?}",
+        io.alarms.0.lock().unwrap()
+    );
+    // Recorded with no poll in between, so the stopped writer never read it.
+    result("m2", "recorded at the stop");
+    tasks.iter().for_each(tokio::task::JoinHandle::abort);
+    polls(2);
+    let store = runtime_root.join("o_store").join(channel.to_string());
+    let written = std::fs::read(store.join("init")).unwrap();
+
+    let (io, tasks) = host();
+    polls(6);
+    assert_eq!(halted(&io), []);
+    assert_eq!(
+        std::fs::read(store.join("init")).unwrap(),
+        written,
+        "the restart takes the store back rather than starting another"
+    );
+    assert_eq!(
+        posts.to(channel),
+        ["posted before the stop", "recorded at the stop"]
+    );
+    tasks.iter().for_each(tokio::task::JoinHandle::abort);
+    polls(2);
+}

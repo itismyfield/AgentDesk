@@ -4870,6 +4870,7 @@ services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::cr
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_on_a_withheld_herdr_pane_reports_the_withhold_not_a_reused_watcher
+services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_repeated_rebind_on_a_withheld_pane_adopts_fences_and_announces_nothing
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::relay_setup_failure_rollbacks_are_exact_episode_guarded
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::replacement_after_adoption_before_claim_is_untouched
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::replacement_writer_linearizes_after_episode_authority_handoff
@@ -7047,6 +7048,7 @@ services::discord::tui_prompt_relay::claude_idle_runtime::tests::timestamp_conti
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::transcript_binding_refresh_requires_recent_activity
 services::discord::tui_prompt_relay::claude_idle_tail::host_tests::a_session_marked_for_another_host_never_reads_a_live_pane
 services::discord::tui_prompt_relay::claude_idle_tail::host_tests::the_idle_tail_reads_a_session_dead_only_through_its_tmux_host
+services::discord::tui_prompt_relay::herdr_source::tests::a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg
 services::discord::tui_prompt_relay::herdr_source::tests::a_refused_restart_attach_withholds_hook_switches_until_a_match_pg
 services::discord::tui_prompt_relay::herdr_source::tests::herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source_pg
 services::discord::tui_prompt_relay::herdr_source::tests::herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_pg
@@ -7660,6 +7662,7 @@ services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_skips_and_does_not_clobber_a_re_owned_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_uses_explicit_pre_mutation_identity
 services::discord::turn_bridge::runtime_handoff_loop::tests::direct_tmux_adoption_rejects_claim_evicted_before_publication
+services::discord::turn_bridge::runtime_handoff_loop::tests::herdr_owner::a_listing_inside_a_legacy_handoff_lands_after_its_claim
 services::discord::turn_bridge::runtime_handoff_loop::tests::herdr_owner::a_withheld_handoff_records_no_owner_and_a_legacy_one_records_it_before_the_claim
 services::discord::turn_bridge::runtime_handoff_loop::tests::legacy_tmux_ready_reowned_row_never_claims_or_starts_watcher
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_ready_skips_reowned_row_and_does_not_queue_stale_flush

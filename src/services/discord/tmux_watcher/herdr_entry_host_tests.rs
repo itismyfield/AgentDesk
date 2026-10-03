@@ -12,6 +12,7 @@ use crate::services::tmux_common::session_temp_path;
 const T0: &str = "ADK-P8-3 T0 delivered before the watcher attached";
 const S1: &str = "ADK-P8-3 S1 streamed while the row exists";
 const S2: &str = "ADK-P8-3 S2 streamed when the row lapses";
+const S3: &str = "ADK-P9 S3 streamed after the terminal with no row";
 const PANEL: &str = "ADK-P8-3 status panel";
 const PLACEHOLDER: &str = "⠋ ADK-P8-4 placeholder";
 const BASE: u64 = 90;
@@ -166,7 +167,7 @@ async fn a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves
 
 // The terminal preflight parked at its abandonment check while the row lapses and a launch
 // moves the session to Herdr re-reads the host on resume: no capture, no orphan cleanup and,
-// whatever the pane would read, no row re-acquired.
+// whatever the pane would read, no row re-acquired by the output that follows the terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel() {
     let test = "a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel";
@@ -187,6 +188,9 @@ async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping
         lapse_onto_herdr_while_parked(&h, &paused, pane);
         resume.send(()).unwrap();
         h.drained("terminal frame").await;
+        // Row-less output after a relayed terminal is where a busy pane re-acquires a row.
+        h.append(said(S3).as_bytes());
+        h.drained("post-terminal output").await;
         seen.push((
             pane,
             panel_kept(&h, panel),

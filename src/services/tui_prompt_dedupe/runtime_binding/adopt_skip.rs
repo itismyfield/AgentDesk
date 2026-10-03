@@ -108,9 +108,32 @@ fn listed<R>(read: impl FnOnce(&AtomicBool) -> R) -> R {
     LISTED.with(read)
 }
 
+/// Per-pane locks ordering a listing against a handoff's owner judgement; outermost of the locks.
+static LISTING_ORDER: LazyLock<Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+/// The lock a handoff holds on `logical` from its owner judgement until its claim commits, so a
+/// launch or reconcile lists the pane before that judgement or after the claim, never between.
+pub(crate) fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
+    let mut locks = LISTING_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(lock) = locks.get(logical).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let lock = std::sync::Arc::new(Mutex::new(()));
+    locks.insert(logical.to_owned(), std::sync::Arc::downgrade(&lock));
+    lock
+}
+
 /// Changes `logical`'s hold in the source authority hooks adopt under, so a hook past its check
 /// commits before the change returns and a later hook sees the change.
 fn change_hold(logical: &str, change: impl FnOnce(&mut HashMap<String, (String, bool)>)) {
+    let order = herdr_listing_order(logical);
+    #[cfg(test)]
+    if let Err(std::sync::TryLockError::WouldBlock) = order.try_lock() {
+        HOLD_CONTENDED.with_borrow(|sent| sent.as_ref().map(|tx| tx.send("listing contended")));
+    }
+    let _order = order.lock().unwrap_or_else(|p| p.into_inner());
     crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
         listed(|flag| flag.fetch_or(true, AcqRel));
         #[cfg(test)]
@@ -123,9 +146,13 @@ fn change_hold(logical: &str, change: impl FnOnce(&mut HashMap<String, (String, 
 
 #[cfg(test)]
 thread_local! {
-    /// Told when this thread's hold change waits on a claim holding the admission map.
+    /// Told when this thread's hold change waits on a handoff or a claim holding the map.
     pub(crate) static HOLD_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<&'static str>>> =
         const { std::cell::RefCell::new(None) };
+    /// Parks this thread's next claim before it reads its admission, until the test resumes it.
+    pub(crate) static ADMISSION_PAUSE: std::cell::RefCell<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
 /// The admission a watcher claim on `logical` commits under, the map locked until it drops.
@@ -135,6 +162,11 @@ pub(crate) fn herdr_claim_admission(
     logical: &str,
     herdr_host: bool,
 ) -> Result<Option<std::sync::MutexGuard<'static, HashMap<String, (String, bool)>>>, ()> {
+    #[cfg(test)]
+    ADMISSION_PAUSE.with_borrow_mut(|pause| {
+        let (paused, resume) = pause.take()?;
+        paused.send(()).ok().and_then(|()| resume.recv().ok())
+    });
     if !herdr_host && !listed(|flag| flag.load(Acquire)) {
         return Ok(None);
     }
@@ -179,7 +211,7 @@ pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
 }
 
 /// Whether a claim on `logical` may be withheld: a Herdr host, or a pane a launch listed.
-/// Any other claim is admitted, whatever other panes are listed.
+/// Any other claim is admitted, whatever other panes are listed. Read under `herdr_listing_order`.
 pub(crate) fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
     herdr_host || herdr_execution_listed(logical)
 }
@@ -206,54 +238,4 @@ fn herdr_execution_withheld(logical: &str) -> bool {
     executions
         .get(logical)
         .is_some_and(|(_, admitted)| !admitted)
-}
-
-#[cfg(test)]
-mod herdr_race_condition_tests {
-    use super::*;
-
-    /// Verify fail-closed behavior: once an execution is withheld, any claim on it fails.
-    /// This simulates the race: herdr_claim_may_be_withheld reads not-yet-listed, then
-    /// execution becomes listed and withheld before herdr_claim_admission reads it.
-    #[test]
-    fn herdr_claim_admission_fails_closed_on_withheld_execution() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        LISTED.with(|flag| flag.store(true, std::sync::atomic::Ordering::Release));
-
-        let logical = "test-herdr-race-pane";
-
-        // Scenario 1: execution not yet installed
-        // Both checks should succeed (not withheld, not listed)
-        assert!(
-            !herdr_claim_may_be_withheld(logical, false),
-            "not yet installed"
-        );
-        assert!(
-            herdr_claim_admission(logical, false).is_ok(),
-            "not yet installed"
-        );
-
-        // Scenario 2: execution installed but withheld
-        install_herdr_execution(logical, "race-nonce");
-        withhold_herdr_execution(logical, Some("race-nonce"));
-
-        // Now both checks should fail (withheld)
-        assert!(herdr_claim_may_be_withheld(logical, false), "is withheld");
-        assert!(
-            herdr_claim_admission(logical, false).is_err(),
-            "admission fails for withheld pane"
-        );
-
-        // Scenario 3: execution admitted
-        admit_herdr_execution(logical, "race-nonce");
-
-        // Now checks should pass (admitted)
-        assert!(herdr_claim_may_be_withheld(logical, false), "still listed");
-        assert!(
-            herdr_claim_admission(logical, false).is_ok(),
-            "admission succeeds for admitted pane"
-        );
-    }
 }

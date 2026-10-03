@@ -220,6 +220,8 @@ async fn rebind_inflight_for_channel_inner(
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id =
         super::inflight::opt_channel_id(channel_id).ok_or(RebindError::ChannelIdZero)?;
+    #[cfg(unix)]
+    watcher_claim::admitted(shared, provider, discord_channel_id, &tmux_session_override).await?;
 
     // Preflight existence check — fast 409 before walking the validation /
     // tmux-liveness path. Advisory only; the AUTHORITATIVE guard is the atomic
