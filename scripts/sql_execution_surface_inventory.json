@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "9aaaebf2b757c6f8f08819d239b7efc93a5563ac",
+  "measured_at_sha": "c16e5a20b805efb9370b9c63d7dff1712ac5bf22",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26344,6 +26344,33 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:f138e2295bb7cc5406e95b4ecd2466286e2cb24b35d43b13e0a88d9f2e8476cf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:71cf32b85c7f46020d63cc5a2cea22483a9725dc0accf2c6f5842f63d9baffd2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3f20de78ccf1b1ead96fff38571a091e84b5d3a18b7fd4f2584cd5fbf68987a3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f2a9e54a0121b60ccf5c82b9320efe06577ab7e3494d5563392fcd3949d1c2f7"
     },
     {
       "root": "src",

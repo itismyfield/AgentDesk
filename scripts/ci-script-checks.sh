@@ -724,6 +724,7 @@ if run_check contracts "Shell test suites (tests/*.sh)"; then
 SHELL_TESTS_FAILED=0
 required_shell_suites=(
   tests/test_cluster_deploy_peer_verdict_5189.sh
+  tests/test_deploy_e2e_readers_gate_6577.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
   tests/test_deploy_o_writer_rollback_guard_6325.sh
   tests/test_deploy_smoke_scope.sh
