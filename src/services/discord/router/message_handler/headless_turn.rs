@@ -1,5 +1,6 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
 use super::*;
+use crate::services::discord::live_bridge::register_or_requeue;
 
 mod routine_metadata;
 use routine_metadata::{
@@ -899,27 +900,21 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         None,
         false,
     );
-    let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
-        shared,
-        &provider,
-        &deferred_state,
-        &cancel_token,
-    )
-    .await
-    {
-        Ok(registration) => registration,
-        Err(true) => {
-            return Ok(HeadlessTurnStartOutcome {
-                turn_id: reservation.turn_id(channel_id),
-                status: HeadlessTurnStartStatus::Consumed,
-            });
-        }
-        Err(false) => {
-            return Err(HeadlessTurnStartError::Internal(
-                "original bridge start deferred; retry enqueue refused".into(),
-            ));
-        }
-    };
+    let original_registration =
+        match register_or_requeue(shared, &provider, &deferred_state, &cancel_token).await {
+            Ok(registration) => registration,
+            Err(true) => {
+                return Ok(HeadlessTurnStartOutcome {
+                    turn_id: reservation.turn_id(channel_id),
+                    status: HeadlessTurnStartStatus::Consumed,
+                });
+            }
+            Err(false) => {
+                return Err(HeadlessTurnStartError::Internal(
+                    "original bridge start deferred; retry enqueue refused".into(),
+                ));
+            }
+        };
     super::intake_turn::inflight_create_log::log_create_new_inflight_outcome(
         crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state),
         &provider,

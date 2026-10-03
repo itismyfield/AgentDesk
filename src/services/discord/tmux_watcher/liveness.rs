@@ -497,8 +497,7 @@ pub(in crate::services::discord) fn reacquire_watcher_inflight_for_active_stream
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         return false;
     }
-    let Ok(_recovery) =
-        crate::services::discord::live_bridge::try_recovery(provider, channel_id.get())
+    let Ok(_recovery) = super::super::super::live_bridge::try_recovery(provider, channel_id.get())
     else {
         return false;
     };

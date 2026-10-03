@@ -793,7 +793,7 @@ fn original_and_restore_source_coverage_preserves_admission_order() {
         include_str!("../router/message_handler/intake_turn.rs"),
         include_str!("../router/message_handler/headless_turn.rs"),
     ] {
-        let register = source.find("live_bridge::register_or_requeue(").unwrap();
+        let register = source.find("register_or_requeue(").unwrap();
         let create = source[register..]
             .find("save_inflight_state_create_new(")
             .unwrap()
