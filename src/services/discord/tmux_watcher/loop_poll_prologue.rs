@@ -518,8 +518,7 @@ pub(super) async fn poll_watcher_output_or_continue(
     let post_terminal_payload_contains_assistant_event = post_terminal_payload
         .as_deref()
         .is_some_and(|payload| watcher_batch_contains_assistant_event(payload.as_bytes()));
-    // #3107: lazy pane-busy probe — capture the pane only when the cheap
-    // (terminal + no-inflight) prefix already holds (keeps `tmux capture-pane` off the hot path).
+    // Probe the pane only after a Legacy terminal relay with no inflight row.
     let post_terminal_pane_actively_streaming = turn_result_relayed
         && post_terminal_inflight_missing
         && !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())

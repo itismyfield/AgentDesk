@@ -44,7 +44,7 @@
     },
     "watcher_cancel": {
       "files": {
-        "src/services/discord/tui_prompt_relay/relay_e2e/n1a_turn_mode_tests.rs": 1,
+        "src/services/discord/tui_prompt_relay/relay_e2e/n1a_turn_mode_tests.rs": 2,
         "src/services/discord/health/recovery.rs": 2,
         "src/services/discord/health/relay_auto_heal.rs": 1,
         "src/services/discord/inflight/destructive_commit.rs": 1,
