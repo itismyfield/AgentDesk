@@ -364,9 +364,16 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
                 prompt_id,
                 ..
             } => {
+                advance_claude_tmux_runtime_binding_offset(
+                    &tmux_session_name,
+                    &transcript_path,
+                    line_end_offset,
+                );
+                if transcript_turns {
+                    continue;
+                }
                 let observed_at = chrono::Utc::now();
-                // Row uuid and `promptId` suppress a re-scanned or hook-relayed
-                // prompt by identity; without them only the 30s content window applies.
+                // Row uuid and `promptId` suppress replay; otherwise use the content window.
                 let observation =
                     crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at(
                         ProviderKind::Claude.as_str(),
@@ -384,14 +391,7 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
                     prompt_id = prompt_id.as_deref().unwrap_or(""),
                     "Claude idle transcript relay observed prompt"
                 );
-                advance_claude_tmux_runtime_binding_offset(
-                    &tmux_session_name,
-                    &transcript_path,
-                    line_end_offset,
-                );
-                if transcript_turns
-                    || !claude_idle_prompt_observation_should_tail_response(observation)
-                {
+                if !claude_idle_prompt_observation_should_tail_response(observation) {
                     continue;
                 }
                 // #3305/#4033/#4082: use the same injected-prompt decision
