@@ -1158,6 +1158,7 @@ services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_t
 services::discord::tmux_reaper::host_guard_tests::orphan_cleanup_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg
+services::discord::tui_prompt_relay::herdr_source::tests::a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg
 services::discord::tui_prompt_relay::herdr_source::tests::a_refused_restart_attach_withholds_hook_switches_until_a_match_pg
 services::discord::tui_prompt_relay::herdr_source::tests::herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source_pg
 services::discord::tui_prompt_relay::herdr_source::tests::herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_pg
