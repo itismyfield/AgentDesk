@@ -53,21 +53,16 @@ pub(crate) use watchdog_decisions::{
     stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 
-#[cfg(test)]
-mod judged_finish_hook;
 mod stop_judgement;
 mod stop_result;
-use crate::services::turn_orchestrator::TokenFinish;
-use discord::MailboxLookup::{Create, Peek};
-use stop_judgement::{host_guard_preserved, preserved};
+use stop_judgement::host_guard_preserved;
 pub(crate) use stop_judgement::{
     judge_provider_channel_stop, stop_channel_runtime, stop_judged_provider_channel,
     stop_provider_channel_runtime_with_policy,
 };
-pub(crate) use stop_result::{FINISH_UNOBSERVED_PATH, TOKEN_SUPERSEDED_PATH};
 pub use stop_result::{
-    FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult, InflightDisposition,
-    RuntimeTurnStopResult,
+    FINISH_UNOBSERVED_PATH, FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult,
+    InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -360,7 +355,7 @@ async fn stop_judged_channel_runtime(
     let stop = match stop {
         Ok(stop) => stop,
         Err(_) if approved.is_some() => {
-            return preserved(shared, channel_id, RuntimeTurnStopResult::finish_unobserved).await;
+            return stop_judgement::unobserved(shared, channel_id).await;
         }
         Err(_) => return host_guard_preserved(shared, channel_id).await,
     };
@@ -442,23 +437,11 @@ async fn stop_judged_channel_runtime(
 
     let owned_role_override =
         discord::turn_finalizer::cleanup::snapshot_role_override(&shared, channel_id);
-    let key = stop.as_ref().map(discord::turn_bridge::ChannelStop::token);
-    let finish = discord::mailbox_finish_judged_turn(&shared, &provider, channel_id, key, Create);
+    let judged = (stop.as_ref(), judged_termination);
+    let finish = stop_judgement::finish_judged_turn(&shared, &provider, channel_id, judged);
     let finish = match finish.await {
-        TokenFinish::Finished(finish) | TokenFinish::NoActiveTurn(finish) => finish,
-        TokenFinish::TokenMismatch { .. } => {
-            let superseded =
-                |depth| RuntimeTurnStopResult::token_superseded(depth, judged_termination);
-            return preserved(&shared, channel_id, superseded).await;
-        }
-        TokenFinish::Unavailable | TokenFinish::NoMailbox => {
-            return preserved(
-                &shared,
-                channel_id,
-                RuntimeTurnStopResult::finish_unobserved,
-            )
-            .await;
-        }
+        Ok(finish) => finish,
+        Err(kept) => return kept,
     };
     let mut termination_recorded = false;
     // The finish removes only the judged token.
@@ -1371,8 +1354,6 @@ async fn runtime_turn_cleanup_by_lookup(
         let judged =
             discord::turn_bridge::ChannelStop::judge(shared, provider, channel, None, false);
         let judged = judged.await;
-        #[cfg(test)]
-        judged_finish_hook::after_judge(channel).await;
         if !stop_watcher && discord::turn_bridge::keeps_turn(&judged) {
             let (cleanup_path, had_active_turn) = ("host-guard-kept", true);
             let kept = HardStopRuntimeResult::default();
@@ -1382,22 +1363,14 @@ async fn runtime_turn_cleanup_by_lookup(
                 ..kept
             };
         }
-        let Ok(stop) = &judged else {
-            return HardStopRuntimeResult::finish_unobserved();
-        };
         let owned_role_override = discord::turn_finalizer::cleanup::snapshot_role_override(
             &runtime.shared,
             runtime.channel_id,
         );
-        let key = stop.as_ref().map(discord::turn_bridge::ChannelStop::token);
-        let finish = discord::mailbox_finish_judged_turn(shared, provider, channel, key, Peek);
-        let finish = match finish.await {
-            TokenFinish::Finished(finish) | TokenFinish::NoActiveTurn(finish) => finish,
-            TokenFinish::NoMailbox => discord::unavailable_finish_turn_result(),
-            TokenFinish::TokenMismatch { has_pending } => {
-                return HardStopRuntimeResult::token_superseded(has_pending);
-            }
-            TokenFinish::Unavailable => return HardStopRuntimeResult::finish_unobserved(),
+        let finish = stop_judgement::finish_found_turn(shared, provider, channel, &judged).await;
+        let finish = match finish {
+            Ok(finish) => finish,
+            Err(kept) => return kept,
         };
         let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
             &runtime.shared,

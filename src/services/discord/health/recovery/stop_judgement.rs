@@ -4,11 +4,16 @@ use std::sync::Arc;
 
 use serenity::ChannelId;
 
-use super::{HealthRegistry, RuntimeTurnStopResult, shared_for_provider};
+use super::{HardStopRuntimeResult, HealthRegistry, RuntimeTurnStopResult, shared_for_provider};
+use crate::services::discord::MailboxLookup::{Create, Peek};
 use crate::services::discord::turn_bridge::{ChannelJudgement, ChannelStop, keeps_turn};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::{FinishTurnResult, TokenFinish};
 use poise::serenity_prelude as serenity;
+
+#[cfg(test)]
+mod judged_finish_tests;
 
 /// The runtime a stop resolved for a provider channel and its turn's verdict; nothing written.
 pub(crate) struct ProviderChannelStop(Option<JudgedChannel>);
@@ -105,7 +110,7 @@ pub(crate) async fn stop_channel_runtime(
 ) -> RuntimeTurnStopResult {
     let stop = ChannelStop::judge(shared, provider, channel_id, approved, false).await;
     #[cfg(test)]
-    super::judged_finish_hook::after_judge(channel_id).await;
+    judged_finish_tests::after_judge(channel_id).await;
     let policy = cleanup_policy;
     let run = super::stop_judged_channel_runtime;
     run(shared, provider, channel_id, stop, reason, policy, approved).await
@@ -132,4 +137,55 @@ pub(super) async fn preserved(
 ) -> RuntimeTurnStopResult {
     let snapshot = discord::mailbox_snapshot(shared, channel).await;
     kept(snapshot.intervention_queue.len())
+}
+
+/// The result of a stop whose finish went unobserved: nothing was finished or cleared.
+pub(super) async fn unobserved(shared: &SharedData, channel: ChannelId) -> RuntimeTurnStopResult {
+    preserved(shared, channel, RuntimeTurnStopResult::finish_unobserved).await
+}
+
+/// Finishes the channel's turn only while it is still the one `judged` stopped, or no turn when
+/// it judged none. `Err` is the stop's result when another turn holds the channel or the finish
+/// went unobserved; nothing was finished or cleared then.
+pub(super) async fn finish_judged_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    (stop, judged_termination): (Option<&ChannelStop>, bool),
+) -> Result<FinishTurnResult, RuntimeTurnStopResult> {
+    let key = stop.map(ChannelStop::token);
+    let finish = discord::mailbox_finish_judged_turn(shared, provider, channel, key, Create);
+    match finish.await {
+        TokenFinish::Finished(finish) | TokenFinish::NoActiveTurn(finish) => Ok(finish),
+        TokenFinish::TokenMismatch { .. } => {
+            let superseded =
+                |depth| RuntimeTurnStopResult::token_superseded(depth, judged_termination);
+            Err(preserved(shared, channel, superseded).await)
+        }
+        TokenFinish::Unavailable | TokenFinish::NoMailbox => Err(unobserved(shared, channel).await),
+    }
+}
+
+/// The name-lookup stop's finish of the turn it judged on the runtime it found; with no actor
+/// registered there it finishes as offline. `Err` keeps the turn, as for [`finish_judged_turn`].
+pub(super) async fn finish_found_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    judged: &ChannelJudgement,
+) -> Result<FinishTurnResult, HardStopRuntimeResult> {
+    #[cfg(test)]
+    judged_finish_tests::after_judge(channel).await;
+    let Ok(stop) = judged else {
+        return Err(HardStopRuntimeResult::finish_unobserved());
+    };
+    let key = stop.as_ref().map(ChannelStop::token);
+    match discord::mailbox_finish_judged_turn(shared, provider, channel, key, Peek).await {
+        TokenFinish::Finished(finish) | TokenFinish::NoActiveTurn(finish) => Ok(finish),
+        TokenFinish::NoMailbox => Ok(discord::unavailable_finish_turn_result()),
+        TokenFinish::TokenMismatch { has_pending } => {
+            Err(HardStopRuntimeResult::token_superseded(has_pending))
+        }
+        TokenFinish::Unavailable => Err(HardStopRuntimeResult::finish_unobserved()),
+    }
 }
