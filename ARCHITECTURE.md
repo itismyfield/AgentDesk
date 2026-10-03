@@ -1543,6 +1543,7 @@ src/
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
 │   │   │   │   ├── process_table.rs
+│   │   │   │   ├── session_stop.rs
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs

@@ -312,6 +312,15 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     tmux_session: Option<String>,
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
+    interrupt_claude_session(Some(token), tmux_session, reason, None).await
+}
+
+pub(super) async fn interrupt_claude_session(
+    token: Option<&Arc<CancelToken>>,
+    tmux_session: Option<String>,
+    reason: &str,
+    observed_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+) -> ProviderTurnInterruptOutcome {
     // #3169: an anonymous internal PreserveSession teardown
     // (`turn_bridge_cancelled`, no user `cancel_source`) must NOT cancel the
     // live claude turn — leave it running for the watcher to reconcile, exactly
@@ -336,26 +345,33 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         };
     };
 
-    let expected_generation = token.claude_interrupt_generation();
-    let Some(mut reservation) = ClaudeStopDeliveryReservation::claim(token) else {
-        tracing::info!(
-            "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism=not_probed runtime_kind=not_probed structured_state=not_probed pane_ready=not_probed pane_active=not_probed pane_has_draft=not_probed phase=not_probed decision={}",
-            session_name,
-            expected_generation,
-            reason,
-            ClaudeStopDeliveryDecision::SkipDuplicate.as_str()
-        );
-        return ProviderTurnInterruptOutcome {
-            tmux_session,
-            sent_keys: false,
-            fallback_sigint_pid: None,
-            missing_tmux_session: false,
-            sigint_target_missing: false,
-        };
+    let expected_generation = token.map_or(0, |token| token.claude_interrupt_generation());
+    let _reservation = match token {
+        Some(token) => {
+            let Some(reservation) = ClaudeStopDeliveryReservation::claim(token) else {
+                tracing::info!(
+                    "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism=not_probed runtime_kind=not_probed structured_state=not_probed pane_ready=not_probed pane_active=not_probed pane_has_draft=not_probed phase=not_probed decision={}",
+                    session_name,
+                    expected_generation,
+                    reason,
+                    ClaudeStopDeliveryDecision::SkipDuplicate.as_str()
+                );
+                return ProviderTurnInterruptOutcome {
+                    tmux_session,
+                    sent_keys: false,
+                    fallback_sigint_pid: None,
+                    missing_tmux_session: false,
+                    sigint_target_missing: false,
+                };
+            };
+
+            Some(reservation)
+        }
+        None => None,
     };
 
     let session_for_probe = session_name.clone();
-    let token_for_probe = Arc::clone(token);
+    let token_for_probe = token.cloned();
     let probe_result = tokio::task::spawn_blocking(move || {
         let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_probe);
         let delivery = claude_turn_interrupt_delivery(is_wrapper);
@@ -423,7 +439,9 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             ),
             ClaudeTurnInterruptDelivery::StreamJsonControlRequest => stream_json_interrupt_phase(
                 structured_state,
-                token_for_probe.claude_interrupt_submit_pending(),
+                token_for_probe
+                    .as_ref()
+                    .is_some_and(|token| token.claude_interrupt_submit_pending()),
             ),
         };
         (
@@ -470,6 +488,11 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         }
     };
 
+    let phase = if token.is_none() && observed_open.as_ref().is_some_and(|open| open()) {
+        ClaudeTuiInterruptPhase::ActiveGeneration
+    } else {
+        phase
+    };
     let decision = decide_claimed_claude_stop_delivery(delivery, phase);
     tracing::info!(
         "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism={:?} runtime_kind={} structured_state={} pane_ready={} pane_active={} pane_has_draft={} phase={} decision={}",
@@ -512,35 +535,51 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     // lock (which can wait up to `SELECTOR_OPEN_TIMEOUT` + confirm). The `write`
     // closure below is provider I/O only — it acquires no composer lock.
     let session_for_task = session_name.clone();
-    let token_for_task = Arc::clone(token);
+    let token_for_task = token.cloned();
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
     let delivery_result = tokio::task::spawn_blocking(move || {
-        deliver_claimed_claude_stop_under_lock_order(
-            token_for_task.as_ref(),
-            &session_for_task,
-            delivery,
-            turn_identity.as_ref(),
-            || match delivery {
-                ClaudeTurnInterruptDelivery::TuiEscape => {
-                    match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"])
-                    {
-                        Ok(output) if output.status.success() => Ok(()),
-                        Ok(output) => Err(format!(
-                            "tmux send-keys Escape failed: status={}",
-                            output.status
-                        )),
-                        Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+        let write = || match delivery {
+            ClaudeTurnInterruptDelivery::TuiEscape => {
+                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
+                    Ok(output) if output.status.success() => Ok(()),
+                    Ok(output) => Err(format!(
+                        "tmux send-keys Escape failed: status={}",
+                        output.status
+                    )),
+                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+                }
+            }
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
+                let Some(input_fifo) = wrapper_input_fifo_path else {
+                    return Err("claude wrapper input FIFO unavailable after probe".to_string());
+                };
+                let line = build_claude_interrupt_control_line(&request_id);
+                write_line_to_wrapper_fifo(&input_fifo, &line)
+            }
+        };
+        match token_for_task.as_ref() {
+            Some(token) => deliver_claimed_claude_stop_under_lock_order(
+                token,
+                &session_for_task,
+                delivery,
+                turn_identity.as_ref(),
+                write,
+            ),
+            None => {
+                let deliver = || {
+                    if !observed_open.as_ref().is_some_and(|open| open()) {
+                        return Err("session stop no longer observes its bound open turn".into());
                     }
+                    write()
+                };
+                match delivery {
+                    ClaudeTurnInterruptDelivery::TuiEscape => {
+                        deliver_tui_escape_under_composer_lock(&session_for_task, deliver)
+                    }
+                    ClaudeTurnInterruptDelivery::StreamJsonControlRequest => deliver(),
                 }
-                ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
-                    let Some(input_fifo) = wrapper_input_fifo_path else {
-                        return Err("claude wrapper input FIFO unavailable after probe".to_string());
-                    };
-                    let line = build_claude_interrupt_control_line(&request_id);
-                    write_line_to_wrapper_fifo(&input_fifo, &line)
-                }
-            },
-        )
+            }
+        }
         .map_err(|error| format!("{error}: expected_generation={expected_generation}"))
     })
     .await;

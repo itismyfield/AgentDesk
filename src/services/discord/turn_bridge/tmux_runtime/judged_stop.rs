@@ -203,6 +203,7 @@ pub(in crate::services::discord) enum CommandStop {
     HostRefused,
     AlreadyStopping,
     Stop(ChannelStop),
+    Session(super::SessionStop),
 }
 
 /// A user stop: judged before any write, then cancelled only when the host is admitted.
@@ -212,6 +213,9 @@ pub(in crate::services::discord) async fn begin_command_stop(
     channel: ChannelId,
     bind_unbound: bool,
 ) -> CommandStop {
+    if crate::services::tui_o::turn_mode::transcript_turns(channel.get()) {
+        return super::SessionStop::judge(shared, provider, channel).await;
+    }
     let judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
     if keeps_turn(&judgement) {
         return CommandStop::HostRefused;
