@@ -32,6 +32,9 @@ mod judged_stop_harness_tests;
 #[path = "herdr_entry_host_tests.rs"]
 mod herdr_entry_host_tests;
 
+#[path = "n1a_turn_mode_tests.rs"]
+mod n1a_turn_mode_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
