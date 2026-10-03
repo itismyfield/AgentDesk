@@ -658,7 +658,7 @@ fn keep_channel(tmux_session: &str, channel_id: u64) {
     if channel_id != 0 && runtime_binding_for_tmux_session(tmux_session).is_some() {
         let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
         state.purge_expired();
-        let recorded_at = std::time::Instant::now();
+        let recorded_at = super::Instant::now();
         let mapping = super::TimedValue {
             value: channel_id,
             recorded_at,
@@ -705,9 +705,10 @@ pub(crate) fn reset_restore_outcomes_for_tests() {
 #[cfg(test)]
 pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
-    let aged = std::time::Instant::now() - super::SESSION_MAPPING_TTL;
+    let aged =
+        state.aged_stamp_for_tests(super::SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
     if let Some(mapping) = state.channel_by_tmux.get_mut(tmux_session) {
-        mapping.recorded_at = aged - std::time::Duration::from_secs(1);
+        mapping.recorded_at = aged;
     }
 }
 
@@ -715,9 +716,10 @@ pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
 #[cfg(test)]
 pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
-    let aged = std::time::Instant::now() - super::SESSION_MAPPING_TTL;
+    let aged =
+        state.aged_stamp_for_tests(super::SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
     if let Some(binding) = state.runtime_by_tmux.get_mut(tmux_session) {
-        binding.recorded_at = aged - std::time::Duration::from_secs(1);
+        binding.recorded_at = aged;
     }
 }
 
@@ -728,11 +730,9 @@ pub(crate) const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPI
 #[cfg(test)]
 pub(crate) fn age_channel_mapping_for_tests(tmux_session: &str, by: std::time::Duration) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
+    state.aged_stamp_for_tests(by);
     if let Some(mapping) = state.channel_by_tmux.get_mut(tmux_session) {
-        mapping.recorded_at = mapping
-            .recorded_at
-            .checked_sub(by)
-            .expect("uptime spans the age");
+        mapping.recorded_at -= by;
     }
 }
 

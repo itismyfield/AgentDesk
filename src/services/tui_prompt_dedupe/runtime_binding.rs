@@ -310,6 +310,7 @@ pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
 pub(crate) fn reset_state_for_tests() {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     *state = TuiPromptDedupeState::default();
+    Instant::reset();
 }
 
 /// Test-only: when the runtime binding for `tmux_session_name` was last written.
@@ -322,12 +323,7 @@ pub(crate) fn runtime_binding_recorded_at_for_tests(tmux_session_name: &str) -> 
         .map(|entry| entry.recorded_at)
 }
 
-/// Test-only: record a prompt anchor whose `recorded_at` is backdated by `age`,
-/// so a test can simulate an anchor stamped at submit time for a turn that has
-/// been streaming for `age`. Crate-visible so sibling modules (e.g. the
-/// `turn_bridge` same-input correlation tests) can pin that a long streaming
-/// turn's anchor still resolves past the legacy 30min purge under
-/// `PROMPT_ANCHOR_SUBMIT_TTL`.
+/// Records an aged anchor using a forward-moving test clock, preserving other records' ages.
 #[cfg(test)]
 pub(crate) fn record_prompt_anchor_aged_for_tests(
     provider: &str,
@@ -342,6 +338,7 @@ pub(crate) fn record_prompt_anchor_aged_for_tests(
         return;
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let recorded_at = state.aged_stamp_for_tests(age);
     state.prompt_anchor_by_tmux.insert(
         PromptKey::new(&provider, tmux_session_name),
         TimedValue {
@@ -349,7 +346,7 @@ pub(crate) fn record_prompt_anchor_aged_for_tests(
                 channel_id,
                 message_id,
             },
-            recorded_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+            recorded_at,
         },
     );
 }
@@ -1011,7 +1008,10 @@ mod shadow_session_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         reset_state_for_tests();
-        let expired = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+        let expired = {
+            let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+            state.aged_stamp_for_tests(SESSION_MAPPING_TTL + Duration::from_secs(1))
+        };
         let binding = |runtime_kind| TuiRuntimeBinding {
             runtime_kind,
             output_path: "/t/s.jsonl".into(),

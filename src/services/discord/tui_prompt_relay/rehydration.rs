@@ -27,14 +27,14 @@ mod codex_marker;
 #[cfg(unix)]
 use codex_marker::{CodexTuiMarkerRehydrateDecision, codex_tui_marker_rehydrate_decision};
 
-#[cfg(not(test))]
+#[cfg(any(not(test), not(unix)))]
 use super::resolve_rehydrated_claude_tmux_channel_id as claude_channel;
-#[cfg(not(test))]
+#[cfg(any(not(test), not(unix)))]
 use crate::services::{
     platform::tmux::list_session_names as claude_session_names,
     tmux_diagnostics::tmux_session_has_live_pane as claude_pane_live,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use claude_pass_tests::{claude_channel, claude_pane_live, claude_session_names};
 #[cfg(test)]
 #[path = "../../claude_tui/hook_server/rehydration_ingress_tests.rs"]
@@ -645,6 +645,7 @@ pub(crate) fn rehydrate_codex_tui_binding_for_tests(
 }
 
 #[cfg(unix)]
+
 fn tmux_session_is_codex_tui(tmux_session_name: &str) -> bool {
     if crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
         == Some(RuntimeHandoffKind::CodexTui)

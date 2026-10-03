@@ -142,7 +142,7 @@ pub(super) fn match_subagent_end_fallback(
     agent_id: Option<&str>,
     desc: Option<&str>,
 ) -> Option<usize> {
-    let now = std::time::Instant::now();
+    let now = super::panel_now();
     if let Some(agent_id) = clean_match_key(agent_id) {
         // #4396 r4: cross-key tombstone guard — the carried desc may be
         // tombstoned even when the agent_id is not (id-less departed owner).
@@ -249,6 +249,13 @@ pub(super) struct SubagentKeyTombstones {
 }
 
 impl SubagentKeyTombstones {
+    #[cfg(test)]
+    pub(super) fn forward_date_for_tests(&mut self, by: std::time::Duration) {
+        for (_, recorded_at) in &mut self.entries {
+            *recorded_at += by;
+        }
+    }
+
     const CAPACITY: usize = 32;
     const TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
@@ -322,10 +329,8 @@ mod tests {
     #[test]
     fn tombstone_expires_after_ttl_and_is_pruned_on_push() {
         let mut ring = SubagentKeyTombstones::default();
-        let now = Instant::now();
-        let stale = now
-            .checked_sub(SubagentKeyTombstones::TTL + Duration::from_secs(1))
-            .expect("monotonic clock far enough past origin");
+        let stale = Instant::now();
+        let now = stale + SubagentKeyTombstones::TTL + Duration::from_secs(1);
         ring.push_key("old", stale);
         assert!(
             !ring.contains_fresh("old", now),

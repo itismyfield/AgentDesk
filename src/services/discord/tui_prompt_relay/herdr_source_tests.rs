@@ -1,4 +1,5 @@
 //! Herdr source attach: launch and restart through the real launch, reconcile and hook receiver.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

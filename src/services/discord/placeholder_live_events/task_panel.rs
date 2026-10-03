@@ -154,7 +154,7 @@ pub(super) fn upsert_task_tool_slot(
         tool_use_id: None,
         background: false,
         ordinal: take_slot_ordinal(next_ordinal),
-        created_at: std::time::Instant::now(),
+        created_at: super::panel_now(),
     });
     trim_task_tool_slots(slots);
 }
@@ -188,7 +188,7 @@ pub(super) fn upsert_background_task_tool_slot(
         tool_use_id: Some(tool_use_id),
         background: true,
         ordinal: take_slot_ordinal(next_ordinal),
-        created_at: std::time::Instant::now(),
+        created_at: super::panel_now(),
     });
     trim_task_tool_slots(slots);
 }

@@ -613,6 +613,7 @@ impl ChannelStore {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};

@@ -1,5 +1,6 @@
 //! Captured Codex 0.157.1 hooks replayed against the rollout source verifier and the
 //! hook capability decision.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 
