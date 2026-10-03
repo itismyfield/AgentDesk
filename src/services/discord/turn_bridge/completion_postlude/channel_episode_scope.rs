@@ -456,6 +456,7 @@ mod tests {
         assert_eq!(
             callers,
             [
+                "services/discord/live_bridge/guard_tests.rs",
                 "services/discord/recovery_engine/restore_inflight.rs",
                 "services/discord/router/message_handler/headless_turn.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
@@ -466,6 +467,14 @@ mod tests {
             "every bridge entry file must declare its mailbox token-registration contract"
         );
 
+        let live_original = include_str!("../../live_bridge/guard_tests.rs");
+        assert_eq!(live_original.matches(&spawn).count(), 2);
+        for call in [
+            "spawn_turn_bridge(shared.clone(), token.clone(), rx, context);",
+            "spawn_turn_bridge(shared, token, rx, context);",
+        ] {
+            assert_eq!(live_original.matches(call).count(), 1);
+        }
         let intake = include_str!("../../router/message_handler/intake_turn.rs");
         let headless = include_str!("../../router/message_handler/headless_turn.rs");
         let recovery = include_str!("../../recovery_engine/restore_inflight.rs");

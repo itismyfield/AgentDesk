@@ -1008,6 +1008,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let producer_registration = original_registration.clone();
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
         &provider,
@@ -1016,7 +1017,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         tmux_session_name.as_deref(),
     )
     .await;
-    let producer_registration = original_registration.clone();
     tokio::task::spawn_blocking(move || {
         let _original_registration = producer_registration;
         let _upload_lifetime = materialized_uploads;
