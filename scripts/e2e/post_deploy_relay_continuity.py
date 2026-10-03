@@ -127,6 +127,28 @@ BUILTIN_FIXTURES: dict[str, dict[str, Any]] = {
             ]
         },
     },
+    "clear-body-held": {
+        **copy.deepcopy(_FIXTURE_PASS),
+        "discord": {
+            "local_output_after_restart_seen": True,
+            "post_restart_marker_seen": True,
+            "post_restart_message_id": "333",
+            "clear_body_held": True,
+        },
+    },
+    "codex-warm-kill": {
+        **copy.deepcopy(_FIXTURE_PASS),
+        "cell": "codex-tui",
+        "health_detail": {
+            "mailboxes": [
+                {
+                    **_idle_mailbox(provider="codex"),
+                    "relay_stall_state": "tmux_alive_relay_dead",
+                    "relay_owner_kind": "none",
+                }
+            ]
+        },
+    },
 }
 
 
@@ -615,6 +637,10 @@ def validate_fixture_evidence(evidence: dict[str, Any]) -> list[str]:
             )
         else:
             violations.append("Discord post-restart relay marker missing")
+
+    # Issue #6551: Body held after !clear command
+    if discord.get("clear_body_held") is True:
+        violations.append("discord clear_body_held=true (issue #6551: body withheld after !clear)")
 
     health_detail = evidence.get("health_detail")
     mailboxes = health_detail.get("mailboxes") if isinstance(health_detail, dict) else None
