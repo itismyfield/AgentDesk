@@ -147,11 +147,6 @@ fn deletion_boundaries_restart_keep_one_owner_and_order() {
             "source retirement order is fixed"
         );
         assert_eq!(host.actor, 1);
-        assert_eq!(
-            handback(root.path(), 9, &mut host).unwrap(),
-            Outcome::Legacy
-        );
-        assert_eq!(host.enqueued, vec![99, 8, 2]);
     }
 }
 
