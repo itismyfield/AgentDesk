@@ -5,12 +5,17 @@ use super::*;
 pub(crate) const CONSECUTIVE_FAILURES_REASON_CODE: &str = "routine_consecutive_failures";
 const CONSECUTIVE_FAILURES_ALERT_TTL_SECS: i64 = 24 * 60 * 60;
 
-/// Leading `failed` runs among the routine's latest terminal runs, read up to `limit` rows.
-/// `interrupted` runs (restart recovery) neither extend nor reset the streak.
-async fn consecutive_failed_runs(pool: &PgPool, routine_id: &str, limit: i64) -> Result<usize> {
-    let statuses: Vec<String> = sqlx::query_scalar(
+/// Stored leading `failed` count (up to `limit`, `interrupted` ignored) and latest error;
+/// 0 unless `run_id` is the routine's latest terminal run.
+async fn consecutive_failed_runs(
+    pool: &PgPool,
+    routine_id: &str,
+    run_id: &str,
+    limit: i64,
+) -> Result<(usize, Option<String>)> {
+    let runs: Vec<(String, String, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT status
+        SELECT id, status, error
         FROM routine_runs
         WHERE routine_id = $1
           AND status NOT IN ('running', 'interrupted')
@@ -23,32 +28,40 @@ async fn consecutive_failed_runs(pool: &PgPool, routine_id: &str, limit: i64) ->
     .fetch_all(pool)
     .await
     .map_err(|error| anyhow!("count consecutive failed routine runs {routine_id}: {error}"))?;
-    Ok(statuses
+    let Some((latest_id, _, latest_error)) = runs.first() else {
+        return Ok((0, None));
+    };
+    if latest_id != run_id {
+        return Ok((0, None));
+    }
+    let streak = runs
         .iter()
-        .take_while(|status| *status == "failed")
-        .count())
+        .take_while(|(_, status, _)| status == "failed")
+        .count();
+    Ok((streak, latest_error.clone()))
 }
 
 impl RoutineDiscordLogger {
-    /// Alerts once when `outcome` brings the routine's consecutive failures to exactly
-    /// `threshold`; later failures in the same streak stay quiet. 0 disables the alert.
+    /// Alerts once when `outcome`'s run brings the stored failure streak to exactly `threshold`
+    /// (0 disables); stored status, since the store can fail a run the outcome calls succeeded.
     pub async fn alert_consecutive_failures(
         &self,
         store: &RoutineStore,
         outcome: &RoutineRunOutcome,
         threshold: u32,
     ) -> RoutineDiscordLogStatus {
-        if threshold == 0 || outcome.status != "failed" {
+        if threshold == 0 {
             return RoutineDiscordLogStatus::skipped();
         }
-        let streak = match consecutive_failed_runs(
+        let (streak, stored_error) = match consecutive_failed_runs(
             &self.pool,
             &outcome.routine_id,
+            &outcome.run_id,
             i64::from(threshold) + 1,
         )
         .await
         {
-            Ok(streak) => streak,
+            Ok(found) => found,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
         if streak != threshold as usize {
@@ -59,7 +72,8 @@ impl RoutineDiscordLogger {
             Ok(None) => return RoutineDiscordLogStatus::skipped(),
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
-        let message = consecutive_failures_message(&routine, threshold, outcome.error.as_deref());
+        let last_error = stored_error.as_deref().or(outcome.error.as_deref());
+        let message = consecutive_failures_message(&routine, threshold, last_error);
         // Keyed by the run that completed the streak, so re-logging that outcome cannot repeat it.
         let session_key = format!(
             "routine:{}:consecutive_failures:{}",
@@ -83,7 +97,7 @@ impl RoutineDiscordLogger {
                 routine_id = %routine.id,
                 routine = %routine.name,
                 consecutive_failures = threshold,
-                error = ?outcome.error,
+                error = ?last_error,
                 "routine consecutive-failure alert could not be enqueued"
             );
         }

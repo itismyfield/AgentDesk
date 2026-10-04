@@ -234,3 +234,94 @@ async fn consecutive_failure_alert_fires_once_per_streak_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn checkpoint_rejected_completion_counts_toward_the_failure_alert_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("oversized-checkpoint.js");
+    std::fs::write(
+        &script_path,
+        r#"agentdesk.routines.register({
+          name: "Oversized checkpoint",
+          tick(ctx) { return { action: "complete", checkpoint: { blob: "x".repeat(512) } }; }
+        });"#,
+    )
+    .unwrap();
+    let loader = RoutineScriptLoader::new().unwrap();
+    let mut routine = new_routine("oversized-checkpoint", None, Some("1479671301387069002"));
+    routine.script_ref = loader.load_script(temp.path(), &script_path).unwrap();
+    // A 64-byte checkpoint limit makes the store close the requested `complete` as `failed`.
+    let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
+        Arc::new(pool.clone()),
+        "Asia/Seoul",
+        64,
+    );
+    let routine = store.attach_routine(routine).await.unwrap();
+    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let past = Utc::now() - Duration::minutes(5);
+    let make_due = || async {
+        sqlx::query("UPDATE routines SET next_due_at = $2 WHERE id = $1")
+            .bind(&routine.id)
+            .bind(past)
+            .execute(&pool)
+            .await
+            .unwrap();
+    };
+    let alerts = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM message_outbox WHERE reason_code = 'routine_consecutive_failures'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let fail_once = || async {
+        make_due().await;
+        let claimed = store
+            .claim_due_runs(1)
+            .await
+            .unwrap()
+            .pop()
+            .expect("due run");
+        store
+            .fail_run(&claimed.run_id, "provider down", None, None)
+            .await
+            .unwrap();
+        let outcome = RoutineRunOutcome {
+            run_id: claimed.run_id,
+            routine_id: claimed.routine_id,
+            script_ref: claimed.script_ref,
+            action: "agent".to_string(),
+            status: "failed".to_string(),
+            result_json: None,
+            error: Some("provider down".to_string()),
+            fresh_context_guaranteed: false,
+        };
+        logger.alert_consecutive_failures(&store, &outcome, 3).await;
+    };
+
+    fail_once().await;
+    fail_once().await;
+    make_due().await;
+    let dirs = [temp.path().to_path_buf()];
+    let outcomes = run_due_tick(&store, &loader, &dirs, None, None, 10, false)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    let (status, _, _) = run_row(&pool, &outcomes[0].run_id).await;
+    assert_eq!(
+        status, "failed",
+        "the store rejects the oversized checkpoint"
+    );
+    logger
+        .alert_consecutive_failures(&store, &outcomes[0], 3)
+        .await;
+    assert_eq!(alerts().await, 1);
+    fail_once().await;
+    assert_eq!(alerts().await, 1);
+
+    pool.close().await;
+    db.drop().await;
+}

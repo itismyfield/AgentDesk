@@ -9380,6 +9380,7 @@ services::routines::migrated::tests::zprofile_paths_restores_env_after_panic_pre
 services::routines::migrated::tests::zprofile_paths_teardown_absent
 services::routines::migrated::tests::zprofile_paths_teardown_present
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
+services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg
 services::routines::reliability_pg_tests::consecutive_failure_alert_fires_once_per_streak_pg
 services::routines::reliability_pg_tests::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg
 services::routines::runtime::tests::agent_action_detail_includes_checkpoint_decision_summary
