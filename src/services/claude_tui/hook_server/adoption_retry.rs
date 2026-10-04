@@ -84,6 +84,7 @@ struct DeferredAdoption {
     payload_session_id: String,
     hook: HookSignal,
     execution_nonce: Option<String>,
+    pending_record: Option<(u64, u64)>,
     /// The entry's binding event is in the log; it only waits for its rotation or its transcript.
     recorded: bool,
     /// Recorded as a Pending whose transcript is not verified yet.
@@ -101,11 +102,28 @@ fn deferred() -> std::sync::MutexGuard<'static, HashMap<String, VecDeque<Deferre
 fn queue_behind(tmux_session_name: &str, request: &DeferredAdoption) {
     let mut queues = deferred();
     let queue = queues.entry(tmux_session_name.to_owned()).or_default();
-    let session = &request.payload_session_id;
-    match queue
-        .iter_mut()
-        .find(|q| &q.payload_session_id == session && q.execution_nonce == request.execution_nonce)
+    // Only the same durable record can promote legacy evidence to its restored execution.
+    if let Some(key) = request.pending_record
+        && let Some(queued) = queue.iter_mut().find(|q| {
+            q.pending_record == Some(key)
+                && (q.execution_nonce.is_none() || q.execution_nonce == request.execution_nonce)
+        })
     {
+        if queued.execution_nonce.is_none() {
+            queued.execution_nonce = request.execution_nonce.clone();
+        }
+        queued.recorded |= request.recorded;
+        queued.pending |= request.pending;
+        return;
+    }
+    let session = &request.payload_session_id;
+    match queue.iter_mut().find(|q| {
+        &q.payload_session_id == session
+            && q.execution_nonce == request.execution_nonce
+            && (q.pending_record.is_none()
+                || request.pending_record.is_none()
+                || q.pending_record == request.pending_record)
+    }) {
         // A repeat hook keeps the first SessionStart, the only one that names the transition.
         Some(queued) if queued.hook.event != "session_start" => {
             if request.hook.event == "session_start" {
@@ -121,13 +139,16 @@ fn front(tmux_session_name: &str) -> Option<DeferredAdoption> {
     deferred().get(tmux_session_name)?.front().cloned()
 }
 
-fn mark_front_recorded(tmux_session_name: &str, pending: bool) {
+fn mark_front_recorded(tmux_session_name: &str, pending: bool, record: Option<(u64, u64)>) {
     if let Some(front) = deferred()
         .get_mut(tmux_session_name)
         .and_then(VecDeque::front_mut)
     {
         front.recorded = true;
         front.pending = pending;
+        if record.is_some() {
+            front.pending_record = record;
+        }
     }
 }
 
@@ -165,6 +186,7 @@ pub(crate) fn adopt_from_enveloped_hook(
         payload_session_id: payload_session_id.to_owned(),
         hook: hook.clone(),
         execution_nonce: captured_nonce(envelope),
+        pending_record: None,
         recorded: false,
         pending: false,
     };
@@ -287,6 +309,17 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             // An adopted source stays queued until its rotation settles and a recorded Pending until
             // its transcript is verified, so later hooks wait behind it; a later queued session replaces it.
             let pending = adopted.is_none() && skip.is_none();
+            let pending_record = pending
+                .then(|| crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux))
+                .flatten()
+                .and_then(|channel| {
+                    crate::services::tui_prompt_dedupe::binding_events::pending_seq(
+                        channel,
+                        tmux,
+                        payload_session_id,
+                    )
+                    .map(|seq| (channel, seq))
+                });
             // An entry whose pane lost its channel mapping keeps its place until the next pass restores it.
             let no_channel = skip == Some(AdoptSkip::ChannelNotRestored);
             // An unreadable log or pinned file, or a withheld Herdr pane, decided nothing, so the entry
@@ -312,7 +345,7 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                 QueueStep::Pop
             };
             if queued && held && !no_channel && !transient {
-                mark_front_recorded(tmux, pending);
+                mark_front_recorded(tmux, pending, pending_record);
             } else if queued && !held {
                 pop_front(tmux);
             } else if pending {
@@ -323,6 +356,7 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                     &DeferredAdoption {
                         recorded,
                         pending,
+                        pending_record,
                         ..request
                     },
                 );
@@ -397,12 +431,14 @@ pub(crate) fn seed_restored(
     payload_session_id: &str,
     hook: &HookSignal,
     execution_nonce: &str,
+    pending_record: (u64, u64),
 ) {
     let request = DeferredAdoption {
         command_session_id: command_session_id.to_owned(),
         payload_session_id: payload_session_id.to_owned(),
         hook: hook.clone(),
         execution_nonce: Some(execution_nonce.to_owned()),
+        pending_record: Some(pending_record),
         recorded: true,
         pending: true,
     };
@@ -452,6 +488,15 @@ pub(crate) fn set_artifact_probe(probe: Option<ArtifactProbe>) {
 #[cfg(test)]
 pub(crate) fn deferred_adoption_count() -> usize {
     deferred().values().map(VecDeque::len).sum()
+}
+
+#[cfg(test)]
+pub(crate) fn forget_pending_record_for_tests(tmux: &str) {
+    if let Some(queue) = deferred().get_mut(tmux) {
+        for entry in queue {
+            entry.pending_record = None;
+        }
+    }
 }
 
 #[cfg(test)]

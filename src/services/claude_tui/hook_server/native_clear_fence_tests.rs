@@ -304,6 +304,60 @@ fn native_fence_marker_replacement_before_authority_refuses_observation() {
 }
 
 #[test]
+fn native_fence_restore_does_not_promote_a_legacy_entry_without_record_key() {
+    use crate::services::claude_tui::hook_server::adoption_retry::{
+        forget_pending_record_for_tests, seed_restored,
+    };
+    let (_root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let ingress = Ingress::new();
+    let (tmux, channel, a, b) = (format!("fence-{}", uuid()), 657_709, uuid(), uuid());
+    ingress.pane(&tmux, channel, &a);
+    let envelope = fence_envelope(&tmux, channel);
+    let payload = ingress.payload(&b, Some("clear"));
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &a, &payload, Some(&uuid())),
+        202
+    );
+    let pending = binding_events_since(channel, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| matches!(e.new, BindingTarget::Pending { .. }))
+        .unwrap();
+    forget_pending_record_for_tests(&tmux);
+    let hook = crate::services::tui_prompt_dedupe::binding_events::HookSignal::from_payload(
+        "session_start",
+        &payload,
+    );
+    crate::services::tmux_common::with_tmux_source_authority(&tmux, |authority| {
+        seed_restored(
+            authority,
+            &a,
+            &b,
+            &hook,
+            pending.execution_nonce.as_deref().unwrap(),
+            (channel, pending.seq),
+        );
+    });
+    assert_eq!(deferred_adoption_count(), 2, "no key means no promotion");
+    fs::write(
+        crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce"),
+        uuid::Uuid::new_v4().simple().to_string(),
+    )
+    .unwrap();
+    ingress.transcript(&b);
+    retry_deferred_claude_adoptions();
+    assert_eq!(
+        runtime_binding_for_tmux_session(&tmux)
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some(b.as_str()),
+        "unkeyed legacy entry keeps its original continuation behavior"
+    );
+    drop(envelope);
+}
+
+#[test]
 fn native_fence_restored_pending_retains_canonical_nonce() {
     use crate::services::tui_prompt_dedupe::pending::{self, LaunchTranscript, PendingRestore};
     let (_root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();

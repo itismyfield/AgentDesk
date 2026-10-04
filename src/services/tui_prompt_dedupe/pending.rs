@@ -638,6 +638,7 @@ fn restore_under_source_authority(
                     payload,
                     &seed.hook,
                     &seed.execution_nonce,
+                    (channel_id, seed.pending_seq),
                 );
             }
             outcome

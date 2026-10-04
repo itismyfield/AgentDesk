@@ -1832,6 +1832,7 @@ services::claude_tui::hook_server::observation_ingress::tests::native_clear_fenc
 services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_legacy_envelopeless_continuation_still_adopts
 services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_marker_replacement_before_authority_refuses_observation
 services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_refuses_old_nonce_and_missing_marker_without_side_effects
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_restore_does_not_promote_a_legacy_entry_without_record_key
 services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_restored_pending_retains_canonical_nonce
 services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_same_nonce_pending_resolves_after_transcript_arrives
 services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_unmapped_capture_checks_its_pane_not_empty_name
