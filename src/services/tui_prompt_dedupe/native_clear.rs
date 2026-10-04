@@ -713,6 +713,254 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn restart_boundary(
+        ticket: &ClearTicket,
+    ) -> crate::db::session_transcripts::NativeClearBoundary {
+        crate::db::session_transcripts::NativeClearBoundary::Unresolved {
+            generation: crate::db::session_transcripts::NativeClearGeneration(1),
+            ticket: serde_json::to_value(ticket).unwrap(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn restart_ticket(fixture: &CanonicalFixture) -> ClearTicket {
+        let mut ticket =
+            CanonicalClearWaiter::capture(fixture.context.clone(), fixture.old.clone())
+                .unwrap()
+                .ticket;
+        ticket.context.host = Some("test-node".into());
+        ticket
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_clear_restart_ticket_roundtrip_and_invalid_host_hold() {
+        let fixture = CanonicalFixture::new();
+        let ticket = restart_ticket(&fixture);
+        let restored: ClearTicket =
+            serde_json::from_value(serde_json::to_value(&ticket).unwrap()).unwrap();
+        assert_eq!(restored, ticket);
+        assert_eq!(
+            judge_native_clear_restart(&restart_boundary(&restored), Some("test-node")),
+            NativeClearRestart::ResetUnresolved
+        );
+        for host in [None, Some(""), Some("   "), Some("other-node")] {
+            let mut changed = restored.clone();
+            changed.context.host = host.map(str::to_owned);
+            assert_eq!(
+                judge_native_clear_restart(&restart_boundary(&changed), Some("test-node")),
+                NativeClearRestart::Hold
+            );
+            assert_eq!(
+                judge_native_clear_restart(&restart_boundary(&restored), host),
+                NativeClearRestart::Hold
+            );
+        }
+        let mut broken = restart_boundary(&restored);
+        if let crate::db::session_transcripts::NativeClearBoundary::Unresolved { ticket, .. } =
+            &mut broken
+        {
+            *ticket = serde_json::json!({"context": "broken"});
+        }
+        assert_eq!(
+            judge_native_clear_restart(&broken, Some("test-node")),
+            NativeClearRestart::Hold
+        );
+        for field in ["schema", "provider", "channel", "tmux", "nonce"] {
+            let mut changed = restored.clone();
+            match field {
+                "schema" => changed.context.schema = 99,
+                "provider" => changed.context.provider = "codex".into(),
+                "channel" => changed.context.channel_id = None,
+                "tmux" => changed.context.tmux_session.clear(),
+                _ => changed.context.execution_nonce.clear(),
+            }
+            assert_eq!(
+                judge_native_clear_restart(&restart_boundary(&changed), Some("test-node")),
+                NativeClearRestart::Hold
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_clear_restart_preserves_completed_and_superseded_without_io() {
+        use crate::db::session_transcripts::NativeClearBoundary;
+        for boundary in [
+            NativeClearBoundary::Legacy,
+            NativeClearBoundary::Resolved,
+            NativeClearBoundary::Superseded,
+        ] {
+            // No host, ticket, marker, or selector is needed to preserve prior behavior.
+            assert_eq!(
+                judge_native_clear_restart(&boundary, None),
+                NativeClearRestart::Preserve
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_clear_restart_matrix_and_live_commit_evidence_agree() {
+        for kind in ["none", "pending", "source", "resolved"] {
+            let fixture = CanonicalFixture::new();
+            let ticket = restart_ticket(&fixture);
+            let waiter =
+                CanonicalClearWaiter::capture(ticket.context.clone(), fixture.old.clone()).unwrap();
+            if kind != "none" {
+                fixture.record("new", BindingCause::Clear, kind != "source");
+                if kind == "resolved" {
+                    fixture.record("new", BindingCause::Clear, false);
+                }
+            }
+            let boundary = restart_boundary(&ticket);
+            let records = binding_events::records_strict(fixture.context.channel_id.unwrap())
+                .unwrap()
+                .unwrap();
+            let evidence = clear_commit(&ticket, &records);
+            let live = waiter.probe();
+            let restarted = judge_native_clear_restart(&boundary, Some("test-node"));
+            match evidence {
+                Some(commit) => {
+                    assert_eq!(
+                        restarted,
+                        NativeClearRestart::CompleteDurable(commit.clone())
+                    );
+                    assert_eq!(live, ClearDecision::Committed(commit));
+                }
+                None => {
+                    assert_eq!(restarted, NativeClearRestart::ResetUnresolved);
+                    assert_eq!(live, ClearDecision::Fallback);
+                }
+            }
+            binding_events::forget_channel_for_tests(fixture.context.channel_id.unwrap());
+            assert_eq!(
+                judge_native_clear_restart(&boundary, Some("test-node")),
+                restarted,
+                "restart log reload"
+            );
+            let marker =
+                tmux_common::session_temp_path(&fixture.context.tmux_session, "spawn_nonce");
+            for marker_state in ["other", "absent", "unreadable", "same"] {
+                if std::path::Path::new(&marker).is_dir() {
+                    std::fs::remove_dir(&marker).unwrap();
+                }
+                match marker_state {
+                    "other" => std::fs::write(&marker, "another-incarnation").unwrap(),
+                    "absent" => {
+                        std::fs::remove_file(&marker).unwrap();
+                    }
+                    "unreadable" => {
+                        std::fs::create_dir(&marker).unwrap();
+                    }
+                    _ => std::fs::write(&marker, &ticket.context.execution_nonce).unwrap(),
+                }
+                let expected = match marker_state {
+                    "unreadable" => NativeClearRestart::Hold,
+                    "same" => restarted.clone(),
+                    _ => NativeClearRestart::ResetUnresolved,
+                };
+                assert_eq!(
+                    judge_native_clear_restart(&boundary, Some("test-node")),
+                    expected,
+                    "{kind}/{marker_state}"
+                );
+                if kind != "none" && marker_state != "same" {
+                    assert!(
+                        matches!(waiter.probe(), ClearDecision::Hold(Some(_))),
+                        "live disposition intentionally differs from restart"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_clear_restart_rejects_non_evidence_and_prior_clear_baselines() {
+        for kind in [
+            "rejected", "cause", "baseline", "nonce", "old", "hook", "session", "channel",
+            "provider", "tmux",
+        ] {
+            let fixture = CanonicalFixture::new();
+            let mut ticket = restart_ticket(&fixture);
+            fixture.record("new", BindingCause::Clear, false);
+            let mut records = binding_events::records_strict(fixture.context.channel_id.unwrap())
+                .unwrap()
+                .unwrap();
+            let event = records.last_mut().unwrap();
+            match kind {
+                "rejected" => {
+                    event.new = BindingTarget::Rejected {
+                        payload_session_id: "new".into(),
+                        payload_transcript_path: None,
+                        reason: "refused".into(),
+                    }
+                }
+                "cause" => event.cause = BindingCause::Startup,
+                "baseline" => ticket.baseline = event.seq,
+                "nonce" => event.execution_nonce = Some("other".into()),
+                "old" => event.old = None,
+                "hook" => event.evidence.hook_event = Some("session_end".into()),
+                "session" => {
+                    event.new = BindingTarget::Pending {
+                        payload_session_id: "old".into(),
+                        payload_transcript_path: None,
+                    }
+                }
+                "channel" => event.channel_id += 1,
+                "provider" => event.provider = "codex".into(),
+                _ => event.tmux_session = "other".into(),
+            }
+            let log = fixture
+                .root
+                .path()
+                .join(binding_events::BINDING_EVENTS_DIR)
+                .join(format!("{}.log", fixture.context.channel_id.unwrap()));
+            let text: String = records
+                .iter()
+                .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+                .collect();
+            std::fs::write(log, text).unwrap();
+            assert_eq!(clear_commit(&ticket, &records), None, "{kind}");
+            assert_eq!(
+                judge_native_clear_restart(&restart_boundary(&ticket), Some("test-node")),
+                NativeClearRestart::ResetUnresolved,
+                "{kind}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_clear_restart_unreadable_log_and_busy_authority_hold() {
+        let fixture = CanonicalFixture::new();
+        let boundary = restart_boundary(&restart_ticket(&fixture));
+        assert_eq!(
+            tmux_common::with_tmux_source_authority(&fixture.context.tmux_session, |_| {
+                judge_native_clear_restart(&boundary, Some("test-node"))
+            }),
+            NativeClearRestart::Hold
+        );
+        let log = fixture
+            .root
+            .path()
+            .join(binding_events::BINDING_EVENTS_DIR)
+            .join(format!("{}.log", fixture.context.channel_id.unwrap()));
+        std::fs::write(&log, "corrupt\n").unwrap();
+        assert_eq!(
+            judge_native_clear_restart(&boundary, Some("test-node")),
+            NativeClearRestart::Hold
+        );
+        std::fs::remove_file(&log).unwrap();
+        std::fs::create_dir(&log).unwrap();
+        assert_eq!(
+            judge_native_clear_restart(&boundary, Some("test-node")),
+            NativeClearRestart::Hold
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn uncommitted_cut_invalidates_nonce_without_nested_lock_and_corruption_holds() {
         let fixture = CanonicalFixture::new();
