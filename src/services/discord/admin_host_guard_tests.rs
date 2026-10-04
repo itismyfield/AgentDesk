@@ -1027,3 +1027,56 @@ async fn a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_
     }
     db.drop().await;
 }
+
+// `/clear` on a Herdr-configured channel served by a runtime whose backend is not managed tmux
+// is refused before its selector, input or durable selector clear changes.
+#[tokio::test]
+async fn an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg() {
+    let test = "services::discord::admin_host_guard::tests::an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg";
+    if !api_child(test) {
+        return;
+    }
+    use crate::services::discord::host_teardown_gate::test_support::Stored;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::install();
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let api = Recorder::start().await;
+    crate::services::discord::internal_api::init(api.port, None);
+    let (provider, http) = (ProviderKind::Gemini, Arc::new(Http::new("")));
+    assert!(!provider.uses_managed_tmux_backend());
+    let channel = ChannelId::new(1_479_671_302_387_077_000);
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("mac-mini"),
+        &[(channel.get(), "mac-mini")],
+    );
+    let name = provider.build_tmux_session_name("p9b1-unmanaged");
+    map_channel(&shared, channel, "p9b1-unmanaged").await;
+    let mut core = shared.core.lock().await;
+    let session = core.sessions.get_mut(&channel).unwrap();
+    (session.session_id, session.pending_uploads) = (Some("sid".into()), vec!["kept".into()]);
+    drop(core);
+    Case::Stored(Stored::Legacy)
+        .seed(&pool, &channel_key(&shared, &name), &name, channel.get())
+        .await;
+    tmux.take_calls();
+
+    let mode = SoftClearNotifyMode::Suppress;
+    let clear = clear_channel_session_state(&http, &shared, &provider, channel, "/clear", mode);
+    let error = clear
+        .await
+        .expect_err("a configured channel refuses the clear");
+    assert!(error.to_string().contains("Herdr"), "{error}");
+    let core = shared.core.lock().await;
+    let session = &core.sessions[&channel];
+    assert_eq!(session.session_id.as_deref(), Some("sid"), "selector kept");
+    assert_eq!(session.pending_uploads, ["kept"], "input kept");
+    drop(core);
+    let calls = api.take();
+    assert!(
+        !calls.iter().any(|c| c.contains("clear-session-id")),
+        "{calls:?}"
+    );
+    assert_eq!(tmux.take_calls(), Vec::<String>::new(), "no tmux call");
+    db.drop().await;
+}

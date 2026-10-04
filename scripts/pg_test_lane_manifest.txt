@@ -798,6 +798,7 @@ server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_runti
 server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg
 server::routes::dispatched_sessions::tests::routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg
 server::routes::dispatched_sessions::tests::routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg
+server::routes::dispatched_sessions::tests::selector_clears_keep_configured_and_hosted_rows_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
@@ -926,6 +927,7 @@ services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_cards_outside_active_loop_state_pg
@@ -1021,6 +1023,7 @@ services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispa
 services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
 services::discord::admin_host_guard::tests::a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_pg
+services::discord::admin_host_guard::tests::an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
@@ -1129,6 +1132,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
+services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::legacy_null_channel_id_single_row_is_reused

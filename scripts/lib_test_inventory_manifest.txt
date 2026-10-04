@@ -1110,6 +1110,7 @@ server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_runti
 server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg
 server::routes::dispatched_sessions::tests::routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg
 server::routes::dispatched_sessions::tests::routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg
+server::routes::dispatched_sessions::tests::selector_clears_keep_configured_and_hosted_rows_pg
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_allows_active_statuses
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_rejects_terminal_statuses
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
@@ -1540,6 +1541,7 @@ services::auto_queue::route::view::activate_next_dispatch_type_tests::unrecogniz
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
 services::auto_queue::tests::auto_queue_status_entry_normalizes_github_repo_url
 services::auto_queue::tests::auto_queue_status_omits_diagnostics_without_slot_invariant_violation
@@ -2692,6 +2694,7 @@ services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispa
 services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
 services::discord::admin_host_guard::tests::a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_pg
+services::discord::admin_host_guard::tests::an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
@@ -5771,6 +5774,7 @@ services::discord::session_identity::tests::parses_legacy_session_key
 services::discord::session_identity::tests::parses_namespaced_session_key
 services::discord::session_identity::tests::rejects_missing_or_empty_parts
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
+services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delegated_idle_range_is_consumed_once_without_transport_or_evidence
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::a_canary_channel_posts_only_through_o_and_its_legacy_neighbour_only_through_legacy

@@ -1590,9 +1590,8 @@ async fn force_kill_of_a_channelless_row_leaves_a_runtime_holding_its_name_pg() 
     pg_db.drop().await;
 }
 
-/// Both selector-clear routes leave the selectors and transcript watermark of a
-/// Herdr-configured channel's legacy row and of stored Pending/Bound rows as they were,
-/// and clear an unconfigured legacy row as before.
+/// Both selector-clear routes keep the selectors and watermark of a Herdr-configured channel's
+/// legacy row and of stored Pending/Bound rows, and clear an unconfigured legacy row as before.
 #[tokio::test(flavor = "current_thread")]
 async fn selector_clears_keep_configured_and_hosted_rows_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;

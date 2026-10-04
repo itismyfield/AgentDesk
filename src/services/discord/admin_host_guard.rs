@@ -100,7 +100,8 @@ pub(super) async fn managed_reset_refusal(
 ) -> Option<String> {
     let kills = reset_provider_state && provider.uses_managed_tmux_backend();
     if !(kills || recreate_tmux) {
-        return None;
+        // A Herdr-configured channel keeps its provider state whatever the runtime's backend.
+        return reset_provider_state.then(|| configured_refusal(channel_id.get()))?;
     }
     let name = session_channel_name(shared, channel_id).await;
     let reason = reset_refusal(shared, provider, channel_id, explicit_session_key, name).await?;
