@@ -9,7 +9,7 @@
 //! * [`tail`] — bounded incremental reader (1 MiB/tick cap, file-identity
 //!   revalidation).
 //! * [`obligation`] — canonical `(generation, start, end, identity, reason)`
-//!   framing, byte-equivalent with `relay_watchdog.py` against the golden
+//!   framing, checked against the golden
 //!   corpus in `tests/fixtures/relay_obligation/`.
 //! * [`divergence`] — row-coordinate ↔ resolved-coordinate identity comparison;
 //!   the only module that sees the inflight row's path (I14, comparison only).

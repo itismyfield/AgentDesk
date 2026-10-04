@@ -2529,6 +2529,14 @@ pub struct RoutinesConfig {
     /// Defaults to 0 (disabled). Set to e.g. 3600 (1 hour) to enable.
     #[serde(default)]
     pub failure_pause_auto_resume_secs: u64,
+    /// Seconds after routine-runtime boot during which due routines are not claimed, so
+    /// provider runtimes can register first; slots missed meanwhile run once afterwards.
+    #[serde(default = "default_routines_startup_grace_secs")]
+    pub startup_grace_secs: u64,
+    /// Alert once when a routine's consecutive failed runs reach this count. Independent of
+    /// the pause and stale-paused knobs; 0 disables the alert.
+    #[serde(default = "default_routines_max_consecutive_failures")]
+    pub max_consecutive_failures: u32,
 }
 
 impl Default for RoutinesConfig {
@@ -2547,6 +2555,8 @@ impl Default for RoutinesConfig {
             stale_paused_alert_secs: 0,
             stale_paused_alert_ttl_secs: default_routines_stale_paused_alert_ttl_secs(),
             failure_pause_auto_resume_secs: 0,
+            startup_grace_secs: default_routines_startup_grace_secs(),
+            max_consecutive_failures: default_routines_max_consecutive_failures(),
         }
     }
 }
@@ -2597,6 +2607,14 @@ fn default_routines_max_checkpoint_bytes() -> usize {
 
 fn default_routines_stale_paused_alert_ttl_secs() -> u64 {
     24 * 60 * 60
+}
+
+fn default_routines_startup_grace_secs() -> u64 {
+    120
+}
+
+fn default_routines_max_consecutive_failures() -> u32 {
+    3
 }
 
 #[cfg(test)]

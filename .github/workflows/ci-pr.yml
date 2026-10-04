@@ -388,6 +388,7 @@ jobs:
               - 'src/services/pipeline_override.rs'
               - 'src/services/pipeline_routes.rs'
               - 'src/services/routines/agent_executor/reliability.rs'
+              - 'src/services/routines/reliability_pg_tests.rs'
               - 'src/services/routines/session_control.rs'
               - 'src/services/scheduled_messages/context_snapshot.rs'
               - 'src/services/scheduled_messages/postgres_tests.rs'

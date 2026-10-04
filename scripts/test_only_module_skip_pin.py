@@ -38,6 +38,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/adk_session_selector_checked_tests.rs",
         "src/services/discord/live_bridge/guard_tests.rs",
         "src/services/discord/runtime_store_checkpoint_lock_tests.rs",
+        "src/services/routines/reliability_pg_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/session_stop_tests.rs",
         "src/services/discord/tmux/n1a_monitor_tests.rs",
         "src/services/discord/tmux_watcher/n1a_turn_mode_tests.rs",

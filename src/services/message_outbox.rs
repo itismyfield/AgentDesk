@@ -100,6 +100,7 @@ mod dedupe_key_tests {
             ("slo_alerter", "slo_threshold_breach"),
             ("dispatch_watchdog", "dispatch_stuck"),
             ("routine-runtime", "routine_paused_stale"),
+            ("routine-runtime", "routine_consecutive_failures"),
             ("auto-queue", "auto_queue.entry_dispatch_failed"),
             ("auto-queue-monitor", "auto_queue.monitor_stuck"),
             ("auto-queue-monitor", "auto_queue.monitor_anomaly"),

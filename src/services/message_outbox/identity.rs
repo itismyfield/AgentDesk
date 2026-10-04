@@ -22,6 +22,7 @@ pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -
             | ("slo_alerter", Some("slo_threshold_breach"))
             | ("dispatch_watchdog", Some("dispatch_stuck"))
             | ("routine-runtime", Some("routine_paused_stale"))
+            | ("routine-runtime", Some("routine_consecutive_failures"))
             | ("auto-queue", Some("auto_queue.entry_dispatch_failed"))
             | ("auto-queue-monitor", Some("auto_queue.monitor_stuck"))
             | ("auto-queue-monitor", Some("auto_queue.monitor_anomaly"))

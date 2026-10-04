@@ -276,8 +276,8 @@
 | `POST` | `/api/routines/{id}/resume` | `routines::resume_routine` | `src/server/routes/routines/handlers.rs:252` | `src/server/routes/domains/ops.rs:180` |
 | `POST` | `/api/routines/{id}/run-now` | `routines::run_routine_now` | `src/server/routes/routines/handlers.rs:336` | `src/server/routes/domains/ops.rs:182` |
 | `GET` | `/api/routines/{id}/runs` | `routines::list_routine_runs` | `src/server/routes/routines/handlers.rs:114` | `src/server/routes/domains/ops.rs:178` |
-| `POST` | `/api/routines/{id}/session/kill` | `routines::kill_routine_session` | `src/server/routes/routines/handlers.rs:432` | `src/server/routes/domains/ops.rs:187` |
-| `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:425` | `src/server/routes/domains/ops.rs:183` |
+| `POST` | `/api/routines/{id}/session/kill` | `routines::kill_routine_session` | `src/server/routes/routines/handlers.rs:436` | `src/server/routes/domains/ops.rs:187` |
+| `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:429` | `src/server/routes/domains/ops.rs:183` |
 | `GET` | `/api/scheduled-messages` | `scheduled_messages::list_scheduled_messages` | `src/server/routes/scheduled_messages.rs:482` | `src/server/routes/domains/ops.rs:191` |
 | `POST` | `/api/scheduled-messages` | `scheduled_messages::create_scheduled_message` | `src/server/routes/scheduled_messages.rs:115` | `src/server/routes/domains/ops.rs:191` |
 | `DELETE` | `/api/scheduled-messages/{id}` | `scheduled_messages::cancel_scheduled_message` | `src/server/routes/scheduled_messages.rs:833` | `src/server/routes/domains/ops.rs:196` |

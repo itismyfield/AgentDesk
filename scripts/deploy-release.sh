@@ -2833,11 +2833,6 @@ else
 fi
 # <<< END restart-durability gate (#5254)
 
-# A planned restart no longer suppresses transcript gaps: the watchdog's durable
-# pre-restart authority must remain observable until Discord delivery catches up.
-# Remove a marker left by an older deploy so its quiet window cannot mask this
-# restart boundary after the runtime has proved its replay frontier durable.
-rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
 # Fixed compatibility indexes remain available until the retention sweep can
 # prove that no same-nonce canonical pending marker still depends on them.
 
@@ -4252,202 +4247,17 @@ else
 fi
 # <<< END smoke-disposition region (#5244)
 
-# ── Out-of-band relay watchdog (#4381) ────────────────────────────────────────
-# Deliberately OUTSIDE dcserver's launchd job: the watchdog must survive exactly
-# the failures it watches for (dcserver crash-looping on PG loss, #4379). The
-# repo is the source of truth — the machine-local prototype (and the 06-29
-# relay-gap-watch before it) evaporated because nothing deployed it. Runs after
-# DEPLOY_OK on purpose: a failed deploy leaves the previous watchdog untouched.
+# >>> BEGIN retired-relay-watchdog cleanup
+# Retire an old installation after a successful deploy; an absent job is a no-op.
 WATCHDOG_LABEL="com.agentdesk.relay-watchdog"
 WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/$WATCHDOG_LABEL.plist"
-WATCHDOG_BIN="$ADK_REL/bin/relay-watchdog.py"
-WATCHDOG_CONFIG="$ADK_REL/config/relay-watchdog.json"
-WATCHDOG_SCRIPT_CHANGED=1
-if [ -f "$WATCHDOG_BIN" ] && cmp -s "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
-    WATCHDOG_SCRIPT_CHANGED=0
-fi
-echo "▸ Installing out-of-band relay watchdog (#4381)..."
-if install -m 0755 "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
-    if [ -f "$WATCHDOG_CONFIG" ]; then
-        WATCHDOG_PYTHON="$(command -v python3 || echo /usr/bin/python3)"
-        # INVARIANT: the ENTIRE watchdog block is fail-open. We are past
-        # DEPLOY_OK, so any failure here (permissions, full disk, launchd)
-        # must degrade to a loud ⚠ warning and let the script continue —
-        # aborting would poison the exit code of a HEALTHY deploy and skip
-        # _write_release_source_manifest / _deploy_to_all_peers below.
-        # The function body runs from an `if` guard, so `set -e` is suspended
-        # inside it; every step therefore carries its own `|| return 1`.
-        #
-        # Runtime python preflight: relay_watchdog.py declares MIN_PYTHON=3.10
-        # and exits 1 below it. If `command -v python3` resolved to the macOS
-        # system 3.9, arming the plist would put KeepAlive into a silent ~30s
-        # crash-loop — refuse to arm instead (r4 review, PR #4399).
-        _xml_escape() {
-            # Plist bodies are XML: raw &, <, > (and quotes, for safety) in an
-            # operator path would render the plist plutil-invalid and the
-            # watchdog silently unarmed (r4 review, PR #4399).
-            local s=$1
-            s=${s//&/\&amp;}
-            s=${s//</\&lt;}
-            s=${s//>/\&gt;}
-            s=${s//\"/\&quot;}
-            s=${s//\'/\&apos;}
-            printf '%s' "$s"
-        }
-        _install_relay_watchdog_plist() {
-            local label_x python_x bin_x root_x
-            label_x=$(_xml_escape "$WATCHDOG_LABEL") || return 1
-            python_x=$(_xml_escape "$WATCHDOG_PYTHON") || return 1
-            bin_x=$(_xml_escape "$WATCHDOG_BIN") || return 1
-            root_x=$(_xml_escape "$ADK_REL") || return 1
-            mkdir -p "$HOME/Library/LaunchAgents" || return 1
-            cat > "$WATCHDOG_PLIST_PATH.tmp" <<PLIST_EOF || return 1
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$label_x</string>
-  <key>ProgramArguments</key>
-  <array><string>$python_x</string><string>$bin_x</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>$root_x/logs/relay-watchdog.launchd.out.log</string>
-  <key>StandardErrorPath</key><string>$root_x/logs/relay-watchdog.launchd.err.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>AGENTDESK_ROOT_DIR</key><string>$root_x</string>
-  </dict>
-</dict>
-</plist>
-PLIST_EOF
-            # Atomic publish: launchd never sees a half-written plist, and an
-            # interrupted write leaves only the .tmp (cleaned by the caller).
-            mv -f "$WATCHDOG_PLIST_PATH.tmp" "$WATCHDOG_PLIST_PATH" || return 1
-        }
-        if ! "$WATCHDOG_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-            echo "⚠ Relay watchdog requires python3 >= 3.10 (MIN_PYTHON in relay_watchdog.py);"
-            echo "  resolved runner: $WATCHDOG_PYTHON — NOT armed (arming would KeepAlive-crash-loop)."
-            echo "  Install a newer python3 (e.g. brew install python) and redeploy."
-        else
-            WATCHDOG_PLIST_BEFORE="$WATCHDOG_PLIST_PATH.deploy-prev.$$"
-            rm -f "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
-            if [ -f "$WATCHDOG_PLIST_PATH" ]; then
-                cp -p "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
-            fi
-            if _install_relay_watchdog_plist; then
-                WATCHDOG_PLIST_CHANGED=1
-                if [ -f "$WATCHDOG_PLIST_BEFORE" ] \
-                  && cmp -s "$WATCHDOG_PLIST_BEFORE" "$WATCHDOG_PLIST_PATH"; then
-                    WATCHDOG_PLIST_CHANGED=0
-                fi
-                rm -f "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
-                xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
-                # #5153: neither `launchctl print` nor a `bootstrap` return code
-                # proves a SPAWN — they prove the job is LOADED. A 2026-08-06
-                # deploy printed "✓ Relay watchdog armed" while `launchctl list`
-                # showed the PID column as '-' and `pgrep` found nothing: relay
-                # gap monitoring was absent and the deploy still reported success.
-                # Judge on the PID column instead. This helper is read-only — it
-                # only queries launchd and never bootouts/bootstraps, so it cannot
-                # perturb the unload sequence below (the #5152 lesson).
-                _wd_spawned_pid() {
-                    local pid=""
-                    pid=$(launchctl list 2>/dev/null \
-                      | awk -v label="$WATCHDOG_LABEL" '$3 == label { print $1; exit }') \
-                      || pid=""
-                    # The PID column is '-' when the job is loaded but not running.
-                    case "$pid" in
-                        ''|*[!0-9]*) return 1 ;;
-                    esac
-                    printf '%s' "$pid"
-                }
-                _wd_running=0
-                if _wd_spawned_pid >/dev/null; then
-                    _wd_running=1
-                fi
-                if [ "$WATCHDOG_SCRIPT_CHANGED" = "0" ] \
-                  && [ "$WATCHDOG_PLIST_CHANGED" = "0" ] \
-                  && [ "$_wd_running" = "1" ]; then
-                    echo "✓ Relay watchdog retained ($WATCHDOG_LABEL; durable authority uninterrupted)"
-                else
-                    # Restart only when deployment material changed or the job is absent.
-                    # The watermark lives in the atomic state file, so replacement loads
-                    # the same pre-restart transcript authority before its first tick.
-                    # NOTE: This block implements the same bootout/poll/bootstrap pattern as
-                    # the PG tunnel sites, and since #5153 the same explicit kickstart and
-                    # spawn verification (#5151 mis-spawn reproduced here on 2026-08-06).
-                    launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
-                    _wd_bootout_polls=0
-                    while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
-                        if [ "$_wd_bootout_polls" -ge 12 ]; then
-                            echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
-                            break
-                        fi
-                        sleep 0.5
-                        _wd_bootout_polls=$((_wd_bootout_polls + 1))
-                    done
-                    _wd_armed=0
-                    for _wd_attempt in 1 2 3; do
-                        if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
-                            _wd_armed=1
-                            break
-                        fi
-                        if [ "$_wd_attempt" -lt 3 ]; then
-                            echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
-                            sleep 2
-                        fi
-                    done
-                    if [ "$_wd_armed" = "1" ]; then
-                        # #5151/#5153: bootstrap loads the plist but does not guarantee
-                        # that launchd spawns the process. Mirror the PG tunnel fix
-                        # (#5152) with an explicit kickstart, placed after the single
-                        # bootout above — a second bootout here would change that
-                        # unload sequence's meaning (the regression #5152 hit).
-                        # kickstart's own rc is NOT the verdict; the PID column is.
-                        launchctl kickstart -k "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1 || true
-                        _wd_pid=""
-                        _wd_spawn_polls=0
-                        while :; do
-                            if _wd_pid=$(_wd_spawned_pid); then
-                                break
-                            fi
-                            _wd_pid=""
-                            # Same 12 x 0.5s budget as the bootout poll above.
-                            if [ "$_wd_spawn_polls" -ge 12 ]; then
-                                break
-                            fi
-                            sleep 0.5
-                            _wd_spawn_polls=$((_wd_spawn_polls + 1))
-                        done
-                        if [ -n "$_wd_pid" ]; then
-                            echo "✓ Relay watchdog armed ($WATCHDOG_LABEL; pid $_wd_pid)"
-                        else
-                            # Fail-open per this block's INVARIANT (we are past DEPLOY_OK),
-                            # but never green: withholding the ✓ is the whole point of #5153.
-                            echo "⚠ Relay watchdog bootstrapped but NOT spawned (launchctl list PID column is '-') — relay gaps will go unwatched"
-                            echo "  Recover: launchctl kickstart -k $LAUNCHD_DOMAIN/$WATCHDOG_LABEL"
-                        fi
-                    else
-                        echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
-                    fi
-                fi
-            else
-                rm -f "$WATCHDOG_PLIST_PATH.tmp" "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
-                echo "⚠ Relay watchdog plist write FAILED ($WATCHDOG_PLIST_PATH) — not armed"
-                echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
-            fi
-        fi
-    else
-        echo "⚠ Relay watchdog config missing: $WATCHDOG_CONFIG"
-        echo "  Watchdog NOT armed on this node. Channel ids are operator config"
-        echo "  (never hardcoded in the repo); create the config — see the"
-        echo "  scripts/relay_watchdog.py docstring — then redeploy."
+if [ -f "$WATCHDOG_PLIST_PATH" ] || launchctl list "$WATCHDOG_LABEL" >/dev/null 2>&1; then
+    if launchctl list "$WATCHDOG_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/$WATCHDOG_LABEL" >/dev/null 2>&1 || true
     fi
-else
-    echo "⚠ Relay watchdog staging FAILED (source: $REPO/scripts/relay_watchdog.py)"
+    rm -f "$WATCHDOG_PLIST_PATH"
 fi
+# <<< END retired-relay-watchdog cleanup
 
 _write_release_source_manifest
 
