@@ -1,9 +1,11 @@
 //! Herdr launch preparation for one channel's canonical session row. No launch selects
 //! Herdr yet. The order is fixed: Pending commit, `.host_kind` and nonce markers, then one create.
+//! A Pending pane left without evidence is only probed again, never recreated.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use sqlx::PgPool;
 
@@ -13,24 +15,23 @@ use crate::db::dispatched_session_canonical_identity::{
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLocation, HostedLookup,
-    HostedLookupKey, HostedObservation, HostedOwner, HostedRecord, HostedState, ProcessStamp,
-    SourceRef, install_pending_pg, load_hosted_execution_pg, record_launch_evidence_pg,
+    HostedLookupKey, HostedObservation, HostedOwner, HostedRecord, HostedState, SourceRef,
+    install_pending_pg, load_hosted_execution_pg, record_launch_evidence_pg,
     record_pane_location_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 pub(crate) use crate::services::session_host::RESTORE_RESUME_NOT_OFF;
-use crate::services::session_host::{HostKind, RestoreResume, ServerWitness};
+use crate::services::session_host::{EvidenceGap, HostKind, RestoreResume, ServerWitness};
 use crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
 use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::{
-    BindingContext, PreparedIncarnation, stable_host_identity,
+    BindingContext, PreparedIncarnation, execution_context, stable_host_identity,
 };
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
-const EVIDENCE_PROVENANCE: &str = "herdr_launch";
 /// What Herdr 0.9.3 gives every pane process; a provider that sees them may report to Herdr.
 pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
     "HERDR_ENV",
@@ -116,13 +117,24 @@ pub(crate) enum HerdrCreateOutcome {
     },
 }
 
+/// What launch evidence must tie together: the pane, the execution, and the server the
+/// launch was sent to, after which the provider started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvidenceProbe {
+    pub location: HostedLocation,
+    pub provider: String,
+    pub execution_nonce: String,
+    pub launched_at: SystemTime,
+    pub witness: ServerWitness,
+}
+
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
 pub(crate) trait HerdrLaunchHost: Send + Sync {
     /// A fresh read of the endpoint server's effective resume-on-restore; never cached.
     fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume;
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome;
-    /// Root shell and provider process of the new pane, when both can be read.
-    fn launch_evidence(&self, location: &HostedLocation) -> Option<(ProcessStamp, ProcessStamp)>;
+    /// Root shell and provider of the pane as launch evidence, from reads only, or why not.
+    fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap>;
 }
 
 pub(crate) struct HerdrLaunch {
@@ -144,7 +156,7 @@ pub(crate) enum HerdrLaunchOutcome {
     Launched {
         execution_nonce: String,
         location: HostedLocation,
-        evidence: bool,
+        evidence: Result<(), EvidenceGap>,
     },
     /// The pane may exist unrecorded. Pending stays; nothing is resent, adopted or killed.
     Indeterminate {
@@ -170,6 +182,8 @@ pub(crate) enum HerdrLaunchError {
     Marker(String),
     /// The create request never left; Pending stays for reconcile.
     NotSent(String),
+    /// The Pending pane still has no launch evidence; nothing was created, typed or removed.
+    Evidence(EvidenceGap),
 }
 
 #[cfg(test)]
@@ -285,11 +299,16 @@ pub(crate) async fn launch_herdr_session(
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
-    if restore_off_witness(&host, &endpoint).await.is_none() {
+    let Some(admitted) = restore_off_witness(&host, &endpoint).await else {
         return Err(HerdrLaunchError::Unsupported(RESTORE_RESUME_NOT_OFF));
-    }
+    };
     let owner = launch.owner;
     let observed = load_row(pool, &owner).await?;
+    if let HostedRecord::Known(record) = &observed.record
+        && let Some(location) = awaiting_evidence(record, &endpoint)
+    {
+        return probe_again(pool, &owner, record, location, admitted, &host).await;
+    }
     match &observed.record {
         HostedRecord::Legacy => {}
         HostedRecord::Known(record) if record.state == HostedState::Retired => {}
@@ -326,6 +345,7 @@ pub(crate) async fn launch_herdr_session(
     let Some(restore_off_witness) = restore_off_witness(&host, &endpoint).await else {
         return Err(HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into()));
     };
+    let witness = restore_off_witness.clone();
     let request = HerdrCreateRequest {
         endpoint: endpoint.clone(),
         label: owner.logical_key.clone(),
@@ -333,6 +353,7 @@ pub(crate) async fn launch_herdr_session(
         command: command.command,
         restore_off_witness,
     };
+    let sent_at = SystemTime::now();
     let created = on_blocking_thread(&host, move |host| host.create(&request)).await;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {
         execution_nonce: nonce.clone(),
@@ -384,7 +405,14 @@ pub(crate) async fn launch_herdr_session(
             location.pane_id
         )));
     }
-    let evidence = record_evidence(pool, &owner, &nonce, &location, &host).await;
+    let probe = EvidenceProbe {
+        location: location.clone(),
+        provider: owner.provider.clone(),
+        execution_nonce: nonce.clone(),
+        launched_at: sent_at,
+        witness,
+    };
+    let evidence = record_evidence(pool, &owner, probe, &host).await;
     Ok(HerdrLaunchOutcome::Launched {
         execution_nonce: nonce,
         location,
@@ -392,31 +420,70 @@ pub(crate) async fn launch_herdr_session(
     })
 }
 
-/// Stores the first root/provider stamps; a stored value that differs is left in place.
+/// The pane of a Pending that has one on this endpoint but no evidence: its provider was
+/// not confirmed when it was launched.
+fn awaiting_evidence<'a>(
+    record: &'a HostedExecution,
+    endpoint: &HerdrLaunchEndpoint,
+) -> Option<&'a HostedLocation> {
+    let location = record.location.as_ref()?;
+    let here = (&location.execution_node, &location.endpoint_config_key)
+        == (&endpoint.execution_node, &endpoint.config_key)
+        && (&location.socket_addr, &location.named_session)
+            == (&endpoint.socket_addr, &endpoint.herdr_session);
+    (record.state == HostedState::Pending && record.expected.is_none() && here).then_some(location)
+}
+
+/// Probes the recorded pane again under the server E7 admitted now. No process that started
+/// before the execution's binding context existed can carry its nonce.
+async fn probe_again(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    record: &HostedExecution,
+    location: &HostedLocation,
+    witness: ServerWitness,
+    host: &Arc<dyn HerdrLaunchHost>,
+) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
+    let nonce = record.execution_nonce.clone();
+    let context = execution_context(&owner.provider, &nonce)
+        .map_err(|detail| HerdrLaunchError::Evidence(EvidenceGap::OtherNonce(detail)))?;
+    let probe = EvidenceProbe {
+        location: location.clone(),
+        provider: owner.provider.clone(),
+        execution_nonce: nonce.clone(),
+        launched_at: context.created_at.into(),
+        witness,
+    };
+    record_evidence(pool, owner, probe, host)
+        .await
+        .map_err(HerdrLaunchError::Evidence)?;
+    Ok(HerdrLaunchOutcome::Launched {
+        execution_nonce: nonce,
+        location: location.clone(),
+        evidence: Ok(()),
+    })
+}
+
+/// Stores the probed evidence on this nonce's Pending; a stored value that differs is left
+/// in place.
 async fn record_evidence(
     pool: &PgPool,
     owner: &HostedOwner,
-    nonce: &str,
-    location: &HostedLocation,
+    probe: EvidenceProbe,
     host: &Arc<dyn HerdrLaunchHost>,
-) -> bool {
-    let probed = location.clone();
-    let evidence = on_blocking_thread(host, move |host| host.launch_evidence(&probed)).await;
-    let (Some(Some((root, provider_process))), Ok(current)) =
-        (evidence, load_row(pool, owner).await)
-    else {
-        return false;
-    };
-    let expected = ExpectedExecution {
-        binding_provider: owner.provider.clone(),
-        binding_nonce: nonce.to_string(),
-        root,
-        provider_process,
-        provenance: EVIDENCE_PROVENANCE.to_string(),
-    };
-    let written =
-        record_launch_evidence_pg(pool, &current, owner, nonce, location.clone(), expected).await;
-    written == Ok(HostedCasOutcome::Written)
+) -> Result<(), EvidenceGap> {
+    let (nonce, location) = (probe.execution_nonce.clone(), probe.location.clone());
+    let probed = on_blocking_thread(host, move |host| host.launch_evidence(&probe)).await;
+    let expected =
+        probed.unwrap_or_else(|| Err(EvidenceGap::ReadFailed("probe panicked".into())))?;
+    let not_recorded = |detail: String| EvidenceGap::NotRecorded(detail);
+    let current = load_row(pool, owner)
+        .await
+        .map_err(|error| not_recorded(format!("{error:?}")))?;
+    match record_launch_evidence_pg(pool, &current, owner, &nonce, location, expected).await {
+        Ok(HostedCasOutcome::Written) => Ok(()),
+        other => Err(not_recorded(format!("{other:?}"))),
+    }
 }
 
 /// `None` when the call panicked: the request may already have reached the server.

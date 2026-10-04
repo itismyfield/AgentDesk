@@ -63,6 +63,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_host/herdr/provenance_tests.rs",
         "src/services/session_host/herdr/launch_host_tests.rs",
         "src/services/session_host/herdr/launch_host_real_tests.rs",
+        "src/services/session_host/herdr/pane_probe_tests.rs",
         "src/services/herdr_launch_tests.rs",
         "src/services/herdr_admission_tests.rs",
         "src/services/turn_host_tests.rs",

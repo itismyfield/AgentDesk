@@ -1,5 +1,5 @@
-//! OS reads behind E7: the socket peer pid, a process's wall-clock start and environment,
-//! and one consistent read of a config file. Unsupported platforms read as Unverified.
+//! OS reads behind E7 and the pane probe: socket peer, a process's parent, start, environment
+//! and exec path, and one consistent config read. Unsupported platforms read as Unverified.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fs::{File, Metadata};
@@ -137,6 +137,19 @@ fn procargs2_environ(raw: &[u8]) -> Option<Vec<String>> {
     Some(environ)
 }
 
+/// The exec path a macOS `KERN_PROCARGS2` buffer starts with, after argc.
+fn procargs2_exec_path(raw: &[u8]) -> Option<String> {
+    let rest = raw.get(4..)?;
+    let path = &rest[..rest.iter().position(|byte| *byte == 0)?];
+    (!path.is_empty()).then(|| String::from_utf8_lossy(path).into_owned())
+}
+
+/// The parent pid in a Linux `/proc/<pid>/stat` line: the field after the state.
+fn linux_stat_parent(stat: &str) -> Option<u32> {
+    let (_, rest) = stat.rsplit_once(") ")?;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
 /// `/proc/<pid>/environ` entries. Linux reads it empty for a zombie, a kernel thread or a
 /// process still inside exec, so empty is unreadable, never an environment without the key.
 fn linux_environ(raw: &[u8]) -> Result<Vec<String>, RestoreUnverified> {
@@ -153,7 +166,7 @@ fn linux_environ(raw: &[u8]) -> Result<Vec<String>, RestoreUnverified> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+fn bsd_info(pid: u32) -> Result<libc::proc_bsdinfo, RestoreUnverified> {
     use std::mem::MaybeUninit;
     let mut info: MaybeUninit<libc::proc_bsdinfo> = MaybeUninit::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
@@ -171,7 +184,12 @@ fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
         return Err(RestoreUnverified::ProcessUnreadable);
     }
     // SAFETY: proc_pidinfo filled the whole struct.
-    let info = unsafe { info.assume_init() };
+    Ok(unsafe { info.assume_init() })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+    let info = bsd_info(pid)?;
     let (seconds, micros) = (info.pbi_start_tvsec, info.pbi_start_tvusec);
     if seconds == 0 {
         return Err(RestoreUnverified::ProcessUnreadable);
@@ -182,9 +200,15 @@ fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     })
 }
 
+/// The kernel's parent pid, the field `sysctl KERN_PROC_PID` reports as `e_ppid`.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_parent(pid: u32) -> Result<u32, RestoreUnverified> {
+    Ok(bsd_info(pid)?.pbi_ppid)
+}
+
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+pub(crate) fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     let unreadable = RestoreUnverified::ProcessUnreadable;
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| unreadable)?;
     let ticks = stat
@@ -208,14 +232,26 @@ fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     })
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn process_parent(pid: u32) -> Result<u32, RestoreUnverified> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .map_err(|_| RestoreUnverified::ProcessUnreadable)?;
+    linux_stat_parent(&stat).ok_or(RestoreUnverified::ProcessUnreadable)
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn process_start(_pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+pub(crate) fn process_start(_pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+    Err(RestoreUnverified::PlatformUnsupported)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn process_parent(_pid: u32) -> Result<u32, RestoreUnverified> {
     Err(RestoreUnverified::PlatformUnsupported)
 }
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+fn procargs2(pid: u32) -> Result<Vec<u8>, RestoreUnverified> {
     let unreadable = RestoreUnverified::ProcessUnreadable;
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
@@ -249,19 +285,40 @@ fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
         return Err(unreadable);
     }
     buffer.truncate(size);
-    procargs2_environ(&buffer).ok_or(unreadable)
+    Ok(buffer)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+    procargs2_environ(&procargs2(pid)?).ok_or(RestoreUnverified::ProcessUnreadable)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_exec_path(pid: u32) -> Option<String> {
+    procargs2_exec_path(&procargs2(pid).ok()?)
 }
 
 #[cfg(target_os = "linux")]
-fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+pub(crate) fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
     let raw = std::fs::read(format!("/proc/{pid}/environ"))
         .map_err(|_| RestoreUnverified::ProcessUnreadable)?;
     linux_environ(&raw)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn process_exec_path(pid: u32) -> Option<String> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn process_environ(_pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+pub(crate) fn process_environ(_pid: u32) -> Result<Vec<String>, RestoreUnverified> {
     Err(RestoreUnverified::PlatformUnsupported)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn process_exec_path(_pid: u32) -> Option<String> {
+    None
 }
 
 /// The pid of the process that accepted this connection, as the kernel recorded it.

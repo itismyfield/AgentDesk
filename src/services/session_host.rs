@@ -8,6 +8,7 @@ mod herdr {
     pub(crate) mod launch_host;
     pub(crate) mod model;
     pub(crate) mod observe;
+    pub(crate) mod pane_probe;
     pub(crate) mod provenance;
     // Unix-socket only; no Windows transport exists.
     #[cfg(unix)]
@@ -32,6 +33,7 @@ pub(crate) use herdr::contract::ServerWitness;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
 pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
+pub(crate) use herdr::pane_probe::EvidenceGap;
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,

@@ -145,21 +145,7 @@ impl HookBindingEnvelope {
     ) -> Self {
         let capture = || {
             let path = env(CONTEXT_ENV).ok_or(AbsentReason::EnvUnset)?;
-            let path = Path::new(&path);
-            let ctx = read_hook_context(path).map_err(|error| match error.kind() {
-                io::ErrorKind::InvalidData => AbsentReason::Corrupt,
-                _ => AbsentReason::Unreadable,
-            })?;
-            if path.file_stem().and_then(|s| s.to_str()) != Some(&ctx.execution_nonce) {
-                return Err(AbsentReason::NonceMismatch);
-            }
-            if ctx.provider != provider {
-                return Err(AbsentReason::ProviderMismatch);
-            }
-            if ctx.schema != 1 {
-                return Err(AbsentReason::SchemaUnsupported);
-            }
-            Ok(ctx)
+            checked_context(Path::new(&path), provider)
         };
         // Overlong observations are unavailable evidence, keeping the encoded header bounded.
         let observed = |key| {
@@ -189,6 +175,52 @@ impl HookBindingEnvelope {
             .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
             .map_err(|e| e.to_string())
     }
+}
+
+/// The context file a provider's environment names, as a hook trusts it: readable, named
+/// after its own nonce, for `provider`, schema 1.
+fn checked_context(path: &Path, provider: &str) -> Result<BindingContext, AbsentReason> {
+    let ctx = read_hook_context(path).map_err(|error| match error.kind() {
+        io::ErrorKind::InvalidData => AbsentReason::Corrupt,
+        _ => AbsentReason::Unreadable,
+    })?;
+    if path.file_stem().and_then(|s| s.to_str()) != Some(&ctx.execution_nonce) {
+        return Err(AbsentReason::NonceMismatch);
+    }
+    if ctx.provider != provider {
+        return Err(AbsentReason::ProviderMismatch);
+    }
+    if ctx.schema != 1 {
+        return Err(AbsentReason::SchemaUnsupported);
+    }
+    Ok(ctx)
+}
+
+/// Execution `nonce`'s own context, read from its own path under the hook's rules.
+pub(crate) fn execution_context(provider: &str, nonce: &str) -> Result<BindingContext, String> {
+    let own = context_path(provider, nonce).map_err(|error| error.to_string())?;
+    let ctx = checked_context(&own, provider).map_err(|reason| format!("{reason:?}"))?;
+    if ctx.execution_nonce != nonce {
+        return Err(format!("context names execution {}", ctx.execution_nonce));
+    }
+    Ok(ctx)
+}
+
+/// Execution `nonce`'s context when `env_path`, as a provider's environment holds it, is
+/// exactly that execution's own context path.
+pub(crate) fn context_names_execution(
+    provider: &str,
+    nonce: &str,
+    env_path: &Path,
+) -> Result<BindingContext, String> {
+    let own = context_path(provider, nonce).map_err(|error| error.to_string())?;
+    if env_path != own {
+        return Err(format!(
+            "{} is not this execution's context",
+            env_path.display()
+        ));
+    }
+    execution_context(provider, nonce)
 }
 
 #[allow(dead_code)]

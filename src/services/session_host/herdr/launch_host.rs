@@ -4,46 +4,29 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use super::contract::{self, CreatedPane, ForegroundProcesses, HerdrTransport, ServerWitness};
+use super::contract::{self, CreatedPane, HerdrTransport, ServerWitness};
 use super::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::observe::{self, RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
+use super::pane_probe::{
+    self, EvidenceGap, HostOs, PROVIDER_WINDOW, PaneProcesses, ProbeRequest, ProcessOs,
+};
 use super::transport::{HerdrSocketConfig, HerdrSocketTransport};
 use super::wire::LineJsonFraming;
-use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, ProcessStamp};
+use crate::db::dispatched_sessions::hosted_execution::ExpectedExecution;
 use crate::services::herdr_launch::{
-    HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
+    EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
     launch_command_eligible,
 };
 use crate::services::session_host::model::HostMutation;
-
-/// How long a new pane is watched for its provider process, and how often.
-const PROVIDER_WINDOW: Duration = Duration::from_secs(5);
-const PROVIDER_POLL: Duration = Duration::from_millis(200);
-
-/// What the pane's process list says about the provider. Only `One` names a candidate,
-/// and a candidate is not evidence until its nonce is checked against the launch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProviderCandidate {
-    One {
-        root: u32,
-        provider: u32,
-    },
-    /// Still only the shell in the foreground when the window closed.
-    NoneYet,
-    Multiple(Vec<u32>),
-    NoRoot,
-    Unreported,
-    ReadFailed(String),
-    UnknownEndpoint,
-}
 
 pub(crate) struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, HerdrSocketTransport)>,
     next_id: AtomicU64,
     read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
+    os: Box<dyn ProcessOs>,
+    provider_window: Duration,
 }
 
 fn same_endpoint(
@@ -81,6 +64,8 @@ impl SocketHerdrLaunchHost {
             endpoints,
             next_id: AtomicU64::new(1),
             read_restore: observe::read_restore_resume,
+            os: Box::new(HostOs),
+            provider_window: PROVIDER_WINDOW,
         }
     }
 
@@ -122,31 +107,15 @@ impl SocketHerdrLaunchHost {
         }
     }
 
-    /// One read of the pane's root shell and foreground processes.
-    fn read_candidate(&self, transport: &HerdrSocketTransport, pane_id: &str) -> ProviderCandidate {
+    /// One read of the pane's root shell and foreground processes on its own connection,
+    /// with the server that answered it.
+    fn read_processes(&self, transport: &HerdrSocketTransport, pane_id: &str) -> PaneProcesses {
         let call = self.call(HerdrRequest::PaneProcessInfo {
             pane_id: pane_id.to_string(),
         });
-        let (outcome, _) = transport.call(&call);
-        let (root, foreground) = match contract::foreground_result(&call, outcome, pane_id) {
-            Ok(read) => read,
-            Err(error) => return ProviderCandidate::ReadFailed(format!("{error:?}")),
-        };
-        let Some(root) = root else {
-            return ProviderCandidate::NoRoot;
-        };
-        let ForegroundProcesses::Listed(pids) = foreground else {
-            return ProviderCandidate::Unreported;
-        };
-        let others: Vec<u32> = pids.into_iter().filter(|pid| *pid != root).collect();
-        match others.as_slice() {
-            [] => ProviderCandidate::NoneYet,
-            [provider] => ProviderCandidate::One {
-                root,
-                provider: *provider,
-            },
-            _ => ProviderCandidate::Multiple(others),
-        }
+        let (outcome, witness) = transport.call(&call);
+        let read = contract::foreground_result(&call, outcome, pane_id);
+        (read.map_err(|error| format!("{error:?}")), witness)
     }
 
     /// The create after the local checks: everything from the first socket call on.
@@ -193,32 +162,6 @@ impl SocketHerdrLaunchHost {
             other => unconfirmed(format!("command input: {other:?}")),
         }
     }
-
-    /// Polls the new pane until one non-shell foreground process shows up or the window
-    /// closes; any other answer is returned with the reason it was not a candidate.
-    pub(crate) fn provider_candidate(&self, location: &HostedLocation) -> ProviderCandidate {
-        let found = self.endpoints.iter().find(|(endpoint, _)| {
-            same_endpoint(
-                endpoint,
-                &location.execution_node,
-                &location.endpoint_config_key,
-                &location.socket_addr,
-                &location.named_session,
-            )
-        });
-        let Some((_, transport)) = found else {
-            return ProviderCandidate::UnknownEndpoint;
-        };
-        let deadline = Instant::now() + PROVIDER_WINDOW;
-        loop {
-            let candidate = self.read_candidate(transport, &location.pane_id);
-            if candidate != ProviderCandidate::NoneYet || Instant::now() + PROVIDER_POLL >= deadline
-            {
-                return candidate;
-            }
-            thread::sleep(PROVIDER_POLL);
-        }
-    }
 }
 
 impl HerdrLaunchHost for SocketHerdrLaunchHost {
@@ -238,11 +181,32 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         self.create_eligible(request)
     }
 
-    /// No stamps until the candidate's nonce is checked; the reading is logged, not stored.
-    fn launch_evidence(&self, location: &HostedLocation) -> Option<(ProcessStamp, ProcessStamp)> {
-        let candidate = self.provider_candidate(location);
-        tracing::info!(pane = %location.pane_id, ?candidate, "herdr provider candidate (not evidence)");
-        None
+    /// The pane probe over the location's configured socket and this host's process table.
+    fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
+        let location = &probe.location;
+        let found = self.endpoints.iter().find(|(endpoint, _)| {
+            same_endpoint(
+                endpoint,
+                &location.execution_node,
+                &location.endpoint_config_key,
+                &location.socket_addr,
+                &location.named_session,
+            )
+        });
+        let Some((_, transport)) = found else {
+            return Err(EvidenceGap::UnknownEndpoint);
+        };
+        let request = ProbeRequest {
+            provider: &probe.provider,
+            nonce: &probe.execution_nonce,
+            launched_at: probe.launched_at,
+            witness: &probe.witness,
+            window: self.provider_window,
+        };
+        let read = || self.read_processes(transport, &location.pane_id);
+        let probed = pane_probe::probe(&read, self.os.as_ref(), &request);
+        tracing::info!(pane = %location.pane_id, ?probed, "herdr launch evidence");
+        probed
     }
 }
 

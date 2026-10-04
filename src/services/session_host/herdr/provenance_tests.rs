@@ -363,6 +363,24 @@ fn procargs2_environment_starts_after_the_exec_path_and_every_argument() {
     assert_eq!(procargs2_environ(&raw[..3]), None);
 }
 
+// A command name may hold ") " itself; the parent is the field after the last one's state.
+#[test]
+fn parent_and_exec_path_parse_from_each_platform_record() {
+    assert_eq!(
+        linux_stat_parent("4242 (sh) x) (y) S 77 4242 4242 0"),
+        Some(77)
+    );
+    assert_eq!(linux_stat_parent("4242 (sh) S"), None);
+    let mut raw = 1i32.to_ne_bytes().to_vec();
+    raw.extend_from_slice(b"/Users/x/.local/share/claude/2.1.288   claude HOME=/Users/x ");
+    let exec = procargs2_exec_path(&raw);
+    assert_eq!(
+        exec.as_deref(),
+        Some("/Users/x/.local/share/claude/2.1.288")
+    );
+    assert_eq!(procargs2_exec_path(&raw[..4]), None);
+}
+
 // Linux reads `/proc/<pid>/environ` empty for a zombie or a process still inside exec.
 #[test]
 fn linux_environ_never_reads_an_empty_environment_as_one_without_the_key() {
@@ -506,6 +524,11 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
         Ok(vec![config.display().to_string()]),
         "{}",
         server.failure("env")
+    );
+    assert_eq!(
+        process_parent(pid),
+        Ok(std::process::id()),
+        "the pane probe's parent read"
     );
     std::thread::sleep(Duration::from_millis(1_100));
     let home_str = home.to_str().unwrap();
