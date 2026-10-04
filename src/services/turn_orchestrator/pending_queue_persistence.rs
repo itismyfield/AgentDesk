@@ -614,7 +614,7 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     removed
 }
 
-fn pending_queue_item_to_intervention(
+pub(super) fn pending_queue_item_to_intervention(
     item: PendingQueueItem,
     reference_wall_time: SystemTime,
     reference_instant: Instant,

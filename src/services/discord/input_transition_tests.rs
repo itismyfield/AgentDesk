@@ -2,7 +2,7 @@
 mod supported {
     use super::super::*;
     use crate::services::tui_input::rows::{Owner, RowState};
-    use crate::services::tui_input::transition::{Move, Outcome};
+    use crate::services::tui_input::transition::{Move, Outcome, handback};
 
     #[derive(Default)]
     struct Fixture {
@@ -110,6 +110,12 @@ mod supported {
             rows.row(2).unwrap().input["source_text_segments"],
             merged["source_text_segments"]
         );
+        host.effects.legacy = vec![99];
+        assert_eq!(
+            handback(root.path(), 9, &mut host).unwrap(),
+            Outcome::Legacy
+        );
+        assert_eq!(host.effects.legacy, vec![99, 8, 2]);
     }
 
     #[test]
