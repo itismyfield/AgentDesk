@@ -507,7 +507,11 @@ pub(crate) async fn perform_resume_rebind(
         return Err(ResumeRebindError::TargetCwdMissing(target_cwd));
     }
 
-    // The host guard judges the stored rows before the first change below.
+    // A Herdr-configured channel, then the stored rows, are judged before the first change below.
+    let configured_refusal = crate::services::discord::admin_host_guard::configured_refusal;
+    if let Some(reason) = channel_id.and_then(|id| configured_refusal(id.get())) {
+        return Err(ResumeRebindError::HostUnsupported(reason));
+    }
     let host_refusal = crate::services::discord::host_defer_gate::resume_host_refusal(
         pool,
         provider.as_ref(),

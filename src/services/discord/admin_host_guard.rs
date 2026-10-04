@@ -62,6 +62,7 @@ impl ManagedReset {
 
 /// Puts back the input an intake took from `channel_id` when a refused reset stops it before
 /// its turn: the uploads lead the channel's pending list again and its clear flag returns.
+/// `false` when the channel has no session to take it back.
 pub(crate) async fn return_intake_input(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -69,7 +70,7 @@ pub(crate) async fn return_intake_input(
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
         Option<bool>,
     ),
-) {
+) -> bool {
     let mut data = shared.core.lock().await;
     let Some(session) = data.sessions.get_mut(&channel_id) else {
         let (channel_id, lost) = (channel_id.get(), uploads.len());
@@ -78,12 +79,13 @@ pub(crate) async fn return_intake_input(
             lost,
             "no session to return a refused intake's input to"
         );
-        return;
+        return false;
     };
     session.pending_uploads.splice(0..0, uploads);
     if let Some(cleared) = was_cleared {
         session.cleared = cleared;
     }
+    true
 }
 
 /// Why a reset that kills or recreates the channel's managed session may not touch it. A
@@ -98,13 +100,23 @@ pub(super) async fn managed_reset_refusal(
 ) -> Option<String> {
     let kills = reset_provider_state && provider.uses_managed_tmux_backend();
     if !(kills || recreate_tmux) {
-        return None;
+        // A Herdr-configured channel keeps its provider state whatever the runtime's backend.
+        return reset_provider_state.then(|| configured_refusal(channel_id.get()))?;
     }
     let name = session_channel_name(shared, channel_id).await;
     let reason = reset_refusal(shared, provider, channel_id, explicit_session_key, name).await?;
     let channel_id = channel_id.get();
     tracing::warn!(channel_id, %reason, "managed session reset refused");
     Some(reason)
+}
+
+/// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
+pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
+    let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;
+    let key = endpoint.key;
+    Some(format!(
+        "Herdr 설정 채널(endpoint `{key}`)이라 tmux 세션을 바꾸지 않아요"
+    ))
 }
 
 /// The in-memory `channel_name` first, then the registered fallback name; with neither, only
@@ -116,6 +128,9 @@ async fn reset_refusal(
     explicit_session_key: Option<&str>,
     channel_name: Option<String>,
 ) -> Option<String> {
+    if let Some(reason) = configured_refusal(channel_id.get()) {
+        return Some(reason);
+    }
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
     #[cfg(test)]
     if shared.pg_pool.is_none() {

@@ -101,6 +101,22 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             provider.as_str()
         )));
     }
+    // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
+    let session_key = || {
+        let basis = session_key_basis_override(
+            scheduled_snapshot_session_label(metadata.as_ref()).as_deref(),
+            metadata.as_ref(),
+            tmux_session_label.as_deref(),
+        )
+        .map(str::to_owned);
+        let provider = &provider;
+        async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
+    };
+    let pool = shared.pg_pool.as_ref();
+    let host = crate::services::turn_host::refusal_before_turn;
+    if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
+        return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
+    }
     shared.record_channel_speaker(
         channel_id,
         request_owner,
@@ -992,6 +1008,13 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let turn_host = crate::services::turn_host::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+    )
+    .await;
     let producer_registration = original_registration.clone();
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
@@ -1021,6 +1044,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
                             remote_profile: remote_profile.as_ref(),
                             tmux_session_name: tmux_session_name.as_deref(),
                             teardown: teardown_clearance.as_ref(),
+                            host: &turn_host,
                             channel_id: channel_id.get(),
                             model: model_for_turn.as_deref(),
                             native_fast_mode: native_fast_mode_override,

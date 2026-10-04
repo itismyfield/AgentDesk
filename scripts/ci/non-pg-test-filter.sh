@@ -45,6 +45,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::relay_dead_letter::tests
   --skip db::scheduled_messages::postgres_tests
   --skip db::session_transcripts::clear_fence_pg_tests
+  --skip db::session_transcripts::native_clear_pg_tests
   --skip dispatch::dispatch_cancel::pg_observability_tests
   --skip dispatch::dispatch_context::pg_rereview_tests
   --skip dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
@@ -147,6 +148,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  --skip services::discord::router::message_handler::provider_dispatch::tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
   --skip services::discord::router::message_handler::watchdog::host_tests
@@ -211,6 +213,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tmux_turn_liveness::tests_pg
+  --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
   --skip voice::turn_link::tests
@@ -495,6 +498,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_local_accepted_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
+  services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
   services::discord::router::message_handler::watchdog::host_tests::a_scheduled_paused_attach_rereads_the_host_before_each_attempt
@@ -685,6 +689,7 @@ NON_PG_FILTER_REPLAY=(
   services::settings::tests::settings_write_response_serializes_ok_contract
   services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+  services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
   utils::redact::tests::mask_dsn_password_redacts_postgres_password
@@ -733,6 +738,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::relay_dead_letter::tests
   db::scheduled_messages::postgres_tests
   db::session_transcripts::clear_fence_pg_tests
+  db::session_transcripts::native_clear_pg_tests
   dispatch::dispatch_cancel::pg_observability_tests
   dispatch::dispatch_context::pg_rereview_tests
   dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
@@ -835,6 +841,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  services::discord::router::message_handler::provider_dispatch::tests
   services::discord::router::message_handler::provider_isolation::host_tests
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests
   services::discord::router::message_handler::watchdog::host_tests
@@ -899,6 +906,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::settings::tests
   services::stale_turn_reconciler::tests
   services::tmux_turn_liveness::tests_pg
+  services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests
   voice::turn_link::tests

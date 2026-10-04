@@ -1,7 +1,11 @@
 use super::super::super::inflight::{InflightEpisodePin, InflightTurnState};
 use super::super::super::tui_direct_abort_marker as markers;
 use super::*;
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::channel_policy::{Adoption::Committed, Candidate};
+use crate::services::tui_o::shadow::tap::TuiOConfig;
+use crate::services::tui_o::turn_mode::TurnConfig;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -163,6 +167,57 @@ pub(in crate::services::discord) fn retire_channel(
         }
     }
     Ok(result)
+}
+
+/// Confirms each selected channel of `owned` once its retirement left nothing behind; a failed or
+/// partial retirement keeps the channel on Legacy turns for this process.
+pub(in crate::services::discord) fn confirm_turn_channels(
+    provider: &ProviderKind,
+    config: Option<&TurnConfig>,
+    owned: impl FnOnce() -> Vec<u64>,
+) -> Vec<u64> {
+    let retire = |channel| match retire_channel(provider, channel) {
+        Ok(Retirement {
+            removed,
+            retry_pending: false,
+        }) => {
+            tracing::info!(
+                channel,
+                removed,
+                "[tui_o] turn mode confirmed after retirement"
+            );
+            true
+        }
+        outcome => {
+            tracing::error!(
+                channel,
+                ?outcome,
+                "[tui_o] turn mode refused; Legacy keeps turns"
+            );
+            false
+        }
+    };
+    crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire)
+}
+
+/// Boot confirmation over the channels whose O adoption this provider's boot policy committed.
+pub(in crate::services::discord) fn confirm_at_boot(
+    provider: &ProviderKind,
+    config: Option<&TuiOConfig>,
+) -> Vec<u64> {
+    confirm_turn_channels(provider, config.map(|c| &c.turn), || {
+        let kind = match provider {
+            ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+            ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
+            _ => return Vec::new(),
+        };
+        let committed = |c: &Option<Candidate>| c.as_ref().is_some_and(|c| c.peek() == Committed);
+        crate::services::tui_o::cutover::boot_ownership()
+            .into_iter()
+            .filter(|(_, k, candidate)| *k == Some(kind) && committed(candidate))
+            .map(|(channel, _, _)| channel)
+            .collect()
+    })
 }
 
 #[cfg(test)]

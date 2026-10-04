@@ -97,6 +97,10 @@ pub(in crate::services::discord) async fn clear_channel_session(
     tmux_name: &str,
     caller: &str,
 ) -> Option<ClearedHostSession> {
+    // A Herdr-configured channel's session is never cleared or killed this way.
+    if crate::services::discord::admin_host_guard::configured_refusal(channel_id).is_some() {
+        return None;
+    }
     let teardown = keyed_teardown(
         pool,
         provider,

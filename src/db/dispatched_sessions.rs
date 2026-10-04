@@ -2937,6 +2937,8 @@ pub(crate) async fn mark_raw_provider_transcript_growth_if_observed_pg(
     .map_err(|error| format!("{error}"))
 }
 
+/// Clears a stale selector from Legacy rows only; a hosted row or a Herdr-configured
+/// channel's row keeps its selectors and transcript watermark.
 pub(crate) async fn clear_stale_session_id_pg(
     pool: &PgPool,
     session_id: &str,
@@ -2949,10 +2951,13 @@ pub(crate) async fn clear_stale_session_id_pg(
              raw_provider_transcript_len_watermark = 0,
              raw_provider_transcript_watermark_session_id = NULL,
              raw_provider_transcript_growth_proven = FALSE
-         WHERE claude_session_id = $1
-            OR raw_provider_session_id = $1",
+         WHERE (claude_session_id = $1 OR raw_provider_session_id = $1)
+           AND hosted_execution IS NULL
+           AND COALESCE(channel_id, '') <> ALL($2::TEXT[])
+           AND COALESCE(thread_channel_id, '') <> ALL($2::TEXT[])",
     )
     .bind(session_id)
+    .bind(crate::config::session_hosts::configured_channel_ids())
     .execute(pool)
     .await
     .map(|result| result.rows_affected())
@@ -2983,9 +2988,13 @@ pub(crate) async fn clear_session_id_by_key_pg(
                  raw_provider_transcript_len_watermark = 0,
                  raw_provider_transcript_watermark_session_id = NULL,
                  raw_provider_transcript_growth_proven = FALSE
-             WHERE id = $1",
+             WHERE id = $1
+               AND hosted_execution IS NULL
+               AND COALESCE(channel_id, '') <> ALL($2::TEXT[])
+               AND COALESCE(thread_channel_id, '') <> ALL($2::TEXT[])",
         )
         .bind(session_id)
+        .bind(crate::config::session_hosts::configured_channel_ids())
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("clear postgres session selectors: {error}"))?

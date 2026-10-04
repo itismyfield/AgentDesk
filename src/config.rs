@@ -15,6 +15,8 @@ pub(crate) mod runtime_profile;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;
+pub(crate) mod session_hosts;
+pub use session_hosts::SessionHostsConfig;
 pub(crate) mod disk_write;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
@@ -73,6 +75,9 @@ pub struct Config {
     pub prompt_manifest_retention: PromptManifestRetentionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_o: Option<crate::services::tui_o::shadow::tap::TuiOConfig>,
+    /// Channels run on a Herdr endpoint; restart-required, empty by default.
+    #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
+    pub session_hosts: SessionHostsConfig,
     /// When true (default), the server watches the on-disk config file and
     /// hot-reloads the hot-swappable settings (routine tunables, thresholds)
     /// without a restart, mirroring the policies watcher: the candidate file is
@@ -2808,6 +2813,7 @@ impl Default for Config {
             mcp: McpConfig::default(),
             prompt_manifest_retention: PromptManifestRetentionConfig::default(),
             tui_o: None,
+            session_hosts: SessionHostsConfig::default(),
             config_hot_reload: default_true(),
         }
         .apply_runtime_defaults()
@@ -2880,6 +2886,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
     crate::services::tui_o::channel_policy::BootChannels::validate(config)?;
     config.cluster.runtime_profile.validate(&config.cluster)?;
+    session_hosts::validate(config)?;
     config.onboarding.warn_invalid_rules();
     validate_escalation_schedule(&config.escalation.schedule)?;
     validate_scheduled_message_required_mentions(

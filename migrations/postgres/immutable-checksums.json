@@ -685,6 +685,11 @@
       "path": "migrations/postgres/0134_channel_home_epochs.sql",
       "sha256": "bce70458c71e133d49de7d1f77215d4d56053c8f452c2f9a530e432b09c88e77",
       "version": 134
+    },
+    {
+      "path": "migrations/postgres/0135_channel_clear_boundary_native_correlation.sql",
+      "sha256": "174c706f1328c48b7d46104d63cdd2f3394338b65b07ec7852af00a6f546dba8",
+      "version": 135
     }
   ],
   "version": 1

@@ -49,6 +49,8 @@ pub trait HostIo: Send + Sync + 'static {
     fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send;
     /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
     fn relaying(&self, channel: u64) -> bool;
+    /// Called once a first activation committed the channel, before it is ready for intake.
+    fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
 }
 
 /// Legacy's local hold on a channel as the gateway reads it.
@@ -321,7 +323,10 @@ async fn host_channel<I: HostIo>(
                 return stop(&candidate, &alarms, channel, &detail);
             }
             match recover(&runtime_root, channel) {
-                Ok(Recovered::Store(store)) => store,
+                Ok(Recovered::Store(store)) => {
+                    io.adopted(channel, provider);
+                    store
+                }
                 Ok(Recovered::Fresh(_)) => {
                     return hold(&alarms, channel, "init missing after activation");
                 }

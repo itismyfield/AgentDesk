@@ -276,6 +276,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
     // doctor handles only health-registered runtimes, which register after their reaper.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
+    // Turn mode is fixed before the relay restores pending starts for the channels it confirms.
+    super::tui_direct_pending_start::turn_retirement::confirm_at_boot(
+        &provider,
+        boot_config.tui_o.as_ref(),
+    );
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -955,6 +960,11 @@ agents:
                 "reaper must precede {later}"
             );
         }
+        let confirm = body.find("turn_retirement::confirm_at_boot(").unwrap();
+        assert!(
+            at < confirm && confirm < body.find("spawn_tui_prompt_relay(").unwrap(),
+            "turn mode is fixed after the reaper and before pending starts are restored"
+        );
     }
 }
 

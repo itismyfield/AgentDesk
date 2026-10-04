@@ -42,19 +42,20 @@ pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
     "HERDR_CONFIG_PATH",
 ];
 
-/// Whether a Claude TUI launch goes to Herdr, decided before any launch I/O: only a selected
-/// channel whose O writer already runs on a store with a seeded binding baseline.
-pub(crate) fn herdr_admitted_for_claude_launch(channel_id: Option<u64>) -> bool {
-    herdr_selected(channel_id)
-        && channel_id.is_some_and(|channel| o_ready_at(runtime_root().as_deref(), channel))
+/// Whether a TUI launch for the channel belongs to Herdr. A configured channel never gets a tmux
+/// session, whatever its admission or O readiness; the turn host reports why it is refused.
+pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
+    channel_id.is_some_and(configured)
 }
 
-/// Nothing selects Herdr yet; activation changes only this predicate, never the gate above.
-fn herdr_selected(_channel_id: Option<u64>) -> bool {
-    #[cfg(test)]
-    return SELECTED.with(std::cell::Cell::get);
-    #[cfg(not(test))]
-    false
+/// Read from the boot `session_hosts` section, never from the live config.
+fn configured(channel: u64) -> bool {
+    crate::config::session_hosts::herdr_endpoint(channel).is_some()
+}
+
+/// Whether the channel's O writer could take a Herdr turn now.
+pub(crate) fn o_writer_ready(channel: u64) -> bool {
+    o_ready_at(runtime_root().as_deref(), channel)
 }
 
 /// O owns the channel's output, its writer accepts work, and its store holds a binding
@@ -174,28 +175,23 @@ pub(crate) enum HerdrLaunchError {
 #[cfg(test)]
 thread_local! {
     static ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static SELECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static WRITER_ACCEPTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static READINESS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Selects Herdr and stands in for the writer's readiness on this thread until dropped.
+/// Stands in for the writer's readiness on this thread until dropped.
 #[cfg(test)]
-pub(crate) struct LaunchGateGuard(bool, Option<bool>);
+pub(crate) struct WriterAcceptsGuard(Option<bool>);
 
 #[cfg(test)]
-pub(crate) fn force_launch_gate(selected: bool, writer_accepts: Option<bool>) -> LaunchGateGuard {
-    LaunchGateGuard(
-        SELECTED.with(|cell| cell.replace(selected)),
-        WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)),
-    )
+pub(crate) fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAcceptsGuard {
+    WriterAcceptsGuard(WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)))
 }
 
 #[cfg(test)]
-impl Drop for LaunchGateGuard {
+impl Drop for WriterAcceptsGuard {
     fn drop(&mut self) {
-        SELECTED.with(|cell| cell.set(self.0));
-        WRITER_ACCEPTS.with(|cell| cell.set(self.1));
+        WRITER_ACCEPTS.with(|cell| cell.set(self.0));
     }
 }
 

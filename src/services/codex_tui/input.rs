@@ -1020,7 +1020,16 @@ fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> b
         && snapshot.capture_available
         && snapshot.composer_marker_detected
         && !snapshot.prompt_draft_detected
+        && !CODEX_STARTUP_UPDATE_MODAL_MARKERS
+            .iter()
+            .any(|marker| snapshot.pane_tail.to_ascii_lowercase().contains(marker))
 }
+
+const CODEX_STARTUP_UPDATE_MODAL_MARKERS: &[&str] = &[
+    "update available",
+    "update now (runs",
+    "skip until next version",
+];
 
 const CODEX_INTERACTIVE_MODAL_MARKERS: &[&str] = &[
     "approval required",
@@ -1032,6 +1041,9 @@ const CODEX_INTERACTIVE_MODAL_MARKERS: &[&str] = &[
     "sign in",
     "log in",
     "authentication required",
+    CODEX_STARTUP_UPDATE_MODAL_MARKERS[0],
+    CODEX_STARTUP_UPDATE_MODAL_MARKERS[1],
+    CODEX_STARTUP_UPDATE_MODAL_MARKERS[2],
 ];
 
 fn pane_has_codex_interactive_modal_in_pane(pane: &str) -> bool {
@@ -2255,18 +2267,7 @@ mod tests {
         snapshot
     }
 
-    #[test]
-    fn steering_snapshot_requires_composer_and_rejects_modal() {
-        let missing_composer = submit_snapshot(true, true, false, false);
-        assert_eq!(
-            steering_snapshot_decision(&missing_composer),
-            Err("composer not present")
-        );
-
-        let mut modal = submit_snapshot(true, true, true, false);
-        modal.pane_tail = "Approval required: allow command?".to_string();
-        assert_eq!(steering_snapshot_decision(&modal), Err("interactive modal"));
-    }
+    mod startup_update_tests;
 
     #[test]
     fn codex_injection_records_before_confirmed_submit() {
@@ -2794,26 +2795,6 @@ then continued with a response.";
 
         assert!(!pane_looks_ready_for_codex_prompt(pane));
         assert!(!pane_has_codex_prompt_draft(pane));
-    }
-
-    #[test]
-    fn final_submit_gate_requires_a_live_empty_canonical_snapshot() {
-        let ready = submit_snapshot(true, true, true, false);
-        assert!(snapshot_allows_warm_followup_submit(&ready));
-
-        for mutate in [
-            |snapshot: &mut PromptReadinessSnapshot| snapshot.tmux_pane_alive = false,
-            |snapshot: &mut PromptReadinessSnapshot| snapshot.capture_available = false,
-            |snapshot: &mut PromptReadinessSnapshot| snapshot.composer_marker_detected = false,
-            |snapshot: &mut PromptReadinessSnapshot| snapshot.prompt_draft_detected = true,
-        ] {
-            let mut rejected = ready.clone();
-            mutate(&mut rejected);
-            assert!(
-                !snapshot_allows_warm_followup_submit(&rejected),
-                "final submit must reject every mutated readiness guard"
-            );
-        }
     }
 
     #[test]

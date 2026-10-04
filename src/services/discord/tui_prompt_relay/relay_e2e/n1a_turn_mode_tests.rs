@@ -425,3 +425,61 @@ fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
         dedupe::clear_tmux_runtime_binding(tmux);
     });
 }
+
+#[test]
+fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_without_a_lease() {
+    run(async {
+        let h = RelayE2eHarness::start_with_health_registry().await;
+        h.cache_relay_transport();
+        h.answer_placeholders_immediately();
+        h.use_mock_notify_bot(Duration::from_secs(5)).await;
+        let tmux = "n1c-hook-direct-prompt";
+        h.attach_tmux_watcher(tmux, "n1c-hook-direct.jsonl");
+        let turn = crate::services::tui_o::turn_mode::TurnConfig {
+            channels: [CHANNEL_ID].into(),
+            all_owned: false,
+        };
+        let confirm = crate::services::discord::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
+        assert_eq!(
+            confirm(&ProviderKind::Claude, Some(&turn), || vec![CHANNEL_ID]),
+            [CHANNEL_ID]
+        );
+        let _confirmed = TestConfirmation::confirmed(CHANNEL_ID);
+        let mut observed = dedupe::subscribe_observed_prompts();
+        let observation = dedupe::observe_prompt_by_tmux_at(
+            PROVIDER_KEY,
+            tmux,
+            "N1c hook prompt stays a notice",
+            chrono::Utc::now(),
+        );
+        assert!(matches!(
+            observation,
+            dedupe::PromptObservation::PublishedSshDirect
+        ));
+        let prompt = loop {
+            let prompt = observed.recv().await.unwrap();
+            if prompt.tmux_session_name == tmux {
+                break prompt;
+            }
+        };
+        assert!(
+            h.relay_lease_present(tmux),
+            "hook observation records a Legacy lease"
+        );
+        super::super::relay_observed_prompt(&h.shared, prompt).await;
+
+        assert!(
+            !h.relay_lease_present(tmux),
+            "a confirmed direct turn must not keep the observation's lease"
+        );
+        assert_eq!(h.local_note_posts(), 1);
+        assert_eq!(h.placeholder_posts(), 0);
+        assert!(h.prompt_anchor(tmux).is_none());
+        assert!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL_ID).is_none()
+        );
+        assert!(crate::services::discord::tui_direct_pending_start::load_all().is_empty());
+        assert!(h.mailbox().await.cancel_token.is_none());
+        assert!(h.unhandled_requests().is_empty());
+    });
+}

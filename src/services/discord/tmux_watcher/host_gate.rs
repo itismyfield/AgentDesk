@@ -115,6 +115,20 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn admits_teardown(
     }
 }
 
+/// [`admits_teardown`] for a kill the watcher starts on its own; a Herdr-configured channel's
+/// session is kept whatever its rows say.
+pub(in crate::services::discord::tmux::tmux_watcher) async fn admits_automatic_kill(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    name: &str,
+    action: &str,
+) -> bool {
+    let configured = crate::services::discord::admin_host_guard::configured_refusal;
+    configured(channel_id.get()).is_none()
+        && admits_teardown(shared, provider, channel_id, name, action).await
+}
+
 /// A pane tmux confirms dead, or an unanswered probe the wrapper's `.pane_dead` confirms.
 /// Herdr is never dead here; the keyed teardown gate before it already read the sessions row.
 pub(in crate::services::discord::tmux::tmux_watcher) fn tmux_pane_dead(

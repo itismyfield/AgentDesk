@@ -328,8 +328,29 @@ async fn discard_pending_current_message_candidate<G: TurnGateway + ?Sized>(
     .await;
 }
 
-/// Binds a just-created candidate now, discarding it when the store fails; true only when the
-/// candidate became the turn's current message.
+const ONE_SHOT_BIND_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+const ONE_SHOT_BIND_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// One-shot binds have no later tick to retry on, so a store failure such as sidecar
+/// contention is retried with async sleeps until a short deadline instead of blocking a worker.
+async fn persist_one_shot_candidate_bind<G: TurnGateway + ?Sized>(
+    context: &mut StreamTickCandidateSaveContext<'_, G>,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let deadline = tokio::time::Instant::now() + ONE_SHOT_BIND_RETRY_BUDGET;
+    loop {
+        let mode = StreamTickSaveMode::MergeConcurrentOwner;
+        let outcome =
+            persist_stream_tick_state_with_candidate_cleanup_mode(context, caller, mode).await;
+        if outcome != GuardedSaveOutcome::IoError || tokio::time::Instant::now() >= deadline {
+            return outcome;
+        }
+        tokio::time::sleep(ONE_SHOT_BIND_RETRY_INTERVAL).await;
+    }
+}
+
+/// Binds a just-created candidate now, discarding it when the store stays unavailable past the
+/// bounded retry; true only when the candidate became the turn's current message.
 pub(super) async fn bind_pending_current_message_candidate<G: TurnGateway + ?Sized>(
     context: &mut StreamTickCandidateSaveContext<'_, G>,
     caller: &'static str,
@@ -337,9 +358,7 @@ pub(super) async fn bind_pending_current_message_candidate<G: TurnGateway + ?Siz
     let Some(candidate) = *context.pending_current_message_candidate else {
         return false;
     };
-    let mode = StreamTickSaveMode::MergeConcurrentOwner;
-    let outcome =
-        persist_stream_tick_state_with_candidate_cleanup_mode(context, caller, mode).await;
+    let outcome = persist_one_shot_candidate_bind(context, caller).await;
     if outcome == GuardedSaveOutcome::IoError {
         discard_pending_current_message_candidate(context).await;
     }
@@ -347,8 +366,8 @@ pub(super) async fn bind_pending_current_message_candidate<G: TurnGateway + ?Siz
 }
 
 /// A stream-loop break may happen before the next periodic tick. Give a pending
-/// response candidate one final guarded bind; if the store is unavailable,
-/// discard the unbound Discord message instead of returning an orphan.
+/// response candidate one final guarded bind; if the store stays unavailable past
+/// the bounded retry, discard the unbound Discord message instead of returning an orphan.
 pub(in crate::services::discord::turn_bridge) async fn settle_pending_current_message_candidate_on_loop_exit<
     G: TurnGateway + ?Sized,
 >(
@@ -357,12 +376,8 @@ pub(in crate::services::discord::turn_bridge) async fn settle_pending_current_me
     if context.pending_current_message_candidate.is_none() {
         return false;
     }
-    let outcome = persist_stream_tick_state_with_candidate_cleanup_mode(
-        &mut context,
-        "turn_bridge::stream_loop::exit_candidate_flush",
-        StreamTickSaveMode::MergeConcurrentOwner,
-    )
-    .await;
+    let caller = "turn_bridge::stream_loop::exit_candidate_flush";
+    let outcome = persist_one_shot_candidate_bind(&mut context, caller).await;
     if outcome == GuardedSaveOutcome::IoError {
         tracing::warn!(
             channel_id = context.channel_id.get(),
@@ -394,6 +409,9 @@ pub(super) fn dirty_after_guarded_save(outcome: GuardedSaveOutcome) -> bool {
 // #4267: the tests live in a sibling file. Inline, this module's ~1.2k lines
 // over ~380 production lines is the test-residue ratio the readability gate
 // flags — the module path and every `super::*` reference are unchanged.
+#[cfg(test)]
+#[path = "lock_liveness_tests.rs"]
+mod lock_liveness_tests;
 #[cfg(test)]
 #[path = "guarded_persist_tests.rs"]
 mod tests;

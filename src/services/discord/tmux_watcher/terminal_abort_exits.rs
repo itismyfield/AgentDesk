@@ -117,7 +117,7 @@ pub(super) async fn handle_terminal_abort_exits(
     // Handle prompt-too-long: kill session so next message creates a fresh one
     if locals.is_prompt_too_long {
         clear_provider_overload_retry_state(channel_id);
-        let notice = if host_gate::admits_teardown(
+        let notice = if host_gate::admits_automatic_kill(
             shared,
             watcher_provider,
             channel_id,

@@ -27,6 +27,7 @@ src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
 src/db/scheduled_messages/postgres_tests.rs
 src/db/session_transcripts.rs
+src/db/session_transcripts_native_clear_tests.rs
 src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
@@ -123,6 +124,7 @@ src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
+src/services/discord/router/message_handler/provider_dispatch.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
@@ -184,6 +186,7 @@ src/services/session_resume.rs
 src/services/settings.rs
 src/services/stale_turn_reconciler.rs
 src/services/tmux_turn_liveness/tests_pg.rs
+src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
@@ -218,6 +221,7 @@ db::prompt_manifests::tests
 db::relay_dead_letter::tests
 db::scheduled_messages::postgres_tests
 db::session_transcripts::clear_fence_pg_tests
+db::session_transcripts::native_clear_pg_tests
 dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
@@ -320,6 +324,7 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::router::message_handler::watchdog::host_tests
@@ -384,6 +389,7 @@ services::session_resume::tests
 services::settings::tests
 services::stale_turn_reconciler::tests
 services::tmux_turn_liveness::tests_pg
+services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
 voice::turn_link::tests
@@ -684,6 +690,12 @@ db::session_transcripts::clear_fence_pg_tests::pre_clear_turn_committed_after_bo
 db::session_transcripts::clear_fence_pg_tests::sa2_exact_routine_attempt_proof_pg
 db::session_transcripts::clear_fence_pg_tests::sa2_failed_observation_survives_recovery_pg
 db::session_transcripts::clear_fence_pg_tests::sa2_own_clear_and_midturn_clear_pg
+db::session_transcripts::native_clear_pg_tests::existing_boundary_readers_treat_native_and_legacy_clears_alike_pg
+db::session_transcripts::native_clear_pg_tests::native_columns_split_counterexamples_the_legacy_markers_cannot_pg
+db::session_transcripts::native_clear_pg_tests::native_write_is_all_or_nothing_and_partial_correlation_is_refused_pg
+db::session_transcripts::native_clear_pg_tests::older_boundary_writers_keep_native_columns_and_supersede_them_pg
+db::session_transcripts::native_clear_pg_tests::resolve_marks_only_the_current_unresolved_generation_pg
+db::session_transcripts::native_clear_pg_tests::transcript_past_frontier_supersedes_and_uncorrelated_rows_are_legacy_pg
 dispatch::dispatch_cancel::pg_observability_tests::cancel_emits_dispatch_result_observability_event
 dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
 dispatch::dispatch_context::pg_rereview_tests::pg_build_review_context_rereview_uses_pr_tracking_head_when_repo_root_dirty
@@ -796,6 +808,7 @@ server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_runti
 server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg
 server::routes::dispatched_sessions::tests::routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg
 server::routes::dispatched_sessions::tests::routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg
+server::routes::dispatched_sessions::tests::selector_clears_keep_configured_and_hosted_rows_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
@@ -924,6 +937,7 @@ services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_cards_outside_active_loop_state_pg
@@ -1015,9 +1029,15 @@ services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_onl
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
+services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
+services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
+services::discord::admin_host_guard::tests::a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_pg
+services::discord::admin_host_guard::tests::an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
+services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
+services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
@@ -1089,6 +1109,7 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
+services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
@@ -1121,6 +1142,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
+services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::legacy_null_channel_id_single_row_is_reused
@@ -1168,6 +1190,7 @@ services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_take_the_keyed_host_verdict_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
@@ -1420,6 +1443,7 @@ services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknow
 services::tmux_turn_liveness::tests_pg::cleanup_host_never_reads_a_missing_or_unreadable_lookup_as_legacy_pg
 services::tmux_turn_liveness::tests_pg::idle_cleanup_preserves_approval_and_background_children_pg
 services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg
+services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
 services::turn_lifecycle::host_guard_tests::force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg
