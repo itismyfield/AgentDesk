@@ -129,6 +129,9 @@ async fn heal_stale_busy_mailbox_with_probe(
     probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
     host_gate: &HostGate,
 ) -> bool {
+    let Ok(_recovery) = super::live_bridge::try_recovery(provider, channel_id.get()) else {
+        return false;
+    };
     if !provider.uses_managed_tmux_backend() {
         return false;
     }

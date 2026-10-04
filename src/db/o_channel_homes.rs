@@ -1,5 +1,6 @@
 //! Channel O home rows (`o_channel_homes`). Every transition is one conditional statement: a
-//! condition that no longer holds is [`HomeWrite::Stale`] and leaves the row unchanged.
+//! condition that no longer holds is [`HomeWrite::Stale`] and leaves the row unchanged. Each new
+//! epoch comes from one sequence, so no lifecycle of a channel repeats an earlier one's epoch.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::Duration;
@@ -181,7 +182,7 @@ pub(crate) async fn read_home(
     row.as_ref().map(decode).transpose()
 }
 
-/// Operator `delegate`: a gateway-owned channel starts releasing to `target`.
+/// Operator `delegate`: a gateway-owned channel starts releasing to `target` at a fresh epoch.
 pub(crate) async fn delegate(
     pool: &PgPool,
     channel_id: &str,
@@ -191,7 +192,8 @@ pub(crate) async fn delegate(
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
     let row = sqlx::query(&format!(
         "INSERT INTO o_channel_homes (channel_id, provider, state, holder, target, epoch, renewed_at)
-         VALUES ($1, $2, 'releasing', $3, $4, 1, NOW())
+         SELECT $1, $2, 'releasing', $3, $4, nextval('o_channel_home_epochs'), NOW()
+          WHERE NOT EXISTS (SELECT 1 FROM o_channel_homes WHERE channel_id = $1)
          ON CONFLICT (channel_id) DO NOTHING
          RETURNING {COLUMNS}"
     ))
@@ -205,7 +207,7 @@ pub(crate) async fn delegate(
 }
 
 /// A drained holder leaves: `releasing` → `released` (or `reclaiming` → `reclaimed`), no
-/// holder, next epoch.
+/// holder, a fresh epoch.
 async fn leave(
     pool: &PgPool,
     channel_id: &str,
@@ -216,7 +218,8 @@ async fn leave(
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
     let row = sqlx::query(&format!(
         "UPDATE o_channel_homes
-            SET state = $5, holder = NULL, epoch = epoch + 1, updated_at = NOW()
+            SET state = $5, holder = NULL, epoch = nextval('o_channel_home_epochs'),
+                updated_at = NOW()
           WHERE channel_id = $1 AND state = $2 AND holder = $3 AND epoch = $4
           RETURNING {COLUMNS}"
     ))
@@ -356,8 +359,8 @@ pub(crate) async fn force_orphan(
 ) -> Result<ForceOutcome, HomeError> {
     let row = sqlx::query(&format!(
         "UPDATE o_channel_homes
-            SET state = 'orphaned', holder = NULL, epoch = epoch + 1, updated_at = NOW(),
-                detail = $4
+            SET state = 'orphaned', holder = NULL, epoch = nextval('o_channel_home_epochs'),
+                updated_at = NOW(), detail = $4
           WHERE channel_id = $1 AND epoch = $2 AND holder IS NOT NULL
             AND NOW() - renewed_at > make_interval(secs => $3)
           RETURNING {COLUMNS}"

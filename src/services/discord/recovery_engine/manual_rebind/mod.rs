@@ -159,52 +159,10 @@ impl PendingRebindInflightRollback {
 /// `DiscordSession`; spawns a `tmux_output_watcher` via the single-watcher
 /// claim policy (an existing live owner is reused, `watcher_spawned=false`,
 /// and still picks up the new inflight — not an error).
-pub(crate) async fn rebind_inflight_for_channel(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: u64,
-    tmux_session_override: Option<String>,
-    overrides: ManualRebindOverrides,
-    expected_episode: Option<&super::inflight::InflightEpisodePin>,
-) -> Result<RebindOutcome, RebindError> {
-    rebind_inflight_for_channel_inner(
-        http,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_override,
-        overrides,
-        None,
-        expected_episode,
-    )
-    .await
-}
-
-/// `expected_episode` pins the inflight row the caller observed. Supplying it
-/// keeps the `WatcherReattach` arm on its adopt branch, so a recovery that only
-/// needs a watcher back can never clear the row it was called to serve.
-pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: u64,
-    tmux_session_override: Option<String>,
-    minimum_initial_offset: Option<u64>,
-    expected_episode: Option<&super::inflight::InflightEpisodePin>,
-) -> Result<RebindOutcome, RebindError> {
-    rebind_inflight_for_channel_inner(
-        http,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_override,
-        ManualRebindOverrides::default(),
-        minimum_initial_offset,
-        expected_episode,
-    )
-    .await
-}
+mod live_bridge_guard;
+pub(crate) use live_bridge_guard::{
+    rebind_inflight_for_channel, rebind_inflight_for_channel_with_minimum_start_offset,
+};
 
 #[allow(clippy::too_many_arguments)]
 async fn rebind_inflight_for_channel_inner(

@@ -981,6 +981,8 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         wait_for_completion: false,
         preserve_on_cancel: false,
         node_override_instance_id: None,
+        owner_authority:
+            crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn::NotOptedIn,
         has_nonportable_uploads: false,
         attachment_refs: &[],
     };

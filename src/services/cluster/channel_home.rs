@@ -2,7 +2,10 @@
 //! this process opens its gate only from its own successful renewal write, never from a read.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::collections::BTreeMap;
 use std::future::Future;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -62,6 +65,8 @@ struct Held {
 #[derive(Default)]
 struct HomeLocal {
     held: Option<Held>,
+    /// The last epoch this gate held, kept after a lapse so a final `close` still retires it.
+    last_epoch: Option<i64>,
     /// Intake stays closed for this epoch once a drain closes it or the row says drain.
     intake_closed: Option<i64>,
     /// A final `close` retires the epoch for good.
@@ -194,6 +199,7 @@ impl HomeGate {
                     gate_epoch,
                     renew_sent: sent,
                 });
+                local.last_epoch = Some(epoch);
             }
         }
         if written.state() != HomeState::Worker {
@@ -222,13 +228,25 @@ impl HomeGate {
         }
     }
 
-    /// The final close before a leaving write: no later renewal reopens this epoch.
+    /// The final close before a leaving write: no later renewal reopens the last epoch held,
+    /// even when the hold had already lapsed.
     pub(crate) fn close(&self) {
         let mut local = self.locked();
-        if let Some(epoch) = local.held.as_ref().map(|held| held.home_epoch) {
-            local.retired = Some(epoch);
+        if let Some(epoch) = local.last_epoch {
+            local.retired = Some(local.retired.map_or(epoch, |retired| retired.max(epoch)));
         }
         self.drop_hold(&mut local, Instant::now());
+    }
+
+    /// Whether this process may take new intake for the channel: held, with intake open.
+    pub(crate) fn intake_open(&self) -> bool {
+        matches!(
+            self.ownership(),
+            HomeOwnership::Owned {
+                intake: HomeIntake::Open,
+                ..
+            }
+        )
     }
 
     /// Runs `hand_off` under the gate lock with the row epoch, only while this home is held.
@@ -240,6 +258,88 @@ impl HomeGate {
         self.gate
             .admit(|epoch| (epoch == gate_epoch).then(|| hand_off(home_epoch)))
             .flatten()
+    }
+}
+
+type Homes = BTreeMap<String, Arc<HomeGate>>;
+
+/// The gates of the channels this process takes part in as holder or target; a channel without
+/// one follows the gateway rules. Test builds keep one set per thread.
+#[cfg(not(test))]
+static HOMES: OnceLock<Mutex<Homes>> = OnceLock::new();
+#[cfg(test)]
+thread_local! {
+    static HOMES: std::cell::RefCell<Homes> = std::cell::RefCell::default();
+}
+
+/// Reads the registered gates; while none was ever registered nothing is locked.
+fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
+    #[cfg(not(test))]
+    {
+        let homes = HOMES.get()?;
+        Some(read(&homes.lock().unwrap_or_else(PoisonError::into_inner)))
+    }
+    #[cfg(test)]
+    HOMES.with(|homes| {
+        let homes = homes.borrow();
+        (!homes.is_empty()).then(|| read(&homes))
+    })
+}
+
+/// Makes `home` its channel's gate in this process; intake for the channel then follows it.
+pub(crate) fn register(home: Arc<HomeGate>) {
+    let channel_id = home.channel_id.clone();
+    #[cfg(not(test))]
+    HOMES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(channel_id, home);
+    #[cfg(test)]
+    HOMES.with(|homes| homes.borrow_mut().insert(channel_id, home));
+}
+
+#[cfg(test)]
+pub(crate) fn unregister(channel_id: &str) {
+    HOMES.with(|homes| homes.borrow_mut().remove(channel_id));
+}
+
+/// The gate of a channel this process takes part in; none means the gateway rules apply.
+pub(crate) fn registered(channel_id: &str) -> Option<Arc<HomeGate>> {
+    read_homes(|homes| homes.get(channel_id).cloned()).flatten()
+}
+
+pub(crate) fn any_registered() -> bool {
+    read_homes(|homes| !homes.is_empty()).unwrap_or(false)
+}
+
+/// Registered channels whose gate takes no new intake here.
+pub(crate) fn intake_held_channels() -> Vec<String> {
+    let held = |homes: &Homes| {
+        let closed = homes.iter().filter(|(_, home)| !home.intake_open());
+        closed.map(|(channel, _)| channel.clone()).collect()
+    };
+    read_homes(held).unwrap_or_default()
+}
+
+/// Why a claimed row must return to pending: a row routed at a home epoch runs only while this
+/// gate holds that epoch with intake open; a gateway-rule row never runs on a registered channel.
+pub(crate) fn intake_hold(channel_id: &str, home_epoch: Option<i64>) -> Option<String> {
+    let home = registered(channel_id);
+    let ownership = home.as_ref().map(|home| home.ownership());
+    match (home_epoch, ownership) {
+        (None, None) => None,
+        (
+            Some(routed),
+            Some(HomeOwnership::Owned {
+                home_epoch,
+                intake: HomeIntake::Open,
+                ..
+            }),
+        ) if routed == home_epoch => None,
+        (routed, ownership) => Some(format!(
+            "channel {channel_id} home does not take intake at epoch {routed:?} here: {ownership:?}"
+        )),
     }
 }
 

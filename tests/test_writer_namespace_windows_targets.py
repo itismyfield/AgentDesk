@@ -169,6 +169,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         fake.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >>\"$FAKE_CALLS\"\n"
+            "[ -z \"${FAKE_ENV:-}\" ] || printf '%s\\n' \"${SCCACHE_IDLE_TIMEOUT-unset}\" >>\"$FAKE_ENV\"\n"
             "[ \"$FAKE_MODE\" != identity ] || printf '# changed\\n' >>\"$FAKE_MANIFEST\"\n"
             "calls=$(wc -l <\"$FAKE_CALLS\")\n"
             "[ \"$FAKE_MODE\" != identity_race ] || [ \"$calls\" -ne 1 ] || printf '# changed\\n' >>\"$FAKE_IDENTITY\"\n"
@@ -268,6 +269,18 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 self.assertNotEqual(outcome.result.returncode, 0)
                 self.assertIn("AGENTDESK_REPO_ROOT", outcome.result.stderr)
                 self.assertEqual(outcome.calls, ())
+
+    def test_runner_cargo_starts_sccache_without_idle_shutdown(self) -> None:
+        # The runner's first cargo starts the job's sccache server; its 600s idle timer would
+        # expire during the Windows lib-test compile and the stats step would read zeros.
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ):
+            os.environ.pop("SCCACHE_IDLE_TIMEOUT", None)
+            seen = Path(temp) / "env"
+            outcome = self.run_fixture(runner=True, extra_env={"FAKE_ENV": str(seen)})
+            self.assertEqual(outcome.result.returncode, 0, outcome.result.stderr)
+            values = seen.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(values), len(outcome.calls))
+            self.assertEqual(set(values), {"0"})
 
     def test_wrapper_selects_only_supported_path_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -31,6 +31,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::dispatches::delivery_events::tests
   --skip db::dispatches::outbox::delivery::tests
   --skip db::idempotency::tests::pg_integration
+  --skip db::intake_outbox::home_tests
   --skip db::intake_outbox::migration_pg_tests
   --skip db::intake_outbox::postgres_tests
   --skip db::intake_outbox_delivery_proof::tests
@@ -107,10 +108,12 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_router_hook::capacity_tests
   --skip services::cluster::intake_router_hook::edge_case_tests
   --skip services::cluster::intake_router_hook::execution_requirement_tests
+  --skip services::cluster::intake_router_hook::home_route_tests
   --skip services::cluster::intake_router_hook::o_route_tests
   --skip services::cluster::intake_router_hook::owner_record::tests
   --skip services::cluster::intake_router_hook::pg_tests
   --skip services::cluster::intake_worker::dispatch_stamp_tests
+  --skip services::cluster::intake_worker::home_route_tests
   --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
@@ -352,9 +355,11 @@ NON_PG_FILTER_REPLAY=(
   services::auto_queue::tests::thread_link_view_only_builds_url_for_discord_snowflakes
   services::cluster::attachment_transfer::storage_tests::attachment_upload_reference_preserves_legacy_json_and_enforces_size_limits
   services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
+  services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
   services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
-  services::cluster::channel_home::tests::channel_home_items_have_no_production_caller
+  services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
+  services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
   services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
@@ -717,6 +722,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::dispatches::delivery_events::tests
   db::dispatches::outbox::delivery::tests
   db::idempotency::tests::pg_integration
+  db::intake_outbox::home_tests
   db::intake_outbox::migration_pg_tests
   db::intake_outbox::postgres_tests
   db::intake_outbox_delivery_proof::tests
@@ -793,10 +799,12 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_router_hook::capacity_tests
   services::cluster::intake_router_hook::edge_case_tests
   services::cluster::intake_router_hook::execution_requirement_tests
+  services::cluster::intake_router_hook::home_route_tests
   services::cluster::intake_router_hook::o_route_tests
   services::cluster::intake_router_hook::owner_record::tests
   services::cluster::intake_router_hook::pg_tests
   services::cluster::intake_worker::dispatch_stamp_tests
+  services::cluster::intake_worker::home_route_tests
   services::cluster::intake_worker::o_route_tests
   services::cluster::machine_resources::store::tests
   services::discord::admin_host_guard::tests

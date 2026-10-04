@@ -60,6 +60,8 @@ pub(crate) struct IntakeOutboxRow {
     pub owner_generation: Option<i64>,
     pub owner_instance_id: Option<String>,
     pub admission_kind: String,
+    /// The delegated home epoch this row was routed under; `None` is a gateway-rule row.
+    pub home_epoch: Option<i64>,
 }
 
 /// Per-message payload required to INSERT a fresh row. Mirrors the
@@ -91,6 +93,7 @@ pub(crate) struct InsertPendingPayload {
     /// eligibility is scoped on this, not on `agents.provider`, because a
     /// cc/cdx paired agent has one `agents.provider` but two bots.
     pub provider: String,
+    pub home_epoch: Option<i64>,
 }
 
 /// INSERT a fresh `pending` row into `intake_outbox` for the given
@@ -119,14 +122,16 @@ pub(crate) async fn insert_pending(
             user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
-            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
+            home_epoch
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15,
             $16, $17, $18, $19,
-            $20, $21, $22, $23, $24
+            $20, $21, $22, $23, $24,
+            $25
         )
         RETURNING id
         "#,
@@ -155,6 +160,7 @@ pub(crate) async fn insert_pending(
     .bind(parent_outbox_id)
     .bind(&payload.execution_requirements)
     .bind(&payload.attachment_refs)
+    .bind(payload.home_epoch)
     .fetch_one(pool)
     .await?;
     Ok(id)
@@ -505,10 +511,11 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             owner_instance_id, owner_generation, admission_kind,
-            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
+            home_epoch
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-                  $23, $24, $25, $26, $27)
+                  $23, $24, $25, $26, $27, $28)
         RETURNING id"#,
     )
     .bind(&target)
@@ -538,6 +545,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(source.id)
     .bind(&source.execution_requirements)
     .bind(&source.attachment_refs)
+    .bind(source.home_epoch)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -585,30 +593,32 @@ pub(crate) async fn claim_pending_for_target_except(
 
     // With nothing held the claim runs the original statement and bindings unchanged.
     let candidate: Option<i64> = if held_channels.is_empty() {
-        sqlx::query_scalar(
+        sqlx::query_scalar(&format!(
             "SELECT io.id FROM intake_outbox io
              WHERE io.target_instance_id = $1
                AND io.status = 'pending'
                AND io.provider = $2
+               AND {HOME_CLAIM_FENCE}
              ORDER BY io.created_at ASC
              LIMIT 1
-             FOR UPDATE OF io SKIP LOCKED",
-        )
+             FOR UPDATE OF io SKIP LOCKED"
+        ))
         .bind(target_instance_id)
         .bind(provider)
         .fetch_optional(&mut *tx)
         .await?
     } else {
-        sqlx::query_scalar(
+        sqlx::query_scalar(&format!(
             "SELECT io.id FROM intake_outbox io
              WHERE io.target_instance_id = $1
                AND io.status = 'pending'
                AND io.provider = $2
                AND NOT (io.channel_id = ANY($3::TEXT[]))
+               AND {HOME_CLAIM_FENCE}
              ORDER BY io.created_at ASC
              LIMIT 1
-             FOR UPDATE OF io SKIP LOCKED",
-        )
+             FOR UPDATE OF io SKIP LOCKED"
+        ))
         .bind(target_instance_id)
         .bind(provider)
         .bind(held_channels)
@@ -621,23 +631,46 @@ pub(crate) async fn claim_pending_for_target_except(
         return Ok(None);
     };
 
-    let row: IntakeOutboxRow = sqlx::query_as(
-        "UPDATE intake_outbox
-         SET status = $3,
-             claim_owner = $2,
-             claimed_at = NOW()
-         WHERE id = $1
-         RETURNING *",
-    )
-    .bind(id)
-    .bind(claim_owner)
-    .bind(IntakeOutboxStatus::Claimed)
-    .fetch_one(&mut *tx)
-    .await?;
+    let Some(row) = confirm_claim(&mut tx, id, claim_owner).await? else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
 
     tx.commit().await?;
     Ok(Some(row))
 }
+
+/// Claims the selected row only if its home still admits it; the home may have moved since.
+async fn confirm_claim(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+    claim_owner: &str,
+) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "UPDATE intake_outbox io
+         SET status = $3,
+             claim_owner = $2,
+             claimed_at = NOW()
+         WHERE io.id = $1 AND {HOME_CLAIM_FENCE}
+         RETURNING *"
+    ))
+    .bind(id)
+    .bind(claim_owner)
+    .bind(IntakeOutboxStatus::Claimed)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// A row with no home epoch is claimable only while its channel has no home row; a row routed at
+/// a home epoch only on that epoch's holder while the channel is worker-owned.
+const HOME_CLAIM_FENCE: &str = "(
+    (io.home_epoch IS NULL
+        AND NOT EXISTS (SELECT 1 FROM o_channel_homes h WHERE h.channel_id = io.channel_id))
+    OR EXISTS (
+        SELECT 1 FROM o_channel_homes h
+         WHERE h.channel_id = io.channel_id AND h.provider = io.provider
+           AND h.state = 'worker' AND h.holder = io.target_instance_id
+           AND h.epoch = io.home_epoch))";
 
 /// The claim with no held channel.
 #[cfg(test)]
@@ -911,6 +944,10 @@ pub(crate) async fn list_accepted_unspawned_sla(
     .await?;
     Ok(rows)
 }
+
+#[cfg(test)]
+#[path = "intake_outbox_home_tests.rs"]
+mod home_tests;
 
 #[cfg(test)]
 mod migration_pg_tests {
@@ -1640,6 +1677,7 @@ mod postgres_tests {
             wait_for_completion: false,
             preserve_on_cancel: false,
             agent_id: "agent-x".to_string(),
+            home_epoch: None,
         }
     }
 
