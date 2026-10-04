@@ -8,17 +8,20 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner};
-use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, HostedState, ProcessStamp};
+use crate::db::dispatched_sessions::hosted_execution::{
+    ExpectedExecution, HostedLocation, HostedState,
+};
 use crate::services::claude_tui::hook_server::observation_ingress::tests::{Ingress, events, uuid};
 use crate::services::discord::recovery_engine::host_reconcile::HerdrPaneEvidence;
 use crate::services::discord::tmux::execution_identity::herdr_observation::{
     HerdrMismatch, HerdrUnknown,
 };
 use crate::services::herdr_launch::{
-    HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint,
-    HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session, unset_herdr_env_before_exec,
+    EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand,
+    HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
+    unset_herdr_env_before_exec,
 };
-use crate::services::session_host::{RestoreResume, ServerWitness};
+use crate::services::session_host::{EvidenceGap, RestoreResume, ServerWitness};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use crate::services::tui_prompt_dedupe::binding_events::{
@@ -48,9 +51,8 @@ impl HerdrLaunchHost for Launcher {
         }
     }
 
-    fn launch_evidence(&self, _location: &HostedLocation) -> Option<(ProcessStamp, ProcessStamp)> {
-        let stamps = expected("unused", 100);
-        Some((stamps.root, stamps.provider_process))
+    fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
+        Ok(expected(&probe.execution_nonce, 100))
     }
 }
 
@@ -177,7 +179,7 @@ impl Herdr {
         let Ok(HerdrLaunchOutcome::Launched {
             execution_nonce,
             location,
-            evidence: true,
+            evidence: Ok(()),
         }) = outcome
         else {
             panic!("{outcome:?}");

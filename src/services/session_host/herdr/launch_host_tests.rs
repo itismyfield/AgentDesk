@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::db::dispatched_sessions::hosted_execution::HostedLocation;
 use crate::services::session_host::herdr::observe::{
     CANONICAL_CONFIG, ConfigRead, ServerProvenance, read_restore_resume_with,
 };
@@ -442,9 +443,13 @@ fn process_info(shell: Value, foreground: Option<&[u32]>) -> Value {
     json!({"type": "pane_process_info", "process_info": info})
 }
 
-// A provider is only a candidate, and every non-candidate reading keeps its reason.
+// The probe reads the located pane on its own connections, each from the launch's server.
 #[test]
-fn provider_candidate_names_one_foreground_process_or_why_not() {
+fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
+    use crate::services::session_host::herdr::pane_probe::tests::{
+        FakeOs, NONCE, context, env_naming,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let location = |server: &Server| HostedLocation {
         host: "herdr".into(),
         execution_node: "mac-mini".into(),
@@ -453,58 +458,68 @@ fn provider_candidate_names_one_foreground_process_or_why_not() {
         named_session: "adk".into(),
         pane_id: "w1:p1".into(),
     };
-    let cases: Vec<(Vec<Value>, ProviderCandidate)> = vec![
+    let probe_on = |server: &Server, host: &SocketHerdrLaunchHost| EvidenceProbe {
+        location: location(server),
+        provider: "claude".into(),
+        execution_nonce: NONCE.into(),
+        launched_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        witness: host
+            .restore_resume(&launch_endpoint(server))
+            .admitted_witness()
+            .unwrap(),
+    };
+    let environ = env_naming(&context(NONCE));
+    let cases: Vec<(Value, Result<u32, fn(&EvidenceGap) -> bool>)> = vec![
+        (process_info(json!(10), Some(&[30, 20])), Ok(20)),
         (
-            vec![
-                process_info(json!(10), Some(&[10])),
-                process_info(json!(10), Some(&[10, 20])),
-            ],
-            ProviderCandidate::One {
-                root: 10,
-                provider: 20,
-            },
+            json!({"type": "ok"}),
+            Err(|gap| matches!(gap, EvidenceGap::ReadFailed(_))),
         ),
         (
-            vec![process_info(json!(10), Some(&[20, 30]))],
-            ProviderCandidate::Multiple(vec![20, 30]),
+            process_info(json!(null), Some(&[20])),
+            Err(|gap| *gap == EvidenceGap::NoRoot),
         ),
         (
-            vec![process_info(json!(10), None)],
-            ProviderCandidate::Unreported,
-        ),
-        (
-            vec![process_info(json!(null), Some(&[20]))],
-            ProviderCandidate::NoRoot,
+            process_info(json!(10), None),
+            Err(|gap| *gap == EvidenceGap::Unreported),
         ),
     ];
-    for (replies, expected) in cases {
-        let replies = Mutex::new(replies);
-        let server = serve(Box::new(move |_, _| {
-            let mut replies = replies.lock().unwrap();
-            if replies.len() > 1 {
-                replies.remove(0)
-            } else {
-                replies[0].clone()
+    for (reply, expected) in cases {
+        let server = serve(Box::new(move |_, _| reply.clone()));
+        let mut host = launch_host(&server);
+        host.os = Box::new(FakeOs::launched(environ.clone()));
+        let probed = host.launch_evidence(&probe_on(&server, &host));
+        match expected {
+            Ok(provider) => {
+                assert_eq!(probed.map(|e| e.provider_process.pid), Ok(provider));
+                let reads = server
+                    .methods()
+                    .iter()
+                    .filter(|m| *m == "pane.process_info")
+                    .count();
+                assert_eq!(reads, 3);
+                assert_eq!(
+                    server.request("pane.process_info"),
+                    Some(json!({"pane_id": "w1:p1"}))
+                );
             }
-        }));
-        let host = launch_host(&server);
-        assert_eq!(host.provider_candidate(&location(&server)), expected);
-        assert_eq!(
-            host.launch_evidence(&location(&server)),
-            None,
-            "a candidate is not evidence"
-        );
+            Err(gap) => assert!(probed.as_ref().is_err_and(gap), "{probed:?}"),
+        }
     }
-    let server = serve(Box::new(|_, _| json!({"type": "ok"})));
-    let host = launch_host(&server);
-    assert!(matches!(
-        host.provider_candidate(&location(&server)),
-        ProviderCandidate::ReadFailed(_)
-    ));
-    let mut elsewhere = location(&server);
-    elsewhere.endpoint_config_key = "other".into();
+    // A server replaced since the launch answers for another witness.
+    let server = serve(Box::new(|_, _| process_info(json!(10), Some(&[20]))));
+    let mut host = launch_host(&server);
+    host.os = Box::new(FakeOs::launched(environ));
+    let probe = probe_on(&server, &host);
+    server.serving.store(8, Ordering::SeqCst);
     assert_eq!(
-        host.provider_candidate(&elsewhere),
-        ProviderCandidate::UnknownEndpoint
+        host.launch_evidence(&probe),
+        Err(EvidenceGap::ServerChanged)
+    );
+    let mut elsewhere = probe;
+    elsewhere.location.endpoint_config_key = "other".into();
+    assert_eq!(
+        host.launch_evidence(&elsewhere),
+        Err(EvidenceGap::UnknownEndpoint)
     );
 }
