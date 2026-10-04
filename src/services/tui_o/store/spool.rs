@@ -22,6 +22,9 @@ use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERS
 pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
+/// Segment versions recovery replays: v3 only reads Codex `turn_aborted` as Idle, which derives
+/// no unit, so v2 raw frames yield the same units. Appends always roll to a current segment.
+const READABLE_IDENTITY_VERSIONS: [u32; 2] = [2, 3];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -97,6 +100,7 @@ struct Segment {
     start: u64,
     end: u64,
     bytes: u64,
+    identity_version: u32,
 }
 
 /// One source's cursor and retained segments; `origin` is where its spool began.
@@ -239,6 +243,7 @@ fn recover_source(
     let retained = gc.last().map_or(origin, |&(_, through)| through);
     let through = cursor.captured_through;
     let (mut expected, mut at_boundary) = (retained, through == retained);
+    let mut newest_version = 0;
     let (mut segments, mut tail, mut torn) = (Vec::new(), Vec::new(), None);
     let last = paths.len().saturating_sub(1);
     for (index, (start, path)) in paths.into_iter().enumerate() {
@@ -263,7 +268,8 @@ fn recover_source(
         let header = &scan.header;
         if header.start_offset != start
             || header.source_id != cursor.source
-            || header.identity_version != IDENTITY_VERSION
+            || !READABLE_IDENTITY_VERSIONS.contains(&header.identity_version)
+            || header.identity_version < newest_version
             || bad_skip
         {
             return Err(damage(format!(
@@ -286,12 +292,14 @@ fn recover_source(
             torn = Some((path.clone(), scan.committed_len));
         }
         expected = scan.end;
-        let bytes = scan.committed_len;
+        newest_version = header.identity_version;
+        let (bytes, identity_version) = (scan.committed_len, newest_version);
         segments.push(Segment {
             path,
             start,
             end: expected,
             bytes,
+            identity_version,
         });
     }
     if through < retained || through > expected || !at_boundary {
@@ -482,11 +490,18 @@ impl ChannelStore {
             if used + bytes.len() as u64 > store.spool_cap {
                 return Err(StoreError::SpoolFull);
             }
-            if spool
-                .segments
-                .last()
-                .is_none_or(|segment| segment.bytes >= store.segment_max)
+            // A frameless older segment covers no bytes and would share the rollover's name.
+            if let Some(last) = spool.segments.last()
+                && last.identity_version != IDENTITY_VERSION
+                && last.start == last.end
             {
+                fs::remove_file(&last.path)?;
+                fsync_parent_dir(&last.path)?;
+                spool.segments.pop();
+            }
+            if spool.segments.last().is_none_or(|segment| {
+                segment.bytes >= store.segment_max || segment.identity_version != IDENTITY_VERSION
+            }) {
                 let header = SegmentHeader {
                     source_id: batch.source.clone(),
                     start_offset: spool.end(),
@@ -504,6 +519,7 @@ impl ChannelStore {
                     start,
                     end,
                     bytes,
+                    identity_version: IDENTITY_VERSION,
                 });
             }
             let segment = spool
@@ -854,6 +870,74 @@ mod tests {
         let (batch, hash) = poll(&mut capture);
         channel.append_spool(&batch, &hash).unwrap();
         assert_eq!(lines(&mut fixture.open().unwrap(), &fixture.source), ["L3"]);
+    }
+
+    fn set_version(segment: &Path, version: u32) {
+        let bytes = fs::read(segment).unwrap();
+        let split = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
+        header["identity_version"] = version.into();
+        let mut rewritten = serde_json::to_vec(&header).unwrap();
+        rewritten.extend_from_slice(&bytes[split..]);
+        fs::write(segment, rewritten).unwrap();
+    }
+
+    fn version(segment: &Path) -> u32 {
+        let mut line = Vec::new();
+        let mut reader = BufReader::new(File::open(segment).unwrap());
+        reader.read_until(b'\n', &mut line).unwrap();
+        serde_json::from_slice::<SegmentHeader>(&line)
+            .unwrap()
+            .identity_version
+    }
+
+    #[test]
+    fn a_v2_spool_recovers_and_the_next_append_rolls_to_a_current_segment() {
+        let fixture = Fixture::new(b"L1\n", None);
+        let mut channel = fixture.open().unwrap();
+        let mut capture = two_batches(&fixture, &mut channel);
+        let old = fixture.segments()[0].clone();
+        set_version(&old, 2);
+        let old_bytes = fs::read(&old).unwrap();
+        // An older binary that crashed between a segment header and its first frame.
+        let header = SegmentHeader {
+            source_id: fixture.source.clone(),
+            start_offset: 6,
+            identity_version: 2,
+        };
+        let frameless = format!("{}-{:020}.seg", source_key(&fixture.source), 6);
+        let mut line = serde_json::to_vec(&header).unwrap();
+        line.push(b'\n');
+        fs::write(fixture.channel_dir().join(SPOOL_DIR).join(frameless), line).unwrap();
+        let mut reopened = fixture.open().unwrap();
+        assert_eq!(lines(&mut reopened, &fixture.source), ["L1", "L2"]);
+        fixture.grow(b"L3\n");
+        let (batch, hash) = poll(&mut capture);
+        reopened.append_spool(&batch, &hash).unwrap();
+        let segments = fixture.segments();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            fs::read(&old).unwrap(),
+            old_bytes,
+            "a v2 segment is never rewritten"
+        );
+        assert_eq!(version(&segments[1]), IDENTITY_VERSION);
+        assert_eq!(
+            lines(&mut fixture.open().unwrap(), &fixture.source),
+            ["L1", "L2", "L3"]
+        );
+        // Only the 2 to 3 upgrade is readable, and versions never go back along the spool.
+        set_version(&segments[1], 2);
+        set_version(&old, 3);
+        assert_eq!(reason(fixture.open()), HaltReason::StoreDamage);
+        for unknown in [1, IDENTITY_VERSION + 1] {
+            set_version(&old, unknown);
+            assert_eq!(
+                reason(fixture.open()),
+                HaltReason::StoreDamage,
+                "v{unknown}"
+            );
+        }
     }
 
     #[test]
