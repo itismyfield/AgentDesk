@@ -469,7 +469,9 @@ fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
             .unwrap(),
     };
     let environ = env_naming(&context(NONCE));
-    let cases: Vec<(Value, Result<u32, fn(&EvidenceGap) -> bool>)> = vec![
+    // The provider pid found, or the test its gap must pass.
+    type Expect = Result<u32, fn(&EvidenceGap) -> bool>;
+    let cases: Vec<(Value, Expect)> = vec![
         (process_info(json!(10), Some(&[30, 20])), Ok(20)),
         (
             json!({"type": "ok"}),
