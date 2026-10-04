@@ -4025,6 +4025,11 @@ services::discord::inflight::wave_a_cleanup_tests::invalidate_stale_generation_r
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_delay_below_placeholder_abandon
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
+services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
+services::discord::input_transition::tests::supported::malformed_population_and_outbox_leave_legacy_while_dead_row_stays_held
+services::discord::input_transition::tests::supported::marker_only_and_merged_payload_survive_move_and_checkpoint
+services::discord::input_transition::tests::supported::row_restart_after_marker_retirement_preserves_richer_metadata
+services::discord::input_transition::tests::supported::upload_bytes_are_pinned_and_original_population_reads_are_nonmutating
 services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create
 services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
@@ -9923,6 +9928,12 @@ services::tui_input::rows_tests::supported::committed_input_is_released_only_by_
 services::tui_input::rows_tests::supported::failed_staging_after_an_earlier_commit_activates_no_new_staged_row
 services::tui_input::rows_tests::supported::repeated_ledger_legacy_ledger_transitions_keep_each_input_with_one_owner
 services::tui_input::rows_tests::supported::replay_is_deterministic_and_a_cut_commit_leaves_its_inputs_with_legacy
+services::tui_input::transition_fixture_tests::bounded_retry_resumes_transient_failure_and_holds_permanent_failure
+services::tui_input::transition_fixture_tests::deletion_boundaries_restart_keep_one_owner_and_order
+services::tui_input::transition_fixture_tests::retry_backoff_is_bounded
+services::tui_input::transition_fixture_tests::second_staging_failure_requires_another_successful_reopen_before_legacy
+services::tui_input::transition_fixture_tests::uncertain_commit_whole_and_cut_reopen_decide_responsibility
+services::tui_input::transition_tests::supported::staged_order_survives_commit_and_checkpoint
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
 services::tui_o::alarm::tests::a_released_channel_has_its_own_reason_apart_from_halted
 services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel

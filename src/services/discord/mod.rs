@@ -155,6 +155,8 @@ mod tmux_watcher_registry;
 #[rustfmt::skip]
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
+#[allow(dead_code)]
+mod input_transition;
 #[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;

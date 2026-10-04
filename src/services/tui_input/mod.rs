@@ -6,6 +6,7 @@ mod durable;
 pub mod handover;
 pub mod ledger;
 pub mod rows;
+pub mod transition;
 
 #[cfg(test)]
 mod bounded_tmux_tests;
@@ -13,3 +14,7 @@ mod bounded_tmux_tests;
 mod durability_tests;
 #[cfg(test)]
 mod rows_tests;
+#[cfg(test)]
+mod transition_fixture_tests;
+#[cfg(test)]
+mod transition_tests;
