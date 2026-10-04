@@ -217,6 +217,50 @@ async fn without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_ret
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes() {
+    let codex = |value: serde_json::Value| {
+        let mut line = serde_json::to_vec(&value).unwrap();
+        line.push(b'\n');
+        line
+    };
+    let message = |id: &str, text: &str| {
+        codex(serde_json::json!({"type": "response_item", "payload": {
+            "type": "message", "role": "assistant", "id": id,
+            "content": [{"type": "output_text", "text": text}]}}))
+    };
+    let turn = |kind: &str, id: &str| {
+        codex(serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": id}}))
+    };
+    let (harness, path, source) = switched_over(b"");
+    let (stop, task) = spawn_as(harness.writer(), ShadowProvider::Codex);
+    for line in [
+        turn("task_started", "t1"),
+        message("msg_1", "first"),
+        turn("task_complete", "t1"),
+        turn("task_started", "t2"),
+        message("msg_2", "second"),
+        turn("turn_aborted", "t2"),
+    ] {
+        append(&path, &line);
+    }
+    polls(6).await;
+    // The reader sits at EOF past both turn ends while no gateway can post.
+    let spooled = harness.channel().cursor(&source).unwrap().captured_through;
+    assert_eq!(spooled, std::fs::metadata(&path).unwrap().len());
+    assert!(harness.port.posts().is_empty());
+    assert_eq!(harness.channel().ledger().next_serial(), 0);
+    assert_eq!(harness.alarms.taken(), [WriterAlarm::PausedNoGateway]);
+    harness.gate.acquired();
+    polls(3).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["first", "second"],
+        "a Stop, an abort or EOF is not a delivery"
+    );
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_full_spool_pauses_capture_until_delivered_segments_are_collected() {
     let body = row("m0", "before the switch");
     let (harness, path, source) = switched_over(&body);
