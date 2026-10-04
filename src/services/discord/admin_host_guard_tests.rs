@@ -1063,10 +1063,7 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg()
 
     let mode = SoftClearNotifyMode::Suppress;
     let clear = clear_channel_session_state(&http, &shared, &provider, channel, "/clear", mode);
-    let error = clear
-        .await
-        .expect_err("a configured channel refuses the clear");
-    assert!(error.to_string().contains("Herdr"), "{error}");
+    let cleared = clear.await;
     let core = shared.core.lock().await;
     let session = &core.sessions[&channel];
     assert_eq!(session.session_id.as_deref(), Some("sid"), "selector kept");
@@ -1078,5 +1075,7 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg()
         "{calls:?}"
     );
     assert_eq!(tmux.take_calls(), Vec::<String>::new(), "no tmux call");
+    let error = cleared.expect_err("a configured channel refuses the clear");
+    assert!(error.to_string().contains("Herdr"), "{error}");
     db.drop().await;
 }
