@@ -202,6 +202,11 @@ async fn keyed_teardown_admits_only_a_found_legacy_row_pg() {
             .map(|session| session.name().to_string());
         assert_eq!(cleared.as_deref(), admitted.then_some(tmux), "{label}");
     }
+    // The admitted legacy row is kept once its channel is Herdr-configured.
+    let _hosts = crate::config::session_hosts::force_for_test(None, &[(channel(1), "mac-mini")]);
+    let tmux = "p4c3w1-legacy";
+    let kept = clear_channel_session(Some(&pool), &claude, channel(1), Some(&legacy), tmux, "c");
+    assert_eq!(kept.await.map(|s| s.name().to_string()), None, "configured");
     let no_pool = clear_channel_session(None, &claude, channel(1), Some(&legacy), "p", "x").await;
     assert_eq!(no_pool, None, "no pool is not a legacy answer");
     pool.close().await;

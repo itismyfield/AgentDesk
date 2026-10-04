@@ -312,6 +312,89 @@ async fn abort_kills_take_the_keyed_host_verdict_pg() {
     db.drop().await;
 }
 
+// On a Herdr-configured channel whose stored row is legacy, the watcher's own prompt-too-long
+// and stale-resume exits kill nothing and keep the session's selectors; the notice says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg() {
+    if !isolated_in(
+        "post_stream_exit_host_tests",
+        "a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg",
+        &[],
+    ) {
+        return;
+    }
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (too_long, stale) = (LEGACY_BASE + 50, LEGACY_BASE + 51);
+    let configured = [
+        (6_284_100 + too_long, "mac-mini"),
+        (6_284_100 + stale, "mac-mini"),
+    ];
+    crate::config::session_hosts::install_for_test(Some("mac-mini"), &configured);
+    let result = |text: &str| {
+        let line = serde_json::json!({"type": "result", "subtype": "error_during_execution",
+            "is_error": true, "result": text});
+        format!("{}{line}\n", user("T1"))
+    };
+    let legacy = Some((&pool, Stored::Legacy));
+
+    let (h, _) = attached(too_long, false, Host::Local, legacy, None).await;
+    h.append(result("Prompt is too long").as_bytes());
+    h.until("prompt too long notice", |h| h.showing(NOT_RESET))
+        .await;
+    assert_eq!(h.kills(), 0, "prompt too long: no kill");
+    assert!(!h.showing(RESET), "prompt too long: not reported as reset");
+
+    let (h, _) = attached(stale, false, Host::Local, legacy, None).await;
+    let key = channel_key(&h.shared, &h.tmux);
+    let sql = "UPDATE sessions SET claude_session_id = 'p9b1-sid' WHERE session_key = $1";
+    sqlx::query(sql).bind(&key).execute(&pool).await.unwrap();
+    let session = crate::services::discord::DiscordSession {
+        session_id: Some("p9b1-sid".into()),
+        memento_context_loaded: false,
+        memento_reflected: false,
+        current_path: None,
+        history: Vec::new(),
+        pending_uploads: Vec::new(),
+        cleared: false,
+        remote_profile_name: None,
+        channel_id: None,
+        channel_name: None,
+        category_name: None,
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: 0,
+    };
+    h.shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .insert(h.channel, session);
+    let line = result("No conversation found with session ID: adk-p9b1");
+    h.append(format!("{line}{}", turn("T2", "ADK-P9B1 T2 body")).as_bytes());
+    h.drained("next turn frame").await;
+    assert_eq!(h.kills(), 0, "stale resume: no kill");
+    let core = h.shared.core.lock().await;
+    let selector = core.sessions[&h.channel].session_id.clone();
+    drop(core);
+    assert_eq!(
+        selector.as_deref(),
+        Some("p9b1-sid"),
+        "stale resume: memory selector kept"
+    );
+    let sql = "SELECT claude_session_id FROM sessions WHERE session_key = $1";
+    let stored = sqlx::query_scalar::<_, Option<String>>(sql).bind(&key);
+    let stored = stored.fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some("p9b1-sid"),
+        "stale resume: stored selector kept"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
 fn set_mode(path: &str, mode: u32) {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();

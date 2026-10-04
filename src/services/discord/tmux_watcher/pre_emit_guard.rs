@@ -299,18 +299,15 @@ pub(super) async fn run_pre_emit_guard(
             "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
             channel_id
         );
-        // Selectors are cleared and the pane killed only where the host verdict lets it go;
-        // a Herdr-configured channel is always kept.
-        let configured = crate::services::discord::admin_host_guard::configured_refusal;
-        let admitted = configured(channel_id.get()).is_none()
-            && host_gate::admits_teardown(
-                shared,
-                watcher_provider,
-                channel_id,
-                tmux_session_name,
-                "stale_resume_retry",
-            )
-            .await;
+        // Selectors are cleared and the pane killed only where the host verdict lets it go.
+        let admitted = host_gate::admits_automatic_kill(
+            shared,
+            watcher_provider,
+            channel_id,
+            tmux_session_name,
+            "stale_resume_retry",
+        )
+        .await;
         if admitted {
             crate::services::termination_audit::record_termination_for_tmux(
                 tmux_session_name,

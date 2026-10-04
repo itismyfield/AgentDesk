@@ -268,6 +268,20 @@ pub(crate) fn force_for_test(
     ForcedSessionHosts(FORCED.with(|forced| forced.replace(Some(boot))))
 }
 
+/// Fixes `channels` as the boot section of this whole process; only an isolated child may call it.
+#[cfg(test)]
+pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
+    let forced = force_for_test(local_node, channels);
+    let boot = FORCED
+        .with(|forced| forced.borrow().clone())
+        .expect("forced section");
+    drop(forced);
+    assert!(
+        BOOT.set(boot).is_ok(),
+        "the boot section is installed once per process"
+    );
+}
+
 #[cfg(test)]
 impl Drop for ForcedSessionHosts {
     fn drop(&mut self) {
