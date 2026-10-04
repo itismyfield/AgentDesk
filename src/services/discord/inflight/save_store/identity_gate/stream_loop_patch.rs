@@ -170,12 +170,8 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         return GuardedSaveOutcome::AuthorityPinned;
     }
     let path = inflight_state_path(root, &provider, state.channel_id);
-    if let Some(parent) = path.parent()
-        && fs::create_dir_all(parent).is_err()
-    {
-        return GuardedSaveOutcome::IoError;
-    }
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
+    let Ok(_lock) = crate::services::discord::inflight::store::try_lock_inflight_state_path(&path)
+    else {
         return GuardedSaveOutcome::IoError;
     };
     let on_disk = match super::read_inflight_state_for_guarded_write(

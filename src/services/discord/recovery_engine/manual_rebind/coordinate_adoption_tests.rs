@@ -182,6 +182,26 @@ fn actual_seam_orders_episode_authority_before_hold_and_return() {
 }
 
 #[test]
+fn host_lookup_finishes_before_exact_adoption_can_hold_a_guard() {
+    let caller = include_str!("mod.rs");
+    let host = caller
+        .find("let host = super::tmux::watch_host_of(")
+        .expect("host lookup");
+    let host_await = host + caller[host..].find(".await;").expect("host awaited");
+    let adoption = caller
+        .find("coordinate_adoption::adopt_coordinates(")
+        .expect("exact adoption");
+    let handoff = caller
+        .find("episode_handoff::commit_episode_side_effects(")
+        .expect("handoff");
+    assert!(
+        host_await < adoption && adoption < handoff,
+        "host PG await must finish before exact adoption acquires the guard"
+    );
+    assert_eq!(caller.matches("super::tmux::watch_host_of(").count(), 1);
+}
+
+#[test]
 fn actual_caller_wires_adoption_before_guarded_handoff() {
     let caller = include_str!("mod.rs");
     let adoption = caller

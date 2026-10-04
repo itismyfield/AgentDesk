@@ -11,6 +11,7 @@ use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
+use crate::services::turn_host::{HerdrRefusal, TurnHost};
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
 pub(super) struct StreamingTurn<'a> {
@@ -26,6 +27,8 @@ pub(super) struct StreamingTurn<'a> {
     pub tmux_session_name: Option<&'a str>,
     /// Host-guard verdict for the turn's tmux teardowns, judged before spawn.
     pub teardown: Option<&'a TeardownClearance>,
+    /// The turn's host, judged before spawn; only `Tmux` reaches a provider driver.
+    pub host: &'a TurnHost,
     pub channel_id: u64,
     pub model: Option<&'a str>,
     pub native_fast_mode: Option<bool>,
@@ -42,6 +45,16 @@ pub(super) fn execute(
     turn: StreamingTurn<'_>,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    match turn.host {
+        TurnHost::Tmux => {}
+        TurnHost::Refused(refusal) => return Err(refusal.to_string()),
+        // No Herdr executor is wired yet, and a Herdr turn never falls back to another driver.
+        TurnHost::Herdr(plan) => {
+            let refusal = HerdrRefusal::ExecutorNotWired;
+            tracing::warn!(endpoint = %plan.endpoint.config_key, "{refusal}");
+            return Err(refusal.to_string());
+        }
+    }
     let _execution_guard = crate::services::cluster::execution_capacity::acquire(
         turn.pool,
         turn.provider.as_str(),
@@ -198,6 +211,7 @@ mod tests {
             remote_profile: None,
             tmux_session_name: None,
             teardown: None,
+            host: &TurnHost::Tmux,
             channel_id: 42,
             model: Some("configured-model"),
             native_fast_mode: None,
@@ -238,5 +252,99 @@ mod tests {
                 .session
                 .is_none()
         );
+    }
+
+    // A configured Claude channel is refused at the dispatch entry, before the capacity slot and any
+    // driver: admission off, then O unready, then, once both pass, the unwired Herdr executor.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg()
+    {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+        use crate::services::herdr_admission::{Admission, force_for_test as force_admission};
+        use crate::services::herdr_launch::{force_writer_accepts, o_store_for_test};
+        use crate::services::tui_prompt_dedupe::binding_context::tests;
+        use std::os::unix::fs::PermissionsExt;
+        const CHANNEL: u64 = 1_490_141_479_707_086_938;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let (root, _env) = tests::fixture_after_shared_test_env_lock();
+        let _tmux = tests::fake_tmux(root.path());
+        let claude = root.path().join("claude");
+        let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/claude.calls\"\n";
+        std::fs::write(&claude, stub).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &claude);
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let _hosts = crate::config::session_hosts::force_for_test(
+            Some("mac-mini"),
+            &[(CHANNEL, "mac-mini")],
+        );
+        let provider = ProviderKind::Claude;
+        let session_key = "claude/discord_0123456789abcdef/mac-mini:AgentDesk-claude-dash";
+        let run = || async {
+            let host = crate::services::turn_host::for_turn(
+                Some(&pool),
+                &provider,
+                CHANNEL,
+                Some(session_key),
+            )
+            .await;
+            let (sender, _receiver) = std::sync::mpsc::channel();
+            let turn = StreamingTurn {
+                pool: Some(&pool),
+                provider: &provider,
+                prompt: "question",
+                session_id: None,
+                working_dir: root.path().to_str().unwrap(),
+                system_prompt: None,
+                allowed_tools: &[],
+                cancel: Arc::new(CancelToken::new()),
+                remote_profile: None,
+                tmux_session_name: Some("AgentDesk-claude-dash"),
+                teardown: None,
+                host: &host,
+                channel_id: CHANNEL,
+                model: None,
+                native_fast_mode: None,
+                codex_goals: None,
+                compact_percent: None,
+                compact_lower_bound_tokens: 0,
+                compact_token_limit: None,
+                cache_ttl_minutes: None,
+                dispatch_type: None,
+                force_fresh: false,
+            };
+            tokio::task::block_in_place(|| execute(turn, sender))
+        };
+
+        let off = force_admission(Admission::new(Some("off".as_ref()), None));
+        assert_eq!(
+            run().await.unwrap_err(),
+            "herdr turn refused: admission_stopped(env)"
+        );
+        drop(off);
+        let absent = root.path().join("no-stop-file");
+        let _open = force_admission(Admission::new(Some("on".as_ref()), Some(absent)));
+        assert_eq!(
+            run().await.unwrap_err(),
+            "herdr turn refused: o_writer_not_ready"
+        );
+        let (store, era) = o_store_for_test(root.path(), &[CHANNEL]);
+        let mut seeded = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+        seeded.set_binding_checkpoint(3).unwrap();
+        let _owned =
+            crate::services::tui_o::cutover::test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+        let _writer = force_writer_accepts(Some(true));
+        assert_eq!(
+            run().await.unwrap_err(),
+            "herdr turn refused: executor_not_wired"
+        );
+        for driver in ["tmux.calls", "claude.calls"] {
+            assert!(!root.path().join(driver).exists(), "{driver} ran");
+        }
+        pool.close().await;
+        db.drop().await;
     }
 }

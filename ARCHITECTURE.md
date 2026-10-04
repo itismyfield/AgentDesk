@@ -91,6 +91,8 @@ src/
 │   ├── disk_write.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
+│   ├── session_hosts.rs
+│   ├── session_hosts_tests.rs
 │   ├── test_env.rs
 │   └── writer_channels_tests.rs
 ├── db/
@@ -878,6 +880,7 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
+│   │   │   │   │   │   ├── captured_terminal_admission.rs
 │   │   │   │   │   │   └── claude_terminal_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── claude_e_stamp.rs
@@ -1145,6 +1148,7 @@ src/
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
 │   │   │   │   │   ├── dispatch_stamp.rs
+│   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
@@ -1522,6 +1526,7 @@ src/
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
+│   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
 │   │   │   │   ├── o_panel.rs
 │   │   │   │   └── rollover_guard.rs
@@ -2273,6 +2278,8 @@ src/
 │   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
+│   ├── herdr_admission.rs
+│   ├── herdr_admission_tests.rs
 │   ├── herdr_launch.rs
 │   ├── herdr_launch_tests.rs
 │   ├── issue_announcements.rs
@@ -2341,6 +2348,8 @@ src/
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_cancel_queue_guard.rs
+│   ├── turn_host.rs
+│   ├── turn_host_tests.rs
 │   ├── turn_lifecycle.rs
 │   ├── turn_orchestrator.rs
 │   ├── voice_conductor.rs
