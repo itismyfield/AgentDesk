@@ -640,4 +640,64 @@ mod host {
         pool.close().await;
         db.drop().await;
     }
+
+    /// A Herdr-configured legacy idle thread keeps its rows and binding through the
+    /// registry-less reset and a clear whose registry yields no runtime verdict.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::TempDir::new().unwrap();
+        let _root =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        let tmux = TmuxEnv::install(Tmux::MissingBinary);
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let id = |n: u64| 1_480_000_000_000_900 + n;
+        let name = |n: u64| format!("AgentDesk-claude-p9b1-slot-{n}");
+        let (configured, plain) = ([id(1), id(2)], id(3));
+        let forced: Vec<_> = configured.iter().map(|t| (*t, "mac-mini")).collect();
+        let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &forced);
+        for (n, thread) in [(1, configured[0]), (2, configured[1]), (3, plain)] {
+            let tmux_name = name(n);
+            let row = (thread, tmux_name.as_str(), Stored::Legacy);
+            thread_row(&pool, &shared, row, "idle", Some("claude")).await;
+            slot(&pool, &format!("p9b1-slot-{n}"), &[thread]).await;
+        }
+        let before = |thread: u64, agent: &'static str| {
+            let pool = pool.clone();
+            async move {
+                (
+                    thread_rows(&pool, thread).await,
+                    slot_map(&pool, agent).await,
+                )
+            }
+        };
+
+        let reset = super::super::reset_slot_thread_bindings_excluding_pg;
+        let kept = before(configured[0], "p9b1-slot-1").await;
+        let done = reset(&pool, "p9b1-slot-1", 0, None, None).await;
+        assert_eq!(done, Ok((0, 0, 0)), "registry-less reset");
+        assert_eq!(before(configured[0], "p9b1-slot-1").await, kept, "no write");
+
+        let empty = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let kept = before(configured[1], "p9b1-slot-2").await;
+        let clear = super::super::clear_slot_threads_for_slot_pg;
+        let cleared = clear(Some(empty), &pool, "p9b1-slot-2", 0).await;
+        assert_eq!(cleared, Ok(0), "no runtime verdict");
+        assert_eq!(before(configured[1], "p9b1-slot-2").await, kept, "no write");
+
+        assert_eq!(
+            reset(&pool, "p9b1-slot-3", 0, None, None).await,
+            Ok((0, 1, 1))
+        );
+        assert_eq!(
+            slot_map(&pool, "p9b1-slot-3").await,
+            ["{}"],
+            "unconfigured resets"
+        );
+        assert!(tmux.take_calls().is_empty(), "the resets run no tmux");
+        pool.close().await;
+        db.drop().await;
+    }
 }

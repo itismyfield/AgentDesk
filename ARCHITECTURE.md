@@ -91,6 +91,8 @@ src/
 │   ├── disk_write.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
+│   ├── session_hosts.rs
+│   ├── session_hosts_tests.rs
 │   ├── test_env.rs
 │   └── writer_channels_tests.rs
 ├── db/
@@ -1146,6 +1148,7 @@ src/
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
 │   │   │   │   │   ├── dispatch_stamp.rs
+│   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
@@ -2274,6 +2277,8 @@ src/
 │   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
+│   ├── herdr_admission.rs
+│   ├── herdr_admission_tests.rs
 │   ├── herdr_launch.rs
 │   ├── herdr_launch_tests.rs
 │   ├── issue_announcements.rs
@@ -2342,6 +2347,8 @@ src/
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_cancel_queue_guard.rs
+│   ├── turn_host.rs
+│   ├── turn_host_tests.rs
 │   ├── turn_lifecycle.rs
 │   ├── turn_orchestrator.rs
 │   ├── voice_conductor.rs

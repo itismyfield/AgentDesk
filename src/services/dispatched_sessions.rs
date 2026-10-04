@@ -493,7 +493,7 @@ pub async fn get_claude_session_id(
 }
 
 /// POST /api/dispatched-sessions/clear-stale-session-id
-/// Clears provider session_id from ALL sessions that have the given stale ID.
+/// Clears the stale ID from every legacy row holding it outside the Herdr-configured channels.
 pub async fn clear_stale_session_id(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -518,7 +518,7 @@ pub async fn clear_stale_session_id(
 }
 
 /// POST /api/dispatched-sessions/clear-session-id
-/// Clears claude_session_id for a specific session_key.
+/// Clears claude_session_id for a specific legacy session_key outside the configured channels.
 /// Used when /clear is called so the next turn doesn't resume a dead session.
 pub async fn clear_session_id_by_key(
     State(state): State<AppState>,

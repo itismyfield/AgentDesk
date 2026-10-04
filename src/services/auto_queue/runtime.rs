@@ -415,7 +415,13 @@ async fn filter_safe_slot_thread_reset_targets(
             .selected_rows
             .iter()
             .find(|row| row.thread_channel_id == *thread_channel_id);
-        if let Some(reason) = slot_thread_host_refusal(pool, &thread_id, selected).await {
+        // A Herdr-configured thread is kept whatever its rows say, with or without a registry.
+        let configured = crate::services::discord::admin_host_guard::configured_refusal;
+        let host = match configured(*thread_channel_id) {
+            Some(reason) => Some(reason),
+            None => slot_thread_host_refusal(pool, &thread_id, selected).await,
+        };
+        if let Some(reason) = host {
             tracing::warn!(
                 "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
             );

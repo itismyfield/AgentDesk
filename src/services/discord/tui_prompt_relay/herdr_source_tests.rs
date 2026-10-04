@@ -865,9 +865,9 @@ fn a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg() 
     polls(3);
     assert_eq!(halted(&io), []);
     // The writer's readiness is this host's own, so the launch gate is told it accepts work.
-    let _launch_gate = crate::services::herdr_launch::force_launch_gate(true, Some(true));
+    let _launch_gate = crate::services::herdr_launch::force_writer_accepts(Some(true));
     assert!(
-        crate::services::herdr_launch::herdr_admitted_for_claude_launch(Some(channel)),
+        crate::services::herdr_launch::o_writer_ready(channel),
         "O owns the channel on a seeded store: {:?}",
         io.alarms.0.lock().unwrap()
     );

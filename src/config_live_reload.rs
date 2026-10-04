@@ -388,6 +388,10 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if old.config_hot_reload != new.config_hot_reload {
         changed.push("config_hot_reload");
     }
+    // Herdr channel hosting is fixed at boot so a turn never changes host mid-process.
+    if old.session_hosts != new.session_hosts {
+        changed.push("session_hosts");
+    }
     if crate::services::tui_o::channel_policy::boot()
         .map(|boot| boot.selected().clone())
         .unwrap_or_else(|| crate::services::tui_o::channel_policy::configured_channels(old))

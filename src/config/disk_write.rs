@@ -138,6 +138,7 @@ fn differing_section(expected: &Config, actual: &Config) -> &'static str {
         mcp,
         prompt_manifest_retention,
         tui_o,
+        session_hosts,
         config_hot_reload
     )
 }

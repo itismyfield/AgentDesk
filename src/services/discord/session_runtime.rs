@@ -518,6 +518,10 @@ pub(super) async fn bootstrap_thread_session(
     http: &Arc<serenity::http::Http>,
     cache: Option<&Arc<serenity::cache::Cache>>,
 ) -> bool {
+    // A Herdr-configured thread gets no tmux-side session, worktree or inflight context here.
+    if crate::config::session_hosts::herdr_endpoint(thread_channel_id.get()).is_some() {
+        return false;
+    }
     let (thread_title, cat_name) = resolve_channel_category(http, cache, thread_channel_id).await;
     let provider_kind = shared.settings.read().await.provider.clone();
     // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
