@@ -489,7 +489,8 @@ async fn release_cancelled_claim(
 }
 
 /// Returns an O channel's claim to pending unless this node's writer can take it right now, so the
-/// row waits for its gateway instead of running here or failing into a retry.
+/// row waits for its gateway instead of running here or failing into a retry. A delegated row
+/// also waits unless this node holds the home at the row's epoch with intake open.
 async fn hold_off_o_gateway(
     pool: &PgPool,
     row: &IntakeOutboxRow,
@@ -497,7 +498,11 @@ async fn hold_off_o_gateway(
     provider: &str,
     channel_id: ChannelId,
 ) -> Result<bool, sqlx::Error> {
-    let IntakeRoute::Hold(detail) = intake_route::route(provider, channel_id.get()) else {
+    let home = super::channel_home::intake_hold(&row.channel_id, row.home_epoch);
+    let Some(detail) = home.or_else(|| match intake_route::route(provider, channel_id.get()) {
+        IntakeRoute::Hold(detail) => Some(detail),
+        IntakeRoute::Unselected | IntakeRoute::Gateway => None,
+    }) else {
         return Ok(false);
     };
     let released = return_claimed_to_pending(pool, row.id, claim_owner).await?;
@@ -705,6 +710,7 @@ mod tests {
             owner_generation: None,
             owner_instance_id: None,
             admission_kind: "forwarded".to_string(),
+            home_epoch: None,
         }
     }
 
@@ -948,6 +954,9 @@ mod tests {
 #[path = "intake_worker/dispatch_stamp_tests.rs"]
 mod dispatch_stamp_tests;
 
+#[cfg(test)]
+#[path = "intake_worker/home_route_tests.rs"]
+mod home_route_tests;
 #[cfg(test)]
 #[path = "intake_worker/o_route_tests.rs"]
 mod o_route_tests;

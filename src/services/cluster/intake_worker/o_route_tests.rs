@@ -31,6 +31,7 @@ async fn seed(pool: &PgPool, channel: u64, message: u64) -> i64 {
         preserve_on_cancel: false,
         agent_id: "agent-o".into(),
         provider: "claude".into(),
+        home_epoch: None,
     };
     let id = insert_pending(pool, &payload, 1, None).await.unwrap();
     // Claims go oldest first; keep creation times apart.
@@ -230,6 +231,8 @@ async fn routed_locally(pool: &PgPool, channel: u64) -> bool {
         wait_for_completion: false,
         preserve_on_cancel: false,
         node_override_instance_id: None,
+        owner_authority:
+            crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn::NotOptedIn,
         has_nonportable_uploads: false,
         attachment_refs: &[],
     };

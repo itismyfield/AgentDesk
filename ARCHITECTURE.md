@@ -182,6 +182,7 @@ src/
 │   ├── intake_outbox_dispatch_stamp.rs
 │   ├── intake_outbox_dispatched_audit.rs
 │   ├── intake_outbox_force_fail.rs
+│   ├── intake_outbox_home_tests.rs
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
@@ -620,6 +621,7 @@ src/
 │   │   │   ├── capacity_tests.rs
 │   │   │   ├── edge_case_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
+│   │   │   ├── home_route_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_record.rs
@@ -628,6 +630,7 @@ src/
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
+│   │   │   ├── home_route_tests.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   └── test_executor.rs
 │   │   ├── machine_resources/
