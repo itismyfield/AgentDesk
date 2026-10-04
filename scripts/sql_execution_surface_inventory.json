@@ -6381,15 +6381,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:46a74b1de9ee713a5b58f00eaeea189241836d1e682ddaa035d2207a30fce25f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/dispatched_sessions.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:46acf2bd61b4319e95d3a11fac8cd78318a923e7947d9d896d33c676d7675bef"
     },
     {
@@ -6445,6 +6436,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:79f38280e1201749dde297a9d5b22d3b6e471787f9da91734772c6be1e05e433"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:83d576b725136f3b7e23499e73e5853d9b6b34a1e86d7844022ff519bdd217fc"
     },
     {
       "root": "src",
@@ -6525,7 +6525,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:d33fcb01278313ea35fb7c833d7ea28dde8a91429b477899a4ce161779e16e55"
+      "fingerprint": "sha256:c4ca795e0b2ea9841e6ebd1073f4b7ddcce19ebab09983366d1b6f68fbd356b9"
     },
     {
       "root": "src",
@@ -6534,7 +6534,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:d6643345e0376ba1e9d8f64213dc32d7553024cddafb17ed87c3ffca3cd70f56"
+      "fingerprint": "sha256:d33fcb01278313ea35fb7c833d7ea28dde8a91429b477899a4ce161779e16e55"
     },
     {
       "root": "src",
@@ -17937,6 +17937,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:317cc71a9ec42f88ff73ade003bde601a34a3fa6bd3cc5daf9d606485fa6bc09"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/dispatched_sessions_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:c78f548cf618baf32457e804c9b08315330839ef00d806fe0217796e02926e75"
     },
     {
@@ -18010,6 +18019,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:f4805dfe651f3618fd10c3e183c75851e106fc93cae39c84f027fe5467152557"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/dispatched_sessions_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:0a66265506714c9c36d090dfb83cb02889ebe088d71e3616fcb00688a34269cc"
     },
     {
       "root": "src",
@@ -27784,6 +27802,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:c67a714a3a610b893883b36d7c031c75681d594a6231ce41427d14818f2cee58"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/session_idle_cleanup_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:97c929686efac550524b0d1de44593d77ac58b23da37548a15df371ff15895ef"
     },
     {
       "root": "src",
