@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::disk_write::{check_round_trip, typed_document, yaml_child, yaml_set};
 
 #[derive(Debug, Clone)]
 enum FileSnapshot {
@@ -56,52 +57,10 @@ fn config_io_error(path: &Path, err: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("{}: {}", path.display(), err))
 }
 
-/// Mutable entry for `key` under `parent`, created as null when absent.
-///
-/// A `parent` that is not a mapping is replaced with an empty one, matching what
-/// the whole-`Config` round-trip this replaced did to a malformed section.
-fn yaml_child<'a>(parent: &'a mut serde_yaml::Value, key: &str) -> &'a mut serde_yaml::Value {
-    if !parent.is_mapping() {
-        *parent = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    let key = serde_yaml::Value::String(key.to_string());
-    let map = parent
-        .as_mapping_mut()
-        .expect("value was just normalized to a mapping");
-    if !map.contains_key(&key) {
-        map.insert(key.clone(), serde_yaml::Value::Null);
-    }
-    map.get_mut(&key).expect("entry exists after the insert")
-}
-
-fn yaml_set(parent: &mut serde_yaml::Value, key: &str, value: serde_yaml::Value) {
-    *yaml_child(parent, key) = value;
-}
-
 fn yaml_remove(parent: &mut serde_yaml::Value, key: &str) {
     if let Some(map) = parent.as_mapping_mut() {
         map.remove(&serde_yaml::Value::String(key.to_string()));
     }
-}
-
-// Local comparison only: include the two secrets deliberately omitted by Serialize.
-// Never log this projection or differences containing its values.
-fn typed_document(config: &crate::config::Config) -> Result<serde_yaml::Value, serde_yaml::Error> {
-    let mut value = serde_yaml::to_value(config)?;
-    yaml_set(
-        yaml_child(&mut value, "server"),
-        "auth_token",
-        serde_yaml::to_value(&config.server.auth_token)?,
-    );
-    let bots = yaml_child(yaml_child(&mut value, "discord"), "bots");
-    for (name, bot) in &config.discord.bots {
-        yaml_set(
-            yaml_child(bots, name),
-            "token",
-            serde_yaml::to_value(&bot.token)?,
-        );
-    }
-    Ok(value)
 }
 
 // Promote existing scalar values/keys using the typed interpretation, without
@@ -151,25 +110,6 @@ fn preserve_string_scalars(raw: &mut serde_yaml::Value, typed: &serde_yaml::Valu
         }
         _ => {}
     }
-}
-
-fn check_typed_equivalence(expected: &crate::config::Config, rendered: &str) -> anyhow::Result<()> {
-    let actual: crate::config::Config = serde_yaml::from_str(rendered)?;
-    let expected = typed_document(expected)?;
-    let actual = typed_document(&actual)?;
-    if actual != expected {
-        for (section, value) in expected.as_mapping().expect("Config is a mapping") {
-            if actual.get(section) == Some(value) {
-                continue;
-            }
-            anyhow::bail!(
-                "settings write-back changed typed section {}",
-                section.as_str().unwrap_or("unknown")
-            );
-        }
-        anyhow::bail!("settings write-back changed typed Config sections");
-    }
-    Ok(())
 }
 
 /// Replace the owned bot provider/agent/auth block, preserving other typed values
@@ -222,7 +162,7 @@ fn patch_bot_settings_yaml(
     bot.agent = settings.agent.clone();
     bot.auth = auth;
     let rendered = serde_yaml::to_string(&document)?;
-    check_typed_equivalence(&expected, &rendered)?;
+    check_round_trip(&expected, &rendered)?;
     Ok(rendered)
 }
 
@@ -823,7 +763,7 @@ relay_authority_dial_from_a_newer_binary: enforce\n"
         let expected: crate::config::Config = serde_yaml::from_str(&original).unwrap();
         let raw: serde_yaml::Value = serde_yaml::from_str(&original).unwrap();
         let corrupted = serde_yaml::to_string(&raw).unwrap();
-        let error = check_typed_equivalence(&expected, &corrupted)
+        let error = check_round_trip(&expected, &corrupted)
             .unwrap_err()
             .to_string();
         assert!(error.contains("database"));

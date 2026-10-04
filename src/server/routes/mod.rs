@@ -364,8 +364,8 @@ mod audit_explicit_auth_routes_tests {
             config.server.auth_token = token_required.then(|| "slice-a-token".to_string());
             config.kanban.manager_channel_id =
                 channel_required.then(|| "slice-a-channel".to_string());
-            // Config intentionally omits auth_token during serialization; add
-            // the synthetic token explicitly to the private test fixture.
+            // `Serialize` redacts auth_token for the wire; write it into the raw
+            // fixture the way `config::save_to_path` does for the real file.
             let mut fixture = serde_json::to_value(&config).unwrap();
             fixture["server"]["auth_token"] = serde_json::json!(config.server.auth_token);
             std::fs::write(&config_path, serde_yaml::to_string(&fixture).unwrap()).unwrap();

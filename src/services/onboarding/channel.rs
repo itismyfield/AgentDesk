@@ -314,6 +314,7 @@ mod tests {
             config.discord.guild_id = existing.map(str::to_string);
             config.policies.dir =
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+            config.server.auth_token = Some("server-secret".to_string());
             std::fs::create_dir_all(crate::runtime_layout::config_dir(root)).unwrap();
             let path = onboarding::onboarding_config_path(root);
             crate::config::save_to_path(&path, &config).unwrap();
@@ -350,35 +351,12 @@ mod tests {
             let saved = crate::config::load_from_path(&path).unwrap();
             assert_eq!(saved.discord.guild_id.as_deref(), Some(expected));
             assert_eq!(saved.onboarding.guild_id.as_deref(), Some("222"));
-            // BotConfig's pre-existing skip_serializing token policy prevents
-            // full completion here. Guild verification must pass before that
-            // unrelated check; supplement only the temporary test fixture.
-            assert!(
-                result.unwrap_err().1["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("primary command token was not persisted")
+            result.unwrap();
+            assert_eq!(
+                saved.discord.bots["command"].token.as_deref(),
+                Some(body.token.as_str())
             );
-            let mut yaml: serde_yaml::Value =
-                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            yaml["discord"]["bots"]["command"]["token"] =
-                serde_yaml::Value::String(body.token.clone());
-            std::fs::write(&path, serde_yaml::to_string(&yaml).unwrap()).unwrap();
-            assert!(
-                onboarding::verify_onboarding_settings_artifacts(
-                    root,
-                    &body.token,
-                    "gemini",
-                    None,
-                    None,
-                    expected,
-                    None,
-                    None,
-                    None,
-                    &[]
-                )
-                .is_ok()
-            );
+            assert_eq!(saved.server.auth_token.as_deref(), Some("server-secret"));
         }
     }
 

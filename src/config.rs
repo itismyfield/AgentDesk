@@ -15,6 +15,9 @@ pub(crate) mod runtime_profile;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;
+pub(crate) mod disk_write;
+pub(crate) use disk_write::render_config_for_path;
+pub use disk_write::save_to_path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -2965,22 +2968,6 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
     if config_contains_file_secrets(config) {
         crate::utils::secret_file::audit_or_harden_secret_file(path, "agentdesk-config");
     }
-}
-
-pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let rendered = serde_yaml::to_string(config)
-        .with_context(|| format!("Failed to serialize config for {}", path.display()))?;
-    if config_contains_file_secrets(config) {
-        crate::utils::secret_file::write_secret_file(path, rendered)
-            .with_context(|| format!("Failed to write config {}", path.display()))?;
-    } else {
-        std::fs::write(path, rendered)
-            .with_context(|| format!("Failed to write config {}", path.display()))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

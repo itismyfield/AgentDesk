@@ -676,8 +676,8 @@ fn write_agentdesk_discord_config(
     upsert_command_bot(&mut config, token, provider, allowed_channel_ids);
     config.database = database.clone();
 
-    let rendered = serde_yaml::to_string(&config)
-        .map_err(|e| format!("Failed to serialize config {}: {e}", config_path.display()))?;
+    let rendered = crate::config::render_config_for_path(&config_path, &config)
+        .map_err(|e| format!("Failed to render config {}: {e:#}", config_path.display()))?;
     write_secret_with_backup(&config_path, &rendered, reconfigure)
         .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))?;
 
@@ -1237,6 +1237,33 @@ mod tests {
             assert_eq!(persisted, Some(expected.as_str()));
             assert_ne!(persisted, Some(labels[index]));
         }
+    }
+
+    #[test]
+    fn cli_init_reconfigure_keeps_disk_secrets_and_writes_command_token() {
+        use crate::config::disk_write::test_support::*;
+        let root = tempfile::tempdir().unwrap();
+        write_secret_config(&init_config_path(root.path()), "");
+
+        let config_path = write_agentdesk_discord_config(
+            root.path(),
+            "12345678901234567",
+            "command-secret-token",
+            "claude",
+            None,
+            &[],
+            &crate::config::DatabaseConfig::default(),
+            true,
+        )
+        .unwrap();
+
+        assert_secrets_on_disk(&config_path);
+        let raw: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            raw["discord"]["bots"]["command"]["token"].as_str(),
+            Some("command-secret-token")
+        );
     }
 }
 
