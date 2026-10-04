@@ -39,6 +39,26 @@ pub(crate) fn confirm(channel: u64) {
     }
 }
 
+/// Confirms each selected channel of `owned` only after `retire` reports it fully retired. An empty
+/// selection returns before `owned` or `retire` runs, so an unconfigured process reads nothing.
+pub(crate) fn confirm_selected(
+    config: Option<&TurnConfig>,
+    owned: impl FnOnce() -> Vec<u64>,
+    mut retire: impl FnMut(u64) -> bool,
+) -> Vec<u64> {
+    let Some(config) = config.filter(|c| c.all_owned || !c.channels.is_empty()) else {
+        return Vec::new();
+    };
+    let mut confirmed = Vec::new();
+    for channel in owned().into_iter().filter(|&c| config.selects(c)) {
+        if retire(channel) {
+            confirm(channel);
+            confirmed.push(channel);
+        }
+    }
+    confirmed
+}
+
 #[cfg(test)]
 pub(crate) struct TestConfirmation(u64);
 
@@ -47,6 +67,12 @@ impl TestConfirmation {
     pub(crate) fn new(channel: u64) -> Self {
         assert!(!transcript_turns(channel));
         confirm(channel);
+        Self(channel)
+    }
+
+    /// Takes over removal of a channel production code already confirmed.
+    pub(crate) fn confirmed(channel: u64) -> Self {
+        assert!(transcript_turns(channel));
         Self(channel)
     }
 }

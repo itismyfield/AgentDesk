@@ -91,6 +91,15 @@ pub(super) async fn post_passive_prompt_notice(
     if !status_only && !crate::services::tui_o::turn_mode::transcript_turns(channel.get()) {
         return Some(observation);
     }
+    if !status_only {
+        // A confirmed direct turn owns no Legacy lease; release the one its observation recorded.
+        crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_generation_matches(
+            &prompt.provider,
+            &prompt.tmux_session_name,
+            channel.get(),
+            prompt.external_input_lease_generation,
+        );
+    }
     let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
     let Some(gate) = task_notification_prompt::resolve_gate(
         shared,

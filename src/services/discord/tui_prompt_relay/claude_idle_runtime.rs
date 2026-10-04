@@ -184,9 +184,9 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
         };
         let transcript_turns =
             crate::services::tui_o::turn_mode::transcript_turns(channel_id.get());
-        if !transcript_turns
-            && let Some(row) =
-                super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
+        if let Some(row) =
+            super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
+            && (!transcript_turns || !super::super::inflight::is_synthetic_create_state(&row))
         {
             let source = Path::new(&binding.output_path);
             if let Some(lease) =

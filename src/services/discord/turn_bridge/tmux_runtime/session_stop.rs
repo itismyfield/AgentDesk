@@ -1,4 +1,4 @@
-//! A confirmed channel interrupts its bound parent turn without owning a mailbox lease.
+//! A confirmed channel with no Discord turn token interrupts its bound parent turn without a lease.
 
 use std::sync::Arc;
 
@@ -47,8 +47,14 @@ impl SessionStop {
             observe(&shared_read, &provider_read, channel)
         })
         .await;
-        let Ok(Ok(Some(observed))) = observed else {
-            return CommandStop::NoActiveTurn;
+        let observed = match observed.map_err(|e| e.to_string()).and_then(|o| o) {
+            Ok(Some(observed)) => observed,
+            Ok(None) => return CommandStop::NoActiveTurn,
+            // An unreadable binding or transcript is not proof the turn ended.
+            Err(error) => {
+                tracing::warn!(channel_id = channel.get(), %error, "session stop could not observe the turn");
+                return CommandStop::HostRefused;
+            }
         };
         let target = StopTarget::for_session(&observed.session);
         if matches!(target, StopTarget::Refused { .. }) {
