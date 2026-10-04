@@ -10139,6 +10139,7 @@ services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_bo
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
+services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
