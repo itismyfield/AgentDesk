@@ -2099,6 +2099,11 @@ src/
 │   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
+│   │   ├── actor/
+│   │   │   ├── gate.rs
+│   │   │   └── pane.rs
+│   │   ├── actor.rs
+│   │   ├── actor_tests.rs
 │   │   ├── blob.rs
 │   │   ├── bounded_tmux.rs
 │   │   ├── bounded_tmux_tests.rs
