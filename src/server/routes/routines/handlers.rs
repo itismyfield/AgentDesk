@@ -418,6 +418,10 @@ pub async fn run_routine_now(
         )));
     };
     let discord_log = discord_logger.log_run_outcome(&store, &outcome).await;
+    let threshold = state.config.routines.max_consecutive_failures;
+    discord_logger
+        .alert_consecutive_failures(&store, &outcome, threshold)
+        .await;
     Ok(Json(
         json!({ "outcome": outcome, "discord_log": discord_log }),
     ))

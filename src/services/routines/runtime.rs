@@ -110,6 +110,19 @@ pub async fn run_due_tick(
     Ok(outcomes)
 }
 
+/// Runs `due_tick` only once `startup_grace_secs` have passed since boot; `None` means nothing
+/// was claimed, so a slot missed during the grace stays due and is claimed once afterwards.
+pub async fn after_startup_grace<T>(
+    since_boot: std::time::Duration,
+    startup_grace_secs: u64,
+    due_tick: impl std::future::Future<Output = Result<T>>,
+) -> Result<Option<T>> {
+    if since_boot < std::time::Duration::from_secs(startup_grace_secs) {
+        return Ok(None);
+    }
+    due_tick.await.map(Some)
+}
+
 fn validate_claimed_migrated_launchd_run(
     loader: &RoutineScriptLoader,
     claimed: &ClaimedRoutineRun,

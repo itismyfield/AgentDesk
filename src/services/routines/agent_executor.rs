@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 
 pub(crate) mod reliability;
+pub(crate) mod start_deferral;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
@@ -173,6 +174,18 @@ impl RoutineAgentExecutor {
                 })
             }
             Err(error) => {
+                let start = start_deferral::PendingAgentStart {
+                    claimed: &claimed,
+                    agent_id: &agent_id,
+                    attempt_kind: "primary",
+                    prompt: &prompt,
+                    dm_user_id: dm_user_id.as_deref(),
+                    checkpoint: &checkpoint,
+                    next_due_at,
+                };
+                if let Some(deferred) = self.defer_transient_start(start, None, &error).await? {
+                    return Ok(deferred);
+                }
                 let message = error.to_string();
                 self.handle_claimed_agent_failure(
                     store,
@@ -590,14 +603,15 @@ impl RoutineAgentExecutor {
         let checkpoint = pending_checkpoint(run.result_json.as_ref());
         let next_due_at = pending_next_due_at(run.result_json.as_ref());
         let claimed = claimed_from_running_run(&run);
+        let (attempt_kind, dm_user_id) = start_deferral::reattempt(run.result_json.as_ref());
         match self
             .start_turn(
                 store,
                 &claimed,
                 &agent_id,
-                "retry",
+                &attempt_kind,
                 &prompt,
-                None,
+                dm_user_id.as_deref(),
                 &checkpoint,
                 next_due_at,
                 pause_on_terminal_failure,
@@ -640,6 +654,19 @@ impl RoutineAgentExecutor {
                 }))
             }
             Err(error) => {
+                let start = start_deferral::PendingAgentStart {
+                    claimed: &claimed,
+                    agent_id: &agent_id,
+                    attempt_kind: &attempt_kind,
+                    prompt: &prompt,
+                    dm_user_id: dm_user_id.as_deref(),
+                    checkpoint: &checkpoint,
+                    next_due_at,
+                };
+                let prior = run.result_json.as_ref();
+                if let Some(deferred) = self.defer_transient_start(start, prior, &error).await? {
+                    return Ok(Some(deferred));
+                }
                 let message = error.to_string();
                 let result_json = Some(pending_result_without_fresh_context_guarantee(
                     &run,
@@ -652,7 +679,7 @@ impl RoutineAgentExecutor {
                     &message,
                     result_json,
                     Some(&agent_id),
-                    "retry",
+                    &attempt_kind,
                     pause_on_terminal_failure,
                 )
                 .await
@@ -1033,6 +1060,7 @@ impl RoutineAgentExecutor {
         let provider = bindings
             .resolved_primary_provider_kind()
             .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+        start_deferral::ensure_provider_registered(registry, &provider).await?;
         let primary_channel = bindings
             .primary_channel()
             .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
@@ -1196,7 +1224,7 @@ impl RoutineAgentExecutor {
             )
             .await
         }
-        .map_err(|error| anyhow!("start routine agent turn for {agent_id}: {error}"))?;
+        .map_err(|error| start_deferral::headless_start_error(agent_id, error))?;
 
         if outcome.turn_id != turn_id {
             return Err(anyhow!(
