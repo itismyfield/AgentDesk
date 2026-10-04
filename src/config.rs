@@ -19,7 +19,7 @@ pub(crate) mod disk_write;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
@@ -123,7 +123,7 @@ fn default_credential_notify_dedupe_secs() -> u64 {
     300
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
@@ -161,7 +161,7 @@ impl std::fmt::Debug for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct DiscordConfig {
     #[serde(default)]
     pub bots: std::collections::HashMap<String, BotConfig>,
@@ -241,7 +241,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct BotConfig {
     // Issue #2047 Finding 6 — bot token must never leave the process via
@@ -354,7 +354,7 @@ where
     )
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AgentDef {
     pub id: String,
     pub name: String,
@@ -738,7 +738,7 @@ impl AgentChannelConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MeetingSettings {
     pub channel_name: String,
     #[serde(default)]
@@ -755,7 +755,7 @@ pub struct MeetingSettings {
     pub available_agents: Vec<MeetingAgentEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MeetingSummaryAgentDef {
     Static(String),
@@ -766,21 +766,21 @@ pub enum MeetingSummaryAgentDef {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MeetingSummaryRuleDef {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
     pub agent: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MeetingAgentEntry {
     RoleId(String),
     Detailed(MeetingAgentDef),
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct MeetingAgentDef {
     pub role_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -809,7 +809,7 @@ pub struct MeetingAgentDef {
     pub provider_hint: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct GitHubConfig {
     #[serde(default)]
     pub repos: Vec<String>,
@@ -829,7 +829,7 @@ impl Default for GitHubConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PoliciesConfig {
     #[serde(default = "default_policies_dir")]
     pub dir: PathBuf,
@@ -845,7 +845,7 @@ pub struct PoliciesConfig {
     pub hook_timeout_ms: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct DataConfig {
     #[serde(default = "default_data_dir")]
     pub dir: PathBuf,

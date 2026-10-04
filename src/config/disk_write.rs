@@ -69,8 +69,8 @@ fn disk_document(config: &Config) -> Result<Value, serde_yaml::Error> {
     Ok(value)
 }
 
-/// Refuse a render that would not read back as `expected`, secrets included.
-/// The error names the section only, never a value.
+/// Settings write-back gate: the patched document must serialize like `expected`,
+/// secrets included. The error names the section only, never a value.
 pub(crate) fn check_round_trip(expected: &Config, rendered: &str) -> Result<()> {
     let actual: Config = serde_yaml::from_str(rendered)?;
     let expected = typed_document(expected)?;
@@ -88,6 +88,58 @@ pub(crate) fn check_round_trip(expected: &Config, rendered: &str) -> Result<()> 
         .and_then(|(key, _)| key.as_str())
         .unwrap_or("unknown");
     bail!("config write would change typed section {section}")
+}
+
+/// Refuse a render that would not read back as exactly `expected`, including values
+/// a `skip_serializing_if` omits. The error names the top-level field only.
+fn check_reads_back(expected: &Config, rendered: &str) -> Result<()> {
+    let actual: Config = serde_yaml::from_str(rendered)?;
+    if actual == *expected {
+        return Ok(());
+    }
+    let section = differing_section(expected, &actual);
+    bail!("config write would change typed section {section}")
+}
+
+/// First differing top-level field; the destructure stops compiling when one is added.
+fn differing_section(expected: &Config, actual: &Config) -> &'static str {
+    macro_rules! first_difference {
+        ($($field:ident),+) => {{
+            let Config { $($field: _),+ } = expected;
+            $(if expected.$field != actual.$field {
+                return stringify!($field);
+            })+
+            "unknown"
+        }};
+    }
+    first_difference!(
+        server,
+        discord,
+        providers,
+        voice,
+        shared_prompt,
+        mcp_servers,
+        review_mcp_allowlist,
+        agents,
+        meeting,
+        github,
+        policies,
+        data,
+        database,
+        cluster,
+        kanban,
+        review,
+        placeholder,
+        runtime,
+        routines,
+        escalation,
+        onboarding,
+        memory,
+        mcp,
+        prompt_manifest_retention,
+        tui_o,
+        config_hot_reload
+    )
 }
 
 fn has_secret(token: &Option<String>) -> bool {
@@ -135,7 +187,7 @@ fn check_disk_secrets_kept(path: &Path, config: &Config) -> Result<()> {
 pub(crate) fn render_config_for_path(path: &Path, config: &Config) -> Result<String> {
     let rendered = serde_yaml::to_string(&disk_document(config)?)
         .with_context(|| format!("Failed to serialize config for {}", path.display()))?;
-    check_round_trip(config, &rendered)
+    check_reads_back(config, &rendered)
         .map_err(|error| anyhow::anyhow!("Refusing to write config {}: {error}", path.display()))?;
     check_disk_secrets_kept(path, config)?;
     Ok(rendered)
@@ -196,12 +248,33 @@ mod tests {
         let expected = crate::config::load_from_path(&path).unwrap();
         let stripped = serde_yaml::to_string(&expected).unwrap();
 
-        let error = check_round_trip(&expected, &stripped)
+        let error = check_reads_back(&expected, &stripped)
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("would change typed section"), "{error}");
+        assert!(
+            error.contains("would change typed section server"),
+            "{error}"
+        );
         assert!(!error.contains(SERVER_TOKEN) && !error.contains(BOT_TOKEN));
+    }
+
+    #[test]
+    fn save_refuses_to_drop_channel_settings_the_yaml_form_omits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        write_secret_config(
+            &path,
+            "agents:\n  - id: retained\n    name: Retained\n    channels:\n      future:\n        model: keep-model\n        workspace: keep-workspace\n",
+        );
+        let original = std::fs::read(&path).unwrap();
+        let mut config = crate::config::load_from_path(&path).unwrap();
+        config.shared_prompt = Some("/prompts/shared.md".to_string());
+
+        let error = format!("{:#}", save_to_path(&path, &config).unwrap_err());
+
+        assert!(error.contains("typed section agents"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]

@@ -49,6 +49,7 @@ src/
 │   │   └── startup.rs
 │   ├── migrate/
 │   │   ├── apply.rs
+│   │   ├── apply_config_tests.rs
 │   │   ├── plan.rs
 │   │   └── source.rs
 │   ├── provider_cli/
