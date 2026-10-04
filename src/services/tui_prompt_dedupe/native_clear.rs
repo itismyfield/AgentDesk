@@ -24,7 +24,7 @@ pub(crate) enum ClearAdmission {
     Fallback,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ClearTicket {
     pub context: BindingContext,
     pub old: SourceId,
@@ -51,6 +51,61 @@ pub(crate) enum ClearOutcome {
     Fallback,
     // The caller must keep subsequent admission closed; no reset is authorized.
     Hold(Option<ClearCommit>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeClearRestart {
+    Preserve,
+    CompleteDurable(ClearCommit),
+    ResetUnresolved,
+    Hold,
+}
+
+// Host identity comes from the caller's existing node identity, never from a selector.
+#[allow(dead_code)]
+pub(crate) fn judge_native_clear_restart(
+    boundary: &crate::db::session_transcripts::NativeClearBoundary,
+    local_host: Option<&str>,
+) -> NativeClearRestart {
+    use crate::db::session_transcripts::NativeClearBoundary;
+    let NativeClearBoundary::Unresolved { ticket, .. } = boundary else {
+        return NativeClearRestart::Preserve;
+    };
+    let Ok(ticket) = serde_json::from_value::<ClearTicket>(ticket.clone()) else {
+        return NativeClearRestart::Hold;
+    };
+    let host = ticket
+        .context
+        .host
+        .as_deref()
+        .filter(|h| !h.trim().is_empty());
+    if host.is_none()
+        || host != local_host.filter(|h| !h.trim().is_empty())
+        || ticket.context.schema != 1
+        || ticket.context.provider != "claude"
+        || ticket.context.channel_id.is_none_or(|id| id == 0)
+        || ticket.context.tmux_session.trim().is_empty()
+        || ticket.context.execution_nonce.is_empty()
+    {
+        return NativeClearRestart::Hold;
+    }
+    tmux_common::try_with_tmux_source_authority(&ticket.context.tmux_session, |_| {
+        let Ok(Ok(records)) = binding_events::records_strict(ticket.context.channel_id.unwrap())
+        else {
+            return NativeClearRestart::Hold;
+        };
+        if observe_spawn_nonce_marker(&ticket.context.tmux_session) == SpawnNonceMarker::Unreadable
+        {
+            return NativeClearRestart::Hold;
+        }
+        if current_execution(&ticket) {
+            if let Some(commit) = clear_commit(&ticket, &records) {
+                return NativeClearRestart::CompleteDurable(commit);
+            }
+        }
+        NativeClearRestart::ResetUnresolved
+    })
+    .unwrap_or(NativeClearRestart::Hold)
 }
 
 #[allow(dead_code)]
@@ -217,6 +272,8 @@ pub(crate) trait NativeClearHost: Send + 'static {
     fn submit(&mut self, deadline: Instant) -> NativeClearSubmission;
     fn decide(&mut self, allow_fallback: bool) -> ClearDecision;
     fn composer_empty(&mut self, deadline: Instant) -> bool;
+    // Finish the durable boundary resolve inside these callbacks, while the worker owns the guard.
+    // A failed resolve must return false, preserving Hold instead of publishing success.
     fn save(&mut self, commit: ClearCommit, deadline: Instant) -> Step<'_, bool>;
     fn fallback(&mut self, deadline: Instant) -> Step<'_, bool>;
 }
