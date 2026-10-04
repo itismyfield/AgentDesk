@@ -26,7 +26,7 @@ pub(in crate::services::discord::inflight) fn touch_inflight_state_if_matches_id
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     let path = inflight_state_path(root, provider, channel_id);
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
+    let Ok(_lock) = crate::services::discord::inflight::store::try_lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
     let Some(on_disk) = load_inflight_state_unlocked(&path) else {

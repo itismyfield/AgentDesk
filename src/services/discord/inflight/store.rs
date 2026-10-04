@@ -139,21 +139,35 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 /// network-filesystem behavior and non-cooperating writers are outside the
 /// contract.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
-    let lock_path = inflight_state_lock_path(path);
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(&lock_path)
-        .map_err(|e| e.to_string())?;
+    let file = open_inflight_lock_file(path)?;
     file.lock().map_err(|e| e.to_string())?;
     Ok(InflightStateFileLock {
         file,
         state_path: path.to_path_buf(),
     })
+}
+
+// Contention is retryable; scheduler callers must not wait for another open handle.
+pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    let file = open_inflight_lock_file(path)?;
+    file.try_lock().map_err(|e| e.to_string())?;
+    Ok(InflightStateFileLock {
+        file,
+        state_path: path.to_path_buf(),
+    })
+}
+
+fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
+    let lock_path = inflight_state_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| e.to_string())
 }
 
 // #3835: shared lock-held persist tail + save-side validation gate, consumed
