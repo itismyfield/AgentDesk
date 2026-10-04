@@ -10,7 +10,6 @@ pub(crate) enum NativeClearSubmission {
     Indeterminate,
 }
 
-#[allow(dead_code)]
 pub(crate) fn submit_native_clear_tmux(
     target: &InputTarget,
     gate: &dyn MutationGate,
@@ -21,7 +20,7 @@ pub(crate) fn submit_native_clear_tmux(
         let _ = (target, gate, deadline);
         return NativeClearSubmission::NotSent;
     }
-    // The caller supplies resolved evidence; this dormant seam does not activate resolution.
+    // The caller supplies the resolved target; only a confirmed tmux session takes keys.
     let InputTarget::Tmux(session) = target else {
         return NativeClearSubmission::NotSent;
     };

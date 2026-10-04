@@ -110,6 +110,10 @@ pub struct RuntimeSettingsConfig {
     /// Independent of rate_limit_danger_pct used by dashboard coloring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_rate_limit_gate_danger_pct: Option<u8>,
+    /// Live switch for Claude native `/clear` on O-owned tmux channels; unset or false keeps
+    /// the managed process reset and skips the native recovery check at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_clear_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -154,6 +158,7 @@ impl RuntimeSettingsConfig {
             && self.codex_rollout_index_cache_enabled.is_none()
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
+            && self.native_clear_enabled.is_none()
             && !self.reset_overrides_on_restart
     }
 

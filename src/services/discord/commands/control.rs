@@ -14,10 +14,12 @@ use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::{CommandStop, stop_active_turn};
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
+mod native;
+pub(in crate::services::discord) use native::native_clear_admits;
+
 use super::config::{
-    clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_channel,
-    clear_fast_mode_reset_pending_for_provider, fast_mode_reset_pending_for_provider,
-    fast_mode_reset_pending_key, sync_session_reset_pending,
+    clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_provider,
+    fast_mode_reset_pending_for_provider, fast_mode_reset_pending_key, sync_session_reset_pending,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -463,18 +465,31 @@ async fn clear_channel_session_state_fenced(
         );
     }
     let channel_key = channel_id.get().to_string();
+    let tmux = tmux_name.as_deref();
+    let native = native::select(
+        http,
+        shared,
+        provider,
+        channel_id,
+        tmux,
+        explicit_session_key,
+    );
+    let native = native.await;
     // A failed boundary keeps the old transcript fence, so the session must
     // survive it too; only the released turn is stopped, still under the guard.
-    if let Some(tx) = boundary
-        && let Err(error) =
-            session_transcripts::finish_channel_clear_boundary_tx(tx, &channel_key).await
-    {
-        stop_released_turn(provider, cleared.removed_token, clear_source).await;
-        anyhow::bail!(
-            "세션을 초기화하지 못했어요: 대기열은 비웠지만 대화 경계 저장에 실패해 세션을 유지했어요 ({error})"
-        );
-    }
-    drop(transition_guard);
+    let native = match native::finish_boundary(boundary, &channel_key, native).await {
+        Err(error) => {
+            stop_released_turn(provider, cleared.removed_token, clear_source).await;
+            anyhow::bail!(
+                "세션을 초기화하지 못했어요: 대기열은 비웠지만 대화 경계 저장에 실패해 세션을 유지했어요 ({error})"
+            );
+        }
+        Ok(Some(armed)) => Some((armed, transition_guard)),
+        Ok(None) => {
+            drop(transition_guard);
+            None
+        }
+    };
 
     {
         let mut data = shared.core.lock().await;
@@ -489,15 +504,9 @@ async fn clear_channel_session_state_fenced(
 
     shared.dispatch.role_overrides.remove(&channel_id);
 
-    clear_fast_mode_reset_pending_for_channel(shared, channel_id);
-    clear_codex_goals_reset_pending_for_channel(shared, channel_id);
-    shared
-        .overrides
-        .model_session_reset_pending
-        .remove(&channel_id);
-    shared.overrides.session_reset_pending.remove(&channel_id);
-    clear_all_fast_mode_reset_markers(shared, channel_id).await;
-    persist_codex_goals_reset_marker(shared, channel_id, false).await;
+    if native.is_none() {
+        native::clear_process_reset_pending(shared, channel_id).await;
+    }
 
     stop_released_turn(provider, cleared.removed_token, clear_source).await;
 
@@ -524,13 +533,14 @@ async fn clear_channel_session_state_fenced(
         .await;
     }
 
-    match managed_session_clear_behavior(provider) {
-        ManagedSessionClearBehavior::ResetManagedProcess => {
+    match (native, managed_session_clear_behavior(provider)) {
+        (Some((armed, guard)), _) => native::complete(shared, channel_id, armed, guard).await?,
+        (None, ManagedSessionClearBehavior::ResetManagedProcess) => {
             if let Some(name) = tmux_name {
                 reset_managed_process_session(&name);
             }
         }
-        ManagedSessionClearBehavior::Noop => {}
+        (None, ManagedSessionClearBehavior::Noop) => {}
     }
 
     if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)

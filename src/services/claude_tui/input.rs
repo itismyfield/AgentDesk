@@ -7,7 +7,6 @@ use tokio::sync::Notify;
 
 use super::host_input;
 
-#[allow(dead_code)]
 pub(crate) fn submit_native_clear(
     target: &host_input::InputTarget,
     gate: &dyn host_input::MutationGate,

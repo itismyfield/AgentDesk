@@ -342,6 +342,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/commands/control/native.rs": ("select:peek",),
     "src/services/discord/footer_view_reconciler/mod.rs": (
         "edit_body_message:claim",
     ),

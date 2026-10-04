@@ -163,11 +163,9 @@ pub(crate) async fn finish_channel_clear_boundary_tx(
 }
 
 /// Clear generation a native clear correlation was recorded under.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NativeClearGeneration(pub(crate) i64);
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeClearResolve {
     Resolved,
@@ -176,7 +174,6 @@ pub(crate) enum NativeClearResolve {
 }
 
 /// Native clear state of a channel's boundary row; the ticket stays opaque at this layer.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum NativeClearBoundary {
     /// No row, or the row never carried a native correlation.
@@ -230,7 +227,6 @@ type NativeClearStateRow = (i64, Option<i64>, Option<serde_json::Value>, bool, b
 
 /// Native variant of [`finish_channel_clear_boundary_tx`]: same lock and markers, plus the ticket
 /// the clear waits on, unresolved, under the generation this write produces.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn finish_native_channel_clear_boundary_tx(
     mut tx: Transaction<'_, Postgres>,
     channel_id: &str,
@@ -268,7 +264,6 @@ async fn write_native_channel_clear_boundary(
 
 /// Marks one native generation complete. The generation CAS makes a repeated or stale completion
 /// a no-op; it does not serialize the clear's effects between processes.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn resolve_native_channel_clear(
     pool: &PgPool,
     channel_id: &str,
@@ -292,7 +287,6 @@ pub(crate) async fn resolve_native_channel_clear(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn native_channel_clear_state(
     pool: &PgPool,
     channel_id: &str,
