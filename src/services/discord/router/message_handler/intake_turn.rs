@@ -2277,6 +2277,18 @@ pub(super) async fn handle_text_message(
     }
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
+    let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
+        shared,
+        &provider,
+        &inflight_state,
+        &cancel_token,
+    )
+    .await
+    {
+        Ok(registration) => registration,
+        Err(true) => return Ok(()),
+        Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
+    };
     inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
     inflight_create_log::log_create_new_inflight_outcome(
         super::super::super::inflight::save_inflight_state_create_new(&inflight_state),
@@ -2390,6 +2402,7 @@ pub(super) async fn handle_text_message(
     }
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let producer_registration = original_registration.clone();
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
         &provider,
@@ -2399,6 +2412,7 @@ pub(super) async fn handle_text_message(
     )
     .await;
     tokio::task::spawn_blocking(move || {
+        let _original_registration = producer_registration;
         let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
             provider_execution_context,

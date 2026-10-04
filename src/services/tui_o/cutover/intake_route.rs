@@ -1,8 +1,10 @@
 //! Intake for an O-owned channel runs only where that channel's writer can take it: the gateway
 //! hosting a resumed actor while it holds the lease. A new placement is also held off the O home
-//! and ends a pending adoption on it. Every other channel routes as before.
+//! and ends a pending adoption on it. A delegated channel is held wherever its home gate takes no
+//! intake. Every other channel routes as before.
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::cluster::channel_home;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeRoute {
@@ -40,14 +42,22 @@ fn placed(provider: &str, channel: Option<u64>) -> IntakeRoute {
     route_parsed(provider, || channel)
 }
 
-/// O-owned channels this process must not claim for `provider`, as stored in intake rows.
+/// O-owned channels this process must not claim for `provider`, and delegated channels whose
+/// home takes no intake here, as stored in intake rows.
 pub(crate) fn held_channels(provider: &str) -> Vec<String> {
     let owned = super::owned_channels();
     let held = |&(channel, kind): &(u64, RuntimeHandoffKind)| {
         let held = judge(provider, channel, kind) != IntakeRoute::Gateway;
         held.then(|| channel.to_string())
     };
-    owned.iter().filter_map(held).collect()
+    let mut held: Vec<String> = owned.iter().filter_map(held).collect();
+    // A gate closing between the two reads can name a channel twice; keep the first.
+    for channel in channel_home::intake_held_channels() {
+        if !held.contains(&channel) {
+            held.push(channel);
+        }
+    }
+    held
 }
 
 /// A known destination reads only its own adoption, so another channel's adoption in progress
@@ -56,9 +66,14 @@ fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> Intake
     match channel() {
         Some(channel) => match super::owned_kind(channel) {
             Some(kind) => judge(provider, channel, kind),
+            None if super::delegated(channel).is_some() => IntakeRoute::Hold(format!(
+                "O channel {channel} is delegated and its home does not take intake here"
+            )),
             None => IntakeRoute::Unselected,
         },
-        None if super::owned_channels().is_empty() => IntakeRoute::Unselected,
+        None if super::owned_channels().is_empty() && !channel_home::any_registered() => {
+            IntakeRoute::Unselected
+        }
         None => IntakeRoute::Hold("intake destination channel is unknown".into()),
     }
 }

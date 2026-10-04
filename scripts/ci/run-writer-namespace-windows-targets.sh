@@ -3,6 +3,9 @@ set -uo pipefail
 
 if [ -n "${AGENTDESK_REPO_ROOT+x}" ]; then echo "ERROR: AGENTDESK_REPO_ROOT is not honored; the runner validates only the checkout that contains it" >&2; exit 1; fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The first cargo below starts the job's sccache server. Its idle timer resets only on new
+# requests, so the long Windows lib-test rustc must not run against the 600s default.
+export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
 readonly engine="$root/scripts/exact_rust_test_proof.py"
 readonly manifest="scripts/lib_test_inventory_manifest.txt"
 readonly protocol="src/services/writer_protocol.rs"

@@ -680,6 +680,11 @@
       "path": "migrations/postgres/0133_o_channel_homes.sql",
       "sha256": "8abee1a7c56480b0f90954c1c64bb0a725104313e143d8d66bcd67941b6b79c2",
       "version": 133
+    },
+    {
+      "path": "migrations/postgres/0134_channel_home_epochs.sql",
+      "sha256": "bce70458c71e133d49de7d1f77215d4d56053c8f452c2f9a530e432b09c88e77",
+      "version": 134
     }
   ],
   "version": 1

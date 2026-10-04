@@ -174,6 +174,7 @@ environment byte-identical: the cache is dropped, never the build.
 | `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
 | Installer source build (helper available) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `scripts/install.sh` + `setup_sccache_env` |
 | CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | inherited/upstream | workflow env + action |
+| CI Windows exact targets (`ci-pr.yml` `check_fast_cross_os_targets`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | `0` unless set | `scripts/ci/run-writer-namespace-windows-targets.sh` |
 | CI macOS hosted | none | disabled | n/a | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |
 
 Helper rows show defaults when sccache is available and size/idle values are unset
@@ -201,6 +202,10 @@ Key rows:
   have built the same deps.
 - `Non-cacheable calls` — build scripts, linker invocations, etc. These do not
   count against hit rate.
+- All-zero counters right after a build mean the stats query reached a fresh
+  server: the previous one exited on its idle timer (600s by default, reset only
+  by new requests). The Windows exact-targets runner defaults
+  `SCCACHE_IDLE_TIMEOUT=0` because its lib-test compile and test runs outlast it.
 
 Reset stats between measurements:
 

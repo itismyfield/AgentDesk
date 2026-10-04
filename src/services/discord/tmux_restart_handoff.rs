@@ -281,6 +281,9 @@ pub(super) async fn start_restart_handoff_from_state(
     state: super::inflight::InflightTurnState,
     best_response: &str,
 ) -> bool {
+    let Ok(_recovery) = super::live_bridge::try_recovery(provider_kind, state.channel_id) else {
+        return false;
+    };
     // O posts this channel's TUI body, so the handoff notice keeps only its marker.
     // A held destination identity keeps the inflight for retry, like a failed notice.
     let kind = (state.channel_id == channel_id.get())
@@ -387,8 +390,25 @@ pub(super) async fn start_restart_handoff_from_state(
         channel_id.get()
     );
 
-    super::inflight::clear_inflight_state(provider_kind, channel_id.get());
-    true
+    if !_recovery.is_guarded() {
+        super::inflight::clear_inflight_state(provider_kind, channel_id.get());
+        return true;
+    }
+    let outcome = match super::inflight::clear_inflight_state_for_snapshot(provider_kind, &state) {
+        super::inflight::GuardedClearOutcome::RebindOriginSkipped => {
+            super::inflight::clear_rebind_origin_inflight_state_if_matches_identity(
+                provider_kind,
+                state.channel_id,
+                &super::inflight::InflightTurnIdentity::from_state(&state),
+                state.turn_nonce.as_deref(),
+            )
+        }
+        outcome => outcome,
+    };
+    !matches!(
+        outcome,
+        super::inflight::GuardedClearOutcome::UserMsgMismatch
+    )
 }
 
 pub(super) async fn resume_aborted_restart_turn(
@@ -727,6 +747,13 @@ mod o_cut_tests {
                     );
                     state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
                     state.rebind_origin = rebind_origin;
+                    state.turn_nonce = Some("handoff-adoption".into());
+                    crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+                    let state = crate::services::discord::inflight::load_inflight_state(
+                        &ProviderKind::Codex,
+                        CHANNEL,
+                    )
+                    .unwrap();
                     let handled = super::start_restart_handoff_from_state(
                         ChannelId::new(CHANNEL),
                         &recorder.http,
@@ -737,6 +764,14 @@ mod o_cut_tests {
                     )
                     .await;
                     assert!(handled);
+                    assert!(
+                        crate::services::discord::inflight::load_inflight_state(
+                            &ProviderKind::Codex,
+                            CHANNEL,
+                        )
+                        .is_none(),
+                        "completed handoff must clear its exact row, rebind={rebind_origin}"
+                    );
                     recorder.calls()
                 }
             };

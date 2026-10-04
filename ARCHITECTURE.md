@@ -182,6 +182,7 @@ src/
 │   ├── intake_outbox_dispatch_stamp.rs
 │   ├── intake_outbox_dispatched_audit.rs
 │   ├── intake_outbox_force_fail.rs
+│   ├── intake_outbox_home_tests.rs
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
@@ -620,6 +621,7 @@ src/
 │   │   │   ├── capacity_tests.rs
 │   │   │   ├── edge_case_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
+│   │   │   ├── home_route_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_record.rs
@@ -628,6 +630,7 @@ src/
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
+│   │   │   ├── home_route_tests.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   └── test_executor.rs
 │   │   ├── machine_resources/
@@ -821,7 +824,8 @@ src/
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── watcher_respawn/
-│   │   │   │   └── idle_relay_absence.rs
+│   │   │   │   ├── idle_relay_absence.rs
+│   │   │   │   └── live_bridge_guard.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
@@ -909,6 +913,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── live_bridge/
+│   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
 │   │   ├── meeting_orchestrator/
@@ -1031,6 +1037,7 @@ src/
 │   │   │   │   ├── coordinate_adoption_tests.rs
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── herdr_withheld_tests.rs
+│   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
 │   │   │   │   ├── test_barriers.rs
@@ -1711,6 +1718,7 @@ src/
 │   │   ├── inflight_heartbeat_sweeper.rs
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
+│   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
 │   │   ├── mailbox_probe.rs
 │   │   ├── mcp_credential_watcher.rs

@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/live_bridge/guard_tests.rs",
         "src/services/discord/runtime_store_checkpoint_lock_tests.rs",
         "src/services/routines/reliability_pg_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/session_stop_tests.rs",
@@ -104,6 +105,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
         "src/services/cluster/intake_router_hook/capacity_tests.rs",
         "src/services/cluster/intake_router_hook/o_route_tests.rs",
+        "src/services/cluster/intake_router_hook/home_route_tests.rs",
         "src/services/cluster/channel_home_tests.rs",
         "src/services/discord/queue_io/transport/tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs",
@@ -116,6 +118,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/dispatched_sessions/tests.rs",
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
         "src/db/o_channel_homes_tests.rs",
+        "src/db/intake_outbox_home_tests.rs",
         "src/db/prompt_manifests/tests.rs",
         "src/db/scheduled_messages/postgres_tests.rs",
         "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",
@@ -150,6 +153,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_worker/dispatch_stamp_tests.rs",
         "src/services/cluster/intake_worker/drain_tests.rs",
         "src/services/cluster/intake_worker/o_route_tests.rs",
+        "src/services/cluster/intake_worker/home_route_tests.rs",
         "src/services/cluster/readiness/tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",
         "src/services/discord/abandon_request_store/probe_contract_tests.rs",

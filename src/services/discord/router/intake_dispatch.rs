@@ -250,6 +250,7 @@ pub(crate) async fn admit_text_intake(
         wait_for_completion: request.wait_for_completion,
         preserve_on_cancel: submission.preserve_on_cancel,
         node_override_instance_id: node_override.as_deref(),
+        owner_authority: authority_channel_opt_in,
         has_nonportable_uploads: submission.has_nonportable_uploads
             || submission
                 .preloaded_uploads

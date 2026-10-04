@@ -146,6 +146,9 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
     provider: &ProviderKind,
     state: &InflightTurnState,
 ) -> AbandonedTmuxCleanupDecision {
+    let Ok(_recovery) = super::super::live_bridge::try_recovery(provider, state.channel_id) else {
+        return AbandonedTmuxCleanupDecision::PreserveRetry;
+    };
     let Some(session_name) = state.tmux_session_name.as_deref() else {
         let runtime_kind = state.runtime_kind;
         let pid = state.claude_e_pid;
@@ -314,6 +317,16 @@ impl AbandonedTmuxCleanupOutcome {
         provider: &ProviderKind,
         state: &InflightTurnState,
     ) -> bool {
+        let _recovery = if self.decision == AbandonedTmuxCleanupDecision::PreserveRetry {
+            None
+        } else {
+            let Ok(registration) =
+                super::super::live_bridge::try_recovery(provider, state.channel_id)
+            else {
+                return false;
+            };
+            Some(registration)
+        };
         self.allows_state_delete()
             && clear_inflight_state_if_matches_identity_generation(
                 provider,
@@ -330,6 +343,40 @@ impl AbandonedTmuxCleanupOutcome {
 /// delivery may skip owner probing and preserves the reusable tmux session;
 /// owner-death cleanup re-probes and keeps the destructive cleanup policy.
 pub(super) async fn finalize_abandoned_mailbox(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    sweep_started_before: std::time::Instant,
+    evidence: AbandonedCleanupEvidence,
+) -> AbandonedTmuxCleanupOutcome {
+    if evidence.terminal_delivered() {
+        return finalize_abandoned_mailbox_admitted(
+            shared,
+            provider,
+            state,
+            sweep_started_before,
+            evidence,
+        )
+        .await;
+    }
+    let Ok(recovery) = super::super::live_bridge::try_recovery(provider, state.channel_id) else {
+        return AbandonedTmuxCleanupOutcome {
+            decision: AbandonedTmuxCleanupDecision::PreserveRetry,
+            state_delete_authorized: false,
+        };
+    };
+    recovery
+        .run(finalize_abandoned_mailbox_admitted(
+            shared,
+            provider,
+            state,
+            sweep_started_before,
+            evidence,
+        ))
+        .await
+}
+
+async fn finalize_abandoned_mailbox_admitted(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,

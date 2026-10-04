@@ -142,6 +142,7 @@ pub(in crate::services::discord) mod turn_end_wip_warning;
 pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
 mod tmux_error_detect;
 pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
+mod live_bridge;
 #[cfg(unix)]
 mod tmux_lifecycle;
 #[cfg(unix)]
