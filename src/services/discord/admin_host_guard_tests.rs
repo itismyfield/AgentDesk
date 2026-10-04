@@ -628,9 +628,6 @@ async fn intake_refuses_a_configured_turn_before_its_runtime_recreate_pg() {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Live);
     stub_provider_clis();
@@ -778,9 +775,6 @@ async fn headless_refuses_a_configured_turn_before_its_runtime_recreate_pg() {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Live);
     stub_provider_clis();
@@ -832,6 +826,204 @@ async fn headless_refuses_a_configured_turn_before_its_runtime_recreate_pg() {
         );
         let refused = "herdr turn refused: o_writer_not_ready".to_string();
         assert_eq!(started, Err(HeadlessTurnStartError::InvalidTarget(refused)));
+    }
+    db.drop().await;
+}
+
+// A worker turn on a Herdr-configured channel its runtime holds no session for cannot hand the
+// input back, so the row fails with the refusal and keeps its attachments instead of done.
+#[tokio::test]
+async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_pg() {
+    use crate::services::cluster::attachment_transfer::*;
+    use crate::services::cluster::intake_worker::{TickOutcome, run_intake_worker_tick};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let agent = "INSERT INTO agents (id, name, provider, discord_channel_id) \
+                 VALUES ('agent-h', 'Test', 'claude', 'unused')";
+    sqlx::query(agent).execute(&pool).await.unwrap();
+    let channel = 1_479_671_302_387_075_000_u64;
+    let identity = AttachmentMessageIdentity {
+        provider: "claude".into(),
+        channel_id: channel.to_string(),
+        user_msg_id: "75001".into(),
+    };
+    let entry = AttachmentEntryV1 {
+        filename: "a.png".into(),
+        bytes: b"png fixture".to_vec(),
+        sha256: attachment_sha256_hex(b"png fixture"),
+    };
+    let bundle = AttachmentBundleV1 {
+        version: 1,
+        identity: identity.clone(),
+        source_attachment_count: 1,
+        entries: vec![entry],
+    };
+    let bundle = validate_attachment_bundle_v1(bundle, &identity).unwrap();
+    let refs = vec![store::put(&pool, &bundle).await.unwrap()];
+    let refs = serde_json::to_value(refs).unwrap();
+    let payload = crate::db::intake_outbox::InsertPendingPayload {
+        target_instance_id: "worker-1".into(),
+        forwarded_by_instance_id: "leader-1".into(),
+        required_labels: serde_json::json!([]),
+        execution_requirements: serde_json::json!({}),
+        attachment_refs: refs.clone(),
+        channel_id: channel.to_string(),
+        user_msg_id: "75001".into(),
+        request_owner_id: "100".into(),
+        request_owner_name: Some("Tester".into()),
+        user_text: "hello".into(),
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: Some(false),
+        turn_kind: "standard".into(),
+        merge_consecutive: false,
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        preserve_on_cancel: false,
+        agent_id: "agent-h".into(),
+        provider: "claude".into(),
+        home_epoch: None,
+    };
+    let insert = crate::db::intake_outbox::insert_pending;
+    let row = insert(&pool, &payload, 1, None).await.unwrap();
+    let api = Recorder::start().await;
+    let _rest = crate::services::discord::shared_state::test_rest::install(api.http.clone());
+    let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
+    let (_registry, owner) = owner.await;
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(channel, "mac-mini")]);
+
+    let not_cancelled = || false;
+    let tick = run_intake_worker_tick(&pool, &owner, "worker-1", "claude", "o", &not_cancelled);
+    assert_eq!(tick.await.unwrap(), TickOutcome::Processed);
+
+    let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(
+        "SELECT status::TEXT, last_error, attachment_refs FROM intake_outbox WHERE id = $1",
+    )
+    .bind(row)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, "failed_post_accept", "not done: {row:?}");
+    assert_eq!(row.2, refs, "the row keeps its attachments");
+    let error = row.1.unwrap_or_default();
+    assert!(error.contains("herdr turn refused"), "{error}");
+    let core = owner.core.lock().await;
+    assert!(
+        !core.sessions.contains_key(&ChannelId::new(channel)),
+        "no session started"
+    );
+    drop(core);
+    let calls = api.take();
+    let reported = calls.iter().any(|c| c.contains("herdr turn refused"));
+    assert!(reported, "the typed refusal is reported: {calls:?}");
+    db.drop().await;
+}
+
+/// The runtime API and Discord as a dispatch on `parent` whose card reuses an archived `thread`.
+fn reuse_api(parent: ChannelId, thread: ChannelId) -> Answer {
+    Arc::new(move |method: &Method, path: &str| {
+        let channel = |id: ChannelId, kind: u8, parent: Option<String>| {
+            serde_json::json!({
+                "id": id.to_string(), "type": kind, "name": "p9b1-reuse", "guild_id": "42000",
+                "position": 0, "permission_overwrites": [], "nsfw": false, "parent_id": parent,
+                "thread_metadata": {"archived": true, "auto_archive_duration": 60,
+                    "archive_timestamp": "2026-10-02T00:00:00Z", "locked": false}
+            })
+        };
+        match (method.as_str(), path) {
+            ("GET", "/api/internal/card-thread") => Some(serde_json::json!({
+                "dispatch_type": "implementation",
+                "active_thread_id": thread.to_string(),
+            })),
+            ("GET", path) if path == format!("/api/v10/channels/{thread}") => {
+                Some(channel(thread, 11, Some(parent.to_string())))
+            }
+            ("GET", path) if path == format!("/api/v10/channels/{parent}") => {
+                Some(channel(parent, 0, None))
+            }
+            _ => None,
+        }
+    })
+}
+
+// A dispatch on an unconfigured channel reusing a Herdr-configured thread is refused before the
+// thread is unarchived, bootstrapped or mapped, with or without its session; input goes back.
+#[tokio::test]
+async fn a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg() {
+    let test = "services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = ScriptedTmux::install();
+    stub_provider_clis();
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let workdir = tempfile::tempdir().unwrap();
+    for thread_has_session in [false, true] {
+        let base = 1_479_671_302_387_076_000 + 10 * u64::from(thread_has_session);
+        let (parent, thread) = (ChannelId::new(base), ChannelId::new(base + 1));
+        let api = Recorder::start_with(reuse_api(parent, thread)).await;
+        crate::services::discord::internal_api::init(api.port, None);
+        map_channel(&shared, parent, "p9b1-reuse-parent").await;
+        let mut core = shared.core.lock().await;
+        let session = core.sessions.get_mut(&parent).unwrap();
+        session.current_path = Some(workdir.path().display().to_string());
+        (session.pending_uploads, session.cleared) = (vec!["taken-upload".into()], true);
+        drop(core);
+        if thread_has_session {
+            map_channel(&shared, thread, "p9b1-reuse-thread").await;
+        }
+        let before = shared.core.lock().await.sessions.get(&thread).cloned();
+        let _hosts = crate::config::session_hosts::force_for_test(
+            Some("mac-mini"),
+            &[(thread.get(), "mac-mini")],
+        );
+        api.take();
+
+        let intake = crate::services::discord::execute_intake_turn_core;
+        let request = intake_request(parent, "DISPATCH:p9b1-reuse-1 implement it");
+        let preloaded = vec!["preloaded-upload".into()];
+        intake(&api.http, &shared, "test-token", request, preloaded)
+            .await
+            .expect("intake");
+
+        let calls = api.take();
+        let label = format!("thread session {thread_has_session}");
+        let unarchived = calls.iter().any(|c| c.starts_with("PATCH"));
+        assert!(!unarchived, "{label}: no unarchive: {calls:?}");
+        let sessions = || async {
+            let core = shared.core.lock().await;
+            let session = core.sessions.get(&thread);
+            session.map(|s| (s.current_path.clone(), s.worktree.is_some()))
+        };
+        let before = before.map(|s| (s.current_path, s.worktree.is_some()));
+        assert_eq!(sessions().await, before, "{label}: no bootstrap");
+        let mapped = shared.dispatch.thread_parents.get(&parent).map(|t| *t);
+        assert_eq!(mapped, None, "{label}: no mapping");
+        assert!(!shared.mailbox(thread).has_active_turn().await.unwrap());
+        let core = shared.core.lock().await;
+        let returned = &core.sessions[&parent].pending_uploads;
+        assert_eq!(returned, &["taken-upload", "preloaded-upload"], "{label}");
+        drop(core);
+        let reported = calls.iter().any(|c| c.contains("herdr turn refused"));
+        assert!(
+            reported,
+            "{label}: the typed refusal is reported: {calls:?}"
+        );
+
+        // Any other route into the thread's bootstrap creates no session for it either.
+        let path = workdir.path().display().to_string();
+        let bootstrap = crate::services::discord::bootstrap_thread_session;
+        let fresh = bootstrap(&shared, thread, &path, &api.http, None).await;
+        assert_eq!(
+            sessions().await,
+            before,
+            "{label}: bootstrap creates nothing"
+        );
+        assert!(!fresh, "{label}: not bootstrapped");
     }
     db.drop().await;
 }

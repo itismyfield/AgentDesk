@@ -1020,8 +1020,8 @@ async fn backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg() {
     pg_db.drop().await;
 }
 
-/// `/resume` of a legacy row whose teardown the runtime keeps refuses before the durable
-/// rebind; once a runtime takes the channel the same row resumes.
+/// `/resume` of a legacy row whose teardown the runtime keeps, or on a Herdr-configured channel,
+/// refuses before the durable rebind; once a runtime takes the channel the same row resumes.
 #[tokio::test(flavor = "current_thread")]
 async fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
     use crate::services::discord::host_teardown_gate::test_support as host;
@@ -1096,6 +1096,39 @@ async fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
             assert_eq!(tmux.take_calls(), [""; 0], "{condition:?}: no tmux call");
         }
     }
+
+    // A Herdr-configured channel refuses even where a runtime would admit the teardown.
+    let tmux = TmuxEnv::install(LiveServer);
+    host::allow_channels(&shared, &[]).await;
+    let name = "AgentDesk-claude-resume-verdict-herdr";
+    let channel = poise::serenity_prelude::ChannelId::new(1_479_671_301_387_067_900);
+    let key = host::channel_key(&shared, name);
+    let sql = "INSERT INTO sessions (session_key, provider, status, cwd, claude_session_id,
+                                     raw_provider_session_id, last_heartbeat)
+               VALUES ($1, 'claude', 'idle', $2, 'old-sid', 'old-sid', NOW())";
+    exec(&pool, sql, &[Some(key.as_str()), old_cwd.path().to_str()]).await;
+    tmux.start(name);
+    let before = snapshot(&pool, "sessions", "session_key", &[&key]).await;
+    let configured = [(channel.get(), "mac-mini")];
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
+    let claude = Some(crate::services::provider::ProviderKind::Claude);
+    let resume = perform_resume_rebind(
+        &pool,
+        Some(&registry),
+        &key,
+        claude,
+        Some(channel),
+        name,
+        &opts,
+    );
+    let resumed = resume.await;
+    let after = snapshot(&pool, "sessions", "session_key", &[&key]).await;
+    assert_eq!(after, before, "configured: no durable rebind");
+    assert!(tmux.alive(name), "configured: tmux survives");
+    assert_eq!(tmux.take_calls(), [""; 0], "configured: no tmux call");
+    let refused = matches!(&resumed, Err(ResumeRebindError::HostUnsupported(reason))
+        if reason.contains("Herdr"));
+    assert!(refused, "configured: {resumed:?}");
     pool.close().await;
     pg_db.drop().await;
 }

@@ -2677,7 +2677,9 @@ services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strip
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
 services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
+services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
+services::discord::admin_host_guard::tests::a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
 services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg

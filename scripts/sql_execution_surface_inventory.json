@@ -26100,7 +26100,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "UNRESOLVED",
+      "fingerprint": "sha256:975456737a9d58d870a8f32cb7137eaa3237cf31218c8285c82377e645f73c65"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/admin_host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
       "fingerprint": "sha256:e4b392e4ad9f352d25cd4ecc16ef1f0af6f7f7aa2cfecd256cb8e4b476438938"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/admin_host_guard_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1a94b652a5ab2737eb3e539241e929d72e19aba0b50e4e6bf12c17618e284f85"
     },
     {
       "root": "src",
