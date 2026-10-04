@@ -500,7 +500,7 @@ fn dirty_and_side_effect_transitions_follow_guarded_outcome() {
     assert!(!matches!(IoError, GuardedSaveOutcome::Saved));
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let blocked_root = temp.path().join("blocked-root");
@@ -935,7 +935,7 @@ async fn abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epo
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let blocked_root = temp.path().join("blocked-root");
