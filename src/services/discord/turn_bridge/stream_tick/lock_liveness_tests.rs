@@ -165,3 +165,81 @@ fn contended_stream_tick_keeps_scheduler_timer_and_loopback_live() {
         );
     }
 }
+
+#[test]
+fn one_shot_candidate_bind_waits_out_brief_sidecar_contention() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    for exit_settle in [false, true] {
+        let channel = ChannelId::new(6_603_200 + u64::from(exit_settle));
+        let state = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel.get(),
+            None,
+            1,
+            77_010,
+            0,
+            "일회성 bind 경합 시험".to_owned(),
+            Some("session".to_owned()),
+            Some("lock-liveness-fixture".to_owned()),
+            None,
+            None,
+            512,
+        );
+        save_inflight_state(&state).expect("seed row");
+        let root = crate::services::discord::inflight::inflight_runtime_root().unwrap();
+        let path = inflight_state_path(&root, &ProviderKind::Codex, channel.get());
+        let lock = lock_inflight_state_path(&path).expect("independent sidecar handle");
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(lock);
+        });
+        let expected = InflightTurnIdentity::from_state(&state);
+        let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+        let mut baseline = state.clone();
+        let mut state = state;
+        state.current_msg_id = 2;
+        state.current_msg_len = 10;
+        let mut expected_message = (0, 0);
+        let mut current = MessageId::new(2);
+        let mut pending = Some(current);
+        let mut created = Some(current);
+        let mut context = StreamTickCandidateSaveContext {
+            gateway: &gateway,
+            provider: &ProviderKind::Codex,
+            token_hash: "lock-liveness",
+            channel_id: channel,
+            persisted_baseline: &mut baseline,
+            inflight_state: &mut state,
+            expected_identity: &expected,
+            expected_current_message: &mut expected_message,
+            current_msg_id: &mut current,
+            pending_current_message_candidate: &mut pending,
+            bridge_created_response_placeholder_msg_id: &mut created,
+        };
+        let bound = runtime.block_on(async {
+            if exit_settle {
+                settle_pending_current_message_candidate_on_loop_exit(context).await
+            } else {
+                bind_pending_current_message_candidate(&mut context, "lock-liveness").await
+            }
+        });
+        holder.join().unwrap();
+        assert!(
+            bound,
+            "brief contention must not discard the created message (exit_settle {exit_settle})"
+        );
+        assert!(gateway.deletes.lock().unwrap().is_empty());
+        assert_eq!(pending, None);
+        assert_eq!(
+            load_inflight_state(&ProviderKind::Codex, channel.get())
+                .unwrap()
+                .current_msg_id,
+            2
+        );
+    }
+}

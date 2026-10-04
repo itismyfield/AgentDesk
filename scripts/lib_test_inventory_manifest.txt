@@ -7840,6 +7840,7 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::stream_receiver_adapter_wakes_on_ready_frame
 services::discord::turn_bridge::stream_tick::guarded_persist::lock_liveness_tests::contended_stream_tick_keeps_scheduler_timer_and_loopback_live
+services::discord::turn_bridge::stream_tick::guarded_persist::lock_liveness_tests::one_shot_candidate_bind_waits_out_brief_sidecar_contention
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epoch
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::candidate_cleanup_covers_saved_competing_reowned_and_missing_rows
