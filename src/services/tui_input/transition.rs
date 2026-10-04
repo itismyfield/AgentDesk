@@ -1,4 +1,4 @@
-//! Dormant move and handback execution; the boot caller keeps both intake paths closed.
+//! Dormant move execution; activation supplies the boot-time intake fences.
 
 use std::collections::BTreeSet;
 use std::io;
