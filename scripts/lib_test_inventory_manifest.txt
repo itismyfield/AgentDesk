@@ -1142,6 +1142,7 @@ server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_s
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
+server::routes::health_api::runtime_profile::tests::health_projects_the_boot_session_hosts_and_admission
 server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
 server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
@@ -2670,9 +2671,12 @@ services::discord::adk_session::context_usage_tests::context_usage_percent_is_bo
 services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strips_profile_label
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
+services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
+services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
+services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::agent_handoff::tests::channel_kind_defaults_to_cc
 services::discord::agent_handoff::tests::channel_kind_rejects_unknown_value
@@ -8653,7 +8657,8 @@ services::health_diagnostics::tests::auto_queue_cleanup_backlog_json_contract_ke
 services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
 services::health_diagnostics::tests::dispatch_outbox_stats_json_contract_keeps_field_names
 services::health_diagnostics::tests::every_health_path_database_await_is_bracketed
-services::herdr_admission::tests::herdr_admission_stop_file_latches_until_restart_and_a_failed_check_stops_only_that_call
+services::herdr_admission::tests::herdr_admission_failed_stop_file_check_stops_only_that_call
+services::herdr_admission::tests::herdr_admission_stop_file_latches_until_restart_and_any_env_value_but_on_stops
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store

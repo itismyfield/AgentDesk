@@ -236,12 +236,27 @@ pub(crate) fn force_for_test(
         herdr_home: "/adk/herdr".into(),
         herdr_session: "agentdesk".into(),
     };
+    let channels: BTreeMap<u64, ChannelEndpoint> = channels
+        .iter()
+        .map(|(channel, node)| (*channel, endpoint(node)))
+        .collect();
+    let mut config = SessionHostsConfig::default();
+    for (channel, endpoint) in &channels {
+        let written = EndpointConfig {
+            execution_node: endpoint.execution_node.clone(),
+            socket_path: endpoint.socket_path.clone(),
+            herdr_home: endpoint.herdr_home.clone(),
+            herdr_session: endpoint.herdr_session.clone(),
+        };
+        let herdr = &mut config.herdr;
+        herdr.endpoints.insert(endpoint.key.clone(), written);
+        herdr
+            .channels
+            .insert(channel.to_string(), endpoint.key.clone());
+    }
     let boot = BootSessionHosts {
-        config: SessionHostsConfig::default(),
-        channels: channels
-            .iter()
-            .map(|(channel, node)| (*channel, endpoint(node)))
-            .collect(),
+        config,
+        channels,
         local_node: local_node.map(str::to_owned),
     };
     ForcedSessionHosts(FORCED.with(|forced| forced.replace(Some(boot))))

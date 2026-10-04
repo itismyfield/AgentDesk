@@ -1,11 +1,14 @@
-// Endpoints are unix socket paths; a `/`-rooted path is not absolute on Windows.
-#![cfg(unix)]
-
 use super::*;
 use crate::config::load_from_path;
 
 const BINDINGS: &str = "claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: tui}\n      gemini: {id: '43'}";
-const ENDPOINT: &str = "{execution_node: mac-mini, socket_path: /adk/herdr/agentdesk.sock, herdr_home: /adk/herdr, herdr_session: agentdesk}";
+
+/// An endpoint whose paths are written as YAML strings; a temp dir path is absolute everywhere.
+fn endpoint(node: &str, socket: &str, home: &str) -> String {
+    format!(
+        "{{execution_node: {node}, socket_path: {socket}, herdr_home: {home}, herdr_session: agentdesk}}"
+    )
+}
 
 fn load(root: &std::path::Path, session_hosts: &str) -> Result<Config> {
     let path = root.join("agentdesk.yaml");
@@ -31,7 +34,10 @@ fn herdr(endpoints: &str, channels: &str) -> String {
 #[test]
 fn session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuses_the_rest() {
     let root = tempfile::tempdir().unwrap();
-    let mini = format!("{{mini: {ENDPOINT}}}");
+    let socket_path = root.path().join("herdr").join("agentdesk.sock");
+    let socket = serde_json::to_string(&socket_path).unwrap();
+    let home = serde_json::to_string(&root.path().join("herdr")).unwrap();
+    let mini = format!("{{mini: {}}}", endpoint("mac-mini", &socket, &home));
     let config = load(root.path(), &herdr(&mini, "{'41': mini, '42': mini}")).unwrap();
     let boot = BootSessionHosts::from_config(&config).unwrap();
     assert_eq!(boot.local_node(), Some("mac-mini"));
@@ -39,20 +45,17 @@ fn session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuse
         boot.channels().keys().copied().collect::<Vec<_>>(),
         [41, 42]
     );
-    let endpoint = boot.herdr_endpoint(41).unwrap();
+    let bound = boot.herdr_endpoint(41).unwrap();
     assert_eq!(
-        (endpoint.key.as_str(), endpoint.execution_node.as_str()),
+        (bound.key.as_str(), bound.execution_node.as_str()),
         ("mini", "mac-mini")
     );
-    assert_eq!(
-        endpoint.socket_path,
-        PathBuf::from("/adk/herdr/agentdesk.sock")
-    );
+    assert_eq!(bound.socket_path, socket_path);
     assert!(boot.herdr_endpoint(43).is_none());
 
-    let relative = ENDPOINT.replace("/adk/herdr/agentdesk.sock", "herdr.sock");
-    let relative_home = ENDPOINT.replace("herdr_home: /adk/herdr", "herdr_home: herdr");
-    let no_node = ENDPOINT.replace("mac-mini", "' '");
+    let relative = endpoint("mac-mini", "herdr.sock", &home);
+    let relative_home = endpoint("mac-mini", &socket, "herdr");
+    let no_node = endpoint("' '", &socket, &home);
     let cases = [
         ("channel 0", herdr(&mini, "{'0': mini}")),
         ("not a channel id", herdr(&mini, "{dash: mini}")),

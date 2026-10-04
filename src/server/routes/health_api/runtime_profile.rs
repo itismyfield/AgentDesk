@@ -76,3 +76,46 @@ pub(super) async fn cluster_standby_without_gateway(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::config::session_hosts::{force_for_test, with_boot};
+    use crate::services::herdr_admission::{Admission, force_for_test as force_admission};
+
+    fn herdr(config: &crate::config::Config) -> serde_json::Value {
+        let mut health = json!({});
+        super::attach_runtime_profile(&mut health, config);
+        health["herdr"].take()
+    }
+
+    // The health body shows the boot section as booted: nothing configured reads no admission,
+    // a configured node shows its stopped switch and endpoints, and a live edit needs a restart.
+    #[test]
+    fn health_projects_the_boot_session_hosts_and_admission() {
+        let live = crate::config::Config::default();
+        let _empty = force_for_test(None, &[]);
+        let quiet = json!({"configured_channels": [], "admission": "not_evaluated",
+            "endpoints": {}, "restart_required": false});
+        assert_eq!(herdr(&live), quiet);
+
+        let _hosts = force_for_test(Some("mac-mini"), &[(41, "mac-mini"), (42, "mac-book")]);
+        let _off = force_admission(Admission::new(Some("off".as_ref()), None));
+        let mut booted = live.clone();
+        booted.session_hosts = with_boot(|boot| boot.unwrap().config().clone());
+        let endpoint =
+            |node: &str, local: bool| json!({"node": node, "local": local, "last_e7": "never"});
+        let mut expected = json!({"configured_channels": ["41", "42"], "admission": "stopped(env)",
+            "endpoints": {"mac-book-endpoint": endpoint("mac-book", false),
+                "mac-mini-endpoint": endpoint("mac-mini", true)},
+            "restart_required": false});
+        assert_eq!(herdr(&booted), expected);
+        expected["restart_required"] = json!(true);
+        assert_eq!(
+            herdr(&live),
+            expected,
+            "the live section differs from the booted one"
+        );
+    }
+}

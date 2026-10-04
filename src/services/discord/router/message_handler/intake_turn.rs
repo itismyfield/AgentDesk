@@ -10,6 +10,7 @@ mod adk_thread;
 mod claim_bootstrap;
 mod dispatch_runtime;
 mod dispatch_stamp;
+mod host_refusal;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
@@ -365,6 +366,11 @@ pub(super) async fn handle_text_message(
         .unwrap_or_else(|| settings_provider.clone());
     let early_fast_mode_channel_id =
         effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+    let (inbound, input) = ((channel_id, channel_id), (preloaded_uploads, None));
+    let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
+    let Some(preloaded_uploads) = admitted.await else {
+        return Ok(());
+    };
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
         &early_provider,
         user_text,
@@ -902,6 +908,16 @@ pub(super) async fn handle_text_message(
     } else {
         channel_id
     };
+    // A dispatch redirected to another channel is judged on that channel the same way.
+    if channel_id != original_channel_id {
+        let input = (std::mem::take(&mut pending_uploads), session_was_cleared);
+        let redirected = (channel_id, original_channel_id);
+        let admitted = host_refusal::admitted_uploads(http, shared, &provider, redirected, input);
+        let Some(uploads) = admitted.await else {
+            return Ok(());
+        };
+        pending_uploads = uploads;
+    }
     let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
         dispatch_runtime::prepare_post_redirect_dispatch_runtime(
             http,

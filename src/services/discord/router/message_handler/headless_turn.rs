@@ -100,6 +100,22 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             provider.as_str()
         )));
     }
+    // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
+    let session_key = || {
+        let basis = session_key_basis_override(
+            scheduled_snapshot_session_label(metadata.as_ref()).as_deref(),
+            metadata.as_ref(),
+            tmux_session_label.as_deref(),
+        )
+        .map(str::to_owned);
+        let provider = &provider;
+        async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
+    };
+    let pool = shared.pg_pool.as_ref();
+    let host = crate::services::turn_host::refusal_before_turn;
+    if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
+        return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
+    }
     shared.record_channel_speaker(
         channel_id,
         request_owner,

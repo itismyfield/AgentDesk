@@ -99,8 +99,8 @@ async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
     }
 }
 
-/// Call once per turn after the inflight save, before spawn. Admission and O readiness are read
-/// only for a configured channel.
+/// Called again right before spawn, after [`refusal_before_turn`]. Admission and O readiness are
+/// read only for a configured channel.
 pub(crate) async fn for_turn(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -117,6 +117,26 @@ pub(crate) async fn for_turn(
     match configured_turn(pool, provider, channel_id, session_key, endpoint).await {
         Ok(plan) => TurnHost::Herdr(Box::new(plan)),
         Err(refusal) => TurnHost::Refused(refusal),
+    }
+}
+
+/// The turn's first judgement, before it resets, reconciles or clears anything. An unconfigured
+/// channel passes without I/O; a configured one is refused until a Herdr executor is wired.
+pub(crate) async fn refusal_before_turn<F>(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: impl FnOnce() -> F,
+) -> Option<HerdrRefusal>
+where
+    F: std::future::Future<Output = Option<String>>,
+{
+    session_hosts::herdr_endpoint(channel_id)?;
+    let session_key = session_key().await;
+    match for_turn(pool, provider, channel_id, session_key.as_deref()).await {
+        TurnHost::Tmux => None,
+        TurnHost::Refused(refusal) => Some(refusal),
+        TurnHost::Herdr(_) => Some(HerdrRefusal::ExecutorNotWired),
     }
 }
 

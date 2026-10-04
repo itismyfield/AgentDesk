@@ -529,3 +529,309 @@ impl ModeTmux {
         calls.lines().filter(write).map(str::to_string).collect()
     }
 }
+
+/// A channel with a legacy row whose live pane runs another runtime kind than the turn expects,
+/// so main's runtime recreate kills it; returns its pane name.
+async fn mismatched_live_pane(
+    shared: &crate::services::discord::SharedData,
+    pool: &sqlx::PgPool,
+    channel: ChannelId,
+    workdir: &std::path::Path,
+) -> String {
+    use crate::services::discord::host_teardown_gate::test_support::Stored;
+    let label = format!("p9b1-entry-{}", channel.get() % 10_000);
+    let name = ProviderKind::Claude.build_tmux_session_name(&label);
+    map_channel(shared, channel, &label).await;
+    let mut core = shared.core.lock().await;
+    let session = core.sessions.get_mut(&channel).unwrap();
+    session.current_path = Some(workdir.display().to_string());
+    session.session_id = Some("sid".into());
+    (session.pending_uploads, session.cleared) = (vec!["taken-upload".into()], true);
+    drop(core);
+    let key = channel_key(shared, &name);
+    Case::Stored(Stored::Legacy)
+        .seed(pool, &key, &name, channel.get())
+        .await;
+    let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        output_path: "/runtime/p9b1-tui.jsonl".to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: None,
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&name, binding);
+    let prompt = crate::services::tmux_common::session_temp_path(&name, "prompt");
+    std::fs::write(prompt, "pending prompt").unwrap();
+    name
+}
+
+/// What a runtime recreate of `name` did: killed it, forgot its binding, removed its files.
+fn recreated(tmux: &ModeTmux, name: &str) -> [bool; 3] {
+    let writes = tmux.take_writes();
+    let killed = writes
+        .iter()
+        .any(|w| w.starts_with("kill-session") && w.contains(name));
+    let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name);
+    let prompt = crate::services::tmux_common::session_temp_path(name, "prompt");
+    [
+        killed,
+        bound.is_none(),
+        !std::path::Path::new(&prompt).exists(),
+    ]
+}
+
+/// A real provider CLI must not start if a regression reaches the launch.
+fn stub_provider_clis() {
+    let stubs = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .next()
+        .unwrap();
+    for cli in ["claude", "codex"] {
+        std::fs::write(stubs.join(cli), "#!/bin/sh\nexit 1\n").unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(stubs.join(cli), mode).unwrap();
+    }
+}
+
+fn intake_request(channel: ChannelId, text: &str) -> crate::services::discord::IntakeRequest {
+    let message = poise::serenity_prelude::MessageId::new(channel.get() + 7);
+    crate::services::discord::IntakeRequest {
+        intake_outbox_id: None,
+        channel_id: channel,
+        user_msg_id: message,
+        source_message_ids: Vec::new(),
+        busy_followup_retry_user_msg_id: message,
+        request_owner: poise::serenity_prelude::UserId::new(4350),
+        request_owner_name: "p9b1-entry".to_string(),
+        user_text: text.to_string(),
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        merge_consecutive: false,
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: Some(false),
+        turn_kind: crate::services::discord::TurnKind::Foreground,
+        preserve_on_cancel: false,
+    }
+}
+
+// A Herdr-configured channel's message, O writer ready or not, is refused through intake before
+// the runtime recreate touches its live pane, and its input goes back; unconfigured, main recreates.
+#[tokio::test]
+async fn intake_refuses_a_configured_turn_before_its_runtime_recreate_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::herdr_launch::{force_writer_accepts, o_store_for_test};
+    let test = "services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Live);
+    stub_provider_clis();
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let api = Recorder::start().await;
+    let workdir = tempfile::tempdir().unwrap();
+    let base = 1_479_671_302_387_072_000;
+    let (unready, ready) = (base, base + 1);
+    let runtime_root = crate::config::runtime_root().expect("a runtime root");
+    let (store, era) = o_store_for_test(&runtime_root, &[ready]);
+    let mut seeded = store.open_channel(&era, ready).unwrap().unwrap();
+    seeded.set_binding_checkpoint(3).unwrap();
+    let _owned =
+        crate::services::tui_o::cutover::test_override::force_channels(&[(ready, ClaudeTui)]);
+    let _writer = force_writer_accepts(Some(true));
+    let cases = [
+        (unready, Some("o_writer_not_ready")),
+        (ready, Some("executor_not_wired")),
+        (base + 2, None),
+    ];
+    for (channel, refusal) in cases {
+        let channel = ChannelId::new(channel);
+        let name = mismatched_live_pane(&shared, &pool, channel, workdir.path()).await;
+        let _hosts = refusal.map(|_| {
+            crate::config::session_hosts::force_for_test(
+                Some("mac-mini"),
+                &[(channel.get(), "mac-mini")],
+            )
+        });
+        tmux.take_writes();
+        api.take();
+
+        let intake = crate::services::discord::execute_intake_turn_core;
+        let request = intake_request(channel, "hello");
+        let preloaded = vec!["preloaded-upload".into()];
+        intake(&api.http, &shared, "test-token", request, preloaded)
+            .await
+            .expect("intake");
+
+        let effects = recreated(&tmux, &name);
+        let Some(refusal) = refusal else {
+            assert_eq!(effects, [true; 3], "main recreates an unconfigured pane");
+            continue;
+        };
+        assert_eq!(
+            effects, [false; 3],
+            "{refusal}: nothing of the pane is touched"
+        );
+        let core = shared.core.lock().await;
+        let session = &core.sessions[&channel];
+        assert_eq!(session.session_id.as_deref(), Some("sid"), "{refusal}");
+        let uploads = &session.pending_uploads;
+        assert_eq!(uploads, &["taken-upload", "preloaded-upload"], "{refusal}");
+        assert!(session.cleared, "{refusal}: the clear flag returns");
+        drop(core);
+        assert!(!shared.mailbox(channel).has_active_turn().await.unwrap());
+        let calls = api.take();
+        let notice = format!("herdr turn refused: {refusal}");
+        let reported = calls.iter().any(|c| c.contains(&notice));
+        assert!(reported, "the typed refusal is reported: {calls:?}");
+    }
+    db.drop().await;
+}
+
+// A dispatch asking to reset a Herdr-configured channel is refused, with admission stopped,
+// before the reset kills its process or tmux session or drops its provider session.
+#[tokio::test]
+async fn a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg() {
+    use crate::services::discord::host_teardown_gate::test_support::Stored;
+    let test = "services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::install();
+    stub_provider_clis();
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let (thread, parent) = (
+        ChannelId::new(1_479_671_302_387_073_001),
+        ChannelId::new(1_479_671_302_387_073_000),
+    );
+    let api = Recorder::start_with(dispatch_api(thread, parent)).await;
+    crate::services::discord::internal_api::init(api.port, None);
+    let name = ProviderKind::Claude.build_tmux_session_name("p4c2-dispatch");
+    map_channel(&shared, thread, "p4c2-dispatch").await;
+    let workdir = tempfile::tempdir().unwrap();
+    let mut core = shared.core.lock().await;
+    let session = core.sessions.get_mut(&thread).unwrap();
+    session.current_path = Some(workdir.path().display().to_string());
+    session.session_id = Some("sid".into());
+    drop(core);
+    let key = channel_key(&shared, &name);
+    Case::Stored(Stored::Legacy)
+        .seed(&pool, &key, &name, thread.get())
+        .await;
+    let alive = process(&name, 67_100);
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("mac-mini"),
+        &[(thread.get(), "mac-mini")],
+    );
+    let stopped = crate::services::herdr_admission::Admission::new(Some("off".as_ref()), None);
+    let _off = crate::services::herdr_admission::force_for_test(stopped);
+    tmux.take_calls();
+    api.take();
+
+    let intake = crate::services::discord::execute_intake_turn_core;
+    let request = intake_request(thread, "DISPATCH:p9b1-dispatch-1 implement it");
+    intake(&api.http, &shared, "test-token", request, Vec::new())
+        .await
+        .expect("intake");
+
+    assert!(alive.load(Ordering::SeqCst), "the process is kept");
+    let kills: Vec<_> = tmux
+        .take_calls()
+        .into_iter()
+        .filter(|c| c.starts_with("kill-"))
+        .collect();
+    assert_eq!(kills, Vec::<String>::new(), "no tmux kill");
+    assert!(
+        session_id(&shared, thread).await,
+        "the provider session is kept"
+    );
+    assert!(!shared.mailbox(thread).has_active_turn().await.unwrap());
+    let calls = api.take();
+    let reported = calls
+        .iter()
+        .any(|c| c.contains("herdr turn refused: admission_stopped(env)"));
+    assert!(reported, "the typed refusal is reported: {calls:?}");
+    crate::services::session_backend::remove_process_session(&name);
+    db.drop().await;
+}
+
+// A headless turn on a Herdr-configured channel fails as an invalid target before it claims the
+// mailbox or recreates the live pane; unconfigured, main starts it and recreates the pane.
+#[tokio::test]
+async fn headless_refuses_a_configured_turn_before_its_runtime_recreate_pg() {
+    use crate::services::discord::router::{
+        HeadlessTurnStartError, reserve_headless_turn, start_reserved_headless_turn_with_owner,
+    };
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    let test = "services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Live);
+    stub_provider_clis();
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let (proxy, gateway, _server) =
+        discord_mock::start(discord_mock::DiscordMockState::new()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let workdir = tempfile::tempdir().unwrap();
+    for configured in [true, false] {
+        let channel = ChannelId::new(1_479_671_302_387_074_000 + u64::from(configured));
+        let name = mismatched_live_pane(&shared, &pool, channel, workdir.path()).await;
+        let _hosts = configured.then(|| {
+            crate::config::session_hosts::force_for_test(
+                Some("mac-mini"),
+                &[(channel.get(), "mac-mini")],
+            )
+        });
+        tmux.take_writes();
+
+        let started = start_reserved_headless_turn_with_owner(
+            &ctx,
+            channel,
+            "status",
+            "p9b1-entry",
+            poise::serenity_prelude::UserId::new(1),
+            &shared,
+            "test-token",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            reserve_headless_turn(),
+        )
+        .await;
+
+        let effects = recreated(&tmux, &name);
+        if !configured {
+            assert!(started.is_ok(), "{started:?}");
+            assert_eq!(effects, [true; 3], "main recreates an unconfigured pane");
+            continue;
+        }
+        assert_eq!(effects, [false; 3], "nothing of the pane is touched");
+        assert!(!shared.mailbox(channel).has_active_turn().await.unwrap());
+        assert!(
+            session_id(&shared, channel).await,
+            "the provider session is kept"
+        );
+        let refused = "herdr turn refused: o_writer_not_ready".to_string();
+        assert_eq!(started, Err(HeadlessTurnStartError::InvalidTarget(refused)));
+    }
+    db.drop().await;
+}
