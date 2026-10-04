@@ -1938,6 +1938,7 @@ services::claude_tui::input::tests::fast_path_returns_within_budget_even_with_pr
 services::claude_tui::input::tests::fast_path_works_without_ambient_runtime
 services::claude_tui::input::tests::followup_timeout_falls_back_to_default_without_live_config
 services::claude_tui::input::tests::foreground_streaming_with_background_agents_still_vetoes_readiness
+services::claude_tui::input::tests::fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again
 services::claude_tui::input::tests::global_prompt_ready_notify_round_trips_via_hook_server_helper
 services::claude_tui::input::tests::idle_terminator_with_background_agents_and_composer_allows_readiness
 services::claude_tui::input::tests::idle_transcript_accepts_claude_suggestion_prompt_chrome

@@ -250,6 +250,35 @@ pub(super) fn previous_turn_still_running(
         }
 }
 
+/// True when the bottom-most composer line still starts `prompt` with no reply or busy chrome
+/// below it: the Enter was swallowed. The generic draft probe reads `[User: …]` as history.
+pub(crate) fn composer_still_holds_prompt(pane: &str, prompt: &str) -> bool {
+    let lines = pane.lines().filter(|line| !line.trim().is_empty());
+    let lines = lines.collect::<Vec<_>>();
+    let recent = &lines[lines
+        .len()
+        .saturating_sub(crate::services::tmux_common::CLAUDE_TUI_READINESS_SCAN_LINES)..];
+    let composer_text = |line: &str| {
+        line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}')
+            .strip_prefix('\u{276f}')
+            .map(str::to_owned)
+    };
+    let Some(index) = recent
+        .iter()
+        .rposition(|line| composer_text(line).is_some())
+    else {
+        return false;
+    };
+    let reply_or_busy = recent[index + 1..].iter().any(|line| {
+        line.trim_start().starts_with([
+            '\u{23fa}', '\u{273b}', '\u{2733}', '\u{2736}', '\u{2722}', '\u{273d}',
+        ]) || line.to_ascii_lowercase().contains("esc to interrupt")
+    });
+    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown = collapse(&composer_text(recent[index]).unwrap_or_default());
+    !reply_or_busy && !shown.is_empty() && collapse(prompt).starts_with(&shown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
