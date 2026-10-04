@@ -28,10 +28,23 @@ pub enum SendOutcome {
 pub trait Pane {
     fn capture(&mut self) -> Result<String, String>;
     fn submit(&mut self, text: &str) -> SendOutcome;
+    fn submit_for_binding(
+        &mut self,
+        text: &str,
+        _binding: &crate::services::tui_o::shadow::SourceBinding,
+    ) -> SendOutcome {
+        self.submit(text)
+    }
     fn with_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
         Some(operation(self))
     }
     fn execution_nonce(&self) -> Option<String>;
+    fn binding_nonce(
+        &self,
+        _binding: &crate::services::tui_o::shadow::SourceBinding,
+    ) -> Option<String> {
+        self.execution_nonce()
+    }
 }
 
 pub struct TmuxPane {
@@ -40,6 +53,8 @@ pub struct TmuxPane {
     budget: Duration,
     provider: ShadowProvider,
     pre_empty: bool,
+    #[cfg(test)]
+    test_nonce: Option<String>,
 }
 
 impl TmuxPane {
@@ -54,7 +69,14 @@ impl TmuxPane {
             budget,
             provider: ShadowProvider::Claude,
             pre_empty: false,
+            #[cfg(test)]
+            test_nonce: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attest_test_nonce(&mut self, nonce: &str) {
+        self.test_nonce = Some(nonce.into());
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -93,7 +115,11 @@ impl TmuxPane {
         pane
     }
 
-    fn submit_inner(&mut self, text: &str) -> SendOutcome {
+    fn submit_inner(
+        &mut self,
+        text: &str,
+        binding: Option<&crate::services::tui_o::shadow::SourceBinding>,
+    ) -> SendOutcome {
         if text.len() > MAX_PROMPT_BYTES {
             return SendOutcome::Refused(format!("prompt exceeds {MAX_PROMPT_BYTES} bytes"));
         }
@@ -108,7 +134,10 @@ impl TmuxPane {
         if let Err(error) = file.write_all(text.as_bytes()).and_then(|()| file.flush()) {
             return SendOutcome::NotSent(error.to_string());
         }
-        let nonce = self.execution_nonce();
+        let nonce = binding.map_or_else(|| self.execution_nonce(), |b| self.binding_nonce(b));
+        if nonce.is_none() {
+            return SendOutcome::NotSent("execution binding unavailable".into());
+        }
         let buffer = format!("agentdesk-input-{}", uuid::Uuid::new_v4());
         let path = file.path().to_string_lossy().into_owned();
         // Loading a buffer never touches the pane, so every failure here is NotSent.
@@ -130,8 +159,14 @@ impl TmuxPane {
         ];
         match self.run(&paste) {
             Ok(output) if output.status.success() => {}
-            // tmux rejects a missing pane or buffer before pasting anything.
-            Ok(output) => return SendOutcome::Indeterminate(stderr_of(&output)),
+            // Unsuccessful paste can follow partial mutation; never infer absence from exit status.
+            Ok(output) => {
+                #[cfg(test)]
+                if super::super::transition::mutant("paste_not_sent") {
+                    return SendOutcome::NotSent(stderr_of(&output));
+                }
+                return SendOutcome::Indeterminate(stderr_of(&output));
+            }
             Err(error) if error.may_have_effect() => {
                 return SendOutcome::Indeterminate(error.to_string());
             }
@@ -141,7 +176,7 @@ impl TmuxPane {
         let Ok(after) = self.capture() else {
             return SendOutcome::Indeterminate("post-paste capture unavailable".into());
         };
-        if self.execution_nonce() != nonce
+        if binding.map_or_else(|| self.execution_nonce(), |b| self.binding_nonce(b)) != nonce
             || !own_draft(self.provider, &after, text, self.pre_empty)
         {
             return SendOutcome::Indeterminate("own draft or modal changed".into());
@@ -183,17 +218,73 @@ impl Pane for TmuxPane {
     }
 
     fn submit(&mut self, text: &str) -> SendOutcome {
-        self.submit_inner(text)
+        if text.len() > MAX_PROMPT_BYTES {
+            return SendOutcome::Refused("oversized prompt".into());
+        }
+        if !self.pre_empty {
+            return SendOutcome::NotSent("exact-empty composer not attested".into());
+        }
+        let outcome = self.submit_inner(text, None);
+        self.pre_empty = false;
+        outcome
+    }
+
+    fn submit_for_binding(
+        &mut self,
+        text: &str,
+        binding: &crate::services::tui_o::shadow::SourceBinding,
+    ) -> SendOutcome {
+        if !self.pre_empty {
+            return SendOutcome::NotSent("exact-empty composer not attested".into());
+        }
+        let outcome = self.submit_inner(text, Some(binding));
+        self.pre_empty = false;
+        outcome
     }
 
     fn execution_nonce(&self) -> Option<String> {
+        #[cfg(test)]
+        if let Some(nonce) = &self.test_nonce {
+            return Some(nonce.clone());
+        }
         use crate::services::tui_prompt_dedupe::binding_context::{
             SpawnNonceMarker, observe_spawn_nonce_marker,
         };
-        match observe_spawn_nonce_marker(&self.session) {
-            SpawnNonceMarker::Known(n) => Some(n),
-            _ => None,
+        let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(&self.session) else {
+            return None;
+        };
+        let provider = match self.provider {
+            ShadowProvider::Claude => "claude",
+            ShadowProvider::Codex => "codex",
+        };
+        let context =
+            crate::services::tui_prompt_dedupe::binding_context::input_context(provider, &nonce)?;
+        (context.schema == 1
+            && context.provider == provider
+            && context.tmux_session == self.session
+            && context.execution_nonce == nonce)
+            .then_some(nonce)
+    }
+
+    fn binding_nonce(
+        &self,
+        binding: &crate::services::tui_o::shadow::SourceBinding,
+    ) -> Option<String> {
+        let nonce = self.execution_nonce()?;
+        #[cfg(test)]
+        if self.test_nonce.is_some() {
+            return Some(nonce);
         }
+        let provider = match self.provider {
+            ShadowProvider::Claude => "claude",
+            ShadowProvider::Codex => "codex",
+        };
+        let context =
+            crate::services::tui_prompt_dedupe::binding_context::input_context(provider, &nonce)?;
+        (binding.provider == self.provider
+            && context.channel_id == Some(binding.channel_id)
+            && context.expected_native_session_id.as_deref() == Some(&binding.source.session_id))
+        .then_some(nonce)
     }
 
     fn with_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
@@ -203,8 +294,14 @@ impl Pane for TmuxPane {
             self.pre_empty = self
                 .capture()
                 .is_ok_and(|c| judge_pane(provider, &c) == PaneVerdict::Ready);
-            operation(self)
+            let result = operation(self);
+            self.pre_empty = false;
+            result
         };
+        #[cfg(test)]
+        if super::super::transition::mutant("shared_lock") {
+            return Some(callback());
+        }
         match provider {
             ShadowProvider::Claude => {
                 crate::services::claude_tui::composer_lock::try_with_composer_mutation_lock(

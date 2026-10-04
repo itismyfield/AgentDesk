@@ -55,6 +55,11 @@ impl<P: Pane> InputActor<P> {
     }
 
     #[cfg(test)]
+    pub(crate) fn entered_at(&self) -> Instant {
+        self.attempt.as_ref().unwrap().entered_at
+    }
+
+    #[cfg(test)]
     pub(crate) fn pane(&self) -> &P {
         &self.pane
     }
@@ -83,7 +88,8 @@ impl<P: Pane> InputActor<P> {
         }
         if row.attempt.as_ref().is_some_and(|attempt| {
             attempt.binding != self.binding
-                || self.pane.execution_nonce().as_deref() != Some(&attempt.execution_nonce)
+                || self.pane.binding_nonce(&self.binding).as_deref()
+                    != Some(&attempt.execution_nonce)
         }) {
             return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
         }
@@ -115,9 +121,15 @@ impl<P: Pane> InputActor<P> {
             self.unready_since = None;
             return Ok(Step::Wait("turn_not_idle"));
         }
-        let Some((text, source_ids)) = witness::frame(key, row) else {
+        let Some((mut text, source_ids)) = witness::frame(key, row) else {
             return set(ledger, key, RowState::Held(HeldReason::NotReady));
         };
+        if let Some(attempt) = &row.attempt {
+            if attempt.source_ids != source_ids {
+                return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+            }
+            text = attempt.rendered_prompt.clone();
+        }
         let binding = self.binding.clone();
         let unready_since = &mut self.unready_since;
         let mut entered = None;
@@ -138,7 +150,7 @@ impl<P: Pane> InputActor<P> {
                 }
                 PaneVerdict::Ready => *unready_since = None,
             }
-            let Some(execution_nonce) = pane.execution_nonce() else {
+            let Some(execution_nonce) = pane.binding_nonce(&binding) else {
                 return Ok(Step::Wait("execution_unknown"));
             };
             let source = binding.source.clone();
@@ -149,7 +161,7 @@ impl<P: Pane> InputActor<P> {
                 return Ok(Step::Wait("transcript_unavailable"));
             }
             let evidence = AttemptEvidence {
-                binding,
+                binding: binding.clone(),
                 execution_nonce: execution_nonce.clone(),
                 eof,
                 rendered_prompt: text.clone(),
@@ -165,10 +177,10 @@ impl<P: Pane> InputActor<P> {
                 },
                 &[],
             )?;
-            if pane.execution_nonce().as_deref() != Some(&execution_nonce) {
+            if pane.binding_nonce(&binding).as_deref() != Some(&execution_nonce) {
                 return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
             }
-            let state = match pane.submit(&text) {
+            let state = match pane.submit_for_binding(&text, &binding) {
                 SendOutcome::Sent => RowState::AwaitTurn,
                 SendOutcome::NotSent(_) => RowState::Ready,
                 SendOutcome::Indeterminate(_) => RowState::Held(HeldReason::Ambiguous),
@@ -184,7 +196,18 @@ impl<P: Pane> InputActor<P> {
         if step == Step::Moved(key, RowState::AwaitTurn) {
             self.attempt = Some(Attempt {
                 key,
-                entered_at: entered.expect("sent attempt timestamp"),
+                entered_at: {
+                    #[cfg(test)]
+                    if super::transition::mutant("entered_start") {
+                        now
+                    } else {
+                        entered.expect("sent attempt timestamp")
+                    }
+                    #[cfg(not(test))]
+                    {
+                        entered.expect("sent attempt timestamp")
+                    }
+                },
                 activity: false,
             });
         }
@@ -263,6 +286,12 @@ impl<P: Pane> InputActor<P> {
         row: &Row,
         fact: Option<(&TurnState, u64)>,
     ) -> io::Result<Step> {
+        #[cfg(test)]
+        if super::transition::mutant("missing_witness")
+            && matches!(fact, Some((TurnState::Idle, _)))
+        {
+            return set(ledger, key, RowState::Done(DoneReason::Completed));
+        }
         let Some(evidence) = row.attempt.as_ref().filter(|e| e.record_end.is_some()) else {
             return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
         };
@@ -282,6 +311,13 @@ impl<P: Pane> InputActor<P> {
 }
 
 fn head(rows: &Rows) -> Option<(u64, Row)> {
+    #[cfg(test)]
+    if super::transition::mutant("head_key") {
+        return rows
+            .open_rows()
+            .min_by_key(|(key, _)| *key)
+            .map(|(key, row)| (key, row.clone()));
+    }
     rows.open_rows()
         .min_by_key(|(_, row)| row.received_seq.unwrap_or(0))
         .map(|(key, row)| (key, row.clone()))

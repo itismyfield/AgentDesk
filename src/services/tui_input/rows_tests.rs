@@ -88,6 +88,7 @@ mod supported {
     const QUEUED: MoveEvidence = MoveEvidence {
         user_record: false,
         turn_open: false,
+        never_started: true,
         composer: Composer::Empty,
     };
 
@@ -166,7 +167,10 @@ mod supported {
                     assert_one_owner(&rows, &legacy, &known);
                     assert_eq!(open_keys(&rows), vec![2]);
                 }
-                _ => set(&mut ledger, 2, RowState::Running),
+                _ => {
+                    set(&mut ledger, 2, RowState::Running);
+                    set(&mut ledger, 2, RowState::Done(DoneReason::Completed));
+                }
             }
             hand_back_all(&mut ledger, &mut legacy, EnqueueOutcome::Persisted);
             ledger = open(&runtime);
@@ -359,9 +363,23 @@ fn move_disposition_follows_the_move_table() {
     let evidence = |user_record, turn_open, composer| MoveEvidence {
         user_record,
         turn_open,
+        never_started: true,
         composer,
     };
     let held = RowState::Held(HeldReason::Ambiguous);
+    for source in [MoveSource::DispatchOnly, MoveSource::TurnRow] {
+        assert_eq!(
+            move_disposition(
+                source,
+                MoveEvidence {
+                    never_started: false,
+                    ..evidence(false, false, Composer::Empty)
+                }
+            ),
+            held,
+            "empty composer alone is not pre-effect evidence"
+        );
+    }
     let done = RowState::Done(DoneReason::Completed);
     let cases = [
         (
@@ -427,8 +445,7 @@ fn move_disposition_follows_the_move_table() {
 #[test]
 fn handback_plan_follows_the_revert_table() {
     let running_done = Handback::Close(RowState::Done(DoneReason::HandbackRunning));
-    let ambiguous =
-        Handback::NoticeThenClose(RowState::Abandoned(AbandonReason::HandbackAmbiguous));
+    let ambiguous = Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous));
     for state in [
         RowState::Received,
         RowState::Ready,
@@ -455,7 +472,7 @@ fn handback_plan_follows_the_revert_table() {
     }
     assert_eq!(
         handback_plan(RowState::Running, false, Composer::Draft),
-        running_done
+        ambiguous
     );
     for state in [
         RowState::Done(DoneReason::Completed),

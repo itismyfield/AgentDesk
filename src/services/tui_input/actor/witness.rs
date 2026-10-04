@@ -7,6 +7,9 @@ use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, ShadowProvid
 use serde_json::Value;
 
 pub(super) fn frame(key: u64, row: &Row) -> Option<(String, Vec<u64>)> {
+    if key == 0 {
+        return None;
+    }
     let mut ids = vec![key];
     if let Some(values) = row.input.get("source_message_ids") {
         for value in values.as_array()? {
@@ -28,25 +31,44 @@ pub(super) fn frame(key: u64, row: &Row) -> Option<(String, Vec<u64>)> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{marks}\n{text}\n[adk:end]"));
-    if ids
-        .iter()
-        .any(|id| !rendered.contains(&format!("[adk:source:{id}]")))
+    let mut marked = Vec::new();
+    for line in rendered
+        .lines()
+        .filter(|line| line.starts_with("[adk:source:"))
+    {
+        let id = line
+            .strip_prefix("[adk:source:")?
+            .strip_suffix(']')?
+            .parse::<u64>()
+            .ok()?;
+        if marked.contains(&id) {
+            return None;
+        }
+        marked.push(id);
+    }
+    if marked.len() != ids.len()
+        || ids.iter().any(|id| !marked.contains(id))
+        || !rendered.contains(text)
+        || rendered.lines().last() != Some("[adk:end]")
     {
         return None;
     }
-    if let Some(segments) = row
-        .input
-        .get("source_text_segments")
-        .and_then(Value::as_array)
-    {
-        if ids.iter().any(|id| {
-            !segments.iter().any(|segment| {
-                segment["message_id"].as_u64() == Some(*id)
-                    && segment["text"]
-                        .as_str()
-                        .is_some_and(|text| rendered.contains(text))
+    if let Some(segments) = row.input.get("source_text_segments") {
+        let segments = segments.as_array()?;
+        if segments.len() != ids.len()
+            || ids.iter().any(|id| {
+                segments
+                    .iter()
+                    .filter(|segment| {
+                        segment["message_id"].as_u64() == Some(*id)
+                            && segment["text"]
+                                .as_str()
+                                .is_some_and(|text| !text.is_empty() && rendered.contains(text))
+                    })
+                    .count()
+                    != 1
             })
-        }) {
+        {
             return None;
         }
     }
@@ -57,6 +79,13 @@ pub(super) fn scan(
     evidence: &AttemptEvidence,
     completion: bool,
 ) -> Result<Option<(u64, Option<String>)>, String> {
+    if evidence.binding.provider == ShadowProvider::Codex {
+        crate::services::codex_tui::rollout_index::strict_parent_session(
+            &evidence.binding.source.path,
+            &evidence.binding.source.session_id,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let mut capture = SourceCapture::open(evidence.binding.source.clone(), evidence.eof)
         .map_err(|e| e.to_string())?;
     let mut accepted = None;

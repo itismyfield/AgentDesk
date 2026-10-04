@@ -209,8 +209,13 @@ impl Rows {
                 state,
                 attempt,
             } => {
+                let writable = self
+                    .rows
+                    .get(&key)
+                    .is_some_and(|row| !row.state.is_terminal());
                 self.transition(seq, key, state);
-                if let Some(attempt) = attempt
+                if writable
+                    && let Some(attempt) = attempt
                     && let Some(row) = self.rows.get_mut(&key)
                     && row.state == state
                 {
@@ -283,7 +288,7 @@ impl Rows {
                     }
                 },
                 state,
-                attempt: None,
+                attempt: serde_json::from_value(input["move_attempt"].clone()).ok(),
                 input,
             },
         );

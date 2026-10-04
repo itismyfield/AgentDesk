@@ -141,7 +141,7 @@ fn codex_parent_stays_open_during_child_completion_and_foreign_closer() {
             codex("task_complete", "child"),
         ],
     );
-    std::fs::write(&path, "").unwrap();
+    std::fs::write(&path, format!("{}\n", json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path(),"source":"cli","originator":"codex-tui"}}))).unwrap();
     let mut facts = InputFacts::open(binding(&path, ShadowProvider::Codex, 23)).unwrap();
     assert!(InputFacts::open(binding(&child, ShadowProvider::Codex, 23)).is_err());
     append(
@@ -374,4 +374,62 @@ fn anonymous_openers_and_sidechain_contamination_fail_closed() {
     child["isSidechain"] = json!(true);
     append(&path, &[child]);
     assert!(facts.poll(u64::MAX).is_err());
+}
+
+#[test]
+fn strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("parent.jsonl");
+    let parent = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path(),"source":"cli","originator":"codex-tui"}});
+    for contents in [
+        "".to_string(),
+        "not json\n".into(),
+        format!(
+            "{}\n",
+            json!({"type":"session_meta","payload":{"id":"other","source":"cli"}})
+        ),
+        format!("{}", parent),
+        format!("{}\n", "x".repeat(65537)),
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        assert!(InputFacts::open(binding(&path, ShadowProvider::Codex, 29)).is_err());
+    }
+    std::fs::write(&path, format!("{parent}\n")).unwrap();
+    let mut facts = InputFacts::open(binding(&path, ShadowProvider::Codex, 29)).unwrap();
+    append(
+        &path,
+        &[
+            codex("task_started", "parent"),
+            codex("task_complete", "parent"),
+            codex("task_started", "next"),
+        ],
+    );
+    assert_eq!(
+        facts.poll(u64::MAX).unwrap().state,
+        TurnState::Open {
+            native_turn_id: Some("next".into())
+        },
+        "intermediate idle cannot escape ordered batch"
+    );
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            json!({"type":"session_meta","payload":{"id":"other","source":"cli"}})
+        ),
+    )
+    .unwrap();
+    assert!(facts.poll(u64::MAX).is_err());
+    std::fs::write(&path, format!("{parent}\n")).unwrap();
+    assert!(
+        facts.poll(u64::MAX).is_err(),
+        "halted source cannot silently recover"
+    );
+    assert!(
+        crate::services::codex_tui::rollout_index::strict_parent_session(
+            &root.path().join("missing"),
+            "parent"
+        )
+        .is_err()
+    );
 }

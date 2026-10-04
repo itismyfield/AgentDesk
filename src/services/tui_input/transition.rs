@@ -223,7 +223,16 @@ impl Move {
                 if staged.contains(&input.key) {
                     continue;
                 }
-                let state = move_disposition(input.source, host.evidence(input)?);
+                let mut state = move_disposition(input.source, host.evidence(input)?);
+                if state == super::rows::RowState::Running
+                    && serde_json::from_value::<super::rows::AttemptEvidence>(
+                        input.payload["move_attempt"].clone(),
+                    )
+                    .ok()
+                    .is_none_or(|attempt| attempt.record_end.is_none())
+                {
+                    state = super::rows::RowState::Held(super::rows::HeldReason::Ambiguous);
+                }
                 if !state.is_terminal() {
                     host.pin_input(&ledger, input)?;
                 }
@@ -342,6 +351,7 @@ pub fn handback(root: &Path, channel: u64, host: &mut impl Host) -> io::Result<O
             }
             Handback::Close(state) => Some(state),
             Handback::NoticeThenClose(state) => {
+                held = !state.is_terminal();
                 host.notice(Some(key), "handback_ambiguous")?;
                 Some(state)
             }

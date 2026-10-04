@@ -2113,7 +2113,8 @@ src/
 │   ├── tui_input/
 │   │   ├── actor/
 │   │   │   ├── gate.rs
-│   │   │   └── pane.rs
+│   │   │   ├── pane.rs
+│   │   │   └── witness.rs
 │   │   ├── actor.rs
 │   │   ├── actor_tests.rs
 │   │   ├── blob.rs

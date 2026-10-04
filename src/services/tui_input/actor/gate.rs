@@ -27,6 +27,10 @@ pub enum PaneVerdict {
 }
 
 pub fn judge_pane(provider: ShadowProvider, capture: &str) -> PaneVerdict {
+    #[cfg(test)]
+    if super::super::transition::mutant("draft_veto") && capture.contains("foreign draft") {
+        return PaneVerdict::Ready;
+    }
     match provider {
         ShadowProvider::Claude => judge_claude(capture),
         ShadowProvider::Codex => judge_codex(capture),
@@ -82,6 +86,10 @@ pub(crate) fn own_draft(
     frame: &str,
     pre_empty: bool,
 ) -> bool {
+    #[cfg(test)]
+    if super::super::transition::mutant("pre_empty") {
+        return true;
+    }
     if !pre_empty {
         return false;
     }
@@ -128,6 +136,10 @@ pub(crate) fn own_draft(
     if body == frame {
         return true;
     }
+    #[cfg(test)]
+    if super::super::transition::mutant("folded_unknown") {
+        return false;
+    }
     let Some(rest) = body.strip_prefix("[Pasted text #") else {
         return false;
     };
@@ -139,6 +151,10 @@ pub(crate) fn own_draft(
     let newlines = frame.bytes().filter(|b| *b == b'\n').count();
     if newlines == 0 {
         return frame.chars().count() > 800 && suffix == "]";
+    }
+    #[cfg(test)]
+    if super::super::transition::mutant("folded_k") {
+        return true;
     }
     suffix == format!(" +{newlines} lines]")
 }

@@ -20,6 +20,8 @@ pub enum Composer {
 pub struct MoveEvidence {
     pub user_record: bool,
     pub turn_open: bool,
+    // Positive producer evidence of a pre-effect refusal/never-started attempt.
+    pub never_started: bool,
     pub composer: Composer,
 }
 
@@ -31,7 +33,8 @@ pub fn move_disposition(source: MoveSource, evidence: MoveEvidence) -> RowState 
         (_, true) if evidence.turn_open => RowState::Running,
         (_, true) => RowState::Done(DoneReason::Completed),
         (_, false) => match evidence.composer {
-            Composer::Empty => RowState::Received,
+            Composer::Empty if evidence.never_started => RowState::Received,
+            Composer::Empty => RowState::Held(HeldReason::Ambiguous),
             Composer::Draft => RowState::Held(HeldReason::Ambiguous),
         },
     }
@@ -52,7 +55,7 @@ pub fn handback_plan(state: RowState, accepted: bool, composer: Composer) -> Han
         (true, _) => Handback::Close(RowState::Done(DoneReason::HandbackRunning)),
         (false, Composer::Empty) => Handback::Enqueue,
         (false, Composer::Draft) => {
-            Handback::NoticeThenClose(RowState::Abandoned(AbandonReason::HandbackAmbiguous))
+            Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous))
         }
     };
     match state {
@@ -64,7 +67,10 @@ pub fn handback_plan(state: RowState, accepted: bool, composer: Composer) -> Han
         | RowState::Unaccepted
         | RowState::Injecting
         | RowState::AwaitTurn => reconcile(),
-        RowState::Running => Handback::Close(RowState::Done(DoneReason::HandbackRunning)),
+        RowState::Running if accepted => {
+            Handback::Close(RowState::Done(DoneReason::HandbackRunning))
+        }
+        RowState::Running => Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous)),
     }
 }
 

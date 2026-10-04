@@ -29,6 +29,7 @@ mod supported {
             Ok(MoveEvidence {
                 user_record: self.accepted,
                 turn_open: self.turn_open,
+                never_started: true,
                 composer: if self.draft {
                     Composer::Draft
                 } else {
@@ -66,6 +67,23 @@ mod supported {
     }
     fn files(root: &Path) -> Files<Fixture> {
         Files::new(root, ProviderKind::Claude, 9, Fixture::default())
+    }
+
+    #[test]
+    fn queued_marker_overlap_cannot_be_reclassified_as_never_pasted() {
+        let root = sandbox();
+        let queue = root
+            .path()
+            .join("discord_pending_queue/claude/token/9.json");
+        save(&queue, &json!([item(8)]));
+        save(&queue.with_extension("dispatch"), &item(8));
+        let original = fs::read(&queue).unwrap();
+        let mut host = files(root.path());
+        let ledger = Ledger::open(root.path(), 9).unwrap();
+        assert!(host.collect(&ledger).is_err());
+        assert_eq!(fs::read(&queue).unwrap(), original);
+        assert_eq!(ledger.rows().unwrap().owner(8), Owner::Legacy);
+        assert_eq!(host.effects.actor_started, 0);
     }
 
     #[test]

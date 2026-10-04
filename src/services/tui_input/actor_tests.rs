@@ -240,7 +240,7 @@ async fn input_responsibility_is_released_only_after_its_user_record_and_idle() 
         assert_eq!(owner_of(&ledger, 1), Owner::Ledger);
     }
 
-    let end = world.user("deploy the fix");
+    let end = world.user(&actor.pane_submitted()[0]);
     let opened = world.fact(open_turn());
     let step = actor.step(&mut ledger, Some(&opened), t0).await.unwrap();
     assert_eq!(step, Step::Moved(1, RowState::Running));
@@ -252,13 +252,14 @@ async fn input_responsibility_is_released_only_after_its_user_record_and_idle() 
     assert_eq!(step, Step::Wait("turn_open"));
     assert_eq!(owner_of(&ledger, 1), Owner::Ledger);
 
+    world.append(json!({"type":"system","subtype":"turn_duration"}));
     let step = actor
         .step(&mut ledger, Some(&world.idle()), t0)
         .await
         .unwrap();
     assert_eq!(step, Step::Moved(1, RowState::Done(DoneReason::Completed)));
     assert_eq!(owner_of(&ledger, 1), Owner::Settled);
-    assert_eq!(actor.pane_submitted(), ["deploy the fix"]);
+    assert_eq!(actor.pane_submitted(), [frame(1, "deploy the fix")]);
 
     // Only then does the next input reach the pane.
     let step = actor
@@ -268,7 +269,7 @@ async fn input_responsibility_is_released_only_after_its_user_record_and_idle() 
     assert_eq!(step, Step::Moved(2, RowState::AwaitTurn));
     assert_eq!(
         actor.pane_submitted(),
-        ["deploy the fix", "then run checks"]
+        [frame(1, "deploy the fix"), frame(2, "then run checks")]
     );
 }
 
@@ -296,7 +297,7 @@ async fn unconfirmed_or_indeterminate_inputs_are_never_injected_again() {
         .await
         .unwrap();
     assert_eq!(step, Step::Blocked(1, RowState::Unaccepted));
-    assert_eq!(actor.pane_submitted(), ["status?"]);
+    assert_eq!(actor.pane_submitted(), [frame(1, "status?")]);
 
     // Silence for the whole accept window has the same outcome.
     let mut ledger = world.ledger_for(2, &[(1, "quiet")]);
@@ -305,10 +306,10 @@ async fn unconfirmed_or_indeterminate_inputs_are_never_injected_again() {
         .step(&mut ledger, Some(&world.idle()), t0)
         .await
         .unwrap();
-    let before = t0 + ACCEPT_WINDOW - Duration::from_millis(1);
+    let before = actor.entered_at() + ACCEPT_WINDOW - Duration::from_millis(1);
     let step = actor.step(&mut ledger, Some(&world.idle()), before).await;
     assert_eq!(step.unwrap(), Step::Wait("awaiting_user_record"));
-    let late = t0 + ACCEPT_WINDOW;
+    let late = actor.entered_at() + ACCEPT_WINDOW;
     let step = actor.step(&mut ledger, Some(&world.idle()), late).await;
     assert_eq!(step.unwrap(), Step::Moved(1, RowState::Unaccepted));
     assert_eq!(owner_of(&ledger, 1), Owner::Ledger);
@@ -341,7 +342,10 @@ async fn unconfirmed_or_indeterminate_inputs_are_never_injected_again() {
             Step::Blocked(1, RowState::Held(HeldReason::Ambiguous))
         );
     }
-    assert_eq!(actor.pane_submitted(), ["retry me", "retry me"]);
+    assert_eq!(
+        actor.pane_submitted(),
+        [frame(1, "retry me"), frame(1, "retry me")]
+    );
     assert_eq!(owner_of(&ledger, 1), Owner::Ledger);
 
     // A restarted actor holds no paste anchor for an in-flight row, so it holds the row.
@@ -398,7 +402,7 @@ async fn modal_and_unknown_screens_never_receive_input() {
         (
             ShadowProvider::Codex,
             CODEX_UNKNOWN_START,
-            PaneVerdict::NotReady,
+            PaneVerdict::Modal,
         ),
     ];
     for (provider, screen, verdict) in cases {
@@ -467,6 +471,7 @@ impl FakeTmux {
             log = log.display(),
             screen = dir.path().join("screen").display(),
         );
+        let script = script.replace("capture-pane)", &format!("load-buffer) for last do :; done; cp \"$last\" '{}/buffer' ;;\npaste-buffer) {{ printf '────────────────────\n❯ '; cat '{}/buffer'; printf '\n────────────────────\n'; }} > '{}/screen' ;;\ncapture-pane)", dir.path().display(), dir.path().display(), dir.path().display()));
         let program = dir.path().join("tmux");
         fs::write(&program, script).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
@@ -475,7 +480,13 @@ impl FakeTmux {
 
     // Wide enough that the non-hanging steps finish on a loaded host; only `sleep 30` times out.
     fn pane(&self) -> TmuxPane {
-        TmuxPane::with_program("s", self.dir.path().join("tmux"), Duration::from_secs(3))
+        let mut pane = TmuxPane::with_program(
+            &format!("s-{}", self.dir.path().display()),
+            self.dir.path().join("tmux"),
+            Duration::from_secs(3),
+        );
+        pane.attest_test_nonce("test-nonce");
+        pane
     }
 
     fn calls(&self) -> Vec<String> {
@@ -491,7 +502,7 @@ impl FakeTmux {
 async fn bounded_tmux_separates_not_sent_from_indeterminate() {
     let cases = [
         ("load-buffer) exit 1 ;;", "not-sent"),
-        ("paste-buffer) exit 1 ;;", "not-sent"),
+        ("paste-buffer) exit 1 ;;", "indeterminate"),
         ("paste-buffer) exec sleep 30 ;;", "indeterminate"),
         ("send-keys) exit 1 ;;", "indeterminate"),
         ("send-keys) exec sleep 30 ;;", "indeterminate"),
@@ -499,7 +510,10 @@ async fn bounded_tmux_separates_not_sent_from_indeterminate() {
     ];
     for (behavior, expected) in cases {
         let tmux = FakeTmux::new(CLAUDE_READY, behavior);
-        let outcome = tmux.pane().submit("hello");
+        let outcome = tmux
+            .pane()
+            .with_composer(|pane| pane.submit("hello"))
+            .unwrap();
         let kind = match outcome {
             SendOutcome::Sent => "sent",
             SendOutcome::NotSent(_) => "not-sent",
@@ -527,7 +541,10 @@ async fn bounded_tmux_separates_not_sent_from_indeterminate() {
 #[tokio::test]
 async fn indeterminate_tmux_paste_is_held_and_never_pasted_again() {
     let world = World::new(ShadowProvider::Claude);
-    let tmux = FakeTmux::new(CLAUDE_READY, "paste-buffer) exec sleep 30 ;;");
+    let tmux = FakeTmux::new(
+        CLAUDE_READY,
+        "paste-buffer) printf foreign > \"$(dirname \"$0\")/screen\"; exit 1 ;;",
+    );
     let mut ledger = world.ledger(&[(1, "hello")]);
     let mut actor = InputActor::new(world.binding.clone(), tmux.pane());
     let t0 = Instant::now();
@@ -551,4 +568,483 @@ impl InputActor<FakePane> {
     fn pane_submitted(&self) -> Vec<String> {
         self.pane().submitted.clone()
     }
+}
+
+fn frame(key: u64, text: &str) -> String {
+    format!("[adk:source:{key}]\n{text}\n[adk:end]")
+}
+
+#[test]
+fn actual_binding_context_mismatch_and_post_paste_replacement_veto_enter() {
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        PreparedIncarnation, tests::fixture,
+    };
+    let (_root, _env) = fixture();
+    let world = World::new(ShadowProvider::Claude);
+    let tmux = FakeTmux::new(CLAUDE_READY, "");
+    let session = format!("binding-input-{}", uuid::Uuid::new_v4().simple());
+    let prepared =
+        PreparedIncarnation::prepare("claude", &session, Some(CHANNEL), Some("session"), false)
+            .unwrap();
+    crate::services::discord::stamp_spawn_markers(&session, Some(&prepared)).unwrap();
+    let mut pane = TmuxPane::with_program(
+        &session,
+        tmux.dir.path().join("tmux"),
+        Duration::from_secs(3),
+    );
+    assert_eq!(
+        pane.binding_nonce(&world.binding),
+        Some(prepared.context.execution_nonce.clone())
+    );
+    for field in [
+        "schema",
+        "provider",
+        "execution_nonce",
+        "tmux_session",
+        "channel_id",
+        "expected_native_session_id",
+    ] {
+        let mut context = serde_json::to_value(&prepared.context).unwrap();
+        context[field] = match field {
+            "schema" => json!(2),
+            "channel_id" => json!(CHANNEL + 1),
+            _ => json!("wrong"),
+        };
+        fs::write(&prepared.path, serde_json::to_vec(&context).unwrap()).unwrap();
+        assert!(pane.binding_nonce(&world.binding).is_none(), "{field}");
+    }
+    fs::write(
+        &prepared.path,
+        serde_json::to_vec(&prepared.context).unwrap(),
+    )
+    .unwrap();
+    let program = tmux.dir.path().join("tmux");
+    let script = fs::read_to_string(&program).unwrap().replace(
+        "paste-buffer) {",
+        &format!(
+            "paste-buffer) cp '{}/replacement' '{}' ; {{",
+            tmux.dir.path().display(),
+            prepared.path.display()
+        ),
+    );
+    fs::write(&program, script).unwrap();
+    let mut replaced = prepared.context.clone();
+    replaced.expected_native_session_id = Some("next-session".into());
+    fs::write(
+        tmux.dir.path().join("replacement"),
+        serde_json::to_vec(&replaced).unwrap(),
+    )
+    .unwrap();
+    let outcome = pane
+        .with_composer(|pane| pane.submit_for_binding("hello", &world.binding))
+        .unwrap();
+    assert!(matches!(outcome, SendOutcome::Indeterminate(_)));
+    assert_eq!(
+        tmux.calls()
+            .iter()
+            .filter(|call| *call == "paste-buffer")
+            .count(),
+        1
+    );
+    assert!(!tmux.calls().iter().any(|call| call == "send-keys"));
+}
+
+#[tokio::test]
+async fn merged_sources_require_the_whole_exact_persisted_frame() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[]);
+    let rendered = "[adk:source:99]\n[adk:source:2]\nfirst\nsecond\n[adk:end]";
+    ledger.append_entry(&Entry::Received { key: 99, input: json!({
+        "text":"first\nsecond", "source_message_ids":[99,2], "rendered_prompt":rendered,
+        "source_text_segments":[{"message_id":99,"text":"first"},{"message_id":2,"text":"second"}],
+    }) }, &[]).unwrap();
+    let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+    let at = Instant::now();
+    actor
+        .step(&mut ledger, Some(&world.idle()), at)
+        .await
+        .unwrap();
+    assert_eq!(actor.pane_submitted(), [rendered]);
+    world.user(&frame(99, "first\nsecond"));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.idle()), at)
+            .await
+            .unwrap(),
+        Step::Wait("awaiting_user_record")
+    );
+    world.user(rendered);
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.idle()), at)
+            .await
+            .unwrap(),
+        Step::Moved(99, RowState::Running)
+    );
+    assert_eq!(
+        ledger
+            .rows()
+            .unwrap()
+            .row(99)
+            .unwrap()
+            .attempt
+            .as_ref()
+            .unwrap()
+            .source_ids,
+        [99, 2]
+    );
+}
+
+fn composer(body: &str) -> String {
+    format!(
+        "────────────────────\n❯ {body}\n────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+    )
+}
+
+#[test]
+fn folded_own_draft_requires_exact_k_empty_attestation_and_no_other_text() {
+    use super::actor::gate::own_draft;
+    for lines in [2, 20, 200, 2000] {
+        let text = vec!["line"; lines].join("\n");
+        let folded = format!("[Pasted text #42 +{} lines]", lines - 1);
+        assert!(own_draft(
+            ShadowProvider::Claude,
+            &composer(&folded),
+            &text,
+            true
+        ));
+        assert!(!own_draft(
+            ShadowProvider::Claude,
+            &composer(&folded),
+            &text,
+            false
+        ));
+        for body in [
+            format!("[Pasted text #42 +{lines} lines]"),
+            format!("{folded}foreign"),
+            format!("{folded}\n[Pasted text #43 +1 lines]"),
+        ] {
+            assert!(
+                !own_draft(ShadowProvider::Claude, &composer(&body), &text, true),
+                "{body}"
+            );
+        }
+    }
+    for count in [799, 800, 801] {
+        let text = "x".repeat(count);
+        assert_eq!(
+            own_draft(
+                ShadowProvider::Claude,
+                &composer("[Pasted text #7]"),
+                &text,
+                true
+            ),
+            count > 800
+        );
+    }
+    assert!(!own_draft(
+        ShadowProvider::Codex,
+        "› [Pasted Content 900 chars]",
+        "x",
+        true
+    ));
+}
+
+#[test]
+fn actual_tmux_adapter_folded_frames_and_800_boundary_enter_once() {
+    for text in [
+        vec!["line"; 2].join("\n"),
+        "x".repeat(800),
+        "x".repeat(801),
+        vec!["line"; 20].join("\n"),
+        vec!["line"; 200].join("\n"),
+        vec!["line"; 2000].join("\n"),
+    ] {
+        let count = text.bytes().filter(|b| *b == b'\n').count();
+        let body = if count > 0 {
+            format!("[Pasted text #9 +{count} lines]")
+        } else if text.len() > 800 {
+            "[Pasted text #9]".into()
+        } else {
+            text.clone()
+        };
+        let tmux = FakeTmux::new(
+            CLAUDE_READY,
+            "paste-buffer) cp \"$(dirname \"$0\")/after\" \"$(dirname \"$0\")/screen\" ;;",
+        );
+        fs::write(tmux.dir.path().join("after"), composer(&body)).unwrap();
+        let outcome = tmux
+            .pane()
+            .with_composer(|pane| pane.submit(&text))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SendOutcome::Sent,
+            "lines={count} chars={}",
+            text.len()
+        );
+        assert_eq!(
+            tmux.calls()
+                .iter()
+                .filter(|call| *call == "send-keys")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn actual_tmux_adapter_foreign_draft_modal_mixed_and_lock_contention_enter_zero() {
+    for body in [
+        "[Pasted text #1 +99 lines]",
+        "[Pasted text #1 +1 lines] foreign",
+        "[Pasted text #1 +1 lines]\n[Pasted text #2 +1 lines]",
+        "foreign draft",
+    ] {
+        let tmux = FakeTmux::new(
+            CLAUDE_READY,
+            "paste-buffer) cp \"$(dirname \"$0\")/after\" \"$(dirname \"$0\")/screen\" ;;",
+        );
+        fs::write(tmux.dir.path().join("after"), composer(body)).unwrap();
+        assert!(matches!(
+            tmux.pane()
+                .with_composer(|pane| pane.submit("one\ntwo"))
+                .unwrap(),
+            SendOutcome::Indeterminate(_)
+        ));
+        assert!(!tmux.calls().iter().any(|call| call == "send-keys"));
+    }
+    for screen in [
+        composer("foreign draft"),
+        CODEX_APPROVAL.into(),
+        "┌───────┐\n│ foreign draft │\n└───────┘\n› foreign draft".into(),
+        "› \u{1b}[2mforeign draft\u{1b}[0m".into(),
+    ] {
+        let provider = if screen.contains('›') {
+            ShadowProvider::Codex
+        } else {
+            ShadowProvider::Claude
+        };
+        assert_ne!(judge_pane(provider, &screen), PaneVerdict::Ready);
+    }
+    let tmux = FakeTmux::new(CLAUDE_READY, "");
+    let mut pane = tmux.pane();
+    let session = format!("s-{}", tmux.dir.path().display());
+    let (sent, received) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        crate::services::claude_tui::composer_lock::with_composer_mutation_lock(&session, || {
+            sent.send(()).unwrap();
+            released.recv().unwrap();
+        })
+    });
+    received.recv().unwrap();
+    let blocked = pane.with_composer(|pane| pane.submit("hello"));
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(blocked.is_none());
+    assert!(
+        tmux.calls().is_empty(),
+        "contending transaction must perform no mutation/capture"
+    );
+}
+
+#[tokio::test]
+async fn arrival_order_and_restart_missing_witness_cannot_be_guessed() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[]);
+    let first = ledger
+        .append_entry(
+            &Entry::Staged {
+                key: 99,
+                input: json!({"text":"oldest"}),
+                state: RowState::Received,
+            },
+            &[],
+        )
+        .unwrap();
+    ledger
+        .append_entry(
+            &Entry::Staged {
+                key: 2,
+                input: json!({"text":"younger"}),
+                state: RowState::Received,
+            },
+            &[],
+        )
+        .unwrap();
+    ledger
+        .append_entry(
+            &Entry::MoveCommitted {
+                first_staged_seq: first,
+                ids: vec![2, 99],
+            },
+            &[],
+        )
+        .unwrap();
+    let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.idle()), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(99, RowState::AwaitTurn)
+    );
+    assert_eq!(actor.pane_submitted(), [frame(99, "oldest")]);
+    let mut ledger = world.ledger_for(91, &[(1, "missing")]);
+    ledger
+        .append_entry(
+            &Entry::Transition {
+                key: 1,
+                state: RowState::Running,
+                attempt: None,
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.idle()), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(1, RowState::Held(HeldReason::Ambiguous))
+    );
+    assert_eq!(owner_of(&ledger, 1), Owner::Ledger);
+}
+
+#[tokio::test]
+async fn exact_source_frame_and_restart_witness_survive_only_ordered_closer() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "keep Exact Spaces")]);
+    let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+    let at = Instant::now();
+    actor
+        .step(&mut ledger, Some(&world.idle()), at)
+        .await
+        .unwrap();
+    for wrong in [
+        "keep Exact Spaces".to_string(),
+        frame(2, "keep Exact Spaces"),
+        frame(1, "keep exact spaces"),
+    ] {
+        world.user(&wrong);
+        assert_eq!(
+            actor
+                .step(&mut ledger, Some(&world.idle()), at)
+                .await
+                .unwrap(),
+            Step::Wait("awaiting_user_record")
+        );
+    }
+    world.user(&actor.pane_submitted()[0]);
+    let mut restarted = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+    assert_eq!(
+        restarted
+            .step(&mut ledger, Some(&world.idle()), at)
+            .await
+            .unwrap(),
+        Step::Moved(1, RowState::Running)
+    );
+    assert_eq!(
+        restarted
+            .step(&mut ledger, Some(&world.idle()), at)
+            .await
+            .unwrap(),
+        Step::Wait("turn_open")
+    );
+    world.append(json!({"type":"system","subtype":"turn_duration"}));
+    assert_eq!(
+        restarted
+            .step(&mut ledger, Some(&world.idle()), at)
+            .await
+            .unwrap(),
+        Step::Moved(1, RowState::Done(DoneReason::Completed))
+    );
+    assert!(restarted.pane_submitted().is_empty());
+}
+
+#[tokio::test]
+async fn slow_success_starts_accept_window_after_enter_not_offer_time() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "slow")]);
+    let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+    let started = Instant::now() - ACCEPT_WINDOW - Duration::from_secs(5);
+    actor
+        .step(&mut ledger, Some(&world.idle()), started)
+        .await
+        .unwrap();
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.idle()), Instant::now())
+            .await
+            .unwrap(),
+        Step::Wait("awaiting_user_record")
+    );
+    assert_eq!(
+        actor
+            .step(
+                &mut ledger,
+                Some(&world.idle()),
+                Instant::now() + ACCEPT_WINDOW
+            )
+            .await
+            .unwrap(),
+        Step::Moved(1, RowState::Unaccepted)
+    );
+}
+
+#[tokio::test]
+async fn optional_attempt_roundtrip_and_terminal_immutability() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "roundtrip")]);
+    let old: Entry = serde_json::from_value(
+        json!({"kind":"transition","payload":{"key":1,"state":{"state":"ready"}}}),
+    )
+    .unwrap();
+    assert!(matches!(old, Entry::Transition { attempt: None, .. }));
+    let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+    actor
+        .step(&mut ledger, Some(&world.idle()), Instant::now())
+        .await
+        .unwrap();
+    let evidence = ledger
+        .rows()
+        .unwrap()
+        .row(1)
+        .unwrap()
+        .attempt
+        .clone()
+        .unwrap();
+    ledger.checkpoint_rows().unwrap();
+    let mut reopened = world.ledger(&[]);
+    assert_eq!(
+        reopened.rows().unwrap().row(1).unwrap().attempt.as_ref(),
+        Some(&evidence)
+    );
+    reopened
+        .append_entry(
+            &Entry::Transition {
+                key: 1,
+                state: RowState::Done(DoneReason::Completed),
+                attempt: None,
+            },
+            &[],
+        )
+        .unwrap();
+    let mut changed = evidence.clone();
+    changed.rendered_prompt = "different".into();
+    reopened
+        .append_entry(
+            &Entry::Transition {
+                key: 1,
+                state: RowState::Done(DoneReason::Completed),
+                attempt: Some(changed),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.rows().unwrap().row(1).unwrap().attempt.as_ref(),
+        Some(&evidence)
+    );
 }

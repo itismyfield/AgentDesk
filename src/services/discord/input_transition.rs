@@ -257,6 +257,18 @@ impl<E: Effects> Host for Files<E> {
         } else {
             None
         };
+        for queued_input in &queued {
+            let ids = source_ids(&queued_input.payload)?;
+            if active
+                .iter()
+                .chain(markers.iter())
+                .any(|input| source_ids(&input.payload).is_ok_and(|other| !ids.is_disjoint(&other)))
+            {
+                return Err(invalid(
+                    "queued input overlaps an effect-bearing population",
+                ));
+            }
+        }
         let mut represented = BTreeSet::new();
         for input in &queued {
             represented.extend(source_ids(&input.payload)?);

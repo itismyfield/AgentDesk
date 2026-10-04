@@ -337,6 +337,10 @@ pub(crate) fn launch_mode(provider: &str, nonce: &str) -> Option<String> {
     (context.execution_nonce == nonce).then_some(context.launch_mode)
 }
 
+pub(crate) fn input_context(provider: &str, nonce: &str) -> Option<BindingContext> {
+    read_hook_context(&context_path(provider, nonce).ok()?).ok()
+}
+
 pub(super) fn pane_context(tmux: &str, nonce: &str) -> Option<BindingContext> {
     let ctx = read_hook_context(&context_path("claude", nonce).ok()?).ok()?;
     (ctx.schema == 1
