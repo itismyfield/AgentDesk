@@ -264,9 +264,14 @@ impl<E: Effects> Host for Files<E> {
                 .chain(markers.iter())
                 .any(|input| source_ids(&input.payload).is_ok_and(|other| !ids.is_disjoint(&other)))
             {
-                return Err(invalid(
-                    "queued input overlaps an effect-bearing population",
-                ));
+                let evidence = self
+                    .effects
+                    .evidence(queued_input.key, &queued_input.payload)?;
+                if !evidence.user_record || evidence.turn_open {
+                    return Err(invalid(
+                        "queued input overlaps an effect-bearing population",
+                    ));
+                }
             }
         }
         let mut represented = BTreeSet::new();
