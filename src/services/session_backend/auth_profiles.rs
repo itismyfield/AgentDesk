@@ -40,6 +40,8 @@ mod tests {
 
     #[test]
     fn account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch() {
+        // Keep marker reads and writes on one root while sibling tests change the environment.
+        let _runtime_root = crate::config::TestRuntimeRootGuard::new();
         let name = format!("auth-switch-{}", uuid::Uuid::new_v4());
         let alive = Arc::new(AtomicBool::new(true));
         let handle = record_launch(
