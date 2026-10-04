@@ -685,11 +685,14 @@ src/
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
 │   │   ├── process_session_launch.rs
+│   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── input/
+│   │   │   ├── tests/
+│   │   │   │   └── startup_update_tests.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
 │   │   │   └── inline_banner.rs

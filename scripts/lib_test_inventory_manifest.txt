@@ -2385,6 +2385,9 @@ services::codex::relay_separator_tests::codex_second_agent_message_carries_parag
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
 services::codex::remote_dispatch_gate_tests::remote_tmux_is_hard_refused_as_policy_non_goal
 services::codex::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
+services::codex::startup_update_tests::codex_tui_args_snapshot_preserves_common_launch_options
+services::codex::startup_update_tests::codex_tui_script_snapshot_preserves_env_and_command_shape
+services::codex::startup_update_tests::startup_update_check_is_disabled_for_fresh_resume_and_readonly_tui
 services::codex::tui_hosting_tests::binding_context_t3b_wrapper_clears_inherited_context
 services::codex::tui_hosting_tests::codex_direct_tui_declares_all_current_options_supported
 services::codex::tui_hosting_tests::codex_fifo_wrapper_reuse_requires_live_pane_output_fifo_mode_and_fifo_file
@@ -2392,7 +2395,6 @@ services::codex::tui_hosting_tests::codex_legacy_tmux_script_preserves_wrapper_l
 services::codex::tui_hosting_tests::codex_live_session_preservation_excludes_only_explicit_pipe_mode
 services::codex::tui_hosting_tests::codex_provider_session_reuse_decision_honors_explicit_fresh_flag
 services::codex::tui_hosting_tests::codex_runtime_kind_records_exec_json_policy
-services::codex::tui_hosting_tests::codex_tui_args_snapshot_preserves_common_launch_options
 services::codex::tui_hosting_tests::codex_tui_config_overrides_are_inserted_before_prompt_delimiter
 services::codex::tui_hosting_tests::codex_tui_config_overrides_preserve_resume_session_position
 services::codex::tui_hosting_tests::codex_tui_existing_session_audit_reasons_match_cleanup_paths
@@ -2402,7 +2404,6 @@ services::codex::tui_hosting_tests::codex_tui_hook_trust_bypass_support_is_detec
 services::codex::tui_hosting_tests::codex_tui_idle_relay_binding_is_buildable_without_runtime_ready
 services::codex::tui_hosting_tests::codex_tui_resume_args_include_session_id_before_prompt
 services::codex::tui_hosting_tests::codex_tui_resume_args_reject_flag_like_session_id
-services::codex::tui_hosting_tests::codex_tui_script_snapshot_preserves_env_and_command_shape
 services::codex::tui_hosting_tests::codex_tui_tmux_script_launches_codex_directly_without_wrapper
 services::codex::tui_hosting_tests::codex_tui_turn_lock_is_shared_only_by_the_same_tmux_session
 services::codex::tui_hosting_tests::codex_wrapper_existing_session_audit_reasons_match_cleanup_paths
@@ -2493,7 +2494,6 @@ services::codex_tui::input::tests::current_codex_idle_pane_uses_dim_evidence_to_
 services::codex_tui::input::tests::detects_box_drawing_classifier_on_pure_edge_line
 services::codex_tui::input::tests::emoji_and_korean_stay_literal
 services::codex_tui::input::tests::empty_prompt_is_rejected
-services::codex_tui::input::tests::final_submit_gate_requires_a_live_empty_canonical_snapshot
 services::codex_tui::input::tests::followup_timeout_falls_back_to_default_without_live_config
 services::codex_tui::input::tests::footer_at_bottom_without_nearby_box_edge_is_not_ready
 services::codex_tui::input::tests::footer_phrase_inside_quoted_assistant_text_is_not_ready_without_box_edge
@@ -2522,7 +2522,10 @@ services::codex_tui::input::tests::run_actions_stops_between_literal_chunks_when
 services::codex_tui::input::tests::session_dead_error_is_classified
 services::codex_tui::input::tests::split_literal_chunks_preserves_multibyte_char_boundaries
 services::codex_tui::input::tests::stale_composer_scrolled_deep_into_history_is_not_ready
-services::codex_tui::input::tests::steering_snapshot_requires_composer_and_rejects_modal
+services::codex_tui::input::tests::startup_update_tests::final_submit_gate_requires_a_live_empty_canonical_snapshot
+services::codex_tui::input::tests::startup_update_tests::startup_update_modal_blocks_readiness_steering_and_submit_without_keys
+services::codex_tui::input::tests::startup_update_tests::startup_update_unknown_screen_without_composer_gets_no_keys
+services::codex_tui::input::tests::startup_update_tests::steering_snapshot_requires_composer_and_rejects_modal
 services::codex_tui::input::tests::submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots
 services::codex_tui::input::tests::taking_composer_ready_signal_is_one_shot
 services::codex_tui::input::tests::try_composer_lock_rejects_held_and_poisoned_lock

@@ -5,6 +5,8 @@ use process_session_launch::execute_streaming_local_process_codex;
 mod c1_teardown_tests;
 #[cfg(unix)]
 mod followup_reader;
+#[cfg(test)]
+mod startup_update_tests;
 #[cfg(unix)]
 use followup_reader::send_followup_to_tmux;
 mod tui_session_launch;
@@ -518,6 +520,11 @@ pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> 
         args.push("resume".to_string());
     }
     append_codex_common_launch_args(&mut args, options);
+    // Startup menus must never turn a routed Enter into a global toolchain update.
+    args.extend([
+        "-c".to_string(),
+        "check_for_update_on_startup=false".to_string(),
+    ]);
     append_codex_sandbox_args(&mut args, options.readonly_mode);
     if let Some(session_id) = options.resume_session_id.as_deref() {
         args.push(session_id.to_string());
@@ -2819,7 +2826,6 @@ mod tui_hosting_tests {
 
     use super::{
         CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
-        build_codex_tui_args, build_tmux_launch_env_lines,
         codex_resume_help_mentions_hook_trust_bypass, codex_tui_idle_relay_binding,
         direct_tui_material_fallback_reason, insert_codex_resume_option_before_other_options,
         render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
@@ -2832,10 +2838,6 @@ mod tui_hosting_tests {
         codex_tui_existing_session_termination_reason, codex_tui_session_turn_lock,
         codex_wrapper_existing_session_termination_reason, codex_wrapper_script_input_mode,
     };
-    use crate::services::discord::restart_report::{
-        RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
-    };
-    use crate::services::provider::ProviderKind;
     use crate::services::provider::ReadOutputResult;
 
     #[test]
@@ -2857,81 +2859,6 @@ mod tui_hosting_tests {
         assert!(script.contains("'-m' 'gpt-5-codex'"));
         assert!(script.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(script.contains("'--' 'hello from tui'"));
-    }
-
-    #[test]
-    fn codex_tui_args_snapshot_preserves_common_launch_options() {
-        let args = build_codex_tui_args(
-            &CodexLaunchOptions::new("prompt that starts --flag")
-                .with_resume_session_id(Some("session-123"))
-                .with_model(Some("gpt-5-codex"))
-                .with_reasoning_effort(Some("xhigh"))
-                .with_compact_token_limit(Some(120_000))
-                .with_readonly_mode(true)
-                .with_fast_mode_enabled(Some(false))
-                .with_goals_enabled(Some(true))
-                .with_cwd(Some("/work/repo"))
-                .with_add_dirs(&["/work/shared", "  /work/second  "]),
-        );
-
-        assert_eq!(
-            args,
-            vec![
-                "resume",
-                "-c",
-                r#"model_reasoning_effort="xhigh""#,
-                "-c",
-                "model_auto_compact_token_limit=120000",
-                "-m",
-                "gpt-5-codex",
-                "--disable",
-                "fast_mode",
-                "--enable",
-                "goals",
-                "-C",
-                "/work/repo",
-                "--add-dir",
-                "/work/shared",
-                "--add-dir",
-                "/work/second",
-                "--sandbox",
-                "read-only",
-                "session-123",
-                "--",
-                "prompt that starts --flag",
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_tui_script_snapshot_preserves_env_and_command_shape() {
-        let env_lines = build_tmux_launch_env_lines(
-            Some("/opt/codex/bin:/usr/bin"),
-            Some(42),
-            Some(ProviderKind::Codex),
-        );
-        let args = build_codex_tui_args(
-            &CodexLaunchOptions::new("fresh prompt")
-                .with_model(Some("gpt-5-codex"))
-                .with_reasoning_effort(Some("medium"))
-                .with_compact_token_limit(Some(64_000))
-                .with_readonly_mode(false)
-                .with_cwd(Some("/work/repo")),
-        );
-        let script = render_codex_tui_tmux_script(&env_lines, "/opt/bin/codex", &args);
-
-        assert!(script.contains("unset CLAUDECODE\n"));
-        assert!(script.contains("export PATH='/opt/codex/bin:/usr/bin'\n"));
-        assert!(script.contains(&format!("export {RESTART_REPORT_CHANNEL_ENV}=42\n")));
-        assert!(script.contains(&format!("export {RESTART_REPORT_PROVIDER_ENV}=codex\n")));
-        if std::env::var("AGENTDESK_ROOT_DIR")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some()
-        {
-            assert!(script.contains("export AGENTDESK_ROOT_DIR="));
-        }
-        assert!(script.ends_with("exec '/opt/bin/codex' '-c' 'model_reasoning_effort=\"medium\"' '-c' 'model_auto_compact_token_limit=64000' '-m' 'gpt-5-codex' '-C' '/work/repo' '--dangerously-bypass-approvals-and-sandbox' '--' 'fresh prompt'\n"));
     }
 
     #[test]
