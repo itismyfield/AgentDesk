@@ -591,3 +591,27 @@ fn rewrite_prompt_path(raw: &str) -> String {
     raw.replace("role-context/", "agents/")
         .replace("role-context\\", "agents\\")
 }
+
+#[cfg(test)]
+mod config_secret_tests {
+    use super::*;
+    use crate::config::disk_write::test_support::*;
+
+    #[test]
+    fn role_map_merge_keeps_disk_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let path = config_file_path(root.path());
+        write_secret_config(&path, "");
+        fs::write(
+            role_map_path(root.path()),
+            r#"{"sharedPromptFile": "/prompts/shared.md"}"#,
+        )
+        .unwrap();
+
+        merge_role_map_into_agentdesk_yaml(root.path()).unwrap();
+
+        assert_secrets_on_disk(&path);
+        let saved = crate::config::load_from_path(&path).unwrap();
+        assert_eq!(saved.shared_prompt.as_deref(), Some("/prompts/shared.md"));
+    }
+}

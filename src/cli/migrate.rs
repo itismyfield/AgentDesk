@@ -6,6 +6,8 @@ use crate::config;
 use crate::utils::format::expand_tilde_path;
 
 mod apply;
+#[cfg(test)]
+mod apply_config_tests;
 mod plan;
 mod source;
 

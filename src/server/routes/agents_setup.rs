@@ -1355,3 +1355,46 @@ fn audit_path(ctx: &SetupContext) -> PathBuf {
 fn maybe_forced_failure(_step: &str) -> Result<(), SetupError> {
     Ok(())
 }
+
+#[cfg(test)]
+mod config_secret_tests {
+    use super::*;
+    use crate::config::disk_write::test_support::*;
+
+    #[test]
+    fn apply_config_step_keeps_disk_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let path = crate::runtime_layout::config_file_path(root.path());
+        write_secret_config(&path, "");
+        let (config, config_path, config_existed) = load_agent_setup_config(root.path()).unwrap();
+        let ctx = SetupContext {
+            agent_id: "setup-agent".to_string(),
+            channel_id: "123456789012345678".to_string(),
+            provider: "claude".to_string(),
+            prompt_template_path: root.path().join("template.md"),
+            prompt_dest_path: root.path().join("IDENTITY.md"),
+            workspace_path: root.path().join("workspace"),
+            runtime_root: root.path().to_path_buf(),
+            config_path,
+            config_existed,
+            original_config_bytes: None,
+            config,
+            skills: Vec::new(),
+            dry_run: false,
+        };
+        let mut report = ExecutionReport {
+            created: Vec::new(),
+            skipped: Vec::new(),
+            rolled_back: Vec::new(),
+            errors: Vec::new(),
+            planned: Vec::new(),
+            audit_log: None,
+        };
+
+        apply_config_step(&ctx, &mut report, &mut Vec::new()).unwrap();
+
+        assert_secrets_on_disk(&path);
+        let saved = crate::config::load_from_path(&path).unwrap();
+        assert!(saved.agents.iter().any(|agent| agent.id == "setup-agent"));
+    }
+}
