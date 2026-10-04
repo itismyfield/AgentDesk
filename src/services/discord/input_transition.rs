@@ -297,6 +297,7 @@ impl<E: Effects> Host for Files<E> {
             }
             covered.extend(ids);
         }
+        covered.extend(rows.boundary_keys());
         for (_, row) in rows.open_rows() {
             covered.extend(source_ids(
                 row.input.get("legacy_input").unwrap_or(&row.input),
@@ -369,7 +370,7 @@ impl<E: Effects> Host for Files<E> {
     fn delete(&mut self, phase: DeletePhase) -> io::Result<()> {
         for file in self.captured.iter().filter(|file| file.phase == phase) {
             if phase == DeletePhase::Row {
-                let guard = inflight::lock_inflight_state_path(&file.path).map_err(invalid)?;
+                let guard = inflight::try_lock_inflight_state_path(&file.path).map_err(invalid)?;
                 let Some(bytes) = read(&file.path)? else {
                     runtime_store::fsync_parent_dir(&file.path)?;
                     continue;

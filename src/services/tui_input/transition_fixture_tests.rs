@@ -3,7 +3,7 @@
 use super::handover::{Composer, EnqueueOutcome, MoveEvidence, MoveSource};
 use super::ledger::Ledger;
 use super::rows::{Entry, Owner, Row};
-use super::transition::{DeletePhase, Host, Input, Move, Outcome, backoff};
+use super::transition::{DeletePhase, Host, Input, Move, Outcome, backoff, handback};
 use serde_json::json;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -147,7 +147,60 @@ fn deletion_boundaries_restart_keep_one_owner_and_order() {
             "source retirement order is fixed"
         );
         assert_eq!(host.actor, 1);
+        assert_eq!(
+            handback(root.path(), 9, &mut host).unwrap(),
+            Outcome::Legacy
+        );
+        assert_eq!(host.enqueued, vec![99, 8, 2]);
     }
+}
+
+#[test]
+fn handback_rejection_preserves_order_and_enqueue_crash_is_idempotent() {
+    let root = sandbox();
+    let mut host = Fixture::new(root.path());
+    let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+    assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+    host.reject = true;
+    assert_eq!(handback(root.path(), 9, &mut host).unwrap(), Outcome::Held);
+    assert_eq!(host.enqueued, vec![99]);
+    host.reject = false;
+    host.enqueued.push(8);
+    assert_eq!(
+        handback(root.path(), 9, &mut host).unwrap(),
+        Outcome::Legacy
+    );
+    assert_eq!(host.enqueued, vec![99, 8, 2]);
+    assert_eq!(
+        handback(root.path(), 9, &mut host).unwrap(),
+        Outcome::Legacy
+    );
+    assert_eq!(host.enqueued, vec![99, 8, 2]);
+}
+
+#[test]
+fn old_snapshot_without_received_order_holds_without_enqueue() {
+    let root = sandbox();
+    let mut ledger = Ledger::open(root.path(), 9).unwrap();
+    ledger
+        .append_entry(
+            &Entry::Received {
+                key: 8,
+                input: json!({"text":"input"}),
+            },
+            &[],
+        )
+        .unwrap();
+    let mut snapshot = ledger.rows().unwrap().compact().unwrap();
+    snapshot["rows"]["8"]
+        .as_object_mut()
+        .unwrap()
+        .remove("received_seq");
+    ledger.checkpoint(snapshot).unwrap();
+    drop(ledger);
+    let mut host = Fixture::new(root.path());
+    assert_eq!(handback(root.path(), 9, &mut host).unwrap(), Outcome::Held);
+    assert_eq!(host.enqueued, vec![99]);
 }
 
 #[test]

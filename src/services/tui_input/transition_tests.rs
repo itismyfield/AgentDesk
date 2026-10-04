@@ -1,8 +1,38 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod supported {
+    use super::super::handover::{Composer, EnqueueOutcome, MoveEvidence};
     use super::super::ledger::Ledger;
+    use super::super::rows::Row;
     use super::super::rows::{Entry, RowState};
+    use super::super::transition::{DeletePhase, Host, Input, Outcome, handback};
     use serde_json::json;
+    use std::io;
+
+    struct Destination(Vec<u64>);
+    impl Host for Destination {
+        fn collect(&mut self, _: &Ledger) -> io::Result<Vec<Input>> {
+            unreachable!()
+        }
+        fn evidence(&mut self, _: &Input) -> io::Result<MoveEvidence> {
+            unreachable!()
+        }
+        fn delete(&mut self, _: DeletePhase) -> io::Result<()> {
+            unreachable!()
+        }
+        fn start_actor(&mut self) -> io::Result<()> {
+            unreachable!()
+        }
+        fn reconcile(&mut self, _: u64, _: &Row) -> io::Result<(bool, Composer)> {
+            Ok((false, Composer::Empty))
+        }
+        fn enqueue(&mut self, key: u64, _: &Row) -> io::Result<EnqueueOutcome> {
+            self.0.push(key);
+            Ok(EnqueueOutcome::Persisted)
+        }
+        fn notice(&mut self, _: Option<u64>, _: &'static str) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn staged_order_survives_commit_and_checkpoint() {
@@ -41,6 +71,48 @@ mod supported {
             assert_eq!(
                 ordered.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
                 keys,
+                "staging order must survive a checkpoint"
+            );
+        }
+    }
+    #[test]
+    fn staged_order_survives_checkpoint_handback() {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/i01-tmp");
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = tempfile::tempdir_in(parent).unwrap();
+        for (channel, keys) in [(1, [9, 2]), (2, [2, 9])] {
+            let mut ledger = Ledger::open(root.path(), channel).unwrap();
+            for key in keys {
+                ledger
+                    .append_entry(
+                        &Entry::Staged {
+                            key,
+                            input: json!({"text": format!("input {key}")}),
+                            state: RowState::Received,
+                        },
+                        &[],
+                    )
+                    .unwrap();
+            }
+            ledger
+                .append_entry(
+                    &Entry::MoveCommitted {
+                        first_staged_seq: 1,
+                        ids: vec![2, 9],
+                    },
+                    &[],
+                )
+                .unwrap();
+            ledger.checkpoint_rows().unwrap();
+            drop(ledger);
+            let mut destination = Destination(vec![99]);
+            assert_eq!(
+                handback(root.path(), channel, &mut destination).unwrap(),
+                Outcome::Legacy
+            );
+            assert_eq!(
+                destination.0,
+                vec![99, keys[0], keys[1]],
                 "staging order must survive a checkpoint"
             );
         }

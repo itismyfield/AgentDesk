@@ -1,4 +1,4 @@
-//! Dormant move execution; activation supplies the boot-time intake fences.
+//! Dormant move and handback execution; activation supplies the boot-time intake fences.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -8,7 +8,10 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::blob::BlobPin;
-use super::handover::{Composer, EnqueueOutcome, MoveEvidence, MoveSource, move_disposition};
+use super::handover::{
+    Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, handback_after_enqueue,
+    handback_plan, move_disposition,
+};
 use super::ledger::Ledger;
 use super::rows::{Entry, Owner, Row, Rows};
 
@@ -220,8 +223,10 @@ impl Move {
                 if staged.contains(&input.key) {
                     continue;
                 }
-                host.pin_input(&ledger, input)?;
                 let state = move_disposition(input.source, host.evidence(input)?);
+                if !state.is_terminal() {
+                    host.pin_input(&ledger, input)?;
+                }
                 if matches!(
                     state,
                     super::rows::RowState::Held(super::rows::HeldReason::Ambiguous)
@@ -304,6 +309,53 @@ pub fn backoff(attempt: u32) -> Duration {
         5u64.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX))
             .min(300),
     )
+}
+
+pub fn handback(root: &Path, channel: u64, host: &mut impl Host) -> io::Result<Outcome> {
+    let mut ledger = Ledger::open(root, channel)?;
+    let rows = ledger.rows()?;
+    if !rows.unbound().is_empty() {
+        return Ok(Outcome::Held);
+    }
+    let mut open: Vec<_> = rows.open_rows().collect();
+    if open.iter().any(|(_, row)| row.received_seq.is_none()) {
+        host.notice(None, "handback_order_unavailable")?;
+        return Ok(Outcome::Held);
+    }
+    open.sort_by_key(|(_, row)| row.received_seq);
+    #[cfg(test)]
+    if mutant("handback_order") {
+        open.reverse();
+    }
+    let mut held = false;
+    for (key, row) in open {
+        let (accepted, composer) = host.reconcile(key, row)?;
+        let closed = match handback_plan(row.state, accepted, composer) {
+            Handback::Enqueue => {
+                let outcome = host.enqueue(key, row).unwrap_or(EnqueueOutcome::Rejected);
+                let closed = handback_after_enqueue(outcome);
+                if closed.is_none() {
+                    held = true;
+                    host.notice(Some(key), "handback_enqueue_rejected")?;
+                }
+                closed
+            }
+            Handback::Close(state) => Some(state),
+            Handback::NoticeThenClose(state) => {
+                host.notice(Some(key), "handback_ambiguous")?;
+                Some(state)
+            }
+            Handback::Settled => None,
+        };
+        if let Some(state) = closed {
+            ledger.append_entry(&Entry::Transition { key, state }, &[])?;
+        }
+        // Do not append later inputs ahead of a rejected earlier input on restart.
+        if held {
+            break;
+        }
+    }
+    Ok(if held { Outcome::Held } else { Outcome::Legacy })
 }
 
 #[cfg(test)]
