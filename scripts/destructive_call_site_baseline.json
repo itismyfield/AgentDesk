@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "74e4596f15be1a4a06470731a36c99857113a25a",
+  "measured_at_sha": "ed7ce757a8f8e2522c1b129d7217c6cfa44235ba",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -125,7 +125,7 @@
         "src/services/discord/relay_recovery/idle_tmux.rs": 1,
         "src/services/discord/router/intake_gate/stale_turn.rs": 2,
         "src/services/discord/standby_relay.rs": 1,
-        "src/services/discord/tmux_restart_handoff.rs": 1,
+        "src/services/discord/tmux_restart_handoff.rs": 2,
         "src/services/discord/tmux_watcher/no_result_exits.rs": 2,
         "src/services/discord/tmux_watcher/stall_exit.rs": 1,
         "src/services/discord/tmux_watcher/terminal_commit_epilogue.rs": 1,

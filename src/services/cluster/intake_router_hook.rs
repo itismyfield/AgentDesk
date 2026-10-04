@@ -19,6 +19,7 @@ use crate::db::intake_outbox::{
 };
 use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
+use crate::db::o_channel_homes::{self, ChannelHome, HomeState};
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use sqlx::PgPool;
 
@@ -32,6 +33,8 @@ mod capacity_tests;
 mod edge_case_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
+#[cfg(test)]
+mod home_route_tests;
 #[cfg(test)]
 mod o_route_tests;
 pub(crate) mod owner_record;
@@ -48,7 +51,7 @@ mod model;
 mod placement;
 use model::build_payload_for_insert;
 pub(crate) use model::{
-    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, IntakeRoutingBasis,
+    HomeBlock, IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, IntakeRoutingBasis,
     ObservedIntakeOutcome, RanLocalReason, ResolvedSessionOwner,
 };
 use placement::route_by_preference;
@@ -120,6 +123,15 @@ pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
+    // A channel's home row, read on every intake in every mode, outranks all other placement.
+    match o_channel_homes::read_home(pool, ctx.channel_id).await {
+        Ok(None) => {}
+        Ok(Some(home)) => return route_to_home(pool, ctx, home).await,
+        Err(error) => {
+            let detail = error.to_string();
+            return home_block(HomeBlock::Unreadable { detail });
+        }
+    }
     // The actual Discord destination decides O ownership, never the policy channel.
     match intake_route::route_text_for_placement(ctx.provider, ctx.channel_id) {
         IntakeRoute::Unselected => route_intake(pool, ctx).await,
@@ -133,6 +145,84 @@ pub(crate) async fn try_route_intake(
             decision => decision,
         },
     }
+}
+
+fn home_block(block: HomeBlock) -> IntakeRouterDecision {
+    IntakeRouterDecision::Blocked {
+        reason: IntakeBlockedReason::ChannelHome { block },
+    }
+}
+
+/// Only a worker-owned home takes intake: it goes to the holder stamped with the row's epoch.
+async fn route_to_home(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+    home: ChannelHome,
+) -> IntakeRouterDecision {
+    let (HomeState::Worker, Some(holder)) = (home.state, home.holder.as_deref()) else {
+        let state = home.state.as_str();
+        return home_block(HomeBlock::InTransition { state });
+    };
+    if ctx.mode != IntakeRoutingMode::Enforce {
+        return required_block("a delegated channel routes only in enforce mode".into());
+    }
+    if ctx.owner_authority != super::intake_routing_config::OwnerAuthorityChannelOptIn::NotOptedIn {
+        return home_block(HomeBlock::DualAuthority);
+    }
+    let owner = session_owner::resolve_session_owner(
+        pool,
+        ctx.provider,
+        ctx.channel_id,
+        ctx.leader_instance_id,
+        worker_heartbeat_lease_secs(),
+        ctx.preserve_on_cancel,
+    )
+    .await;
+    let elsewhere = match owner {
+        Err(detail) => {
+            let reason = IntakeBlockedReason::OwnerLookupFailed { detail };
+            return IntakeRouterDecision::Blocked { reason };
+        }
+        Ok(SessionOwnerResolution::NoOwner) => Vec::new(),
+        Ok(
+            SessionOwnerResolution::LiveLocal { instance_id, .. }
+            | SessionOwnerResolution::LiveForeign { instance_id, .. },
+        ) if instance_id == holder => Vec::new(),
+        Ok(
+            SessionOwnerResolution::LiveLocal { instance_id, .. }
+            | SessionOwnerResolution::LiveForeign { instance_id, .. },
+        ) => vec![instance_id],
+        Ok(SessionOwnerResolution::LiveForeignIncompatible { instance_id, .. }) => {
+            let reason = IntakeBlockedReason::OwnerProtocolIncompatible { instance_id };
+            return IntakeRouterDecision::Blocked { reason };
+        }
+        Ok(
+            SessionOwnerResolution::StaleOwners { instance_ids }
+            | SessionOwnerResolution::ConflictingLiveOwners { instance_ids },
+        ) => instance_ids,
+    };
+    if !elsewhere.is_empty() {
+        let instance_ids = elsewhere;
+        return home_block(HomeBlock::StaleSessionOwner { instance_ids });
+    }
+    if holder != ctx.leader_instance_id && ctx.has_nonportable_uploads {
+        let target_instance_id = holder.to_string();
+        let reason = IntakeBlockedReason::NonPortableAttachmentRoutedTarget { target_instance_id };
+        return IntakeRouterDecision::Blocked { reason };
+    }
+    let requirements =
+        match super::execution_requirements::for_channel(pool, ctx.policy_channel_id).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                return required_block(format!("execution policy lookup failed: {error}"));
+            }
+        };
+    let agent_id = match agent_id_and_preferred_labels(pool, ctx.policy_channel_id).await {
+        Ok(agent) => agent.map(|(agent_id, _, _)| agent_id).unwrap_or_default(),
+        Err(error) => return required_block(format!("agent lookup for home: {error}")),
+    };
+    let kind = ObserveTargetKind::DelegatedHome { epoch: home.epoch };
+    route_to_instance(pool, ctx, holder, &[], &agent_id, kind, &requirements).await
 }
 
 async fn route_intake(pool: &PgPool, ctx: &IntakeRouterContext<'_>) -> IntakeRouterDecision {
@@ -511,6 +601,10 @@ enum ObserveTargetKind {
     NodeOverride,
     AgentDefault,
     PreferredLabels,
+    /// The holder the channel's home row names at `epoch`, not the gateway.
+    DelegatedHome {
+        epoch: i64,
+    },
 }
 
 fn apply_observe_mode(
@@ -576,8 +670,12 @@ async fn route_to_instance(
     observe_target_kind: ObserveTargetKind,
     requirements: &ExecutionRequirements,
 ) -> IntakeRouterDecision {
+    let home_epoch = match observe_target_kind {
+        ObserveTargetKind::DelegatedHome { epoch } => Some(epoch),
+        _ => None,
+    };
     // An O channel is never placed off its gateway, whatever the owner, override or preference.
-    let off_gateway = target != ctx.leader_instance_id;
+    let off_gateway = target != ctx.leader_instance_id && home_epoch.is_none();
     if off_gateway
         && intake_route::route_text_for_placement(ctx.provider, ctx.channel_id)
             != IntakeRoute::Unselected
@@ -589,7 +687,8 @@ async fn route_to_instance(
         ObserveTargetKind::LiveForeignOwner => ResolvedSessionOwner::LiveForeign,
         ObserveTargetKind::NodeOverride
         | ObserveTargetKind::AgentDefault
-        | ObserveTargetKind::PreferredLabels => ResolvedSessionOwner::NoOwner,
+        | ObserveTargetKind::PreferredLabels
+        | ObserveTargetKind::DelegatedHome { .. } => ResolvedSessionOwner::NoOwner,
     };
     match existing_open_route(pool, ctx.channel_id).await {
         Ok(Some((_, _, existing_user_msg_id, _, _))) if existing_user_msg_id == ctx.user_msg_id => {
@@ -693,7 +792,8 @@ async fn route_to_instance(
             }
             ObserveTargetKind::NodeOverride
             | ObserveTargetKind::AgentDefault
-            | ObserveTargetKind::PreferredLabels => {
+            | ObserveTargetKind::PreferredLabels
+            | ObserveTargetKind::DelegatedHome { .. } => {
                 ObservedIntakeOutcome::WouldAssignNoOwnerToTarget {
                     target_instance_id: target.to_string(),
                 }
@@ -716,6 +816,7 @@ async fn route_to_instance(
     }
     let mut payload = build_payload_for_insert(ctx, target, required_labels, agent_id);
     payload.execution_requirements = serde_json::json!(requirements);
+    payload.home_epoch = home_epoch;
     match insert_pending(pool, &payload, 1, None).await {
         Ok(outbox_id) => IntakeRouterDecision::Forwarded {
             target_instance_id: target.to_string(),
@@ -725,6 +826,7 @@ async fn route_to_instance(
                 ObserveTargetKind::NodeOverride => IntakeRoutingBasis::NodeOverride,
                 ObserveTargetKind::AgentDefault => IntakeRoutingBasis::AgentDefault,
                 ObserveTargetKind::PreferredLabels => IntakeRoutingBasis::PreferredLabels,
+                ObserveTargetKind::DelegatedHome { .. } => IntakeRoutingBasis::DelegatedHome,
             },
         },
         Err(error) => match classify_insert_pending_error(&error) {
@@ -768,6 +870,7 @@ async fn route_to_instance(
                     ObserveTargetKind::NodeOverride => "node override",
                     ObserveTargetKind::AgentDefault => "agent default",
                     ObserveTargetKind::PreferredLabels => "preferred labels",
+                    ObserveTargetKind::DelegatedHome { .. } => "delegated home",
                 };
                 tracing::info!(
                     channel_id = ctx.channel_id,
@@ -862,6 +965,7 @@ mod pg_tests {
             wait_for_completion: false,
             preserve_on_cancel: false,
             node_override_instance_id: None,
+            owner_authority: crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn::NotOptedIn,
             has_nonportable_uploads: false,
             attachment_refs: &[],
         }

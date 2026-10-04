@@ -209,8 +209,10 @@ unset POST_DEPLOY_SMOKE_READY
 grep -q 'startup recovery unconfirmed' "$TMP_ROOT/unowned.out" || fail_test 'direct E-1 without readiness must not inject'
 
 # A successful wait and the runner's fresh-snapshot decision open E-1.
+# This read runs curl/jq on the real clock, so a 1s budget would fail it whenever
+# a second boundary passes; the deadline cases above keep the 1s budget.
 RECOVERY_STUB=true
-if ! _post_deploy_smoke_wait_for_startup_recovery; then
+if ! POST_DEPLOY_SMOKE_RECOVERY_GATE_S=3600 _post_deploy_smoke_wait_for_startup_recovery; then
     fail_test 'HTTP 200 fully_recovered=true must pass the recovery wait'
 fi
 export POST_DEPLOY_SMOKE_READY=true

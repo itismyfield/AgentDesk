@@ -19,14 +19,14 @@ fn applied<T>(write: Result<HomeWrite<T>, HomeError>) -> T {
     }
 }
 
-/// Each refused write is Stale and leaves the row exactly as it was.
+/// Each refused write is Stale and leaves the row exactly as it was before the write ran.
 async fn refused<T: std::fmt::Debug>(
     pool: &PgPool,
     label: &str,
-    write: Result<HomeWrite<T>, HomeError>,
+    write: impl std::future::Future<Output = Result<HomeWrite<T>, HomeError>>,
 ) {
     let before = home(pool).await;
-    match write.expect("home write") {
+    match write.await.expect("home write") {
         HomeWrite::Stale => {}
         HomeWrite::Applied(value) => panic!("{label}: applied {value:?}"),
     }
@@ -64,40 +64,30 @@ async fn every_home_transition_applies_only_under_its_exact_condition_pg() {
     refused(
         &pool,
         "second delegate",
-        delegate(&pool, C, "claude", "gw", "x").await,
+        delegate(&pool, C, "claude", "gw", "x"),
     )
     .await;
-    refused(
-        &pool,
-        "renew other holder",
-        renew(&pool, C, "mini", 1).await,
-    )
-    .await;
-    refused(&pool, "renew other epoch", renew(&pool, C, "gw", 2).await).await;
+    refused(&pool, "renew other holder", renew(&pool, C, "mini", 1)).await;
+    refused(&pool, "renew other epoch", renew(&pool, C, "gw", 2)).await;
     let held = applied(renew(&pool, C, "gw", 1).await);
     assert_eq!((held.epoch(), held.state()), (1, HomeState::Releasing));
-    refused(
-        &pool,
-        "adopt before release",
-        adopt(&pool, C, "mini", 1).await,
-    )
-    .await;
+    refused(&pool, "adopt before release", adopt(&pool, C, "mini", 1)).await;
     refused(
         &pool,
         "release by target",
-        finish_release(&pool, C, "mini", 1).await,
+        finish_release(&pool, C, "mini", 1),
     )
     .await;
     refused(
         &pool,
         "release old epoch",
-        finish_release(&pool, C, "gw", 0).await,
+        finish_release(&pool, C, "gw", 0),
     )
     .await;
     refused(
         &pool,
         "release as reclaim",
-        finish_reclaim(&pool, C, "gw", 1).await,
+        finish_reclaim(&pool, C, "gw", 1),
     )
     .await;
 
@@ -111,15 +101,10 @@ async fn every_home_transition_applies_only_under_its_exact_condition_pg() {
         ),
         (HomeState::Released, None, Some("mini"), 2)
     );
-    refused(
-        &pool,
-        "repeat release",
-        finish_release(&pool, C, "gw", 1).await,
-    )
-    .await;
-    refused(&pool, "renew after leaving", renew(&pool, C, "gw", 1).await).await;
-    refused(&pool, "adopt by non-target", adopt(&pool, C, "gw", 2).await).await;
-    refused(&pool, "adopt old epoch", adopt(&pool, C, "mini", 1).await).await;
+    refused(&pool, "repeat release", finish_release(&pool, C, "gw", 1)).await;
+    refused(&pool, "renew after leaving", renew(&pool, C, "gw", 1)).await;
+    refused(&pool, "adopt by non-target", adopt(&pool, C, "gw", 2)).await;
+    refused(&pool, "adopt old epoch", adopt(&pool, C, "mini", 1)).await;
 
     let row = applied(adopt(&pool, C, "mini", 2).await);
     assert_eq!(
@@ -132,13 +117,8 @@ async fn every_home_transition_applies_only_under_its_exact_condition_pg() {
         (HomeState::Worker, Some("mini"), None, 2)
     );
     assert!(row.renewed_at.is_some());
-    refused(&pool, "repeat adopt", adopt(&pool, C, "mini", 2).await).await;
-    refused(
-        &pool,
-        "reclaim old epoch",
-        begin_reclaim(&pool, C, 1, "gw").await,
-    )
-    .await;
+    refused(&pool, "repeat adopt", adopt(&pool, C, "mini", 2)).await;
+    refused(&pool, "reclaim old epoch", begin_reclaim(&pool, C, 1, "gw")).await;
     let held = applied(renew(&pool, C, "mini", 2).await);
     assert_eq!((held.holder(), held.state()), ("mini", HomeState::Worker));
 
@@ -152,30 +132,25 @@ async fn every_home_transition_applies_only_under_its_exact_condition_pg() {
         ),
         (HomeState::Reclaiming, Some("mini"), Some("gw"), 2)
     );
-    refused(
-        &pool,
-        "repeat reclaim",
-        begin_reclaim(&pool, C, 2, "gw").await,
-    )
-    .await;
+    refused(&pool, "repeat reclaim", begin_reclaim(&pool, C, 2, "gw")).await;
     let held = applied(renew(&pool, C, "mini", 2).await);
     assert_eq!(held.state(), HomeState::Reclaiming);
     refused(
         &pool,
         "reclaim finish by gw",
-        finish_reclaim(&pool, C, "gw", 2).await,
+        finish_reclaim(&pool, C, "gw", 2),
     )
     .await;
     refused(
         &pool,
         "reclaim finish old",
-        finish_reclaim(&pool, C, "mini", 1).await,
+        finish_reclaim(&pool, C, "mini", 1),
     )
     .await;
     refused(
         &pool,
         "reclaim as release",
-        finish_release(&pool, C, "mini", 2).await,
+        finish_release(&pool, C, "mini", 2),
     )
     .await;
 
@@ -189,27 +164,22 @@ async fn every_home_transition_applies_only_under_its_exact_condition_pg() {
         ),
         (HomeState::Reclaimed, None, Some("gw"), 3)
     );
-    refused(&pool, "renew reclaimed", renew(&pool, C, "mini", 2).await).await;
+    refused(&pool, "renew reclaimed", renew(&pool, C, "mini", 2)).await;
     refused(
         &pool,
         "remove by worker",
-        remove_reclaimed(&pool, C, "mini", 3).await,
+        remove_reclaimed(&pool, C, "mini", 3),
     )
     .await;
     refused(
         &pool,
         "remove old epoch",
-        remove_reclaimed(&pool, C, "gw", 2).await,
+        remove_reclaimed(&pool, C, "gw", 2),
     )
     .await;
     applied(remove_reclaimed(&pool, C, "gw", 3).await);
     assert_eq!(home(&pool).await, None);
-    refused(
-        &pool,
-        "repeat remove",
-        remove_reclaimed(&pool, C, "gw", 3).await,
-    )
-    .await;
+    refused(&pool, "repeat remove", remove_reclaimed(&pool, C, "gw", 3)).await;
 
     pool.close().await;
     pg_db.drop().await;
@@ -248,28 +218,13 @@ async fn force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_p
         (HomeState::Orphaned, None, 3, Some("op"))
     );
     // Orphaned holds: nobody renews, adopts or releases out of it.
-    refused(&pool, "old holder renews", renew(&pool, C, "mini", 2).await).await;
-    refused(
-        &pool,
-        "old holder renews new",
-        renew(&pool, C, "mini", 3).await,
-    )
-    .await;
+    refused(&pool, "old holder renews", renew(&pool, C, "mini", 2)).await;
+    refused(&pool, "old holder renews new", renew(&pool, C, "mini", 3)).await;
     for (target, epoch) in [("mini", 2), ("mini", 3), ("gw", 3)] {
-        refused(&pool, "adopt orphan", adopt(&pool, C, target, epoch).await).await;
+        refused(&pool, "adopt orphan", adopt(&pool, C, target, epoch)).await;
     }
-    refused(
-        &pool,
-        "reclaim orphan",
-        begin_reclaim(&pool, C, 3, "gw").await,
-    )
-    .await;
-    refused(
-        &pool,
-        "remove orphan",
-        remove_reclaimed(&pool, C, "gw", 3).await,
-    )
-    .await;
+    refused(&pool, "reclaim orphan", begin_reclaim(&pool, C, 3, "gw")).await;
+    refused(&pool, "remove orphan", remove_reclaimed(&pool, C, "gw", 3)).await;
     let force = force_orphan(&pool, C, 3, F, "op").await.expect("force");
     assert_eq!(force, ForceOutcome::Stale);
 

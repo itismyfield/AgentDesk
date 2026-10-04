@@ -493,6 +493,7 @@ db::idempotency::tests::pg_integration::claim_with_different_fingerprint_reports
 db::idempotency::tests::pg_integration::claim_with_inflight_slot_reports_in_flight
 db::idempotency::tests::pg_integration::crash_window_retry_blocks_until_expiry_then_reexecutes_replay_safe_mutation
 db::idempotency::tests::pg_integration::gc_expired_removes_only_past_due_rows
+db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
 db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows
@@ -2103,10 +2104,12 @@ services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_iden
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
 services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
+services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
-services::cluster::channel_home::tests::channel_home_items_have_no_production_caller
+services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
+services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
@@ -2129,6 +2132,7 @@ services::cluster::intake_router_hook::edge_case_tests::per_agent_primary_race_r
 services::cluster::intake_router_hook::edge_case_tests::primary_readiness_loss_and_removed_registration_only_use_compatible_fallback_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
+services::cluster::intake_router_hook::home_route_tests::a_channel_routes_by_its_home_row_and_as_before_without_one_pg
 services::cluster::intake_router_hook::o_route_tests::an_o_channel_is_placed_only_on_its_ready_gateway_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
 services::cluster::intake_router_hook::owner_record::tests::admission_idempotency_conflict_returns_prior_row
@@ -2214,6 +2218,7 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
+services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
@@ -3530,6 +3535,7 @@ services::discord::health::watcher_respawn::tests::deadman_switch_escalates_afte
 services::discord::health::watcher_respawn::tests::deadman_switch_ignores_idle_channel_without_relay_work
 services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier
 services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_floor_uses_generation_fenced_frontier
+services::discord::health::watcher_respawn::tests::live_original_defers_deadman_until_its_execution_ends
 services::discord::health::watcher_respawn::tests::relay_work_terms_cannot_qualify_a_channel_the_arming_gate_rejects
 services::discord::health::watcher_respawn::tests::release_is_noop_when_mailbox_already_idle
 services::discord::health::watcher_respawn::tests::release_is_noop_when_snapshot_had_no_owner
@@ -4028,6 +4034,22 @@ services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_c
 services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
 services::discord::last_message_checkpoint_tests::advance_last_message_checkpoint_interleaved_advances_keep_max
+services::discord::live_bridge::tests::actual_dead_original_retains_existing_handoff_and_exact_successor_cleanup_fence
+services::discord::live_bridge::tests::canonical_root_alias_keeps_the_slot_before_and_after_first_row_creation
+services::discord::live_bridge::tests::confirmed_original_registers_and_blocks_death_while_n1_rejects_synthetic_birth
+services::discord::live_bridge::tests::live_original_blocks_both_pinned_and_unpinned_manual_rebind_before_preflight
+services::discord::live_bridge::tests::off_entries_do_not_register_wait_or_block_existing_recovery
+services::discord::live_bridge::tests::original_and_restore_source_coverage_preserves_admission_order
+services::discord::live_bridge::tests::other_providers_do_not_register_or_block_recovery
+services::discord::live_bridge::tests::real_bridge_entry_abort_keeps_the_original_reader_registered
+services::discord::live_bridge::tests::recovery_first_bounds_original_start_without_provider_execution
+services::discord::live_bridge::tests::recovery_first_release_revalidates_actor_and_preserves_successor
+services::discord::live_bridge::tests::recovery_first_timeout_requeues_original_input_and_unwinds_only_its_actor
+services::discord::live_bridge::tests::recovery_scope_reuses_admission_only_for_its_exact_slot
+services::discord::live_bridge::tests::row_loss_keeps_original_registration_and_blocks_self_heal_until_both_owners_exit
+services::discord::live_bridge::tests::same_slot_originals_overlap_and_both_exclude_recovery
+services::discord::live_bridge::tests::t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_next
+services::discord::live_bridge::tests::thread_registration_uses_the_row_channel_and_runtime_learning_keeps_the_same_token
 services::discord::mailbox_finish::closed_actor_tests::exhausted_restitution_is_not_an_empty_success
 services::discord::mailbox_finish::closed_actor_tests::hydration_exhaustion_returns_closed_and_keeps_disk_queue
 services::discord::mailbox_finish::closed_actor_tests::refused_restitution_lands_on_the_successor
@@ -5429,6 +5451,7 @@ services::discord::router::message_handler::headless_turn::fresh_routine_tests::
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::tmux_name_selection_prefers_the_routine_label_over_the_channel_name
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::two_dm_routines_on_one_agent_do_not_share_a_tmux_session
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::actual_headless_assembly_selects_only_all_and_headless_shared_sections
+services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_queue
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
@@ -9920,6 +9943,7 @@ services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_k
 services::tui_o::channel_policy::tests::the_body_check_fails_a_bodiless_claim_and_a_body_before_its_claim
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
+services::tui_o::cutover::test_override::without_a_delegated_home_owned_channels_match_boot_ownership
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition

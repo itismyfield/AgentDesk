@@ -242,6 +242,11 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     initial_watcher_delivery_pin: Option<WatcherClaimIncarnation>,
 ) {
     use tracing::Instrument;
+    let original_registration = super::live_bridge::retain_original(
+        &bridge.provider,
+        bridge.channel_id.get(),
+        &cancel_token,
+    );
     intake_settlement::bind_bridge_turn_snapshot(&shared_owned, &mut bridge);
     let bridge_turn_id = discord_turn_id(
         &bridge.provider,
@@ -264,6 +269,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         turn_id = %bridge_turn_id,
     );
     super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
+        let _original_registration = original_registration;
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();

@@ -60,6 +60,9 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
                     continue;
                 };
+                let Ok(_recovery) = super::super::live_bridge::try_recovery(&ProviderKind::Codex, channel_id.get()) else {
+                    continue;
+                };
                 let Some(binding) =
                     resolved_codex_idle_relay_binding(&tmux_session_name, channel_id)
                 else {

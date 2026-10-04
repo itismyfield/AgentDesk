@@ -25,6 +25,7 @@ fn payload(node: &str, channel: &str) -> InsertPendingPayload {
         wait_for_completion: false,
         preserve_on_cancel: false,
         agent_id: "agent".into(),
+        home_epoch: None,
     }
 }
 
