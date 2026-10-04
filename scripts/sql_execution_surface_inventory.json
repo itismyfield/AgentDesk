@@ -28976,6 +28976,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:4e622e7129c1f8dcc446f93833279e0064ed93ba1a268c40591578d213045d3a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:e2e9dbf27861551b03a2f058375cf4cb2fdc8d65f614b88e58a6c440db558a6c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/tmux_watcher/terminal_token_update.rs",
       "api": "sqlx::query",
       "symbol": "query",
