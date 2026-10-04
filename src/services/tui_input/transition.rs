@@ -1,4 +1,4 @@
-//! Dormant move execution; activation supplies the boot-time intake fences.
+//! Dormant move and handback execution; activation supplies the boot-time intake fences.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -223,8 +223,10 @@ impl Move {
                 if staged.contains(&input.key) {
                     continue;
                 }
-                host.pin_input(&ledger, input)?;
                 let state = move_disposition(input.source, host.evidence(input)?);
+                if !state.is_terminal() {
+                    host.pin_input(&ledger, input)?;
+                }
                 if matches!(
                     state,
                     super::rows::RowState::Held(super::rows::HeldReason::Ambiguous)

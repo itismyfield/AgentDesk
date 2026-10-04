@@ -284,6 +284,13 @@ impl Rows {
             .map(|(key, row)| (*key, row))
     }
 
+    // A terminal row may have been compacted, but still names its commit's accessories.
+    pub fn boundary_keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.rows
+            .iter()
+            .filter_map(|(key, row)| (row.since_seq == self.boundary_seq).then_some(*key))
+    }
+
     pub fn unbound(&self) -> &BTreeSet<u64> {
         &self.unbound
     }

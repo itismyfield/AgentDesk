@@ -9,6 +9,8 @@ mod supported {
         dead: bool,
         outbox: bool,
         draft: bool,
+        accepted: bool,
+        turn_open: bool,
         actor_started: usize,
         legacy: Vec<u64>,
         notices: usize,
@@ -25,8 +27,8 @@ mod supported {
         }
         fn evidence(&mut self, _: u64, _: &Value) -> io::Result<MoveEvidence> {
             Ok(MoveEvidence {
-                user_record: false,
-                turn_open: false,
+                user_record: self.accepted,
+                turn_open: self.turn_open,
                 composer: if self.draft {
                     Composer::Draft
                 } else {
@@ -260,6 +262,177 @@ mod supported {
             assert_eq!(path.exists(), !draft);
             assert!(host.effects.notices > 0);
         }
+    }
+
+    #[test]
+    fn terminal_boundary_accessories_resume_after_queue_retirement() {
+        struct Interrupted {
+            files: Files<Fixture>,
+            stop: DeletePhase,
+        }
+        impl Host for Interrupted {
+            fn collect(&mut self, ledger: &Ledger) -> io::Result<Vec<Input>> {
+                self.files.collect(ledger)
+            }
+            fn evidence(&mut self, input: &Input) -> io::Result<MoveEvidence> {
+                self.files.evidence(input)
+            }
+            fn pin_input(&mut self, ledger: &Ledger, input: &mut Input) -> io::Result<()> {
+                self.files.pin_input(ledger, input)
+            }
+            fn delete(&mut self, phase: DeletePhase) -> io::Result<()> {
+                if phase == self.stop {
+                    return Err(invalid("interrupted retirement"));
+                }
+                self.files.delete(phase)
+            }
+            fn start_actor(&mut self) -> io::Result<()> {
+                self.files.start_actor()
+            }
+            fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<(bool, Composer)> {
+                self.files.reconcile(key, row)
+            }
+            fn enqueue(&mut self, key: u64, row: &Row) -> io::Result<EnqueueOutcome> {
+                self.files.enqueue(key, row)
+            }
+            fn notice(&mut self, key: Option<u64>, reason: &'static str) -> io::Result<()> {
+                self.files.notice(key, reason)
+            }
+        }
+        for stop in [DeletePhase::Queue, DeletePhase::Accessories] {
+            for checkpoint in [false, true] {
+                let root = sandbox();
+                let queue = root
+                    .path()
+                    .join("discord_pending_queue/claude/token/9.json");
+                let marker = queue.with_extension("dispatch");
+                let placeholder = root
+                    .path()
+                    .join("discord_queued_placeholders/claude/token/9.json");
+                let busy = root
+                    .path()
+                    .join("discord_busy_followup_retries/claude/9/8.json");
+                save(&queue, &json!([item(8)]));
+                save(&marker, &item(8));
+                save(
+                    &placeholder,
+                    &json!([{"user_message_id":8,"placeholder_message_id":80}]),
+                );
+                save(
+                    &busy,
+                    &json!({"notice_message_id":81,"busy_retry_count":1,"first_busy_retry_at_ms":1}),
+                );
+                let mut adapter = files(root.path());
+                adapter.effects.accepted = true;
+                let mut host = Interrupted {
+                    files: adapter,
+                    stop,
+                };
+                let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+                assert_eq!(movement.advance(&mut host), Outcome::Held);
+                assert!(!marker.exists());
+                assert_eq!(queue.exists(), stop == DeletePhase::Queue);
+                assert!(placeholder.exists() && busy.exists());
+                if checkpoint {
+                    Ledger::open(root.path(), 9)
+                        .unwrap()
+                        .checkpoint_rows()
+                        .unwrap();
+                }
+                drop(movement);
+                let mut resumed_host = files(root.path());
+                let mut resumed = Move::prepare(root.path(), 9, &mut resumed_host)
+                    .expect("terminal commit must cover surviving accessories on restart");
+                assert_eq!(resumed.advance(&mut resumed_host), Outcome::Ledger);
+                assert!(!queue.exists() && !placeholder.exists() && !busy.exists());
+                assert_eq!(resumed_host.effects.actor_started, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_upload_is_allowed_only_after_terminal_disposition() {
+        // Accepted running turns still need uploads; acceptance alone is not terminal.
+        for (accepted, turn_open, marker, terminal) in [
+            (false, false, false, false),
+            (true, false, false, true),
+            (true, true, true, false),
+            (true, false, true, true),
+        ] {
+            let root = sandbox();
+            let upload = root.path().join("removed.txt");
+            let mut input = item(8);
+            input["pending_uploads"] = json!([format!(
+                "[File uploaded] removed.txt → {} (1 bytes)",
+                upload.display()
+            )]);
+            let queue = root
+                .path()
+                .join("discord_pending_queue/claude/token/9.json");
+            let source = if marker {
+                queue.with_extension("dispatch")
+            } else {
+                queue
+            };
+            save(&source, &if marker { input } else { json!([input]) });
+            let mut host = files(root.path());
+            host.effects.accepted = accepted;
+            host.effects.turn_open = turn_open;
+            let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+            assert_eq!(
+                movement.advance(&mut host),
+                if terminal {
+                    Outcome::Ledger
+                } else {
+                    Outcome::Held
+                }
+            );
+            assert_eq!(source.exists(), !terminal);
+            if !terminal {
+                assert!(host.effects.notices > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn contended_row_lock_holds_without_waiting_and_resumes_after_release() {
+        let root = sandbox();
+        let row = InflightTurnState::new(
+            ProviderKind::Claude,
+            9,
+            None,
+            7,
+            8,
+            0,
+            "input".into(),
+            None,
+            Some("fixture".into()),
+            None,
+            None,
+            0,
+        );
+        let path = root.path().join("discord_inflight/claude/9.json");
+        save(&path, &serde_json::to_value(row).unwrap());
+        let guard = inflight::lock_inflight_state_path(&path).unwrap();
+        let root_path = root.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut host = files(&root_path);
+            let mut movement = Move::prepare(&root_path, 9, &mut host).unwrap();
+            let first = movement.advance(&mut host);
+            tx.send((movement, host, first)).unwrap();
+        });
+        let attempted = rx.recv_timeout(std::time::Duration::from_secs(2));
+        let stayed = path.exists();
+        drop(guard);
+        worker.join().unwrap();
+        let (mut movement, mut host, first) =
+            attempted.expect("row lock contention must return Held without waiting for the owner");
+        assert_eq!(first, Outcome::Held);
+        assert!(stayed, "contended row must not be deleted");
+        assert!(host.effects.notices > 0);
+        assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+        assert!(!path.exists());
     }
 
     #[test]

@@ -4051,9 +4051,12 @@ services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_de
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
 services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
+services::discord::input_transition::tests::supported::contended_row_lock_holds_without_waiting_and_resumes_after_release
 services::discord::input_transition::tests::supported::malformed_population_and_outbox_leave_legacy_while_dead_row_stays_held
 services::discord::input_transition::tests::supported::marker_only_and_merged_payload_survive_move_and_checkpoint
+services::discord::input_transition::tests::supported::missing_upload_is_allowed_only_after_terminal_disposition
 services::discord::input_transition::tests::supported::row_restart_after_marker_retirement_preserves_richer_metadata
+services::discord::input_transition::tests::supported::terminal_boundary_accessories_resume_after_queue_retirement
 services::discord::input_transition::tests::supported::upload_bytes_are_pinned_and_original_population_reads_are_nonmutating
 services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create
 services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
