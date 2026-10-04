@@ -68,6 +68,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/claude_idle_tail_host_tests.rs",
         "src/services/claude/c1_teardown_tests.rs",
         "src/services/codex/c1_teardown_tests.rs",
+        "src/services/codex/startup_update_tests.rs",
+        "src/services/codex_tui/input/tests/startup_update_tests.rs",
         "src/services/discord/turn_teardown_clearance_tests.rs",
         "src/services/discord/host_key_derivation_tests.rs",
         "src/services/discord/host_defer_gate_tests.rs",
