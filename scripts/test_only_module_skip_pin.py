@@ -329,6 +329,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_relay/ordered_queue/tests/tq_tests.rs",
         "src/services/claude_tui/hook_relay/ordered_queue/tests/session_start_retry_tests.rs",
         "src/services/tui_prompt_dedupe/tests.rs",
+        "src/services/turn_orchestrator/input_handback_tests.rs",
         "src/services/turn_orchestrator/mailbox_unreachable_tests.rs",
         "src/services/turn_orchestrator/recovery_kickoff_tests.rs",
         "src/services/turn_orchestrator/registry_purge/closed_gate_tests.rs",
