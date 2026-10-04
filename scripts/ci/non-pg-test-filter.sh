@@ -45,6 +45,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::relay_dead_letter::tests
   --skip db::scheduled_messages::postgres_tests
   --skip db::session_transcripts::clear_fence_pg_tests
+  --skip db::session_transcripts::native_clear_pg_tests
   --skip dispatch::dispatch_cancel::pg_observability_tests
   --skip dispatch::dispatch_context::pg_rereview_tests
   --skip dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
@@ -737,6 +738,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::relay_dead_letter::tests
   db::scheduled_messages::postgres_tests
   db::session_transcripts::clear_fence_pg_tests
+  db::session_transcripts::native_clear_pg_tests
   dispatch::dispatch_cancel::pg_observability_tests
   dispatch::dispatch_context::pg_rereview_tests
   dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests

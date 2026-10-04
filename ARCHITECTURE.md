@@ -202,6 +202,7 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
+│   ├── session_transcripts_native_clear_tests.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
