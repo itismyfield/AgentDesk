@@ -340,9 +340,14 @@ async fn a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_
 
     let (h, _) = attached(too_long, false, Host::Local, legacy, None).await;
     h.append(result("Prompt is too long").as_bytes());
-    h.until("prompt too long notice", |h| h.showing(NOT_RESET))
-        .await;
+    // The notice follows the kill decision, so the kill count is read once either notice shows.
+    let noticed = |h: &Harness| h.showing(NOT_RESET) || h.showing(RESET);
+    h.until("prompt too long notice", noticed).await;
     assert_eq!(h.kills(), 0, "prompt too long: no kill");
+    assert!(
+        h.showing(NOT_RESET),
+        "prompt too long: reported as not reset"
+    );
     assert!(!h.showing(RESET), "prompt too long: not reported as reset");
 
     let (h, _) = attached(stale, false, Host::Local, legacy, None).await;
