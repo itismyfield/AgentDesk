@@ -75,6 +75,16 @@ const CODEX_UPDATE_SCREEN: &str = "\
 
   Press enter to continue";
 
+// A start screen no detector knows: no composer and no modal wording.
+const CODEX_UNKNOWN_START: &str = "\
+>_ OpenAI Codex (v9.9.9)
+
+  Pick how this workspace starts
+› 1. Continue
+  2. Exit
+
+  Press enter to continue";
+
 struct World {
     _dir: TempDir,
     runtime: PathBuf,
@@ -345,48 +355,76 @@ async fn unconfirmed_or_indeterminate_inputs_are_never_injected_again() {
     }
 }
 
+async fn idle_step(
+    actor: &mut InputActor<FakePane>,
+    ledger: &mut Ledger,
+    world: &World,
+    at: Instant,
+) -> Step {
+    actor.step(ledger, Some(&world.idle()), at).await.unwrap()
+}
+
 #[tokio::test]
 async fn modal_and_unknown_screens_never_receive_input() {
     let t0 = Instant::now();
+    // Modal screens are held at once; unknown screens wait and are held only after READY_WINDOW.
     let cases = [
         (
             ShadowProvider::Claude,
             CLAUDE_EFFORT_OVERLAY,
-            HeldReason::Modal,
+            PaneVerdict::Modal,
         ),
-        (ShadowProvider::Codex, CODEX_APPROVAL, HeldReason::Modal),
-        (
-            ShadowProvider::Claude,
-            CLAUDE_UPDATE_SCREEN,
-            HeldReason::NotReady,
-        ),
+        (ShadowProvider::Codex, CODEX_APPROVAL, PaneVerdict::Modal),
         (
             ShadowProvider::Codex,
             CODEX_UPDATE_SCREEN,
-            HeldReason::NotReady,
+            PaneVerdict::Modal,
+        ),
+        (
+            ShadowProvider::Claude,
+            CLAUDE_UPDATE_SCREEN,
+            PaneVerdict::NotReady,
+        ),
+        (
+            ShadowProvider::Codex,
+            CODEX_UNKNOWN_START,
+            PaneVerdict::NotReady,
         ),
     ];
-    for (provider, screen, held) in cases {
+    for (provider, screen, verdict) in cases {
+        assert_eq!(judge_pane(provider, screen), verdict, "{screen}");
         let world = World::new(provider);
         let mut ledger = world.ledger(&[(1, "hello")]);
         let mut actor = InputActor::new(world.binding.clone(), FakePane::new(screen));
-        let mut last = Step::Idle;
-        for at in [t0, t0 + READY_WINDOW / 2, t0 + READY_WINDOW] {
-            last = actor
-                .step(&mut ledger, Some(&world.idle()), at)
-                .await
-                .unwrap();
-            if last == Step::Moved(1, RowState::Held(held)) {
-                break;
+        let held = if verdict == PaneVerdict::Modal {
+            assert_eq!(
+                idle_step(&mut actor, &mut ledger, &world, t0).await,
+                Step::Moved(1, RowState::Held(HeldReason::Modal))
+            );
+            HeldReason::Modal
+        } else {
+            for at in [t0, t0 + READY_WINDOW / 2] {
+                assert_eq!(
+                    idle_step(&mut actor, &mut ledger, &world, at).await,
+                    Step::Wait("pane_not_ready"),
+                    "{screen}"
+                );
             }
-            assert_eq!(last, Step::Wait("pane_not_ready"), "{screen}");
-        }
-        assert_eq!(last, Step::Moved(1, RowState::Held(held)), "{screen}");
-        let step = actor
-            .step(&mut ledger, Some(&world.idle()), t0)
-            .await
-            .unwrap();
-        assert_eq!(step, Step::Blocked(1, RowState::Held(held)));
+            let at = t0 + READY_WINDOW;
+            let held = RowState::Held(HeldReason::NotReady);
+            assert_eq!(
+                idle_step(&mut actor, &mut ledger, &world, at).await,
+                Step::Moved(1, held),
+                "{screen}"
+            );
+            HeldReason::NotReady
+        };
+        let blocked = Step::Blocked(1, RowState::Held(held));
+        assert_eq!(
+            idle_step(&mut actor, &mut ledger, &world, t0).await,
+            blocked,
+            "{screen}"
+        );
         assert!(actor.pane_submitted().is_empty(), "{screen}");
         assert_eq!(owner_of(&ledger, 1), Owner::Ledger);
     }
