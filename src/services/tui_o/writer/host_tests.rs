@@ -150,6 +150,10 @@ impl HostIo for TestIo {
     fn relaying(&self, _: u64) -> bool {
         self.relaying.load(Ordering::SeqCst)
     }
+
+    fn adopted(&self, channel: u64, _: ShadowProvider) {
+        self.calls.lock().unwrap().push(("adopted", channel));
+    }
 }
 
 /// This thread's adoption of a selected channel.
@@ -546,6 +550,12 @@ async fn a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restar
         ready.is_ready(CHANNEL),
         "the actor resumed over the new init"
     );
+    let calls = io.calls();
+    let at = |name| calls.iter().position(|call| call.0 == name).unwrap();
+    assert!(
+        at("facts") < at("adopted") && at("adopted") < at("port"),
+        "a committed first activation is reported before the actor can take work: {calls:?}"
+    );
     append(&path, &row("m1", "first"));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["first"]);
@@ -558,7 +568,7 @@ async fn a_new_empty_channel_gets_one_first_init_and_a_ready_actor_that_a_restar
     append(&path, &row("m2", "second"));
     polls(3).await;
     assert!(
-        !io.calls().contains(&("facts", CHANNEL)),
+        !io.calls().contains(&("facts", CHANNEL)) && !io.calls().contains(&("adopted", CHANNEL)),
         "a restart recovers, it does not activate"
     );
     assert_eq!(

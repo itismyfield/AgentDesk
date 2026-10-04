@@ -488,11 +488,14 @@ pub(super) async fn interrupt_claude_session(
         }
     };
 
-    let phase = if token.is_none() && observed_open.as_ref().is_some_and(|open| open()) {
-        ClaudeTuiInterruptPhase::ActiveGeneration
-    } else {
-        phase
-    };
+    // An open transcript turn stands in for streaming only while the pane shows no prompt or draft.
+    let pane_idle = pane_ready || pane_has_draft;
+    let phase =
+        if token.is_none() && !pane_idle && observed_open.as_ref().is_some_and(|open| open()) {
+            ClaudeTuiInterruptPhase::ActiveGeneration
+        } else {
+            phase
+        };
     let decision = decide_claimed_claude_stop_delivery(delivery, phase);
     tracing::info!(
         "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism={:?} runtime_kind={} structured_state={} pane_ready={} pane_active={} pane_has_draft={} phase={} decision={}",

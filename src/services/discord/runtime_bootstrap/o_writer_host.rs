@@ -11,6 +11,7 @@ use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::alarm::AlarmRouter;
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
+use crate::services::tui_o::turn_mode::TurnConfig;
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::adoption::LegacyView;
@@ -26,6 +27,8 @@ struct GatewayHost {
     self_id_wait: Duration,
     /// `cluster.instance_id` as the home judgement read it; `None` without clustering.
     configured_id: Option<String>,
+    /// The boot turn selection a newly adopted channel is confirmed against.
+    turn: TurnConfig,
 }
 
 /// With clustering, the configured id the home judgement used, refused when bootstrap published
@@ -160,6 +163,16 @@ impl HostIo for GatewayHost {
         self.shared
             .relay_emission_in_flight(ChannelId::new(channel))
     }
+
+    fn adopted(&self, channel: u64, provider: ShadowProvider) {
+        let kind = match provider {
+            ShadowProvider::Claude => ProviderKind::Claude,
+            ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        let confirm =
+            super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
+        confirm(&kind, Some(&self.turn), || vec![channel]);
+    }
 }
 
 /// Starts the writer host for this provider's gateway runtime; it never waits on the gateway.
@@ -187,6 +200,7 @@ pub(super) fn spawn(
                 alarms,
                 self_id_wait: SELF_ID_WAIT,
                 configured_id,
+                turn: config.map(|c| c.turn.clone()).unwrap_or_default(),
             }),
             runtime_root: crate::config::runtime_root(),
             gate: crate::services::tui_o::ownership::gate(provider.as_str()),
@@ -212,6 +226,7 @@ pub(super) mod test_host {
             alarms,
             self_id_wait,
             configured_id: configured_id.map(str::to_owned),
+            turn: TurnConfig::default(),
         }
     }
 }

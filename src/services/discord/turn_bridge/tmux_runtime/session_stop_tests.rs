@@ -298,3 +298,80 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         server.abort();
     });
 }
+
+#[test]
+fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn"
+    )) {
+        return;
+    }
+    let fx = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let _binding_root = TestBindingRoot::enter(Some(root.path()));
+    run(async {
+        let mock = discord_mock::DiscordMockState::new();
+        let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+        let ctx = discord_mock::serenity_context(proxy, gateway).await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.settings.write().await.owner_user_id = Some(7);
+        let mut voice_config = crate::voice::VoiceConfig::default();
+        voice_config.keep_recordings = true;
+        voice_config.audio.recordings_dir = root.path().join("recordings");
+        let data = Data {
+            shared: shared.clone(),
+            token: "test-token".into(),
+            provider: ProviderKind::Claude,
+            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+            voice_config,
+        };
+        let channel = ChannelId::new(discord_mock::CHANNEL_ID);
+        let session = "n1c-discord-turn";
+        let path = root.path().join("parent.jsonl");
+        open(&path, "discord");
+        bind(&shared, &data.provider, channel, session, &path);
+        let _confirmed = TestConfirmation::new(channel.get());
+
+        let log = root
+            .path()
+            .join(p5::BINDING_EVENTS_DIR)
+            .join(format!("{}.log", channel.get()));
+        let good_log = std::fs::read(&log).unwrap();
+        std::fs::write(&log, "corrupt O binding log\n").unwrap();
+        let judged = super::super::begin_command_stop(&shared, &data.provider, channel, true).await;
+        assert!(
+            matches!(judged, CommandStop::HostRefused),
+            "an unreadable binding is not proof the turn ended"
+        );
+        assert!(fx.take_calls().is_empty());
+        std::fs::write(&log, good_log).unwrap();
+        fx.ready(session);
+        command(&ctx, &data, channel).await;
+        assert!(
+            escapes(&fx.take_calls()).is_empty(),
+            "an open transcript turn does not override a pane ready for input"
+        );
+        fx.ready("n1c-no-ready-pane");
+
+        let token = bound_token(&ProviderKind::Claude, session);
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                serenity::UserId::new(7),
+                serenity::MessageId::new(channel.get() + 2)
+            )
+            .await
+        );
+        command(&ctx, &data, channel).await;
+        assert!(
+            token.cancelled.load(Ordering::Acquire),
+            "a confirmed channel's Discord turn keeps the channel stop's cancel"
+        );
+        assert!(crate::services::discord::tmux::recent_turn_stop_for_channel(channel).is_some());
+        assert!(mock.unhandled.lock().unwrap().is_empty());
+        server.abort();
+    });
+}

@@ -322,3 +322,95 @@ fn n1a_retirement_covers_monitor_rebind_and_watcher_synthetics() {
         );
     }
 }
+
+#[test]
+fn n1c_boot_confirms_only_selected_committed_channels_after_full_retirement() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::tui_o::cutover::test_override;
+    use crate::services::tui_o::turn_mode::{TestConfirmation, transcript_turns};
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root_dir = tempfile::tempdir().unwrap();
+    let _root = Root::new(root_dir.path());
+    let [retired, unreadable, unselected, codex] = [63250201, 63250202, 63250203, 63250204];
+    #[allow(unused_mut)]
+    let mut owned = vec![
+        (retired, ClaudeTui),
+        (unreadable, ClaudeTui),
+        (unselected, ClaudeTui),
+        (codex, CodexTui),
+    ];
+    #[cfg(unix)]
+    let partial = 63250205;
+    #[cfg(unix)]
+    owned.push((partial, ClaudeTui));
+    let _boot = test_override::force_channels(&owned);
+    let synthetic = save(&row(retired, 1));
+    persist(&pending(retired)).unwrap();
+    let kept = save(&row(unselected, 1));
+    let unread_row = save(&row(unreadable, 1));
+    let bad = root().unwrap().join(format!("claude_{unreadable}_8.json"));
+    std::fs::write(&bad, "invalid").unwrap();
+    #[cfg(unix)]
+    let (marker, held) = {
+        let marker = markers::AbortedAnchorMarker::for_abort(
+            "claude".into(),
+            partial,
+            7,
+            "n1a-retirement-fixture".into(),
+            0,
+            None,
+        );
+        markers::record(&marker).unwrap();
+        let held = markers::try_claim_marker(&marker).unwrap();
+        (marker, held)
+    };
+
+    let mut config = TuiOConfig::default();
+    assert!(confirm_at_boot(&ProviderKind::Claude, None).is_empty());
+    assert!(confirm_at_boot(&ProviderKind::Claude, Some(&config)).is_empty());
+    assert!(synthetic.exists(), "an empty selection retires nothing");
+
+    config.turn.channels = owned
+        .iter()
+        .map(|(channel, _)| *channel)
+        .filter(|&channel| channel != unselected)
+        .collect();
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    *PAUSE.lock().unwrap_or_else(|e| e.into_inner()) = Some((retired, reached_tx, resume_rx));
+    let shared = test_override::shared_channels();
+    let boot = std::thread::spawn(move || {
+        let _boot = shared();
+        confirm_at_boot(&ProviderKind::Claude, Some(&config))
+    });
+    reached_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+    assert!(
+        !transcript_turns(retired),
+        "confirmation follows the completed retirement"
+    );
+    resume_tx.send(()).unwrap();
+    assert_eq!(boot.join().unwrap(), [retired]);
+    let _confirmed = TestConfirmation::confirmed(retired);
+    assert!(!synthetic.exists());
+    assert!(!pending_synthetic_start_present("claude", retired));
+    for refused in [unreadable, unselected, codex] {
+        assert!(
+            !transcript_turns(refused),
+            "{refused} stays on Legacy turns"
+        );
+    }
+    assert!(kept.exists() && unread_row.exists() && bad.exists());
+    #[cfg(unix)]
+    {
+        assert!(
+            !transcript_turns(partial),
+            "a retirement that left residue keeps Legacy turns"
+        );
+        drop(held);
+        markers::delete(&marker);
+    }
+}
