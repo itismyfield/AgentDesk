@@ -250,7 +250,8 @@ mod tests {
     fn codex_turn_aborted_closes_only_the_named_parent_turn() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("parent.jsonl");
-        std::fs::write(&path, "").unwrap();
+        let header = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path()}});
+        std::fs::write(&path, format!("{header}\n")).unwrap();
         let (dev, ino) = file_identity(&std::fs::metadata(&path).unwrap());
         let session_id = "parent".to_string();
         let source = SourceId {
