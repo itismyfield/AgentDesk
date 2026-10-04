@@ -10035,6 +10035,7 @@ services::tui_o::shadow::diff::tests::legacy_posting_a_later_unit_first_is_an_or
 services::tui_o::shadow::diff::tests::legacy_rows_are_judged_two_windows_after_their_last_activity
 services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_an_unposted_piece_is_missing
 services::tui_o::shadow::diff::tests::one_legacy_occurrence_is_consumed_by_one_unit_only
+services::tui_o::shadow::identity::tests::codex_turn_aborted_closes_only_the_named_parent_turn
 services::tui_o::shadow::metrics::tests::the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit
 services::tui_o::shadow::report::tests::a_capture_anomaly_even_six_minutes_before_the_window_fails_with_capture_anomaly_in_run
 services::tui_o::shadow::report::tests::a_complete_window_passes_counting_turns_not_units_and_skipping_backlog
@@ -10088,6 +10089,7 @@ services::tui_o::store::spool::tests::a_header_only_segment_is_collected_without
 services::tui_o::store::spool::tests::a_lost_spool_segment_halts_with_a_gap_instead_of_resuming
 services::tui_o::store::spool::tests::a_spool_read_error_stops_writes_until_the_channel_is_reopened
 services::tui_o::store::spool::tests::a_spool_tail_the_source_no_longer_holds_halts_the_channel
+services::tui_o::store::spool::tests::a_v2_spool_recovers_and_the_next_append_rolls_to_a_current_segment
 services::tui_o::store::spool::tests::appends_that_would_skip_or_overflow_leave_spool_and_cursor_unchanged
 services::tui_o::store::spool::tests::gc_is_logged_before_the_delete_and_recovery_finishes_an_interrupted_one
 services::tui_o::store::spool::tests::reopening_sweeps_crash_aliases_so_gc_frees_the_segment
@@ -10211,6 +10213,7 @@ services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_copied
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_parent_row_the_channel_had_not_read_is_not_counted_as_inherited
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_row_a_pending_parent_also_holds_is_still_posted_after_the_fork_start
+services::tui_o::writer::tests::actor::rotation::recovery_tests::a_v2_codex_spool_resumes_under_v3_without_reposting_a_delivered_piece
 services::tui_o::writer::tests::actor::rotation::recovery_tests::h1_adoption_history_restores_relations_without_native_proof_or_boundary_changes
 services::tui_o::writer::tests::actor::rotation::recovery_tests::h2_rebind_removes_new_successor_including_oldless_binds
 services::tui_o::writer::tests::actor::rotation::recovery_tests::h3_future_resolution_and_future_bind_do_not_restore_an_applied_hop

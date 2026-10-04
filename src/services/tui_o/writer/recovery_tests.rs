@@ -1,4 +1,7 @@
+use serde_json::json;
+
 use super::*;
+use crate::services::tui_o::shadow::IDENTITY_VERSION;
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::rotation::{MAX_READERS, RETIRE_QUIET, Sources};
 
@@ -630,4 +633,131 @@ fn failed_regrowth_defers_overcount_until_success() {
         active(&health).contains(&format!("tui_o:too_many_readers:{CHANNEL}")),
         "new overcount activates on the next successful tend"
     );
+}
+
+fn codex(value: serde_json::Value) -> Vec<u8> {
+    let mut line = serde_json::to_vec(&value).unwrap();
+    line.push(b'\n');
+    line
+}
+
+fn body(id: &str, text: &str) -> Vec<u8> {
+    codex(json!({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "id": id,
+        "content": [{"type": "output_text", "text": text}]}}))
+}
+
+fn turn_event(kind: &str, turn_id: &str) -> Vec<u8> {
+    codex(json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn_id}}))
+}
+
+fn resume_codex(
+    harness: &Harness,
+    bindings: Arc<FakeBindings>,
+) -> (
+    Sources<FakeBindings>,
+    Writer,
+    UnitDeriver,
+    VecDeque<Derived>,
+) {
+    let mut writer = harness.writer();
+    let mut sources = Sources::new(CHANNEL, ShadowProvider::Codex, bindings);
+    let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Codex);
+    let mut owed = VecDeque::new();
+    sources
+        .resume(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    sources.follow(&mut writer).unwrap();
+    (sources, writer, deriver, owed)
+}
+
+fn segments(harness: &Harness) -> Vec<PathBuf> {
+    let dir = harness._runtime.path().join("o_store");
+    let dir = dir.join(CHANNEL.to_string()).join("spool");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "seg"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// The segment header line's identity version, rewritten when `set` is given.
+fn header_version(segment: &std::path::Path, set: Option<u32>) -> u64 {
+    let bytes = std::fs::read(segment).unwrap();
+    let split = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+    let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
+    if let Some(version) = set {
+        header["identity_version"] = version.into();
+        let mut rewritten = serde_json::to_vec(&header).unwrap();
+        rewritten.extend_from_slice(&bytes[split..]);
+        std::fs::write(segment, rewritten).unwrap();
+    }
+    header["identity_version"].as_u64().unwrap()
+}
+
+fn payloads(owed: &VecDeque<Derived>) -> Vec<String> {
+    let pieces = owed.iter().filter_map(|item| match item {
+        Derived::Piece(piece) => Some(piece.payload.clone()),
+        _ => None,
+    });
+    pieces.collect()
+}
+
+#[tokio::test]
+async fn a_v2_codex_spool_resumes_under_v3_without_reposting_a_delivered_piece() {
+    let (harness, ids, bindings) = fixture(1);
+    let long = "중단 전 긴 본문".repeat(400);
+    let turn = [
+        turn_event("task_started", "t1"),
+        body("a1", &long),
+        body("a2", "pending body"),
+        turn_event("turn_aborted", "t1"),
+    ];
+    append(&ids[0].path, &turn.concat());
+    let (mut sources, mut writer, mut deriver, mut owed) = resume_codex(&harness, bindings.clone());
+    sources
+        .capture(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    let expected = payloads(&owed);
+    assert!(
+        expected.len() >= 3,
+        "exercise a split body and a pending body"
+    );
+    assert_eq!(writer.deliver(&owed.pop_front().unwrap()).await, Step::Done);
+    drop((sources, writer));
+    let written = segments(&harness);
+    for segment in &written {
+        header_version(segment, Some(2));
+    }
+    let (mut sources, mut writer, mut deriver, mut owed) = resume_codex(&harness, bindings);
+    assert_eq!(
+        payloads(&owed),
+        expected,
+        "v2 frames derive the same pieces"
+    );
+    while let Some(item) = owed.pop_front() {
+        assert_eq!(writer.deliver(&item).await, Step::Done);
+    }
+    assert_eq!(
+        harness.port.posts(),
+        expected,
+        "each piece posts exactly once"
+    );
+    append(&ids[0].path, &turn_event("task_started", "t2"));
+    append(&ids[0].path, &body("a3", "after the upgrade"));
+    sources
+        .capture(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    while let Some(item) = owed.pop_front() {
+        assert_eq!(writer.deliver(&item).await, Step::Done);
+    }
+    let posts = harness.port.posts();
+    assert_eq!(posts[expected.len()..], ["after the upgrade"]);
+    let rolled = segments(&harness);
+    assert_eq!(rolled[..written.len()], written[..]);
+    assert_eq!(rolled.len(), written.len() + 1);
+    let current = header_version(rolled.last().unwrap(), None);
+    assert_eq!(current, u64::from(IDENTITY_VERSION));
 }
