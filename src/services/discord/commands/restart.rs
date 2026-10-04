@@ -304,8 +304,8 @@ mod host_guard_tests {
         busy_turn, channel_key, shared_on, turn_kept,
     };
 
-    // `/restart` on a session the host guard keeps leaves its in-flight turn, process and tmux
-    // as they are and says why; a legacy row, or no row yet, cancels and kills as in main.
+    // `/restart` on a session the host guard keeps, or on a Herdr-configured channel, leaves its
+    // turn, process and tmux as they are and says why; otherwise it cancels and kills as in main.
     #[tokio::test]
     async fn restart_keeps_the_turn_and_process_of_a_refused_session_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
@@ -355,6 +355,46 @@ mod host_guard_tests {
             assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{case:?}: no tmux");
             crate::services::session_backend::remove_process_session(&name);
         }
+
+        // A legacy row the guard admits, on a configured channel with admission stopped.
+        use crate::services::discord::host_teardown_gate::test_support::Stored;
+        use crate::services::herdr_admission::{Admission, force_for_test};
+        let channel = serenity::ChannelId::new(1_479_671_302_387_071_900);
+        let name = provider.build_tmux_session_name("p9b1-restart");
+        map_channel(&shared, channel, "p9b1-restart").await;
+        Case::Stored(Stored::Legacy)
+            .seed(&pool, &channel_key(&shared, &name), &name, channel.get())
+            .await;
+        let token = busy_turn(&shared, channel, &name).await;
+        let alive = process(&name, 68_900);
+        let configured = [(channel.get(), "mac-mini")];
+        let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
+        let _off = force_for_test(Admission::new(Some("off".as_ref()), None));
+        tmux.take_calls();
+        let warned = AtomicBool::new(false);
+        let warn = || {
+            warned.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        };
+        let restart = restart_managed_session(&http, &shared, &provider, channel, "/restart", warn);
+        let restarted = restart.await.expect("restart");
+        assert!(
+            turn_kept(&shared, channel, &token).await,
+            "configured: turn kept"
+        );
+        assert!(alive.load(Ordering::SeqCst), "configured: process kept");
+        assert_eq!(
+            tmux.take_calls(),
+            Vec::<String>::new(),
+            "configured: no tmux"
+        );
+        assert!(
+            !warned.load(Ordering::SeqCst),
+            "configured: no in-flight warning"
+        );
+        let reason = restarted.expect_err("a configured channel refuses the restart");
+        assert!(reason.contains("Herdr"), "{reason}");
+        crate::services::session_backend::remove_process_session(&name);
         db.drop().await;
     }
 }

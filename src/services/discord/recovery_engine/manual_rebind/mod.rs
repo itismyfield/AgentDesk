@@ -625,6 +625,15 @@ async fn rebind_inflight_for_channel_inner(
         existing_offset_rebase_to_output = Some(fence);
     }
 
+    // Resolve the host before adoption acquires the episode lock; adoption revalidates the exact pin.
+    #[cfg(unix)]
+    let host = super::tmux::watch_host_of(
+        shared,
+        provider,
+        discord_channel_id.get(),
+        &tmux_session_name,
+    )
+    .await;
     let mut inflight_rollback_on_relay_setup_failure: Option<PendingRebindInflightRollback>;
     let mut locked_episode_from_adoption: Option<super::inflight::LockedInflightEpisode> = None;
     #[cfg(test)]
@@ -760,15 +769,6 @@ async fn rebind_inflight_for_channel_inner(
         state
     };
 
-    // Read before the episode lock is taken, so the lock never waits on the sessions row.
-    #[cfg(unix)]
-    let host = super::tmux::watch_host_of(
-        shared,
-        provider,
-        discord_channel_id.get(),
-        &tmux_session_name,
-    )
-    .await;
     let (locked_episode, finish_mailbox_on_completion) =
         episode_handoff::commit_episode_side_effects(
             shared,

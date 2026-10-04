@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 96
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 97
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -22,6 +22,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs:204` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs:53` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs:1390` |  |
+| `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs:8` (+1 more) | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs:236` (+1 more) |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs:35` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs:227` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
@@ -40,13 +41,13 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:220` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:79` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs:19` |  |
-| `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs:446` | Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no". |
+| `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs:448` | Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no". |
 | `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs:194` |  |
 | `AGENTDESK_CODEX_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs:51` |  |
-| `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:209` |  |
-| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1255` |  |
+| `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:211` |  |
+| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1262` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:15` (+1 more) |  |
-| `AGENTDESK_CONFIG` | `src/config.rs:2820` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
+| `AGENTDESK_CONFIG` | `src/config.rs:2826` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:264` |  |
@@ -88,7 +89,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs:67` (+1 more) |  |
 | `AGENTDESK_POLICY_TRUST_ENFORCE` | `src/engine/loader.rs:61` |  |
 | `AGENTDESK_POLICY_TRUST_OVERRIDE` | `src/engine/loader.rs:55` |  |
-| `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:625` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
+| `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:630` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
 | `AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS` | `src/services/discord/runtime_bootstrap/framework_setup.rs:284` |  |
 | `AGENTDESK_PYTHON3_PATH` | `src/engine/ops/runtime_ops.rs:18` |  |
 | `AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:492` |  |

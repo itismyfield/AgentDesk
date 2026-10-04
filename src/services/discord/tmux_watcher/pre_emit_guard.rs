@@ -299,39 +299,16 @@ pub(super) async fn run_pre_emit_guard(
             "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
             channel_id
         );
-        let stale_sid = {
-            let mut data = shared.core.lock().await;
-            let old = data
-                .sessions
-                .get(&channel_id)
-                .and_then(|s| s.session_id.clone());
-            if let Some(session) = data.sessions.get_mut(&channel_id) {
-                session.clear_provider_session();
-            }
-            old
-        };
-        // Clear DB session_id
-        {
-            let hostname = crate::services::platform::hostname_short();
-            let session_key = format!("{}:{}", hostname, tmux_session_name);
-            crate::services::discord::adk_session::clear_provider_session_id(
-                &session_key,
-                shared.api_port,
-            )
-            .await;
-        }
-        if let Some(ref sid) = stale_sid {
-            let _ = crate::services::discord::internal_api::clear_stale_session_id(sid).await;
-        }
-        if host_gate::admits_teardown(
+        // Selectors are cleared and the pane killed only where the host verdict lets it go.
+        let admitted = host_gate::admits_automatic_kill(
             shared,
             watcher_provider,
             channel_id,
             tmux_session_name,
             "stale_resume_retry",
         )
-        .await
-        {
+        .await;
+        if admitted {
             crate::services::termination_audit::record_termination_for_tmux(
                 tmux_session_name,
                 None,
@@ -348,6 +325,30 @@ pub(super) async fn run_pre_emit_guard(
                 tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );
+            let stale_sid = {
+                let mut data = shared.core.lock().await;
+                let old = data
+                    .sessions
+                    .get(&channel_id)
+                    .and_then(|s| s.session_id.clone());
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.clear_provider_session();
+                }
+                old
+            };
+            // Clear DB session_id
+            {
+                let hostname = crate::services::platform::hostname_short();
+                let session_key = format!("{}:{}", hostname, tmux_session_name);
+                crate::services::discord::adk_session::clear_provider_session_id(
+                    &session_key,
+                    shared.api_port,
+                )
+                .await;
+            }
+            if let Some(ref sid) = stale_sid {
+                let _ = crate::services::discord::internal_api::clear_stale_session_id(sid).await;
+            }
         }
         // Replace placeholder with recovery notice (don't delete — avoids visual gap)
         if let Some(msg_id) = placeholder_msg_id {

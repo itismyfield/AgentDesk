@@ -97,5 +97,6 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
 pub(crate) fn install_boot_snapshots(config: &crate::config::Config) -> Result<()> {
     crate::services::tui_o::channel_policy::install(config)?;
     crate::services::provider_hosting::install_provider_hosting_config(config);
+    crate::config::session_hosts::install(config)?;
     Ok(())
 }

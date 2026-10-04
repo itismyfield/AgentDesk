@@ -10,6 +10,7 @@ mod adk_thread;
 mod claim_bootstrap;
 mod dispatch_runtime;
 mod dispatch_stamp;
+mod host_refusal;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
@@ -365,6 +366,11 @@ pub(super) async fn handle_text_message(
         .unwrap_or_else(|| settings_provider.clone());
     let early_fast_mode_channel_id =
         effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+    let (inbound, input) = ((channel_id, channel_id), (preloaded_uploads, None));
+    let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
+    let Some(preloaded_uploads) = admitted.await? else {
+        return Ok(());
+    };
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
         &early_provider,
         user_text,
@@ -797,6 +803,17 @@ pub(super) async fn handle_text_message(
                     }
                 });
 
+                // A reused thread is judged before it is unarchived, bootstrapped or mapped.
+                if let Some(tid) = reuse_tid {
+                    let input = (std::mem::take(&mut pending_uploads), session_was_cleared);
+                    let target = (tid, original_channel_id);
+                    let admitted =
+                        host_refusal::admitted_uploads(http, shared, &provider, target, input);
+                    let Some(uploads) = admitted.await? else {
+                        return Ok(());
+                    };
+                    pending_uploads = uploads;
+                }
                 let reused = if let Some(tid) = reuse_tid {
                     if super::super::verify_thread_accessible(http, tid).await {
                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2402,6 +2419,13 @@ pub(super) async fn handle_text_message(
     }
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let turn_host = crate::services::turn_host::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+    )
+    .await;
     let producer_registration = original_registration.clone();
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
@@ -2431,6 +2455,7 @@ pub(super) async fn handle_text_message(
                             remote_profile: remote_profile.as_ref(),
                             tmux_session_name: tmux_session_name.as_deref(),
                             teardown: teardown_clearance.as_ref(),
+                            host: &turn_host,
                             channel_id: channel_id.get(),
                             model: model_for_turn.as_deref(),
                             native_fast_mode: native_fast_mode_override,

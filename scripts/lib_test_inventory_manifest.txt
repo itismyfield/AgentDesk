@@ -213,6 +213,7 @@ config::secret_bearing_config_file_tests::load_from_path_ignores_retired_automat
 config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_pm_hours
 config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_timezone
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
+config::session_hosts::tests::session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuses_the_rest
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
 config::writer_channels_tests::writer_all_tui_selects_only_tui_bindings_and_applies_on_restart
 config::writer_channels_tests::writer_channels_disk_loader_normalizes_and_reports_restart_required
@@ -1117,6 +1118,7 @@ server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_runti
 server::routes::dispatched_sessions::tests::resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg
 server::routes::dispatched_sessions::tests::routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg
 server::routes::dispatched_sessions::tests::routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg
+server::routes::dispatched_sessions::tests::selector_clears_keep_configured_and_hosted_rows_pg
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_allows_active_statuses
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_rejects_terminal_statuses
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
@@ -1150,6 +1152,7 @@ server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_s
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
+server::routes::health_api::runtime_profile::tests::health_projects_the_boot_session_hosts_and_admission
 server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
 server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
@@ -1547,6 +1550,7 @@ services::auto_queue::route::view::activate_next_dispatch_type_tests::unrecogniz
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
+services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
 services::auto_queue::tests::auto_queue_status_entry_normalizes_github_repo_url
 services::auto_queue::tests::auto_queue_status_omits_diagnostics_without_slot_invariant_violation
@@ -1633,8 +1637,8 @@ services::claude::process_session_launch::tests::account_switch_drops_only_the_r
 services::claude::simple_launch_env_tests::simple_command_clears_an_inherited_absolute_compact_window
 services::claude::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
 services::claude::tui_session_launch::herdr_env_tests::herdr_launch_child_loses_the_herdr_pane_env_while_tmux_keeps_its_launch_env
+services::claude::tui_session_launch::herdr_off_tests::claude_launch_creates_no_tmux_for_a_herdr_configured_channel_ready_or_not
 services::claude::tui_session_launch::herdr_off_tests::claude_launch_entry_stays_on_tmux_and_starts_no_herdr_preparation
-services::claude::tui_session_launch::herdr_off_tests::claude_launch_takes_herdr_only_for_a_selected_channel_with_a_ready_o_store
 services::claude::tui_session_launch::host_marker_tests::claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_mark_still_launches
 services::claude::tui_session_launch::tests::binding_context_t7_claude_launch_fails_before_tmux
 services::claude_command::chokepoint_guard_tests::claude_binaries_are_not_raw_spawned_outside_the_chokepoint
@@ -2385,6 +2389,9 @@ services::codex::relay_separator_tests::codex_second_agent_message_carries_parag
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
 services::codex::remote_dispatch_gate_tests::remote_tmux_is_hard_refused_as_policy_non_goal
 services::codex::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
+services::codex::startup_update_tests::codex_tui_args_snapshot_preserves_common_launch_options
+services::codex::startup_update_tests::codex_tui_script_snapshot_preserves_env_and_command_shape
+services::codex::startup_update_tests::startup_update_check_is_disabled_for_fresh_resume_and_readonly_tui
 services::codex::tui_hosting_tests::binding_context_t3b_wrapper_clears_inherited_context
 services::codex::tui_hosting_tests::codex_direct_tui_declares_all_current_options_supported
 services::codex::tui_hosting_tests::codex_fifo_wrapper_reuse_requires_live_pane_output_fifo_mode_and_fifo_file
@@ -2392,7 +2399,6 @@ services::codex::tui_hosting_tests::codex_legacy_tmux_script_preserves_wrapper_l
 services::codex::tui_hosting_tests::codex_live_session_preservation_excludes_only_explicit_pipe_mode
 services::codex::tui_hosting_tests::codex_provider_session_reuse_decision_honors_explicit_fresh_flag
 services::codex::tui_hosting_tests::codex_runtime_kind_records_exec_json_policy
-services::codex::tui_hosting_tests::codex_tui_args_snapshot_preserves_common_launch_options
 services::codex::tui_hosting_tests::codex_tui_config_overrides_are_inserted_before_prompt_delimiter
 services::codex::tui_hosting_tests::codex_tui_config_overrides_preserve_resume_session_position
 services::codex::tui_hosting_tests::codex_tui_existing_session_audit_reasons_match_cleanup_paths
@@ -2402,7 +2408,6 @@ services::codex::tui_hosting_tests::codex_tui_hook_trust_bypass_support_is_detec
 services::codex::tui_hosting_tests::codex_tui_idle_relay_binding_is_buildable_without_runtime_ready
 services::codex::tui_hosting_tests::codex_tui_resume_args_include_session_id_before_prompt
 services::codex::tui_hosting_tests::codex_tui_resume_args_reject_flag_like_session_id
-services::codex::tui_hosting_tests::codex_tui_script_snapshot_preserves_env_and_command_shape
 services::codex::tui_hosting_tests::codex_tui_tmux_script_launches_codex_directly_without_wrapper
 services::codex::tui_hosting_tests::codex_tui_turn_lock_is_shared_only_by_the_same_tmux_session
 services::codex::tui_hosting_tests::codex_wrapper_existing_session_audit_reasons_match_cleanup_paths
@@ -2410,6 +2415,7 @@ services::codex::tui_hosting_tests::codex_wrapper_input_mode_detector_distinguis
 services::codex::tui_hosting_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
 services::codex::tui_session_launch::tests::binding_context_t7_codex_launch_fails_before_tmux
 services::codex::tui_session_launch::tests::codex_launch_home_follows_the_auth_profile_and_hooks_pin_only_an_unprofiled_home
+services::codex::tui_session_launch::tests::codex_launch_writes_nothing_for_a_herdr_configured_channel
 services::codex::tui_session_launch::tests::codex_tui_hooks_need_the_advertised_bypass_not_trust_hashes
 services::codex_remote_policy::tests::prerequisites_remain_unsatisfied
 services::codex_tmux_wrapper::accepted_turn_tests::accepted_quiet_process_reaches_terminal_without_retired_limits
@@ -2493,7 +2499,6 @@ services::codex_tui::input::tests::current_codex_idle_pane_uses_dim_evidence_to_
 services::codex_tui::input::tests::detects_box_drawing_classifier_on_pure_edge_line
 services::codex_tui::input::tests::emoji_and_korean_stay_literal
 services::codex_tui::input::tests::empty_prompt_is_rejected
-services::codex_tui::input::tests::final_submit_gate_requires_a_live_empty_canonical_snapshot
 services::codex_tui::input::tests::followup_timeout_falls_back_to_default_without_live_config
 services::codex_tui::input::tests::footer_at_bottom_without_nearby_box_edge_is_not_ready
 services::codex_tui::input::tests::footer_phrase_inside_quoted_assistant_text_is_not_ready_without_box_edge
@@ -2522,7 +2527,10 @@ services::codex_tui::input::tests::run_actions_stops_between_literal_chunks_when
 services::codex_tui::input::tests::session_dead_error_is_classified
 services::codex_tui::input::tests::split_literal_chunks_preserves_multibyte_char_boundaries
 services::codex_tui::input::tests::stale_composer_scrolled_deep_into_history_is_not_ready
-services::codex_tui::input::tests::steering_snapshot_requires_composer_and_rejects_modal
+services::codex_tui::input::tests::startup_update_tests::final_submit_gate_requires_a_live_empty_canonical_snapshot
+services::codex_tui::input::tests::startup_update_tests::startup_update_modal_blocks_readiness_steering_and_submit_without_keys
+services::codex_tui::input::tests::startup_update_tests::startup_update_unknown_screen_without_composer_gets_no_keys
+services::codex_tui::input::tests::startup_update_tests::steering_snapshot_requires_composer_and_rejects_modal
 services::codex_tui::input::tests::submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots
 services::codex_tui::input::tests::taking_composer_ready_signal_is_one_shot
 services::codex_tui::input::tests::try_composer_lock_rejects_held_and_poisoned_lock
@@ -2694,9 +2702,15 @@ services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strip
 services::discord::adk_session::selector::selector_checked_tests::checked_selector_http_ack_and_errors_are_not_best_effort
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
+services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
+services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
+services::discord::admin_host_guard::tests::a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_pg
+services::discord::admin_host_guard::tests::an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg
 services::discord::admin_host_guard::tests::clear_and_reset_refuse_a_kept_session_before_any_change_pg
 services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_its_own_row_pg
+services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
+services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::agent_handoff::tests::channel_kind_defaults_to_cc
 services::discord::agent_handoff::tests::channel_kind_rejects_unknown_value
@@ -3855,6 +3869,8 @@ services::discord::inflight::save_store::identity_gate::host_locator::tests::hos
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_captured_terminal_keeps_scheduler_timer_and_loopback_live
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_uncaptured_codex_terminal_keeps_scheduler_timer_and_loopback_live
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::claude_tui_runtime_stamp_accepts_none_to_projects_output_path
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::codex_terminal_range_cold_admission_and_exit_owner_5264
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots
@@ -4927,6 +4943,7 @@ services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::ac
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_orders_episode_authority_before_hold_and_return
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_preserves_normal_adoption_and_rollback_coordinates
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_rejects_same_anchor_successor_without_durable_mutation
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::host_lookup_finishes_before_exact_adoption_can_hold_a_guard
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::crossed_codex_turn_forces_watcher_replacement_before_normal_reuse
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
@@ -5501,6 +5518,7 @@ services::discord::router::message_handler::pre_admission_control::pre_admission
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
+services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
@@ -5757,6 +5775,7 @@ services::discord::session_identity::tests::parses_legacy_session_key
 services::discord::session_identity::tests::parses_namespaced_session_key
 services::discord::session_identity::tests::rejects_missing_or_empty_parts
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
+services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delegated_idle_range_is_consumed_once_without_transport_or_evidence
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::a_canary_channel_posts_only_through_o_and_its_legacy_neighbour_only_through_legacy
@@ -6711,6 +6730,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegat
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_watcher_turn_shows_no_body_and_records_no_frontier
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_listed_herdr_pane_is_never_read_dead_after_a_stream
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_marked_herdr_pane_is_abandoned_only_by_its_stop_tombstone
@@ -7845,6 +7865,8 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transie
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::stream_receiver_adapter_wakes_on_ready_frame
+services::discord::turn_bridge::stream_tick::guarded_persist::lock_liveness_tests::contended_stream_tick_keeps_scheduler_timer_and_loopback_live
+services::discord::turn_bridge::stream_tick::guarded_persist::lock_liveness_tests::one_shot_candidate_bind_waits_out_brief_sidecar_contention
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epoch
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::candidate_cleanup_covers_saved_competing_reowned_and_missing_rows
@@ -8681,6 +8703,8 @@ services::health_diagnostics::tests::auto_queue_cleanup_backlog_json_contract_ke
 services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
 services::health_diagnostics::tests::dispatch_outbox_stats_json_contract_keeps_field_names
 services::health_diagnostics::tests::every_health_path_database_await_is_bracketed
+services::herdr_admission::tests::herdr_admission_failed_stop_file_check_stops_only_that_call
+services::herdr_admission::tests::herdr_admission_stop_file_latches_until_restart_and_any_env_value_but_on_stops
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
@@ -10499,6 +10523,8 @@ services::turn_cancel_queue_guard::tests::queue_truth_purge_requires_a_complete_
 services::turn_cancel_queue_guard::tests::records_the_queued_message_a_cancel_removed
 services::turn_cancel_queue_guard::tests::the_guard_never_writes_to_the_mailbox
 services::turn_cancel_queue_guard::tests::the_promoted_message_is_not_recorded_as_lost
+services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
+services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
 services::turn_lifecycle::host_guard_tests::force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg
