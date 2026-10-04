@@ -61,7 +61,9 @@ async fn a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send() {
 
     // A renewal still pending at the deadline does not keep the gate open.
     let hung = std::future::pending();
-    let round = lease_round(&home, 2, Instant::now(), hung).await;
+    let round = lease_round(&home, 2, Instant::now(), hung);
+    let round = tokio::time::timeout(HOLD_FOR, round).await;
+    let round = round.expect("the deadline ends a hung renewal");
     assert!(matches!(round, LeaseRound::Expired), "{round:?}");
     assert_eq!(Instant::now() - t0, HOLD_FOR);
     assert_eq!(home.ownership(), HomeOwnership::Lost);
@@ -190,17 +192,18 @@ async fn a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg() {
         .execute(&pool)
         .await
         .expect("clear");
-    apply(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await);
-    let renewal = o_channel_homes::renew(&pool, C, "gw", 1);
+    let epoch = apply(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+    assert!(epoch > 3, "a re-delegation never repeats an epoch: {epoch}");
+    let renewal = o_channel_homes::renew(&pool, C, "gw", epoch);
     let sent = Instant::now();
-    let round = lease_round(&held, 1, sent, renewal).await;
+    let round = lease_round(&held, epoch, sent, renewal).await;
     let LeaseRound::Renewed(ownership) = round else {
         panic!("expected renewed: {round:?}");
     };
-    assert_eq!(ownership, owned(1, 1, HomeIntake::Closed));
+    assert_eq!(ownership, owned(epoch, 1, HomeIntake::Closed));
     pool.close().await;
-    let renewal = o_channel_homes::renew(&pool, C, "gw", 1);
-    let round = lease_round(&held, 1, Instant::now(), renewal).await;
+    let renewal = o_channel_homes::renew(&pool, C, "gw", epoch);
+    let round = lease_round(&held, epoch, Instant::now(), renewal).await;
     assert!(
         matches!(round, LeaseRound::Failed(HomeError::Db(_))),
         "{round:?}"
@@ -210,7 +213,7 @@ async fn a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg() {
         matches!(boot, BootHome::Unreadable(HomeError::Db(_))),
         "{boot:?}"
     );
-    assert_eq!(held.ownership(), owned(1, 1, HomeIntake::Closed));
+    assert_eq!(held.ownership(), owned(epoch, 1, HomeIntake::Closed));
     assert!(held.expire_if_due(sent + HOLD_FOR));
     assert_eq!(admitted(&held), (None, None));
     pg_db.drop().await;
@@ -318,29 +321,29 @@ fn production_text(text: &str) -> String {
     out
 }
 
-// Dormant guard: no production code outside the two owners names the home table or gate,
-// and the owners never start the lease loop.
+// Dormant guard: production code outside the two owners may read home rows and consult gates,
+// but never writes a home row, makes or registers a gate, or runs the lease.
 #[test]
-fn channel_home_items_have_no_production_caller() {
+fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     const OWNERS: &[&str] = &[
         "src/db/o_channel_homes.rs",
         "src/services/cluster/channel_home.rs",
     ];
-    const REGISTRATIONS: &[(&str, &str)] = &[
-        ("src/db/mod.rs", "pub(crate) mod o_channel_homes;"),
-        (
-            "src/services/cluster/mod.rs",
-            "pub(crate) mod channel_home;",
-        ),
-    ];
-    const NEEDLES: &[&str] = &[
-        "o_channel_homes",
-        "channel_home",
-        "HomeGate",
-        "HeldHome",
-        "boot_home",
-        "lease_round",
+    const FORBIDDEN: &[&str] = &[
+        "delegate",
+        "finish_release",
+        "finish_reclaim",
+        "adopt",
+        "begin_reclaim",
+        "remove_reclaimed",
+        "renew",
+        "force_orphan",
+        "register",
         "run_lease",
+        "lease_round",
+        "boot_home",
+        "confirm",
+        "close_intake",
     ];
     let probe = production_text(concat!(
         "fn a() {}\n#[cfg(test)]\nmod t { fn b() { c(\"{\", '{', r#\"}\"#); } // }\n }",
@@ -350,7 +353,7 @@ fn channel_home_items_have_no_production_caller() {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut stack = vec![root.join("src")];
-    let mut violations = Vec::new();
+    let (mut users, mut violations) = (0, Vec::new());
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).expect("source dir") {
             let path = entry.expect("source entry").path();
@@ -371,9 +374,9 @@ fn channel_home_items_have_no_production_caller() {
                 .to_string_lossy()
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).expect("source file");
-            let mut prod = production_text(&text);
+            let code = String::from_utf8(mask_literals(&production_text(&text))).unwrap();
             if OWNERS.contains(&relative.as_str()) {
-                let starts = prod.matches("run_lease(").count();
+                let starts = code.matches("run_lease(").count();
                 if relative.ends_with("channel_home.rs") && starts != 1 {
                     violations.push(format!(
                         "{relative}: run_lease( x{starts}, only its definition"
@@ -381,19 +384,138 @@ fn channel_home_items_have_no_production_caller() {
                 }
                 continue;
             }
-            if let Some((_, line)) = REGISTRATIONS.iter().find(|(file, _)| *file == relative) {
-                prod = prod.replacen(line, "", 1);
+            let tokens: Vec<&str> = code
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .collect();
+            if !tokens.contains(&"o_channel_homes") && !tokens.contains(&"channel_home") {
+                continue;
+            }
+            users += 1;
+            if code.contains("HomeGate::new") {
+                violations.push(format!("{relative}: HomeGate::new"));
             }
             violations.extend(
-                NEEDLES
+                FORBIDDEN
                     .iter()
-                    .filter(|needle| prod.contains(**needle))
-                    .map(|needle| format!("{relative}: {needle}")),
+                    .filter(|word| tokens.contains(word))
+                    .map(|word| format!("{relative}: {word}")),
             );
         }
     }
+    assert!(users > 0, "the scan found no reader of the home table");
     assert!(
         violations.is_empty(),
-        "channel home production caller: {violations:?}"
+        "channel home writer outside its owners: {violations:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_close_after_a_lapse_still_retires_the_last_epoch() {
+    let home = HomeGate::new(C, "mini");
+    home.confirm(&written("mini", 6, HomeState::Worker), Instant::now())
+        .expect("opens");
+    advance(HOLD_FOR).await;
+    assert_eq!(home.ownership(), HomeOwnership::Lost);
+    home.close();
+    advance(Duration::from_millis(1)).await;
+    let late = home.confirm(&written("mini", 6, HomeState::Worker), Instant::now());
+    assert_eq!(late, Err(ConfirmRefused::Retired));
+    assert_eq!(admitted(&home), (None, None));
+    let next = home.confirm(&written("mini", 7, HomeState::Worker), Instant::now());
+    assert_eq!(next, Ok(owned(7, 2, HomeIntake::Open)));
+}
+
+/// Routing answers for one channel and an unparseable destination on the current thread.
+fn routing(channel: u64) -> impl PartialEq + std::fmt::Debug {
+    use crate::services::tui_o::cutover::{boot_ownership, intake_route};
+    let ownership: Vec<_> = boot_ownership()
+        .into_iter()
+        .map(|(channel, kind, candidate)| (channel, kind, candidate.map(|c| c.peek())))
+        .collect();
+    (
+        intake_route::route("claude", channel),
+        intake_route::route_text("claude", "x"),
+        intake_route::route_for_placement("claude", channel),
+        intake_route::held_channels("claude"),
+        ownership,
+    )
+}
+
+/// A node off the O home keeps a selected channel's store as standby from boot, so the first
+/// delegation needs no restart; standby alone changes no routing, and only an open gate counts.
+#[test]
+fn standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
+    use crate::services::tui_o::cutover::intake_route::{IntakeRoute, test_probe};
+    use crate::services::tui_o::cutover::test_override;
+    const SELECTED: u64 = 4_380_501;
+    let _ready = test_probe::answer_with(|_| true);
+    use crate::services::tui_o::cutover::intake_route;
+    let foreign = {
+        let _plain = test_override::force_foreign(&[(SELECTED, ClaudeTui)], "gw");
+        routing(SELECTED)
+    };
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "cluster": {"enabled": true, "instance_id": "mini", "gateway_preferred_instance_id": "gw"},
+        "tui_o": {"writer": {"channels": [SELECTED]}},
+        "agents": [{"id": "w", "name": "W", "channels": {"claude": {"id": SELECTED.to_string(), "runtime": "tui"}}}],
+    }))
+    .unwrap();
+    let stored = |channels: &std::collections::BTreeSet<u64>, committed: bool| {
+        assert!(!committed, "off the home only local state is read");
+        Ok(channels.iter().map(|&c| (c, Adoption::Committed)).collect())
+    };
+    let boot = BootChannels::validate(&config).unwrap();
+    let boot = boot.seeded(true, &config, stored).unwrap();
+    assert!(
+        boot.candidate(SELECTED).is_none(),
+        "nothing adopted off the home"
+    );
+    let standby = boot.standby(SELECTED).cloned().expect("kept as standby");
+    let _booted = test_override::force_boot(boot);
+    assert_eq!(routing(SELECTED), foreign, "no home row: as before");
+
+    // The first delegation in this process: a gate that has not opened holds the channel.
+    let channel = SELECTED.to_string();
+    let gate = std::sync::Arc::new(HomeGate::new(&channel, "mini"));
+    register(std::sync::Arc::clone(&gate));
+    assert!(matches!(
+        intake_route::route("claude", SELECTED),
+        IntakeRoute::Hold(_)
+    ));
+    assert!(matches!(
+        intake_route::route_for_placement("claude", SELECTED),
+        IntakeRoute::Hold(_)
+    ));
+    assert_eq!(intake_route::held_channels("claude"), [channel.clone()]);
+
+    let renewal = HeldHome::for_test(&channel, "mini", 9, HomeState::Worker);
+    gate.confirm(&renewal, Instant::now()).expect("opens");
+    assert_eq!(
+        intake_route::route_for_placement("claude", SELECTED),
+        IntakeRoute::Gateway
+    );
+    assert!(intake_route::held_channels("claude").is_empty());
+    assert_eq!(
+        standby.peek(),
+        Adoption::Committed,
+        "the boot store, no restart"
+    );
+    // Intake closing between the owned read and the gate read names the channel once.
+    let closing = std::sync::Arc::clone(&gate);
+    let closing = test_probe::answer_with(move |_| {
+        closing.close_intake();
+        false
+    });
+    assert_eq!(intake_route::held_channels("claude"), [channel.clone()]);
+    drop(closing);
+    gate.close_intake();
+    assert!(matches!(
+        intake_route::route("claude", SELECTED),
+        IntakeRoute::Hold(_)
+    ));
+    unregister(&channel);
+    assert_eq!(routing(SELECTED), foreign, "row gone: as before");
 }

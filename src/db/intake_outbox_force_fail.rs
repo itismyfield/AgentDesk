@@ -112,14 +112,16 @@ pub(crate) async fn force_fail_and_retry_as_new(
             user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
-            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
+            home_epoch
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15,
             $16, $17, $18, $19,
-            $20, $21, $22, $23, $24
+            $20, $21, $22, $23, $24,
+            $25
         )
         RETURNING id
         "#,
@@ -148,6 +150,7 @@ pub(crate) async fn force_fail_and_retry_as_new(
     .bind(stuck_id)
     .bind(&row.execution_requirements)
     .bind(&row.attachment_refs)
+    .bind(row.home_epoch)
     .fetch_one(&mut *tx)
     .await?;
 

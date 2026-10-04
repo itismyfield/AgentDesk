@@ -2,6 +2,7 @@
 use super::IntakeRoutingMode;
 use crate::db::intake_outbox::InsertPendingPayload;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
+use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 
 /// Evidence used to choose the execution node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +11,8 @@ pub(crate) enum IntakeRoutingBasis {
     NodeOverride,
     AgentDefault,
     PreferredLabels,
+    /// The holder of the channel's worker-owned home row.
+    DelegatedHome,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,15 +88,49 @@ pub(crate) enum ObservedIntakeOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeBlockedReason {
-    OwnerLookupFailed { detail: String },
-    StaleSessionOwners { instance_ids: Vec<String> },
-    ConflictingLiveSessionOwners { instance_ids: Vec<String> },
-    OwnerProtocolIncompatible { instance_id: String },
-    OverrideUnavailable { target_instance_id: String },
-    NonPortableAttachmentForeignOwner { owner_instance_id: String },
-    NonPortableAttachmentRoutedTarget { target_instance_id: String },
-    AttachmentUnavailable { detail: String },
-    RoutingDependencyFailed { detail: String },
+    OwnerLookupFailed {
+        detail: String,
+    },
+    StaleSessionOwners {
+        instance_ids: Vec<String>,
+    },
+    ConflictingLiveSessionOwners {
+        instance_ids: Vec<String>,
+    },
+    OwnerProtocolIncompatible {
+        instance_id: String,
+    },
+    OverrideUnavailable {
+        target_instance_id: String,
+    },
+    NonPortableAttachmentForeignOwner {
+        owner_instance_id: String,
+    },
+    NonPortableAttachmentRoutedTarget {
+        target_instance_id: String,
+    },
+    AttachmentUnavailable {
+        detail: String,
+    },
+    RoutingDependencyFailed {
+        detail: String,
+    },
+    /// A channel with a home row that cannot take this intake now.
+    ChannelHome {
+        block: HomeBlock,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HomeBlock {
+    /// The home is being handed over or was orphaned; nobody takes new intake.
+    InTransition { state: &'static str },
+    /// The home row could not be read.
+    Unreadable { detail: String },
+    /// The channel also opted into the session-owner authority.
+    DualAuthority,
+    /// Live sessions run on a node other than the holder.
+    StaleSessionOwner { instance_ids: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +190,8 @@ pub(crate) struct IntakeRouterContext<'a> {
     pub wait_for_completion: bool,
     pub preserve_on_cancel: bool,
     pub node_override_instance_id: Option<&'a str>,
+    /// The channel's session-owner authority opt-in; a delegated home refuses any but not-opted-in.
+    pub owner_authority: OwnerAuthorityChannelOptIn,
     pub has_nonportable_uploads: bool,
     pub attachment_refs: &'a [crate::services::cluster::attachment_transfer::uploads::BundleRef],
 }
@@ -192,5 +231,6 @@ pub(super) fn build_payload_for_insert(
         wait_for_completion: ctx.wait_for_completion,
         preserve_on_cancel: ctx.preserve_on_cancel,
         agent_id: agent_id.to_string(),
+        home_epoch: None,
     }
 }
