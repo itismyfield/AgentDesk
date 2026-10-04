@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "3ae7ee1d491d7b41748d965b1befecd523711501",
+  "measured_at_sha": "691e67ae5de135883fa7a0e8d4f73cbe9a4921c4",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1237,6 +1237,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0135_channel_clear_boundary_native_correlation.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:80f8d34d77dae2d6e520b6811ba5e55e5b54c87ed5befe3606ba44372cfb6777"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1251,7 +1260,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:ae94e8a8baf82c08b464a9264004a8bac69e6249e90b0f9ba1ef64bff7849616"
+      "fingerprint": "sha256:5888bad2c5220749653647b71db517481472c685b02fe5674709148220c3240e"
     },
     {
       "root": "policies",
@@ -12762,6 +12771,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:302b894f93340c0ee4a6da9be3bb3d50e1d6f8e22ce419b0e360ee2b7dd0ea00"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:4e89146915982a908c52824ec2c8adb5dddf8fd77ee3674cdcc2c7cf5a904064"
     },
     {
@@ -12885,6 +12903,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/db/session_transcripts.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:a3dc3a07eb33bd0270ed6a483d328562ee1e54e52d75fd66a4c7bb5ccd0fa9cd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -12952,6 +12979,60 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e27089c0e5ae82320c0fcebdb4127f304688879f10b8214e457010a4e10e11ca"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:cb107aaa8b9f36b69ab887679710e6ebedb990732ea7dd59336719dbbe403588"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:e8bf3ba84f0ca64c299a34754186c45647a0d065dc3e1893b89c5ec975e8044b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:478afb4fd0965f81499b0a780fac98d0150089fc134cb145f73d335391fdd64c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9da30a8a3d4d1aa7d4c2040b10e93bae7e0fd36ea904c58b5cd3d32945564bb8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c2f8af3b879290ab18507f9bf2c7ad1c0c6b207efa629c34f5f5da6f76c8bbc6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d6b6436767f88a7e2f3793d99a6f569de5645a80068d7c21da0fb30f4c3bb9fe"
     },
     {
       "root": "src",

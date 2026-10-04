@@ -27,6 +27,7 @@ src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
 src/db/scheduled_messages/postgres_tests.rs
 src/db/session_transcripts.rs
+src/db/session_transcripts_native_clear_tests.rs
 src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
@@ -218,6 +219,7 @@ db::prompt_manifests::tests
 db::relay_dead_letter::tests
 db::scheduled_messages::postgres_tests
 db::session_transcripts::clear_fence_pg_tests
+db::session_transcripts::native_clear_pg_tests
 dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
@@ -684,6 +686,12 @@ db::session_transcripts::clear_fence_pg_tests::pre_clear_turn_committed_after_bo
 db::session_transcripts::clear_fence_pg_tests::sa2_exact_routine_attempt_proof_pg
 db::session_transcripts::clear_fence_pg_tests::sa2_failed_observation_survives_recovery_pg
 db::session_transcripts::clear_fence_pg_tests::sa2_own_clear_and_midturn_clear_pg
+db::session_transcripts::native_clear_pg_tests::existing_boundary_readers_treat_native_and_legacy_clears_alike_pg
+db::session_transcripts::native_clear_pg_tests::native_columns_split_counterexamples_the_legacy_markers_cannot_pg
+db::session_transcripts::native_clear_pg_tests::native_write_is_all_or_nothing_and_partial_correlation_is_refused_pg
+db::session_transcripts::native_clear_pg_tests::older_boundary_writers_keep_native_columns_and_supersede_them_pg
+db::session_transcripts::native_clear_pg_tests::resolve_marks_only_the_current_unresolved_generation_pg
+db::session_transcripts::native_clear_pg_tests::transcript_past_frontier_supersedes_and_uncorrelated_rows_are_legacy_pg
 dispatch::dispatch_cancel::pg_observability_tests::cancel_emits_dispatch_result_observability_event
 dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
 dispatch::dispatch_context::pg_rereview_tests::pg_build_review_context_rereview_uses_pr_tracking_head_when_repo_root_dirty

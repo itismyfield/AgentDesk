@@ -122,6 +122,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
         "src/db/o_channel_homes_tests.rs",
         "src/db/intake_outbox_home_tests.rs",
+        "src/db/session_transcripts_native_clear_tests.rs",
         "src/db/prompt_manifests/tests.rs",
         "src/db/scheduled_messages/postgres_tests.rs",
         "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",

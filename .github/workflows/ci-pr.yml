@@ -240,6 +240,7 @@ jobs:
               - 'src/db/relay_dead_letter.rs'
               - 'src/db/scheduled_messages/postgres_tests.rs'
               - 'src/db/session_transcripts.rs'
+              - 'src/db/session_transcripts_native_clear_tests.rs'
               - 'src/dispatch/dispatch_cancel.rs'
               - 'src/dispatch/dispatch_context.rs'
               - 'src/dispatch/dispatch_status.rs'

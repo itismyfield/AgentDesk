@@ -162,6 +162,169 @@ pub(crate) async fn finish_channel_clear_boundary_tx(
     Ok(())
 }
 
+/// Clear generation a native clear correlation was recorded under.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeClearGeneration(pub(crate) i64);
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeClearResolve {
+    Resolved,
+    /// Already resolved, or a later native write replaced this generation.
+    NotCurrent,
+}
+
+/// Native clear state of a channel's boundary row; the ticket stays opaque at this layer.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum NativeClearBoundary {
+    /// No row, or the row never carried a native correlation.
+    Legacy,
+    Resolved,
+    /// Another boundary write, or a transcript past the frontier, came after this clear.
+    Superseded,
+    Unresolved {
+        generation: NativeClearGeneration,
+        ticket: serde_json::Value,
+    },
+}
+
+// The `finish_channel_clear_boundary_tx` row update plus the correlation, in one statement so the
+// generation and its ticket commit or vanish together.
+const WRITE_NATIVE_CLEAR_BOUNDARY_SQL: &str = "INSERT INTO channel_session_clear_boundaries (
+         channel_id, cleared_at, cleared_through_id, clear_generation,
+         native_clear_generation, native_clear_ticket
+     )
+     SELECT $1, NOW(), COALESCE(MAX(id), 0), 1, 1, $2
+       FROM session_transcripts
+      WHERE channel_id = $1
+     ON CONFLICT (channel_id) DO UPDATE SET
+         cleared_at = GREATEST(
+             channel_session_clear_boundaries.cleared_at,
+             EXCLUDED.cleared_at
+         ),
+         cleared_through_id = GREATEST(
+             channel_session_clear_boundaries.cleared_through_id,
+             EXCLUDED.cleared_through_id
+         ),
+         clear_generation = channel_session_clear_boundaries.clear_generation + 1,
+         native_clear_generation = channel_session_clear_boundaries.clear_generation + 1,
+         native_clear_ticket = EXCLUDED.native_clear_ticket,
+         native_clear_resolved_at = NULL
+     RETURNING native_clear_generation";
+
+const NATIVE_CLEAR_STATE_SQL: &str = "SELECT boundary.clear_generation,
+            boundary.native_clear_generation,
+            boundary.native_clear_ticket,
+            boundary.native_clear_resolved_at IS NOT NULL,
+            EXISTS (
+                SELECT 1 FROM session_transcripts AS transcript
+                 WHERE transcript.channel_id = boundary.channel_id
+                   AND transcript.id > boundary.cleared_through_id
+            )
+       FROM channel_session_clear_boundaries AS boundary
+      WHERE boundary.channel_id = $1";
+
+type NativeClearStateRow = (i64, Option<i64>, Option<serde_json::Value>, bool, bool);
+
+/// Native variant of [`finish_channel_clear_boundary_tx`]: same lock and markers, plus the ticket
+/// the clear waits on, unresolved, under the generation this write produces.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn finish_native_channel_clear_boundary_tx(
+    mut tx: Transaction<'_, Postgres>,
+    channel_id: &str,
+    ticket: &serde_json::Value,
+) -> Result<NativeClearGeneration> {
+    let generation = write_native_channel_clear_boundary(&mut tx, channel_id, ticket).await?;
+    tx.commit()
+        .await
+        .map_err(|error| anyhow!("commit native channel clear boundary failed: {error}"))?;
+    Ok(generation)
+}
+
+async fn write_native_channel_clear_boundary(
+    tx: &mut Transaction<'_, Postgres>,
+    channel_id: &str,
+    ticket: &serde_json::Value,
+) -> Result<NativeClearGeneration> {
+    let channel_id = channel_id.trim();
+    if channel_id.is_empty() || !ticket.is_object() {
+        return Err(anyhow!(
+            "native channel clear boundary requires a channel_id and an object ticket"
+        ));
+    }
+    lock_channel_transcript_clear_fence(tx, channel_id)
+        .await
+        .map_err(|error| anyhow!("lock native channel clear boundary failed: {error}"))?;
+    let generation = sqlx::query_scalar::<_, i64>(WRITE_NATIVE_CLEAR_BOUNDARY_SQL)
+        .bind(channel_id)
+        .bind(ticket)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| anyhow!("record native channel clear boundary failed: {error}"))?;
+    Ok(NativeClearGeneration(generation))
+}
+
+/// Marks one native generation complete. The generation CAS makes a repeated or stale completion
+/// a no-op; it does not serialize the clear's effects between processes.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn resolve_native_channel_clear(
+    pool: &PgPool,
+    channel_id: &str,
+    generation: NativeClearGeneration,
+) -> Result<NativeClearResolve> {
+    let updated = sqlx::query(
+        "UPDATE channel_session_clear_boundaries
+            SET native_clear_resolved_at = clock_timestamp()
+          WHERE channel_id = $1
+            AND native_clear_generation = $2
+            AND native_clear_resolved_at IS NULL",
+    )
+    .bind(channel_id.trim())
+    .bind(generation.0)
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow!("resolve native channel clear failed: {error}"))?;
+    Ok(match updated.rows_affected() {
+        0 => NativeClearResolve::NotCurrent,
+        _ => NativeClearResolve::Resolved,
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn native_channel_clear_state(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<NativeClearBoundary> {
+    let row = sqlx::query_as::<_, NativeClearStateRow>(NATIVE_CLEAR_STATE_SQL)
+        .bind(channel_id.trim())
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| anyhow!("native channel clear state lookup failed: {error}"))?;
+    classify_native_clear_boundary(row)
+}
+
+// A generation mismatch means another writer (or an older binary) cleared after this ticket; the
+// frontier check is sound because, at an equal generation, the native write set the frontier.
+fn classify_native_clear_boundary(row: Option<NativeClearStateRow>) -> Result<NativeClearBoundary> {
+    let Some((clear_generation, Some(native_generation), ticket, resolved, after_frontier)) = row
+    else {
+        return Ok(NativeClearBoundary::Legacy);
+    };
+    if resolved {
+        return Ok(NativeClearBoundary::Resolved);
+    }
+    if clear_generation != native_generation || after_frontier {
+        return Ok(NativeClearBoundary::Superseded);
+    }
+    let ticket = ticket.ok_or_else(|| anyhow!("native clear generation without a ticket"))?;
+    Ok(NativeClearBoundary::Unresolved {
+        generation: NativeClearGeneration(native_generation),
+        ticket,
+    })
+}
+
 pub(crate) async fn fetch_recent_channel_pairs(
     pool: &PgPool,
     channel_id: &str,
@@ -1495,3 +1658,8 @@ mod clear_fence_pg_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+#[path = "session_transcripts_native_clear_tests.rs"]
+mod native_clear_pg_tests;
