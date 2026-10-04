@@ -569,6 +569,7 @@ src/
 │   │   ├── hook_server/
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── codex_ingress_tests.rs
+│   │   │   ├── native_clear_fence_tests.rs
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
@@ -1674,6 +1675,8 @@ src/
 │   │   │   └── lifecycle_decision.rs
 │   │   ├── abandon_request_store.rs
 │   │   ├── adk_session.rs
+│   │   ├── adk_session_selector.rs
+│   │   ├── adk_session_selector_checked_tests.rs
 │   │   ├── admin_host_guard.rs
 │   │   ├── admin_host_guard_tests.rs
 │   │   ├── agent_handoff.rs

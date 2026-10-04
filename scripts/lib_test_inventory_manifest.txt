@@ -1826,6 +1826,16 @@ services::claude_tui::hook_server::observation_ingress::tests::a_repeat_hook_of_
 services::claude_tui::hook_server::observation_ingress::tests::a_tmux_pane_switch_never_looks_up_the_herdr_hold
 services::claude_tui::hook_server::observation_ingress::tests::an_unmapped_hook_is_refused_until_the_first_discovery_pass_finishes
 services::claude_tui::hook_server::observation_ingress::tests::discovery_grace_uses_the_production_sixty_second_boundary
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_deferred_retry_keeps_original_nonce
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_launch_session_prompt_cannot_reclaim_after_nonce_changes
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_legacy_absent_capture_still_adopts
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_legacy_envelopeless_continuation_still_adopts
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_marker_replacement_before_authority_refuses_observation
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_refuses_old_nonce_and_missing_marker_without_side_effects
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_restored_pending_retains_canonical_nonce
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_same_nonce_pending_resolves_after_transcript_arrives
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_unmapped_capture_checks_its_pane_not_empty_name
+services::claude_tui::hook_server::observation_ingress::tests::native_clear_fence_tests::native_fence_unreadable_marker_holds_pending_until_same_nonce_returns
 services::claude_tui::hook_server::observation_ingress::windows_tests::a_claude_transcript_without_supported_file_identity_is_refused
 services::claude_tui::hook_server::observation_ingress::windows_tests::a_rollout_without_supported_file_identity_is_refused
 services::claude_tui::hook_server::relay_receipts::tests::ledger_retention_covers_every_deliverable_request
@@ -2666,6 +2676,7 @@ services::discord::adk_session::compact_threshold_tests::compact_pct_for_claude_
 services::discord::adk_session::compact_threshold_tests::compact_pct_for_claude_uses_claude_specific_override
 services::discord::adk_session::context_usage_tests::context_usage_percent_is_bounded_to_window
 services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strips_profile_label
+services::discord::adk_session::selector::selector_checked_tests::checked_selector_http_ack_and_errors_are_not_best_effort
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
 services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg
