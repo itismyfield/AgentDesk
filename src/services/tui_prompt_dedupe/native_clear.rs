@@ -1,11 +1,12 @@
-//! Dormant native-clear orchestration. Canonical binding records alone decide commitment.
+//! Native-clear orchestration behind the runtime switch. Canonical binding records alone decide
+//! commitment.
 
 use super::{
     binding_context::{BindingContext, SpawnNonceMarker, observe_spawn_nonce_marker},
     binding_events::{self, BindingCause, BindingEvent, BindingTarget, SourceId},
 };
 use crate::services::{
-    claude_tui::host_input::NativeClearSubmission,
+    claude_tui::host_input::{InputRefusal, MutationGate, NativeClearSubmission},
     tmux_common::{self, TmuxSourceAuthority},
 };
 use std::{future::Future, io, pin::Pin, time::Duration};
@@ -61,8 +62,28 @@ pub(crate) enum NativeClearRestart {
     Hold,
 }
 
+/// Admission form of [`judge_native_clear_restart`]: a ticket for another channel or tmux session
+/// than the one being admitted holds instead of acting on that other target.
+pub(crate) fn judge_native_clear_admission(
+    boundary: &crate::db::session_transcripts::NativeClearBoundary,
+    local_host: Option<&str>,
+    channel_id: u64,
+    tmux_session: Option<&str>,
+) -> NativeClearRestart {
+    use crate::db::session_transcripts::NativeClearBoundary;
+    if let NativeClearBoundary::Unresolved { ticket, .. } = boundary {
+        let target = serde_json::from_value::<ClearTicket>(ticket.clone());
+        if !target.is_ok_and(|t| {
+            t.context.channel_id == Some(channel_id)
+                && Some(t.context.tmux_session.as_str()) == tmux_session
+        }) {
+            return NativeClearRestart::Hold;
+        }
+    }
+    judge_native_clear_restart(boundary, local_host)
+}
+
 // Host identity comes from the caller's existing node identity, never from a selector.
-#[allow(dead_code)]
 pub(crate) fn judge_native_clear_restart(
     boundary: &crate::db::session_transcripts::NativeClearBoundary,
     local_host: Option<&str>,
@@ -100,7 +121,11 @@ pub(crate) fn judge_native_clear_restart(
         }
         if current_execution(&ticket) {
             if let Some(commit) = clear_commit(&ticket, &records) {
-                return NativeClearRestart::CompleteDurable(commit);
+                // The live waiter's projection check: a moved or rejected commit is not completed.
+                return match confirmed_visit(&ticket, &commit) {
+                    Some(_) => NativeClearRestart::CompleteDurable(commit),
+                    None => NativeClearRestart::Hold,
+                };
             }
         }
         NativeClearRestart::ResetUnresolved
@@ -108,13 +133,40 @@ pub(crate) fn judge_native_clear_restart(
     .unwrap_or(NativeClearRestart::Hold)
 }
 
-#[allow(dead_code)]
+/// The live waiter for `tmux` when its marker, launch context, host and pinned source all name the
+/// running execution; `None` keeps the managed reset.
+pub(crate) fn capture_live_clear(channel_id: u64, tmux: &str) -> Option<CanonicalClearWaiter> {
+    let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(tmux) else {
+        return None;
+    };
+    let context = super::binding_context::pane_context(tmux, &nonce)?;
+    let host = super::binding_context::stable_host_identity();
+    if context.channel_id != Some(channel_id)
+        || context.host.as_deref().is_none_or(|h| h.trim().is_empty())
+        || context.host != host
+    {
+        return None;
+    }
+    let old = binding_events::pinned_source(channel_id, tmux).ok()??;
+    CanonicalClearWaiter::capture(context, old).ok()
+}
+
+// Native input goes only to the execution this ticket captured.
+impl MutationGate for ClearTicket {
+    fn admit(&self, session: &str) -> Result<(), InputRefusal> {
+        if session == self.context.tmux_session && current_execution(self) {
+            Ok(())
+        } else {
+            Err(InputRefusal::IdentityMismatch)
+        }
+    }
+}
+
 pub(crate) struct CanonicalClearWaiter {
     pub ticket: ClearTicket,
     pub changed: watch::Receiver<u64>,
 }
 
-#[allow(dead_code)]
 impl CanonicalClearWaiter {
     // Subscribe before reading the baseline so a fast hook cannot be lost.
     pub(crate) fn capture(context: BindingContext, old: SourceId) -> io::Result<Self> {
@@ -186,19 +238,10 @@ impl CanonicalClearWaiter {
                     if !current_execution(&self.ticket) {
                         return (ClearDecision::Hold(Some(commit)), None);
                     }
-                    let history = binding_events::claude_history(
-                        self.ticket.context.channel_id.unwrap_or(0),
-                        &self.ticket.context.tmux_session,
-                        Some(&self.ticket.context.execution_nonce),
-                    );
-                    let Ok((_, history)) = history else {
+                    let Some(pin) = confirmed_visit(&self.ticket, &commit) else {
                         return (ClearDecision::Hold(Some(commit)), None);
                     };
-                    let visit = history.awaiting.as_ref().or(history.current.as_ref());
-                    if !history.complete || !visit.is_some_and(|v| v.session == commit.session) {
-                        return (ClearDecision::Hold(Some(commit)), None);
-                    }
-                    commit.source = visit.and_then(|v| v.pin.clone());
+                    commit.source = pin;
                     return (ClearDecision::Committed(commit), None);
                 }
                 if !current_execution(&self.ticket) {
@@ -209,6 +252,18 @@ impl CanonicalClearWaiter {
         )
         .unwrap_or((ClearDecision::Hold(None), None))
     }
+}
+
+// The pane's current projection still visits the committed session; `Some` carries its pin.
+fn confirmed_visit(ticket: &ClearTicket, commit: &ClearCommit) -> Option<Option<SourceId>> {
+    let (_, history) = binding_events::claude_history(
+        ticket.context.channel_id.unwrap_or(0),
+        &ticket.context.tmux_session,
+        Some(&ticket.context.execution_nonce),
+    )
+    .ok()?;
+    let visit = history.awaiting.as_ref().or(history.current.as_ref())?;
+    (history.complete && visit.session == commit.session).then(|| visit.pin.clone())
 }
 
 fn current_execution(ticket: &ClearTicket) -> bool {
@@ -265,7 +320,6 @@ fn clear_commit(ticket: &ClearTicket, records: &[BindingEvent]) -> Option<ClearC
 
 // Synchronous callbacks must honor the deadline and hold no lock across an async callback.
 // decide(true) must retire the execution under the canonical waiter's fallback fence.
-#[allow(dead_code)]
 pub(crate) trait NativeClearHost: Send + 'static {
     fn changes(&self) -> watch::Receiver<u64>;
     fn prepare(&mut self, deadline: Instant) -> Step<'_, bool>;
@@ -279,7 +333,6 @@ pub(crate) trait NativeClearHost: Send + 'static {
 }
 
 // Dropping the receiver never cancels the worker or releases its transition guard early.
-#[allow(dead_code)]
 pub(crate) fn start_native_clear<H: NativeClearHost>(
     host: H,
     admission: ClearAdmission,
@@ -288,9 +341,16 @@ pub(crate) fn start_native_clear<H: NativeClearHost>(
     let (send, recv) = oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
     let end = Instant::now() + NATIVE_CLEAR_BUDGET;
+    #[cfg(test)]
+    let test_root = binding_events::test_root();
     tokio::task::spawn_blocking(move || {
+        // Test binding roots are per thread; the worker reads the caller's.
+        #[cfg(test)]
+        binding_events::set_test_root(test_root.as_deref());
         let result = runtime.block_on(run_until(host, admission, end));
         drop(guard);
+        #[cfg(test)]
+        binding_events::set_test_root(None);
         let _ = send.send(result);
     });
     recv

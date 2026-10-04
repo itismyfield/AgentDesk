@@ -1900,13 +1900,14 @@ redeploy leaves the old values live in the plist.
   write. Per-turn prompt assembly joins the shared boundary while reading
   `session_transcripts`, so restart or worker reassignment cannot cross a clear.
   This adds no leader lease, singleton, or routing decision.
-- #6577 native clear correlation (migration 0135, dormant) — **Shared boundary
+- #6577 native clear correlation (migration 0135, `runtime.native_clear_enabled`, default off) — **Shared boundary
   row, worker-local judgment**: a native clear stores its opaque ticket and
   generation on the same `channel_session_clear_boundaries` row, in the statement
   that advances `clear_generation`, plus a completion mark. Only the node named
   by the ticket's host may act on an unresolved row; the completion CAS only makes
-  completion idempotent and refuses stale generations. No lease or singleton; no
-  production caller yet.
+  completion idempotent and refuses stale generations. No lease or singleton; the
+  user clear and the intake admission that settles an unresolved row are its only
+  callers, both only while the switch is on.
 - #4551 fresh routine context severance and verified start evidence — **Existing
   leader-owned routine state, worker-local provider launch**: the routine
   executor records turn-matched start evidence in the shared `routine_runs` row,

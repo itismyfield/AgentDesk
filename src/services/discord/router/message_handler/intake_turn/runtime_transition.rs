@@ -42,9 +42,22 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     // deferred wake policy (the fixed 60s fail-open backstop) rather than the race-loss
     // edge-trigger recheck, whose own transition wait re-entered intake against
     // a lock it had itself made unacquirable, requeueing on every rotation.
-    match try_intake_runtime_transition_after_redirect(shared, channel_id, fallback_state).await {
-        Ok(transition) => Ok(Some(transition)),
-        Err(_) => {
+    let admits = crate::services::discord::commands::native_clear_admits;
+    let admitted = match try_intake_runtime_transition_after_redirect(
+        shared,
+        channel_id,
+        fallback_state,
+    )
+    .await
+    {
+        Ok(mut t) => admits(http, shared, provider, channel_id, &mut t.state)
+            .await
+            .then_some(t),
+        Err(_) => None,
+    };
+    match admitted {
+        Some(transition) => Ok(Some(transition)),
+        None => {
             tracing::warn!(
                 channel_id = channel_id.get(),
                 "session transition is busy; preserving intake immediately as a durable queued intervention"

@@ -97,6 +97,7 @@ src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
+src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
@@ -296,6 +297,7 @@ services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::control::native::tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
@@ -1043,6 +1045,13 @@ services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_ou
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
+services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
+services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
+services::discord::commands::control::native::tests::native_clear_marks_completion_before_the_worker_releases_admission_pg
+services::discord::commands::control::native::tests::native_clear_without_a_clear_hook_falls_back_to_the_managed_reset_pg
+services::discord::commands::control::native::tests::restart_admission_holds_undecidable_rows_until_a_new_clear_pg
+services::discord::commands::control::native::tests::restart_admission_settles_each_unresolved_native_clear_row_pg
+services::discord::commands::control::native::tests::switched_off_or_unowned_clear_keeps_the_managed_reset_pg
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
