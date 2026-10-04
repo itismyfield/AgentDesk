@@ -395,5 +395,8 @@ pub(super) fn dirty_after_guarded_save(outcome: GuardedSaveOutcome) -> bool {
 // over ~380 production lines is the test-residue ratio the readability gate
 // flags — the module path and every `super::*` reference are unchanged.
 #[cfg(test)]
+#[path = "lock_liveness_tests.rs"]
+mod lock_liveness_tests;
+#[cfg(test)]
 #[path = "guarded_persist_tests.rs"]
 mod tests;

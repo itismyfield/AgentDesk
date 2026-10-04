@@ -876,6 +876,7 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
+│   │   │   │   │   │   ├── captured_terminal_admission.rs
 │   │   │   │   │   │   └── claude_terminal_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── claude_e_stamp.rs
@@ -1520,6 +1521,7 @@ src/
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
+│   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
 │   │   │   │   ├── o_panel.rs
 │   │   │   │   └── rollover_guard.rs

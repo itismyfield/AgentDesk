@@ -3846,6 +3846,8 @@ services::discord::inflight::save_store::identity_gate::host_locator::tests::hos
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_captured_terminal_keeps_scheduler_timer_and_loopback_live
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_uncaptured_codex_terminal_keeps_scheduler_timer_and_loopback_live
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::claude_tui_runtime_stamp_accepts_none_to_projects_output_path
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::codex_terminal_range_cold_admission_and_exit_owner_5264
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots
@@ -4918,6 +4920,7 @@ services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::ac
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_orders_episode_authority_before_hold_and_return
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_preserves_normal_adoption_and_rollback_coordinates
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_rejects_same_anchor_successor_without_durable_mutation
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::host_lookup_finishes_before_exact_adoption_can_hold_a_guard
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::crossed_codex_turn_forces_watcher_replacement_before_normal_reuse
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
@@ -7836,6 +7839,7 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transie
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::stream_receiver_adapter_wakes_on_ready_frame
+services::discord::turn_bridge::stream_tick::guarded_persist::lock_liveness_tests::contended_stream_tick_keeps_scheduler_timer_and_loopback_live
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epoch
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::candidate_cleanup_covers_saved_competing_reowned_and_missing_rows
