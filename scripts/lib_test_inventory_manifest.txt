@@ -6976,6 +6976,7 @@ services::discord::tmux_reaper::tests::rejects_wrappers_without_required_input_f
 services::discord::tmux_reaper::tests::stale_busy_finalize_cannot_release_newer_mailbox_identity
 services::discord::tmux_reaper::tests::stale_busy_finalize_uses_identity_gate_and_returns_global_slot
 services::discord::tmux_reaper::tests::stale_busy_guard_preserves_respawned_or_reowned_turn
+services::discord::tmux_restart_handoff::mailbox_tests::watcher_death_handoff_releases_only_the_relinquished_turn_token
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_keeps_different_completion_footer_target
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_notice_skips_missing_current_message
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_notice_skips_rebind_origin
