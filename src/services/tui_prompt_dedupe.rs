@@ -292,6 +292,7 @@ impl PromptKey {
 }
 
 mod extract;
+pub(crate) mod native_clear;
 mod observation;
 mod prompt_identity;
 mod runtime_binding;

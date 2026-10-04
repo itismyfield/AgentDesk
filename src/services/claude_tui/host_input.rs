@@ -3,6 +3,74 @@
 
 use std::process::Output;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeClearSubmission {
+    NotSent,
+    Confirmed,
+    Indeterminate,
+}
+
+#[allow(dead_code)]
+pub(crate) fn submit_native_clear_tmux(
+    target: &ResolvedSessionTarget,
+    deadline: tokio::time::Instant,
+) -> NativeClearSubmission {
+    let InputTarget::Tmux(session) = InputTarget::from_session_target(target) else {
+        return NativeClearSubmission::NotSent;
+    };
+    super::composer_lock::try_with_composer_mutation_lock(&session, || {
+        native_clear_once(
+            &session,
+            deadline,
+            |remaining| tmux::capture_pane_timeout(&session, -80, remaining),
+            |keys, remaining| {
+                tmux::send_keys_timeout(&session, keys, remaining).is_ok_and(|o| o.status.success())
+            },
+        )
+    })
+    .unwrap_or(NativeClearSubmission::NotSent)
+}
+
+fn native_clear_once(
+    session: &str,
+    deadline: tokio::time::Instant,
+    mut capture: impl FnMut(std::time::Duration) -> Option<String>,
+    mut send: impl FnMut(&[&str], std::time::Duration) -> bool,
+) -> NativeClearSubmission {
+    let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
+    let budget = remaining();
+    if budget.is_zero() {
+        return NativeClearSubmission::NotSent;
+    }
+    let Some(before) = capture(budget) else {
+        return NativeClearSubmission::NotSent;
+    };
+    if !native_clear_composer_empty(&before) || remaining().is_zero() {
+        return NativeClearSubmission::NotSent;
+    }
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        "claude", session, "/clear",
+    );
+    // One command submits only literal slash-command characters and Enter; no retry follows.
+    if !send(&["/clear", "Enter"], remaining()) {
+        return NativeClearSubmission::Indeterminate;
+    }
+    if !remaining().is_zero()
+        && capture(remaining()).is_some_and(|c| native_clear_composer_empty(&c))
+    {
+        NativeClearSubmission::Confirmed
+    } else {
+        NativeClearSubmission::Indeterminate
+    }
+}
+
+pub(crate) fn native_clear_composer_empty(capture: &str) -> bool {
+    use crate::services::tmux_common as tc;
+    tc::tmux_capture_indicates_claude_tui_exact_empty_composer(capture)
+        && !tc::tmux_capture_indicates_claude_tui_busy(capture)
+        && !tc::tmux_capture_indicates_claude_tui_interactive_modal(capture)
+}
+
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,
