@@ -43,7 +43,10 @@ fn ids(item: &PendingQueueItem) -> Vec<u64> {
 }
 fn sync_existing(path: &Path) -> io::Result<()> {
     if path.exists() {
-        std::fs::File::open(path)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .sync_all()?;
         runtime_store::fsync_parent_dir(path)?;
     }
     Ok(())
