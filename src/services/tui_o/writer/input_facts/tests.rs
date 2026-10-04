@@ -281,7 +281,9 @@ fn g0_discovery_install_and_o_binding_supply_only_the_new_parent() {
     let write = |id: &str, header: Value, time: u64| {
         let path = sessions.join(format!("rollout-{id}.jsonl"));
         std::fs::write(&path, format!("{header}\n")).unwrap();
-        std::fs::File::open(&path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(time))
             .unwrap();

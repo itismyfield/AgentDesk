@@ -474,6 +474,16 @@ pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<b
     commit(proposal, Plan::Rejected(reason)).map(|c| c == Committed::Appended)
 }
 
+/// Reads the existing writer's Pending identity without loading, appending, or publishing a record.
+pub(crate) fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) -> Option<u64> {
+    let path = log_path(channel_id).ok().flatten()?;
+    let logs = lock_logs();
+    let writer = logs.get(&path)?.writer.as_ref()?;
+    let pending = writer.panes.get(tmux_session)?.pending.as_ref()?;
+    let same = matches!(&pending.new, BindingTarget::Pending { payload_session_id: id, .. } if id == session);
+    same.then_some(pending.seq)
+}
+
 /// The pane's current source, when a verified record pinned it.
 pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
     let mut pinned = None;

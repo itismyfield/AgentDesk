@@ -148,6 +148,10 @@ pub(crate) fn observe_binding_hook(
         published_at: published_at.map(|t| t.with_timezone(&chrono::Utc)),
         ..HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload)
     };
+    let envelope = headers
+        .get(BINDING_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| decode_binding_header(h).ok());
     if command == payload_session
         && !(provider == "codex"
             && HookEventKind::from_path(event) == HookEventKind::SessionStart
@@ -158,15 +162,23 @@ pub(crate) fn observe_binding_hook(
         #[cfg(test)]
         let prompt = prompt
             && !crate::services::claude_tui::source_verify::n2b_mutant("r5-reclaim-ingress-off");
-        if provider == "claude" && prompt {
-            adoption_retry::reclaim_from_prompt(command, &hook);
+        if provider == "claude"
+            && let Err(reason) =
+                adoption_retry::observe_launch_hook(command, &hook, envelope.as_ref(), prompt)
+        {
+            return IngressOutcome::NotDurable(reason);
         }
         #[cfg(test)]
         if provider == "claude"
             && !prompt
             && crate::services::claude_tui::source_verify::n2b_mutant("r5-ingress-start")
         {
-            return match adoption_retry::adopt_from_hook(command, payload_session, &hook) {
+            return match adoption_retry::adopt_from_enveloped_hook(
+                command,
+                payload_session,
+                &hook,
+                envelope.as_ref(),
+            ) {
                 AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
                 AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
                 AdoptionHttp::Skipped(skip) => classify_skip(skip, command, None),
@@ -174,10 +186,6 @@ pub(crate) fn observe_binding_hook(
         }
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
     }
-    let envelope = headers
-        .get(BINDING_HEADER)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| decode_binding_header(h).ok());
     match provider {
         "claude" => {}
         "codex" => {
@@ -195,7 +203,12 @@ pub(crate) fn observe_binding_hook(
     }
     #[cfg(test)]
     crate::services::tui_prompt_dedupe::before_authority(command);
-    match adoption_retry::adopt_from_hook(command, payload_session, &hook) {
+    match adoption_retry::adopt_from_enveloped_hook(
+        command,
+        payload_session,
+        &hook,
+        envelope.as_ref(),
+    ) {
         AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
         AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
         AdoptionHttp::Skipped(skip) => classify_skip(skip, command, envelope.as_ref()),

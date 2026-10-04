@@ -132,11 +132,17 @@ async fn herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_an
             ENDPOINT_MISSING,
         ),
     ];
+    // Windows reads the Unix socket path as not absolute, so the endpoint is refused before restore.
+    let not_off = if cfg!(windows) {
+        ENDPOINT_MISSING
+    } else {
+        RESTORE_RESUME_NOT_OFF
+    };
     let unverified = [
         RestoreResume::Unverified(RestoreUnverified::NoPeer),
         RestoreResume::On,
     ]
-    .map(|reading| (Some(endpoint()), RESTORE_RESUME_NOT_OFF, Some(reading)));
+    .map(|reading| (Some(endpoint()), not_off, Some(reading)));
     let cases = cases.map(|(endpoint, reason)| (endpoint, reason, None));
     for (endpoint, reason, reading) in cases.into_iter().chain(unverified) {
         let host = Arc::new(FakeHost::created("pane-1").reading(reading.as_slice()));
@@ -676,6 +682,16 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
     let root = tempfile::tempdir().unwrap();
     let ready = |channel| o_ready_at(Some(root.path()), channel);
     let _gate = force_writer_accepts(Some(true));
+    // Windows has no directory fsync, so the O store refuses to open and no channel is ready.
+    if cfg!(windows) {
+        use crate::services::tui_o::store::{OStore, StoreConfig};
+        let opened = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path());
+        let refused = opened.err().map(|error| error.kind());
+        assert_eq!(refused, Some(std::io::ErrorKind::Unsupported));
+        let _owned = force_channels(&channels);
+        assert!(!ready(owned));
+        return;
+    }
     let (store, era) = o_store_for_test(root.path(), &[owned]);
     {
         let _owned = force_channels(&channels);

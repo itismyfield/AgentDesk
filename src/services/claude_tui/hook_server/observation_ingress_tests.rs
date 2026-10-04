@@ -206,6 +206,9 @@ impl Drop for Ingress {
     }
 }
 
+#[path = "native_clear_fence_tests.rs"]
+mod native_clear_fence_tests;
+
 pub(crate) fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding {
     TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::ClaudeTui,
