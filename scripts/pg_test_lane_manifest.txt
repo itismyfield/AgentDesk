@@ -1346,6 +1346,7 @@ services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
 services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
+services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg
 services::routines::reliability_pg_tests::consecutive_failure_alert_fires_once_per_streak_pg
 services::routines::reliability_pg_tests::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg
 services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
