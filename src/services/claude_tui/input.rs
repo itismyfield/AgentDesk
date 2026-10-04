@@ -9,7 +9,7 @@ use super::host_input;
 
 #[allow(dead_code)]
 pub(crate) fn submit_native_clear(
-    target: &crate::services::session_host::ResolvedSessionTarget,
+    target: &host_input::InputTarget,
     gate: &dyn host_input::MutationGate,
     deadline: tokio::time::Instant,
 ) -> host_input::NativeClearSubmission {

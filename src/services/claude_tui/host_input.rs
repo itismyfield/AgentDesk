@@ -12,7 +12,7 @@ pub(crate) enum NativeClearSubmission {
 
 #[allow(dead_code)]
 pub(crate) fn submit_native_clear_tmux(
-    target: &ResolvedSessionTarget,
+    target: &InputTarget,
     gate: &dyn MutationGate,
     deadline: tokio::time::Instant,
 ) -> NativeClearSubmission {
@@ -21,7 +21,8 @@ pub(crate) fn submit_native_clear_tmux(
         let _ = (target, gate, deadline);
         return NativeClearSubmission::NotSent;
     }
-    let InputTarget::Tmux(session) = InputTarget::from_session_target(target) else {
+    // The caller supplies resolved evidence; this dormant seam does not activate resolution.
+    let InputTarget::Tmux(session) = target else {
         return NativeClearSubmission::NotSent;
     };
     super::composer_lock::try_with_composer_mutation_lock(&session, || {
@@ -868,7 +869,7 @@ mod tests {
             };
             assert_eq!(
                 super::super::input::submit_native_clear(
-                    &target,
+                    &InputTarget::from_session_target(&target),
                     &LegacyTmuxGate,
                     tokio::time::Instant::now() + std::time::Duration::from_secs(20)
                 ),
