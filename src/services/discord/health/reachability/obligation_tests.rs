@@ -1,16 +1,4 @@
-//! Canonical framing tests, and the Rust half of the Rust↔Python equivalence
-//! gate (#5071 T4-B2a = 4987 §-1.5 blocker B1′).
-//!
-//! The equivalence is proved through the golden corpus rather than by running
-//! both runtimes in one process: this file asserts Rust's bytes equal
-//! `tests/fixtures/relay_obligation/<case>.expected`, and
-//! `scripts/check_reachability_canonical_equivalence.py` asserts Python's bytes
-//! equal the same files. Equality with a common third value IS byte-equality
-//! between the two, and it is the shape 4987 §2.4 asks for ("both validated
-//! against the same golden corpus"). It also makes a one-sided mutation die on
-//! exactly one side, which is what the design row requires — a mutation runner
-//! that changed BOTH implementations identically would leave the corpus red
-//! too, because the corpus is a third party to both.
+//! Canonical framing and golden-corpus regression tests.
 
 use std::path::{Path, PathBuf};
 
@@ -351,10 +339,7 @@ fn one_non_blank_block_among_blank_ones_is_an_obligation() {
     assert_eq!(reasons(&scan), vec![ObligationReason::AssistantText]);
 }
 
-/// The timestamp rule is the corpus's most divergence-prone rung, because the
-/// Python half runs `time.strptime`, which accepts single-digit fields, and
-/// nothing forces a Rust date parser to agree. Pinned directly as well as
-/// through the corpus.
+/// Timestamp parsing preserves the historical accepted field shapes.
 #[test]
 fn the_timestamp_rung_accepts_what_the_python_half_accepts() {
     for (timestamp, expected) in [
@@ -399,16 +384,7 @@ fn a_line_that_is_not_utf8_is_malformed_json() {
     assert_eq!(reasons(&scan), vec![ObligationReason::MalformedJson]);
 }
 
-/// A residual difference, pinned rather than asserted.
-///
-/// `scripts/check_reachability_canonical_equivalence.py` lists the shapes on
-/// which the two halves are known NOT to agree, and one of them is that
-/// Python's `json` accepts the non-RFC-8259 literals while `serde_json`'s value
-/// parser rejects them: `NaN` alone on a line is a float — hence a
-/// `NON_ASSISTANT_RECORD` — over there, and unparsable here. No corpus case can
-/// reach it, so this test is what keeps the claim measured. If serde_json ever
-/// starts accepting these, this goes red and the residual list is corrected in
-/// the same change rather than rotting into a false statement.
+/// Non-RFC JSON numeric literals remain malformed transcript records.
 #[test]
 fn the_json_parsers_disagree_about_the_non_rfc_literals() {
     for line in [&b"NaN\n"[..], b"Infinity\n", b"-Infinity\n"] {

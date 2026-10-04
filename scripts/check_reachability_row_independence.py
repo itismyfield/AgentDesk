@@ -26,8 +26,7 @@ Two halves, both required:
    `include!("...")` is followed, transitively.
 2. **Change-surface ownership.** `docs/agent-maintenance/change-surfaces.md`
    must carry the `relay_reachability` surface with the canonical globs that
-   cover every file in the tree, the `scripts/relay_watchdog.py` companion-edit
-   requirement of 4987 §2.4/§9.4, and the lint-not-type-proof statement. A tree
+   cover every file in the tree and the lint-not-type-proof statement. A tree
    with no owner entry is how the next slice adds a file nobody reviews as part
    of this surface.
 
@@ -110,9 +109,6 @@ REQUIRED_SURFACE_GLOBS = (TREE_ROOT_FILE, f"{TREE_DIR}/**")
 # Statements the surface entry must carry. Compared after whitespace and
 # markdown emphasis are normalized away, so the doc may wrap and bold freely.
 REQUIRED_SURFACE_MARKERS = (
-    # 4987 §2.4/§9.4: the obligation rule has two implementations and they must
-    # move together, or the second oracle is born.
-    "scripts/relay_watchdog.py",
     # 4987 §-1.5: the downgrade must survive in the operator-facing doc too.
     "lint, not a type proof",
 )

@@ -2064,14 +2064,8 @@ time for diagnostics; neither is a stored approval value.
   The tree is unix-gated: its transcript coordinate is the `(dev, ino)` file
   identity of 4987 §-1.3, and `std::fs::Metadata` exposes no stable Windows
   equivalent.
-- status: **inactive library.** #5071 T4-B1 landed the verdict vocabulary, the
-  row-independent transcript resolution ladder, and the bounded incremental tail
-  reader; #5071 T4-B2a added the canonical obligation framing and the machine
-  that proves the Rust and Python definitions of it agree. There is still no
-  consumer at all — no tick, no task, no health field, no recovery input.
-  Production verdicts are unchanged, and this surface does not count as
-  "4987 S1 active": T4-B2b lands the durable obligation ledger, T4-B2c wires the
-  observation task, and observation starts there.
+- status: active in-band observation and health composition. The external
+  input is retired; composition retains the absent-input `Unknown` behavior.
 - invariants: obligation production is independent of the inflight row
   (4987 §-1.5 I14), and no verdict authorizes a destructive action or a
   redelivery (4987 §7.1 I15, S7 stays NO-GO). `TransportUnknown` is neither
@@ -2080,23 +2074,10 @@ time for diagnostics; neither is a stored approval value.
   success→commit crash window looks like a loss and is not one (4987 §-1.3b).
   `ReachabilityVerdict != Reachable` denies GREEN whatever the structural
   signals say (4987 §4.1); the converse does not hold.
-- companion edits: changing the obligation rule REQUIRES changing
-  `scripts/relay_watchdog.py` (`assistant_blocks_from_lines` /
-  `is_harness_control_assistant_record`) and the golden fixture corpus in the
-  same PR. 4987 §2.4: two implementations of "assistant text block" are two
-  oracles, and one of them is then always wrong. Since #5071 T4-B2a that is
-  enforced rather than requested: both halves are compared byte for byte against
-  the golden corpus in `tests/fixtures/relay_obligation/` — Python by
-  `scripts/check_reachability_canonical_equivalence.py`, Rust by
-  `services::discord::health::reachability::obligation::tests` — over the
-  canonical `(generation, start, end, identity, reason)` schema plus its
-  `next_offset` trailer. The trailer is inside the compared bytes because every
-  framing rule is a cursor rule; measured on this corpus, omitting it lets the
-  "a partial line advances the cursor" mutation survive every case. The corpus
-  is a THIRD PARTY to both, so a change applied identically to the two
-  implementations still turns it red. Editing either framing rule means running
-  `just reachability-mutation-runner`, which applies each declared one-sided
-  mutation and requires it to die.
+- companion edits: changing the obligation rule requires reviewing the golden
+  fixture corpus in `tests/fixtures/relay_obligation/` and running
+  `just reachability-mutation-runner`. Rust framing and cursor rules remain
+  pinned by `services::discord::health::reachability::obligation::tests`.
 - non_guarantees: `scripts/check_reachability_row_independence.py` (run by
   `scripts/ci-script-checks.sh`) enforces I14 as a source **lint, not a type
   proof** — `InflightTurnState` is `pub(in crate::services::discord)`, so the

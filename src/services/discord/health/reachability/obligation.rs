@@ -1,33 +1,20 @@
 //! Canonical obligation extraction — 4987 S1 second half + blocker B1′
 //! (#5071 T4-B2a).
 //!
-//! INACTIVE, like the rest of the tree — see [`super`] module docs. This is
-//! the Rust half of 4987 §2.2/§2.4's durable-obligation rule;
-//! `scripts/relay_watchdog.py`'s `canonical_obligation_records` is the Python
-//! half, compared byte for byte against `tests/fixtures/relay_obligation/`
-//! via `scripts/check_reachability_canonical_equivalence.py` — proof of
-//! equivalence only for the cases in that corpus, not over all inputs.
+//! Durable-obligation framing is checked against the Rust golden corpus.
 //!
 //! Canonical schema (4987 §-1.5): one record per physical line,
 //! `(generation, start, end, identity, reason)`. `start`/`end` are absolute
 //! half-open byte offsets (the receipt's `IncarnationRange` coordinate);
 //! `identity` is `(dev, ino)`, so a rotation cannot make two files' offsets
 //! comparable; `reason` is emitted for EVERY line, not only obligations, so a
-//! silently-dropped record type cannot pass the equivalence gate unnoticed.
+//! silently-dropped record type cannot pass the golden-corpus test unnoticed.
 //! See [`classify_line`] for the framing ladder (partial line, CRLF,
 //! multi-byte, rotation, oversized line).
 
 use super::discovery::TranscriptFileId;
 
-/// First line of every canonical encoding. A version, not decoration: the
-/// equivalence gate compares whole files, so a schema change that both sides
-/// make in lockstep still has to move this string, and a fixture regenerated
-/// under an old schema stops matching.
-///
-/// The canonical ENCODING exists to be compared against the Python half, so
-/// its consumers are this file's fixture test and
-/// `scripts/check_reachability_canonical_equivalence.py` — a later slice's
-/// observation task will consume [`scan_canonical`], not its serialization.
+/// Versioned encoding header pinned by the golden-corpus fixture test.
 pub(in crate::services::discord) const CANONICAL_SCHEMA_HEADER: &str =
     "relay_obligation_canonical_v1";
 
@@ -35,14 +22,10 @@ pub(in crate::services::discord) const CANONICAL_SCHEMA_HEADER: &str =
 /// every one of which starts with the generation.
 pub(in crate::services::discord) const CANONICAL_NEXT_OFFSET_KEY: &str = "next_offset";
 
-/// The model identity Claude stamps on harness-authored assistant rows.
-/// Mirrors `relay_watchdog.py`'s `is_harness_control_assistant_record`, whose
-/// docstring records WHY the marker and not the banner text is the test: users
-/// and real answers may legitimately contain the same words.
+/// Harness-authored rows carry this marker; banner text alone is not evidence.
 const HARNESS_CONTROL_MODEL: &str = "<synthetic>";
 
-/// The transcript timestamp format, applied to the first 19 characters exactly
-/// as `relay_watchdog.py`'s `parse_transcript_ts` does.
+/// Timestamp format applied to the first 19 characters.
 const TRANSCRIPT_TS_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 
 /// How a physical line was classified. Every line gets exactly one.
@@ -80,11 +63,11 @@ pub(in crate::services::discord) enum ObligationReason {
 
 impl ObligationReason {
     /// The canonical spelling. These strings are the wire format the
-    /// equivalence gate compares, so they are written out one arm at a time
+    /// golden-corpus test compares, so they are written out one arm at a time
     /// with no catch-all: a new reason cannot reach the corpus without someone
-    /// choosing its spelling here and in the Python table.
+    /// choosing its spelling here and in the golden corpus.
     ///
-    /// Consumed by the encoding, hence by the equivalence corpus — see
+    /// Consumed by the encoding, hence by the golden corpus — see
     /// [`CANONICAL_SCHEMA_HEADER`].
     pub(in crate::services::discord) fn as_canonical_str(self) -> &'static str {
         match self {
@@ -166,18 +149,8 @@ impl ObligationScan {
 ///    `text` ⇒ `NoAssistantText`;
 /// 7. otherwise ⇒ `AssistantText`.
 ///
-/// Steps 3–7 are `relay_watchdog.py`'s `_assistant_blocks_from_record` read as
-/// a decision tree instead of as a filter — that function answers "which
-/// blocks", this one answers "and if none, why not", which is the half the
-/// canonical schema needs and the watchdog never had to name.
-///
-/// The typed accessors below are part of the agreement, not a Rust convenience:
-/// `as_array` on `message.content` and `as_str` on a block's `text` make a
-/// wrong-typed field read as ABSENT, and a JSONL transcript is not a
-/// schema-checked channel, so those rows arrive. `relay_watchdog.py`'s
-/// `_canonical_typed_content` narrows the same two fields for the same reason —
-/// without it Python raises where this classifies — and the
-/// `schema_type_blocks` corpus case pins the two answers together.
+/// Typed accessors classify wrong-typed content as absent instead of panicking.
+/// The `schema_type_blocks` corpus case pins this behavior.
 fn classify_line(line: &[u8]) -> ObligationReason {
     if line.is_empty() {
         return ObligationReason::BlankLine;
@@ -232,9 +205,7 @@ fn classify_line(line: &[u8]) -> ObligationReason {
     }
 }
 
-/// Whether `relay_watchdog.py`'s `parse_transcript_ts` would accept this
-/// string: its first 19 CHARACTERS (Python slices code points, so this one
-/// does too) parsed as [`TRANSCRIPT_TS_FORMAT`].
+/// Parse the first 19 Unicode characters with the transcript timestamp format.
 fn transcript_timestamp_parses(timestamp: &str) -> bool {
     let head: String = timestamp.chars().take(19).collect();
     chrono::NaiveDateTime::parse_from_str(&head, TRANSCRIPT_TS_FORMAT).is_ok()

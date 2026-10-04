@@ -82,8 +82,7 @@ GOOD_SURFACE = """\
 
 - canonical_modules: `src/services/discord/health/reachability.rs` and
   everything under `src/services/discord/health/reachability/**`.
-- companion edits: changing the obligation rule requires changing
-  `scripts/relay_watchdog.py` in the same PR.
+- companion edits: changing the obligation rule requires updating its corpus.
 - non_guarantees: this is a source lint, not a type proof.
 
 ### `something_else`
@@ -729,12 +728,6 @@ class ChangeSurfaceOwnershipTest(unittest.TestCase):
         surface = GOOD_SURFACE.replace(
             "- non_guarantees: this is a source lint, not a type proof.\n", ""
         )
-        with TemporaryDirectory() as tmp:
-            violations = GATE.run(_build_root(tmp, surface=surface))
-        self.assertEqual(_kinds(violations), ["missing-marker"])
-
-    def test_missing_watchdog_companion_requirement_fails(self) -> None:
-        surface = GOOD_SURFACE.replace("`scripts/relay_watchdog.py`", "the watchdog")
         with TemporaryDirectory() as tmp:
             violations = GATE.run(_build_root(tmp, surface=surface))
         self.assertEqual(_kinds(violations), ["missing-marker"])

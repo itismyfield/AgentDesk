@@ -20,8 +20,7 @@
 //! #5993: the Discord DB-down alert that used to fire on exhaustion (sent to
 //! the retired kanban human-alert channel) is gone. The DB-down signals are
 //! the stderr line [`PgBootstrapFailure::exhaustion_line`] written right
-//! before `exit(1)` and the independent relay watchdog's PG-path alert, which
-//! does not depend on dcserver being up.
+//! before `exit(1)`.
 
 use std::future::Future;
 use std::path::Path;
