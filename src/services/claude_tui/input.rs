@@ -10,9 +10,10 @@ use super::host_input;
 #[allow(dead_code)]
 pub(crate) fn submit_native_clear(
     target: &crate::services::session_host::ResolvedSessionTarget,
+    gate: &dyn host_input::MutationGate,
     deadline: tokio::time::Instant,
 ) -> host_input::NativeClearSubmission {
-    host_input::submit_native_clear_tmux(target, deadline)
+    host_input::submit_native_clear_tmux(target, gate, deadline)
 }
 use crate::services::provider::{CancelToken, cancel_requested};
 

@@ -1887,6 +1887,9 @@ services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_nev
 services::claude_tui::host_input::tests::compact_literal_failure_never_sends_enter
 services::claude_tui::host_input::tests::draft_cleanup_follows_a_stop_only_on_a_confirmed_tmux_session
 services::claude_tui::host_input::tests::every_mutation_passes_the_gate_and_a_refusal_stops_before_enter
+services::claude_tui::host_input::tests::native_clear_indeterminate_never_retries_and_keeps_discord_provenance
+services::claude_tui::host_input::tests::native_clear_refuses_drafts_deadlines_and_changed_execution_before_send
+services::claude_tui::host_input::tests::native_clear_unsupported_hosts_do_no_tmux_io
 services::claude_tui::host_input::tests::non_tmux_targets_send_nothing_and_are_never_recreated
 services::claude_tui::host_input::tests::steering_submit_keeps_the_legacy_tmux_key_order
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_keeps_legacy_done_when_requeue_is_disabled
@@ -10216,6 +10219,11 @@ services::tui_prompt_dedupe::binding_events::lane_tests::crash_leaves_log_and_me
 services::tui_prompt_dedupe::binding_events::lane_tests::fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent_a
 services::tui_prompt_dedupe::binding_events::lane_tests::launch_cause_comes_from_the_execution_context_only_once
 services::tui_prompt_dedupe::binding_events::lane_tests::log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_hook
+services::tui_prompt_dedupe::native_clear::tests::canonical_pending_source_restart_and_supersession_forbid_fallback_cut
+services::tui_prompt_dedupe::native_clear::tests::deadline_bounds_prepare_wait_save_and_fallback
+services::tui_prompt_dedupe::native_clear::tests::durable_commit_never_kills_and_saves_before_empty_confirmation
+services::tui_prompt_dedupe::native_clear::tests::receiver_cancellation_keeps_guard_until_bounded_worker_finishes
+services::tui_prompt_dedupe::native_clear::tests::uncommitted_cut_invalidates_nonce_without_nested_lock_and_corruption_holds
 services::tui_prompt_dedupe::pending::tests::a_late_hook_refused_as_left_leaves_the_waiting_pending_queued
 services::tui_prompt_dedupe::pending::tests::a_pending_refused_before_the_restart_stays_refused_until_it_resolves
 services::tui_prompt_dedupe::pending::tests::a_transcript_gone_after_the_judgment_is_waited_for
