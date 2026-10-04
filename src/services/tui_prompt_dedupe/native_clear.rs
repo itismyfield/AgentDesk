@@ -246,12 +246,6 @@ async fn run_until<H: NativeClearHost>(
 ) -> ClearOutcome {
     let native_end = end - FINISH_RESERVE;
     let mut changed = host.changes();
-    #[cfg(test)]
-    let native_end = if mutant("deadline") {
-        end + Duration::from_secs(30)
-    } else {
-        native_end
-    };
     let ready = admission == ClearAdmission::Native
         && tokio::time::timeout_at(native_end, host.prepare(native_end))
             .await
@@ -277,11 +271,6 @@ async fn run_until<H: NativeClearHost>(
     }
     match host.decide(true) {
         ClearDecision::Committed(commit) => {
-            #[cfg(test)]
-            if mutant("durable-kill") {
-                let _ = host.fallback(end).await;
-                return ClearOutcome::Fallback;
-            }
             let saved = tokio::time::timeout_at(end, host.save(commit.clone(), end))
                 .await
                 .unwrap_or(false);
@@ -303,11 +292,6 @@ async fn run_until<H: NativeClearHost>(
         }
         ClearDecision::Hold(commit) => ClearOutcome::Hold(commit),
     }
-}
-
-#[cfg(test)]
-fn mutant(name: &str) -> bool {
-    std::env::var("ADK_NATIVE_CLEAR_MUT").as_deref() == Ok(name)
 }
 
 #[cfg(test)]

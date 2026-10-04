@@ -69,10 +69,6 @@ fn native_clear_once(
     );
     // One command submits only slash-command characters and Enter; no retry follows.
     let sent = send(&["/clear", "Enter"], remaining());
-    #[cfg(test)]
-    if native_clear_mutant("resend") && !sent {
-        let _ = send(&["/clear", "Enter"], remaining());
-    }
     if !sent {
         return NativeClearSubmission::Indeterminate;
     }
@@ -83,11 +79,6 @@ fn native_clear_once(
     } else {
         NativeClearSubmission::Indeterminate
     }
-}
-
-#[cfg(test)]
-fn native_clear_mutant(name: &str) -> bool {
-    std::env::var("ADK_NATIVE_CLEAR_MUT").as_deref() == Ok(name)
 }
 
 pub(crate) fn native_clear_composer_empty(capture: &str) -> bool {
