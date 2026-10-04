@@ -436,7 +436,12 @@ fn send_prompt_with_readiness(
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+        match run_actions_with_submission_confirmation(
+            session_name,
+            &actions,
+            Some(prompt),
+            cancel_token,
+        ) {
             Ok(()) => Ok(()),
             Err(error) => {
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -607,7 +612,7 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, None) {
+        match run_actions_with_submission_confirmation(session_name, &actions, None, None) {
             Ok(()) => Ok(()),
             Err(error) => {
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -904,15 +909,16 @@ fn run_actions(
 fn run_actions_with_submission_confirmation(
     session_name: &str,
     actions: &[TuiInputAction],
+    submitted_prompt: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let actions_contained_paste = actions_contain_paste_buffer(actions);
     let run = host_input::run_legacy(session_name, actions, cancel_token);
     let cleanup_may_follow =
         host_input::InputTarget::legacy_tmux(session_name).keys_may_follow(&run);
-    let result = run
-        .into_legacy()
-        .and_then(|()| confirm_prompt_submission_left_editor(session_name, cancel_token));
+    let result = run.into_legacy().and_then(|()| {
+        confirm_prompt_submission_left_editor(session_name, submitted_prompt, cancel_token)
+    });
     if cleanup_may_follow && should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
         clear_prompt_draft_before_error(session_name);
     }
@@ -931,17 +937,31 @@ fn should_clear_draft_on_error(actions_contained_paste: bool, result_is_err: boo
 
 fn confirm_prompt_submission_left_editor(
     session_name: &str,
+    submitted_prompt: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let mut attempt = 0usize;
     loop {
         std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
         check_prompt_cancel(cancel_token)?;
-        let snapshot = prompt_readiness_snapshot(session_name);
+        let (pane, alive) =
+            host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
+        let snapshot = prompt_readiness_snapshot_from_capture(pane.as_deref(), alive);
+        let prompt_left = submitted_prompt
+            .zip(pane.as_deref())
+            .is_some_and(|(prompt, pane)| {
+                crate::services::claude_tui::prompt_readiness::composer_still_holds_prompt(
+                    pane, prompt,
+                )
+            });
         check_prompt_cancel(cancel_token)?;
 
-        match prompt_submit_confirmation_decision(&snapshot, attempt, PROMPT_SUBMIT_CONFIRM_RETRIES)
-        {
+        match prompt_submit_confirmation_decision(
+            &snapshot,
+            prompt_left,
+            attempt,
+            PROMPT_SUBMIT_CONFIRM_RETRIES,
+        ) {
             PromptSubmitConfirmationDecision::Submitted => return Ok(()),
             PromptSubmitConfirmationDecision::FailedSessionDead => {
                 return Err("claude tui session died after prompt submit".to_string());
@@ -987,6 +1007,7 @@ fn prompt_submit_needs_enter_retry(snapshot: &PromptReadinessSnapshot) -> bool {
 
 fn prompt_submit_confirmation_decision(
     snapshot: &PromptReadinessSnapshot,
+    prompt_left_in_composer: bool,
     attempt: usize,
     max_retries: usize,
 ) -> PromptSubmitConfirmationDecision {
@@ -1000,11 +1021,13 @@ fn prompt_submit_confirmation_decision(
             PromptSubmitConfirmationDecision::RetrySnapshot
         };
     }
-    if prompt_submit_needs_enter_retry(snapshot) {
-        return if attempt >= max_retries {
-            PromptSubmitConfirmationDecision::FailedDraftStuck
-        } else {
-            PromptSubmitConfirmationDecision::RetryEnter
+    let draft = prompt_submit_needs_enter_retry(snapshot);
+    if draft || prompt_left_in_composer {
+        // Only a probed draft fails; a prompt-text match just earns retries (a repaint can lag).
+        return match (attempt >= max_retries, draft) {
+            (false, _) => PromptSubmitConfirmationDecision::RetryEnter,
+            (true, true) => PromptSubmitConfirmationDecision::FailedDraftStuck,
+            (true, false) => PromptSubmitConfirmationDecision::Submitted,
         };
     }
     PromptSubmitConfirmationDecision::Submitted
@@ -1148,7 +1171,12 @@ pub fn send_followup_prompt_or_idle_transcript(
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+        match run_actions_with_submission_confirmation(
+            session_name,
+            &actions,
+            Some(prompt),
+            cancel_token,
+        ) {
             Ok(()) => Ok(()),
             Err(error) => {
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -2946,11 +2974,11 @@ mod tests {
         };
 
         assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, 0, 2),
+            prompt_submit_confirmation_decision(&snapshot, false, 0, 2),
             PromptSubmitConfirmationDecision::RetryEnter
         );
         assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, 2, 2),
+            prompt_submit_confirmation_decision(&snapshot, false, 2, 2),
             PromptSubmitConfirmationDecision::FailedDraftStuck
         );
     }
@@ -2966,11 +2994,11 @@ mod tests {
         };
 
         assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, 0, 2),
+            prompt_submit_confirmation_decision(&snapshot, false, 0, 2),
             PromptSubmitConfirmationDecision::RetrySnapshot
         );
         assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, 2, 2),
+            prompt_submit_confirmation_decision(&snapshot, false, 2, 2),
             PromptSubmitConfirmationDecision::FailedCaptureUnavailable
         );
     }
@@ -2985,7 +3013,7 @@ mod tests {
             pane_tail: "✳ Architecting...".to_string(),
         };
         assert_eq!(
-            prompt_submit_confirmation_decision(&submitted, 0, 2),
+            prompt_submit_confirmation_decision(&submitted, false, 0, 2),
             PromptSubmitConfirmationDecision::Submitted
         );
 
@@ -2997,9 +3025,55 @@ mod tests {
             pane_tail: "<capture unavailable>".to_string(),
         };
         assert_eq!(
-            prompt_submit_confirmation_decision(&dead, 0, 2),
+            prompt_submit_confirmation_decision(&dead, false, 0, 2),
             PromptSubmitConfirmationDecision::FailedSessionDead
         );
+    }
+
+    #[test]
+    fn fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again() {
+        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let session = format!("fresh-enter-retry-{}", uuid::Uuid::new_v4());
+        let prompt = "[User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로 \
+                      [E2E:E50:run:AFTER_CLEAR] 만 출력해줘.";
+        let rule = "─".repeat(80);
+        let banner = " ▐▛███▛█   Claude Code v2.1.289\n~/.adk/release/workspaces/e2e\n\n";
+        let footer = format!("{rule}\n  ⏱ 0m │ ░░░░░░░░░░ │ 0% │ 0/1.0M │ $0.00\n  MCP: 2");
+        let empty = format!("{banner}{rule}\n\u{276f} \n{footer}");
+        // The swallowed-Enter pane seen in production after `!clear`.
+        let stuck = format!(
+            "{banner}{rule}\n\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
+             [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n{footer}"
+        );
+        let submitted = format!(
+            "{banner}\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
+             [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n\u{2733} Architecting\u{2026} (esc to interrupt)\n\n\
+             {rule}\n\u{276f} \n{footer}"
+        );
+        let token = CancelToken::new();
+        let enters_after = |tail: &[&str]| {
+            let mut captures = vec![Some(empty.clone()); 3];
+            captures.extend(tail.iter().map(|pane| Some(pane.to_string())));
+            let guard = SpyGuard::install(SpyState {
+                captures: captures.into(),
+                ..SpyState::default()
+            });
+            assert_eq!(send_fresh_prompt(&session, prompt, Some(&token)), Ok(()));
+            let calls = guard.calls();
+            assert_eq!(calls[6], format!("literal:{prompt}"), "{calls:?}");
+            calls.iter().filter(|call| *call == "keys:Enter").count()
+        };
+        assert_eq!(enters_after(&[&stuck, &submitted]), 2);
+        assert_eq!(
+            enters_after(&[&submitted]),
+            1,
+            "a landed submit gets no extra Enter"
+        );
+        // A repaint that lags every retry still counts as submitted, as on main.
+        assert_eq!(enters_after(&[&stuck, &stuck, &stuck]), 3);
     }
 
     #[test]
