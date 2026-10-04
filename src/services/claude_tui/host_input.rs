@@ -3,6 +3,92 @@
 
 use std::process::Output;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeClearSubmission {
+    NotSent,
+    Confirmed,
+    Indeterminate,
+}
+
+#[allow(dead_code)]
+pub(crate) fn submit_native_clear_tmux(
+    target: &InputTarget,
+    gate: &dyn MutationGate,
+    deadline: tokio::time::Instant,
+) -> NativeClearSubmission {
+    #[cfg(not(unix))]
+    {
+        let _ = (target, gate, deadline);
+        return NativeClearSubmission::NotSent;
+    }
+    // The caller supplies resolved evidence; this dormant seam does not activate resolution.
+    let InputTarget::Tmux(session) = target else {
+        return NativeClearSubmission::NotSent;
+    };
+    super::composer_lock::try_with_composer_mutation_lock(&session, || {
+        native_clear_once(
+            &session,
+            gate,
+            deadline,
+            |remaining| tmux::capture_pane_timeout(&session, -80, remaining),
+            |keys, remaining| {
+                tmux::send_keys_timeout(&session, keys, remaining).is_ok_and(|o| o.status.success())
+            },
+        )
+    })
+    .unwrap_or(NativeClearSubmission::NotSent)
+}
+
+fn native_clear_once(
+    session: &str,
+    gate: &dyn MutationGate,
+    deadline: tokio::time::Instant,
+    mut capture: impl FnMut(std::time::Duration) -> Option<String>,
+    mut send: impl FnMut(&[&str], std::time::Duration) -> bool,
+) -> NativeClearSubmission {
+    // The shared subprocess owner may spend 200ms killing and 2s reaping a timed-out child.
+    let remaining = || {
+        deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(std::time::Duration::from_millis(2300))
+    };
+    let budget = remaining();
+    if budget.is_zero() {
+        return NativeClearSubmission::NotSent;
+    }
+    let Some(before) = capture(budget) else {
+        return NativeClearSubmission::NotSent;
+    };
+    if !native_clear_composer_empty(&before)
+        || remaining().is_zero()
+        || gate.admit(session).is_err()
+    {
+        return NativeClearSubmission::NotSent;
+    }
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        "claude", session, "/clear",
+    );
+    // One command submits only slash-command characters and Enter; no retry follows.
+    let sent = send(&["/clear", "Enter"], remaining());
+    if !sent {
+        return NativeClearSubmission::Indeterminate;
+    }
+    if !remaining().is_zero()
+        && capture(remaining()).is_some_and(|c| native_clear_composer_empty(&c))
+    {
+        NativeClearSubmission::Confirmed
+    } else {
+        NativeClearSubmission::Indeterminate
+    }
+}
+
+pub(crate) fn native_clear_composer_empty(capture: &str) -> bool {
+    use crate::services::tmux_common as tc;
+    tc::tmux_capture_indicates_claude_tui_exact_empty_composer(capture)
+        && !tc::tmux_capture_indicates_claude_tui_busy(capture)
+        && !tc::tmux_capture_indicates_claude_tui_interactive_modal(capture)
+}
+
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,
@@ -679,6 +765,118 @@ mod tests {
     const EMPTY_COMPOSER: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
     const BUSY: &str = "\u{2733} Architecting\u{2026}";
     const DRAFT: &str = "\u{276f} 남은 초안 한글";
+
+    #[test]
+    fn native_clear_indeterminate_never_retries_and_keeps_discord_provenance() {
+        let _state = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let session = format!("native-clear-input-{}", uuid::Uuid::new_v4());
+        let mut sends = 0;
+        let outcome = native_clear_once(
+            &session,
+            &LegacyTmuxGate,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+            |_| Some(EMPTY_COMPOSER.into()),
+            |keys, _| {
+                assert_eq!(keys, &["/clear", "Enter"]);
+                sends += 1;
+                false
+            },
+        );
+        assert_eq!(outcome, NativeClearSubmission::Indeterminate);
+        assert_eq!(sends, 1, "Indeterminate must not resend");
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux(
+                "claude", &session, "/clear"
+            ),
+            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
+        );
+    }
+
+    #[test]
+    fn native_clear_refuses_drafts_deadlines_and_changed_execution_before_send() {
+        let _state = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let session = format!("native-clear-refuse-{}", uuid::Uuid::new_v4());
+        for capture in [None, Some(DRAFT), Some(BUSY)] {
+            assert_eq!(
+                native_clear_once(
+                    &session,
+                    &LegacyTmuxGate,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+                    |_| capture.map(str::to_owned),
+                    |_, _| panic!("unready pane sent keys")
+                ),
+                NativeClearSubmission::NotSent
+            );
+        }
+        assert_eq!(
+            native_clear_once(
+                &session,
+                &LegacyTmuxGate,
+                tokio::time::Instant::now(),
+                |_| panic!("expired deadline captured pane"),
+                |_, _| panic!("expired deadline sent")
+            ),
+            NativeClearSubmission::NotSent
+        );
+        let refused = RefuseAfter(std::cell::Cell::new(0), InputRefusal::IdentityMismatch);
+        assert_eq!(
+            native_clear_once(
+                &session,
+                &refused,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+                |_| Some(EMPTY_COMPOSER.into()),
+                |_, _| panic!("changed execution sent")
+            ),
+            NativeClearSubmission::NotSent
+        );
+        for last in [EMPTY_COMPOSER, DRAFT] {
+            let mut captures = [EMPTY_COMPOSER, last].into_iter();
+            let result = native_clear_once(
+                &session,
+                &LegacyTmuxGate,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+                |_| captures.next().map(str::to_owned),
+                |_, _| true,
+            );
+            assert_eq!(
+                result,
+                if last == EMPTY_COMPOSER {
+                    NativeClearSubmission::Confirmed
+                } else {
+                    NativeClearSubmission::Indeterminate
+                }
+            );
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                "claude", &session, "/clear",
+            );
+        }
+    }
+
+    #[test]
+    fn native_clear_unsupported_hosts_do_no_tmux_io() {
+        for host in [
+            known(HostKind::Herdr),
+            TargetHost::Unknown(UnknownHost::NoHostEvidence),
+        ] {
+            let target = ResolvedSessionTarget {
+                input: SessionTargetInput::RawName("native-clear-refused".into()),
+                session_key: None,
+                host,
+            };
+            assert_eq!(
+                super::super::input::submit_native_clear(
+                    &InputTarget::from_session_target(&target),
+                    &LegacyTmuxGate,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(20)
+                ),
+                NativeClearSubmission::NotSent
+            );
+        }
+    }
 
     fn state(captures: &[Option<&str>]) -> SpyState {
         SpyState {

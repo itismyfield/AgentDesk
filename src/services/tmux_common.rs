@@ -1234,6 +1234,19 @@ pub(crate) fn cleanup_cleared_session_temp_files(
     cleanup_session_temp_files(session.name());
 }
 
+// The caller already holds the source fence; never acquire it a second time.
+#[allow(dead_code)]
+pub(crate) fn cleanup_native_clear_fallback_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    session: &crate::services::session_host::ClearedHostSession,
+) -> bool {
+    if authority.session() != session.name() {
+        return false;
+    }
+    cleanup_session_temp_files_under_source_authority(authority.session());
+    true
+}
+
 fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
     // All extensions we ever allocate under the session prefix.
     const EXTS: &[&str] = &[
