@@ -1595,3 +1595,24 @@ mod voice_alias_precheck_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod config_secret_write_tests {
+    use super::*;
+    use crate::config::disk_write::test_support::*;
+
+    #[test]
+    fn runtime_config_write_keeps_disk_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let path = runtime_layout::config_file_path(root.path());
+        write_secret_config(&path, "");
+        let mut loaded = load_runtime_config(root.path()).unwrap();
+        loaded.config.discord.owner_id = Some(123_456_789_012_345_678);
+
+        write_runtime_config(root.path(), &loaded.config).unwrap();
+
+        assert_secrets_on_disk(&path);
+        let saved = crate::config::load_from_path(&path).unwrap();
+        assert_eq!(saved.discord.owner_id, Some(123_456_789_012_345_678));
+    }
+}

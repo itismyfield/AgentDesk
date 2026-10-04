@@ -541,4 +541,36 @@ mod tests {
         apply_voice_config_body(&mut config, &PutVoiceConfigBody::default()).unwrap();
         assert_eq!(VoiceModelsDto::from_config(&config.voice), models);
     }
+
+    #[test]
+    fn put_voice_config_keeps_disk_secrets() {
+        use crate::config::disk_write::test_support::*;
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::test_env::set_agentdesk_root_for_test(root.path());
+        let path = crate::runtime_layout::config_file_path(root.path());
+        write_secret_config(&path, "");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let response = runtime.block_on(async {
+            let config = Config::default();
+            let tx = crate::server::ws::new_broadcast();
+            let state = AppState {
+                pg_pool: None,
+                engine: crate::engine::PolicyEngine::new(&config).unwrap(),
+                config: std::sync::Arc::new(config),
+                batch_buffer: crate::server::ws::spawn_batch_flusher(tx.clone()),
+                broadcast_tx: tx,
+                health_registry: None,
+                cluster_instance_id: None,
+            };
+            let body = PutVoiceConfigBody {
+                actor: Some("test".to_string()),
+                ..PutVoiceConfigBody::default()
+            };
+            put_voice_config_inner(&state, body).await
+        });
+
+        response.unwrap();
+        assert_secrets_on_disk(&path);
+    }
 }

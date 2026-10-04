@@ -1013,3 +1013,23 @@ pub(super) async fn list_policies(State(state): State<AppState>) -> Json<serde_j
         .collect();
     Json(json!({ "policies": items }))
 }
+
+#[cfg(test)]
+mod config_secret_tests {
+    use crate::config::disk_write::test_support::*;
+
+    #[test]
+    fn duplicate_metadata_update_keeps_disk_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::test_env::set_agentdesk_root_for_test(root.path());
+        let path = crate::runtime_layout::config_file_path(root.path());
+        write_secret_config(&path, "agents:\n  - id: dup-agent\n    name: Dup\n");
+
+        super::update_duplicate_config_metadata("dup-agent", Some("Renamed"), None, None, None)
+            .unwrap();
+
+        assert_secrets_on_disk(&path);
+        let saved = crate::config::load_from_path(&path).unwrap();
+        assert_eq!(saved.agents[0].name, "Renamed");
+    }
+}
