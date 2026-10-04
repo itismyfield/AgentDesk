@@ -397,16 +397,26 @@ def raw_message_count_between_markers(
 
 
 def no_duplicate_content(window: Window) -> None:
-    """Fail if the same ADK relay body is emitted twice in the window."""
+    """Fail if the same ADK relay body is left twice in the channel's final state.
 
-    seen: set[str] = set()
+    Messages deleted before the latest snapshot (per-turn '...' placeholders) are
+    transient and not counted; edits already replace the observed content.
+    """
+
+    seen: dict[str, str] = {}
     for message in window.messages:
+        message_id = str(message.get("id") or "")
+        if message_id in window.deleted_ids:
+            continue
         body = (relay_body(message) or "").strip()
         if not body:
             continue
         if body in seen:
-            raise AssertionError(f"duplicate Discord relay body: {body[:80]!r}")
-        seen.add(body)
+            raise AssertionError(
+                f"duplicate Discord relay body: {body[:80]!r} "
+                f"(ids {seen[body]}, {message_id})"
+            )
+        seen[body] = message_id
 
 
 def text_present(window: Window, *, needle: str) -> None:

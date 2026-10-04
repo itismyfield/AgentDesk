@@ -423,6 +423,31 @@ class NoDuplicateMarker(unittest.TestCase):
         assertions.no_duplicate_content(window)
 
 
+class NoDuplicateContent(unittest.TestCase):
+    def test_transient_placeholders_gone_from_final_snapshot_pass(self):
+        # Each turn posts a '...' placeholder that is deleted or edited once the turn ends.
+        t1, t2, t3 = _relay_msg(20, "..."), _relay_msg(40, "..."), _relay_msg(60, "...")
+        bodies = [_relay_msg(30, "[T1]"), _relay_msg(50, "[T2]"), _relay_msg(70, "[T3]")]
+        window = _window(t1, bodies[0], t2, bodies[1], t3, bodies[2])
+        window.add({**t2, "content": "[T2] edited", "edited_timestamp": "x"})
+        window.reconcile_snapshot([{**t2, "content": "[T2] edited"}, t3, *bodies], after_id="10")
+        assertions.no_duplicate_content(window)
+
+    def test_identical_bodies_left_in_final_snapshot_fail(self):
+        first, second = _relay_msg(20, "same answer"), _relay_msg(30, "same answer")
+        window = _window(first, second, _relay_msg(40, "later"))
+        window.reconcile_snapshot([first, second, _relay_msg(40, "later")], after_id="10")
+        with self.assertRaisesRegex(assertions.AssertionError, "'same answer'"):
+            assertions.no_duplicate_content(window)
+
+    def test_orphaned_placeholders_left_in_final_snapshot_fail(self):
+        rows = [_relay_msg(20, "..."), _relay_msg(30, "[T1]"), _relay_msg(40, "..."), _relay_msg(50, "[T2]")]
+        window = _window(*rows)
+        window.reconcile_snapshot(rows, after_id="10")
+        with self.assertRaisesRegex(assertions.AssertionError, r"'\.\.\.'"):
+            assertions.no_duplicate_content(window)
+
+
 class BodyComplete(unittest.TestCase):
     def test_complete_body_passes(self):
         window = _window(_relay_msg(1, "START middle END"))

@@ -145,6 +145,8 @@ fn codex(record: &Value) -> Vec<RecordFact> {
         (Some("response_item"), Some(item_type)) => codex_item(payload, item_type),
         (Some("event_msg"), Some("task_started")) => Some(RecordFact::TurnStart(turn_id)),
         (Some("event_msg"), Some("task_complete")) => Some(RecordFact::Idle(turn_id)),
+        // An abort without a turn id cannot be tied to the parent turn, so only a named one closes.
+        (Some("event_msg"), Some("turn_aborted")) => turn_id.map(|id| RecordFact::Idle(Some(id))),
         // `item_completed` usually precedes the response_item it mirrors: it announces, never seals.
         (Some("event_msg"), Some("item_completed")) => payload
             .get("item")
@@ -224,4 +226,73 @@ fn blocked(reason: &str) -> RecordFact {
 
 fn str_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use serde_json::{Value, json};
+
+    use crate::services::tui_o::shadow::capture::file_identity;
+    use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId};
+    use crate::services::tui_o::writer::input_facts::{InputFacts, TurnState};
+
+    fn event(kind: &str, turn_id: Option<&str>) -> Value {
+        let mut payload = json!({"type": kind, "reason": "interrupted"});
+        if let Some(turn_id) = turn_id {
+            payload["turn_id"] = turn_id.into();
+        }
+        json!({"type": "event_msg", "payload": payload})
+    }
+
+    #[test]
+    fn codex_turn_aborted_closes_only_the_named_parent_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("parent.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let (dev, ino) = file_identity(&std::fs::metadata(&path).unwrap());
+        let session_id = "parent".to_string();
+        let source = SourceId {
+            session_id,
+            path: path.clone(),
+            dev,
+            ino,
+        };
+        let (channel_id, provider) = (24, ShadowProvider::Codex);
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source,
+        };
+        let mut facts = InputFacts::open(binding).unwrap();
+        let mut state_after = |records: &[Value]| {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for record in records {
+                writeln!(file, "{record}").unwrap();
+            }
+            facts.poll(u64::MAX).unwrap().state
+        };
+        let open = |id: &str| TurnState::Open {
+            native_turn_id: Some(id.into()),
+        };
+        let started = state_after(&[event("task_started", Some("parent"))]);
+        assert_eq!(started, open("parent"));
+        // An unnamed abort, a child turn's abort and a foreign one leave the parent running.
+        for closer in [None, Some("child"), Some("foreign")] {
+            let state = state_after(&[event("turn_aborted", closer)]);
+            assert_eq!(state, open("parent"), "abort {closer:?}");
+        }
+        let aborted = state_after(&[event("turn_aborted", Some("parent"))]);
+        assert_eq!(aborted, TurnState::Idle);
+        state_after(&[event("task_started", Some("next"))]);
+        let restarted = state_after(&[
+            event("turn_aborted", Some("next")),
+            event("task_started", Some("last")),
+        ]);
+        assert_eq!(restarted, open("last"), "a start after the abort wins");
+    }
 }
