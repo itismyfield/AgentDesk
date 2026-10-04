@@ -1823,6 +1823,7 @@ src/
 │   │   ├── tmux_reaper.rs
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
+│   │   ├── tmux_restart_handoff_mailbox_tests.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
 │   │   ├── tmux_watcher_registry.rs

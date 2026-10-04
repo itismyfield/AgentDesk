@@ -281,6 +281,7 @@ pub(super) async fn start_restart_handoff_from_state(
     state: super::inflight::InflightTurnState,
     best_response: &str,
 ) -> bool {
+    let handoff_started = std::time::Instant::now();
     let Ok(_recovery) = super::live_bridge::try_recovery(provider_kind, state.channel_id) else {
         return false;
     };
@@ -392,6 +393,7 @@ pub(super) async fn start_restart_handoff_from_state(
 
     if !_recovery.is_guarded() {
         super::inflight::clear_inflight_state(provider_kind, channel_id.get());
+        release_relinquished_turn_mailbox(shared, provider_kind, &state, handoff_started).await;
         return true;
     }
     let outcome = match super::inflight::clear_inflight_state_for_snapshot(provider_kind, &state) {
@@ -405,10 +407,59 @@ pub(super) async fn start_restart_handoff_from_state(
         }
         outcome => outcome,
     };
+    if matches!(
+        outcome,
+        super::inflight::GuardedClearOutcome::Cleared
+            | super::inflight::GuardedClearOutcome::Missing
+    ) {
+        release_relinquished_turn_mailbox(shared, provider_kind, &state, handoff_started).await;
+    }
     !matches!(
         outcome,
         super::inflight::GuardedClearOutcome::UserMsgMismatch
     )
+}
+
+/// Releases the dead turn's mailbox token when its bridge had already handed the relay away,
+/// since no bridge remains to finish it; the episode guard spares any other turn's token.
+async fn release_relinquished_turn_mailbox(
+    shared: &Arc<SharedData>,
+    provider_kind: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    handoff_started: std::time::Instant,
+) {
+    if state.effective_relay_owner_kind() == super::inflight::RelayOwnerKind::None
+        || state.channel_id == 0
+        || state.user_msg_id == 0
+    {
+        return;
+    }
+    let channel = ChannelId::new(state.channel_id);
+    let finish = super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before(
+        shared,
+        provider_kind,
+        channel,
+        serenity::MessageId::new(state.user_msg_id),
+        state.turn_nonce.clone(),
+        handoff_started,
+    )
+    .await;
+    let Some(removed) = finish.removed_token else {
+        return;
+    };
+    removed.mark_completion_cleanup();
+    removed
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    super::saturating_decrement_global_active(shared);
+    if finish.has_pending {
+        super::queue_io::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider_kind.clone(),
+            channel,
+            "watcher_death_mailbox_release",
+        );
+    }
 }
 
 pub(super) async fn resume_aborted_restart_turn(
@@ -797,3 +848,7 @@ mod o_cut_tests {
         .await;
     }
 }
+
+#[cfg(test)]
+#[path = "tmux_restart_handoff_mailbox_tests.rs"]
+mod mailbox_tests;
