@@ -8101,6 +8101,7 @@ services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_times_out_when_child_keeps_running
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::codex_parent_without_session_meta_refuses_stop_and_replies
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
