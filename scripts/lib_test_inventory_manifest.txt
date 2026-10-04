@@ -2555,6 +2555,7 @@ services::codex_tui::rollout_index::tests::membership_probe_checks_old_known_lea
 services::codex_tui::rollout_index::tests::membership_probe_detects_new_child_leaf_with_restored_parent_mtime
 services::codex_tui::rollout_index::tests::missing_root_then_created_is_picked_up
 services::codex_tui::rollout_index::tests::new_rollout_after_warm_lookup_is_discovered
+services::codex_tui::rollout_index::tests::oversized_header_still_fails_complete_discovery
 services::codex_tui::rollout_index::tests::reset_clears_cache
 services::codex_tui::rollout_index::tests::rollout_files_under_collects_only_rollout_jsonl
 services::codex_tui::rollout_index::tests::same_leaf_content_rewrite_reparses_header
@@ -2564,6 +2565,7 @@ services::codex_tui::rollout_index::tests::session_meta_without_id_preserves_cwd
 services::codex_tui::rollout_index::tests::signature_hit_reuses_cached_file_list_without_rewalk
 services::codex_tui::rollout_index::tests::signature_hit_still_rereads_on_mtime_len_change
 services::codex_tui::rollout_index::tests::signature_miss_reuses_surviving_file_headers
+services::codex_tui::rollout_index::tests::torn_header_does_not_hide_a_complete_rollout_or_prove_a_parent
 services::codex_tui::rollout_index::tests::tree_signature_changes_when_rollout_added
 services::codex_tui::rollout_index::tests::warm_lookup_end_to_end_reuses_cache
 services::codex_tui::rollout_index::tests::warm_scan_reuses_cached_header_without_reread
