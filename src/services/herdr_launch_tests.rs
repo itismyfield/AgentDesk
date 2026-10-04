@@ -53,7 +53,7 @@ struct FakeHost {
     probes: AtomicUsize,
     on_create: Hook,
     on_evidence: Hook,
-    /// E7 readings in order; once empty, Off on connection 1.
+    /// E7 readings in order; once empty, Off naming server 1.
     restore: Mutex<VecDeque<RestoreResume>>,
     requests: Mutex<Vec<HerdrCreateRequest>>,
 }
@@ -552,6 +552,96 @@ async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
         pool.close().await;
         db.drop().await;
     }
+}
+
+// A command or cwd that cannot run is refused before Pending, so it never occupies the row;
+// a pane whose command was not confirmed is recorded where reconcile finds it, and left alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_unconfirmed_panes_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    type Prepare = fn(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>;
+    let ineligible: [Prepare; 5] = [
+        |_| {
+            Ok(HerdrLaunchCommand {
+                cwd: "/tmp".into(),
+                command: "bash a.sh\nrm -rf x".into(),
+            })
+        },
+        |_| {
+            Ok(HerdrLaunchCommand {
+                cwd: "tmp".into(),
+                command: "bash a.sh".into(),
+            })
+        },
+        |_| {
+            Ok(HerdrLaunchCommand {
+                cwd: "/tmp".into(),
+                command: " ".into(),
+            })
+        },
+        |_| {
+            Ok(HerdrLaunchCommand {
+                cwd: "/nonexistent-adk-herdr-cwd".into(),
+                command: "bash a.sh".into(),
+            })
+        },
+        |_| {
+            Ok(HerdrLaunchCommand {
+                cwd: "/etc/hosts".into(),
+                command: "bash a.sh".into(),
+            })
+        },
+    ];
+    seed_row(&pool, None).await;
+    for prepare in ineligible {
+        let host = Arc::new(FakeHost::created("pane-1"));
+        let result =
+            launch_herdr_session(&pool, launch(Some(endpoint())), prepare, host.clone()).await;
+        assert!(
+            matches!(result, Err(HerdrLaunchError::Ineligible(_))),
+            "{result:?}"
+        );
+        assert_eq!(stored(&pool).await, None, "no Pending is installed");
+        assert_eq!(marker(), HostKindMarker::Absent);
+        assert_eq!(host.creates.load(Ordering::SeqCst), 0);
+    }
+
+    let host = Arc::new(FakeHost::new(HerdrCreateOutcome::CreatedUnconfirmed {
+        pane_id: "pane-9".into(),
+        detail: "pane opened in HOME".into(),
+    }));
+    let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone()).await;
+    let Ok(HerdrLaunchOutcome::Indeterminate {
+        execution_nonce,
+        detail,
+    }) = result
+    else {
+        panic!("{result:?}");
+    };
+    assert!(detail.contains("HOME"), "{detail}");
+    let HostedRecord::Known(kept) = decoded(stored(&pool).await) else {
+        panic!("Pending must stay");
+    };
+    assert_eq!(kept.state, HostedState::Pending);
+    assert_eq!(kept.execution_nonce, execution_nonce);
+    assert_eq!(
+        kept.location.map(|location| location.pane_id),
+        Some("pane-9".into())
+    );
+    assert_eq!(
+        kept.expected, None,
+        "no evidence for an unconfirmed command"
+    );
+    assert_eq!(host.creates.load(Ordering::SeqCst), 1, "never recreated");
+    assert_eq!(
+        host.probes.load(Ordering::SeqCst),
+        0,
+        "never probed for evidence"
+    );
+    pool.close().await;
+    db.drop().await;
 }
 
 /// Every path under `root` with its bytes; a directory reads as empty.

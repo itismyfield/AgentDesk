@@ -278,7 +278,7 @@ fn withdraw_at_the_claim(tmux: &str, nonce: &str) -> std::thread::JoinHandle<()>
 }
 
 // Admission withdrawn between the rebind's adoption and its claim: the adoption stands with its
-// range kept, and a repeat while the pane keeps writing adopts, keeps and queues nothing more.
+// range kept and announced once; a repeat while the pane writes adopts, keeps and queues nothing.
 #[test]
 fn a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg() {
     let _lock = crate::config::shared_test_env_lock()
@@ -401,6 +401,8 @@ fn a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg
     let (kept, notices) = posted();
     assert_eq!(kept.len(), 1, "{kept:?}");
     assert!(kept[0].contains("range_start=4096"), "{kept:?}");
+    assert_eq!(notices.len(), 1, "the loss is announced once: {notices:?}");
+    assert!(notices[0].contains("응답 이어받기 실패"), "{notices:?}");
     assert_eq!(shared.tmux_watchers.len(), 0, "no watcher claimed");
 
     // The pane keeps producing while no watcher reads it, and the respawn repeats the rebind.

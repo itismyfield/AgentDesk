@@ -2035,6 +2035,9 @@ src/
 │   ├── session_host/
 │   │   ├── herdr/
 │   │   │   ├── contract.rs
+│   │   │   ├── launch_host.rs
+│   │   │   ├── launch_host_real_tests.rs
+│   │   │   ├── launch_host_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── provenance.rs
@@ -2139,12 +2142,14 @@ src/
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
+│   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs
+│   │   │   ├── recovery_tests.rs
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs

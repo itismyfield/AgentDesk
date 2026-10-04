@@ -31,12 +31,15 @@ pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
 const EVIDENCE_PROVENANCE: &str = "herdr_launch";
-/// What Herdr gives every pane process; a provider that sees them may report to Herdr.
-pub(crate) const HERDR_PANE_ENV: [&str; 4] = [
+/// What Herdr 0.9.3 gives every pane process; a provider that sees them may report to Herdr.
+pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
     "HERDR_ENV",
     "HERDR_PANE_ID",
     "HERDR_BIN_PATH",
     "HERDR_SOCKET_PATH",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_CONFIG_PATH",
 ];
 
 /// Whether a Claude TUI launch goes to Herdr, decided before any launch I/O: only a selected
@@ -104,6 +107,12 @@ pub(crate) enum HerdrCreateOutcome {
     NotSent(String),
     /// The server may have acted without a usable reply: lost ACK, wrong id, remote error.
     Indeterminate(String),
+    /// The pane exists but its command was not confirmed to start (cwd mismatch, E7 lost,
+    /// unclear input reply). The pane is recorded; nothing is resent or killed.
+    CreatedUnconfirmed {
+        pane_id: String,
+        detail: String,
+    },
 }
 
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
@@ -147,6 +156,8 @@ pub(crate) enum HerdrLaunchOutcome {
 pub(crate) enum HerdrLaunchError {
     /// Refused before any I/O.
     Unsupported(&'static str),
+    /// The prepared cwd or command cannot run in a pane; refused before Pending.
+    Ineligible(String),
     /// The canonical row is missing, unreadable or conflicting.
     Row(String),
     /// The row holds a Pending, Bound or unreadable record (`None`).
@@ -244,6 +255,21 @@ async fn restore_off_witness(
         .admitted_witness()
 }
 
+/// An existing absolute cwd and one line of command, since the command is typed into the
+/// pane followed by Enter. Herdr opens a missing cwd in HOME without an error.
+pub(crate) fn launch_command_eligible(cwd: &Path, command: &str) -> Result<(), String> {
+    if !cwd.is_absolute() || cwd.to_str().is_none() {
+        return Err(format!("cwd {} is not an absolute path", cwd.display()));
+    }
+    if !cwd.is_dir() {
+        return Err(format!("cwd {} is not a directory", cwd.display()));
+    }
+    if command.trim().is_empty() || command.chars().any(char::is_control) {
+        return Err("command is not one line of text".to_string());
+    }
+    Ok(())
+}
+
 /// Removes the Herdr pane variables on the line before the script's provider `exec`, after
 /// every export; the first `exec` line, since its arguments may hold any text.
 pub(crate) fn unset_herdr_env_before_exec(script: &str) -> Result<String, String> {
@@ -278,6 +304,8 @@ pub(crate) async fn launch_herdr_session(
     let incarnation = herdr_incarnation(&owner, launch.channel_id, expected_native, launch.resume)
         .map_err(HerdrLaunchError::Prepare)?;
     let command = prepare(&incarnation).map_err(HerdrLaunchError::Prepare)?;
+    launch_command_eligible(&command.cwd, &command.command)
+        .map_err(HerdrLaunchError::Ineligible)?;
     let nonce = incarnation.context.execution_nonce.clone();
     let pending =
         HostedExecution::pending(owner.clone(), nonce.clone(), source_ref(&owner, &nonce));
@@ -314,9 +342,18 @@ pub(crate) async fn launch_herdr_session(
         execution_nonce: nonce.clone(),
         detail,
     };
-    let pane_id = match created {
-        Some(HerdrCreateOutcome::Created { pane_id }) if !pane_id.trim().is_empty() => pane_id,
-        Some(HerdrCreateOutcome::Created { .. }) => {
+    let (pane_id, unconfirmed) = match created {
+        Some(HerdrCreateOutcome::Created { pane_id }) if !pane_id.trim().is_empty() => {
+            (pane_id, None)
+        }
+        Some(HerdrCreateOutcome::CreatedUnconfirmed { pane_id, detail })
+            if !pane_id.trim().is_empty() =>
+        {
+            (pane_id, Some(detail))
+        }
+        Some(
+            HerdrCreateOutcome::Created { .. } | HerdrCreateOutcome::CreatedUnconfirmed { .. },
+        ) => {
             return Ok(indeterminate("create reply named no pane".into()));
         }
         Some(HerdrCreateOutcome::NotSent(detail)) => return Err(HerdrLaunchError::NotSent(detail)),
@@ -341,6 +378,13 @@ pub(crate) async fn launch_herdr_session(
     if recorded != Ok(HostedCasOutcome::Written) {
         return Ok(indeterminate(format!(
             "pane {} not recorded: {recorded:?}",
+            location.pane_id
+        )));
+    }
+    // The pane is recorded where reconcile finds it; its unconfirmed command is never retried.
+    if let Some(detail) = unconfirmed {
+        return Ok(indeterminate(format!(
+            "pane {}: {detail}",
             location.pane_id
         )));
     }
