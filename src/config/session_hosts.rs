@@ -208,6 +208,12 @@ pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
+/// Every Herdr-configured channel id as text, for SQL that must leave their rows alone.
+pub(crate) fn configured_channel_ids() -> Vec<String> {
+    let ids = |boot: &BootSessionHosts| boot.channels().keys().map(u64::to_string).collect();
+    with_boot(|boot| boot.map_or_else(Vec::new, ids))
+}
+
 pub(crate) fn local_node() -> Option<String> {
     with_boot(|boot| {
         boot.and_then(BootSessionHosts::local_node)

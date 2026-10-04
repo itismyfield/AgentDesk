@@ -208,3 +208,69 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A Herdr-configured channel's expired legacy session keeps its returned input in memory and
+/// its row, while an unconfigured one beside it expires as before.
+#[tokio::test(flavor = "current_thread")]
+async fn idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (tmux_dir, _path_guard) = install_fake_tmux();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let token = shared.token_hash.clone();
+    let provider = ProviderKind::Claude;
+    let tmux = |n: &str| provider.build_tmux_session_name(&format!("idle-herdr-{n}"));
+    let key = |n: &str| adk_session::build_namespaced_session_key(&token, &provider, &tmux(n));
+    let (configured, plain) = (1_500_600_700_800_901_001u64, 1_500_600_700_800_901_002u64);
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(configured, "mac-mini")]);
+    for (n, channel) in [("configured", configured), ("plain", plain)] {
+        let ch = channel.to_string();
+        insert_row(&pool, &key(n), Some((token.as_str(), ch.as_str())), None).await;
+        let mut session = expired_session(&format!("idle-herdr-{n}"));
+        session.pending_uploads = vec!["returned-upload".into()];
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .insert(ChannelId::new(channel), session);
+    }
+    tokio::time::pause();
+    tokio::time::advance(SESSION_MAX_IDLE + std::time::Duration::from_secs(60)).await;
+    tokio::time::resume();
+
+    cleanup_expired_sessions(&shared).await;
+
+    let data = shared.core.lock().await;
+    let kept = data.sessions.get(&ChannelId::new(configured));
+    let uploads = kept.map(|session| session.pending_uploads.clone());
+    assert_eq!(
+        uploads,
+        Some(vec!["returned-upload".into()]),
+        "returned input kept"
+    );
+    assert!(
+        !data.sessions.contains_key(&ChannelId::new(plain)),
+        "unconfigured expires"
+    );
+    drop(data);
+    let status = |n: &str| {
+        let query = "SELECT status FROM sessions WHERE session_key = $1";
+        sqlx::query_scalar::<_, String>(query)
+            .bind(key(n))
+            .fetch_one(&pool)
+    };
+    assert_eq!(status("configured").await.unwrap(), "idle");
+    assert_eq!(status("plain").await.unwrap(), "disconnected");
+    let calls = std::fs::read_to_string(tmux_dir.path().join("calls")).unwrap_or_default();
+    assert!(!calls.contains(&tmux("configured")), "{calls}");
+    pool.close().await;
+    db.drop().await;
+}

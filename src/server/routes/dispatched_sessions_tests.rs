@@ -1589,3 +1589,90 @@ async fn force_kill_of_a_channelless_row_leaves_a_runtime_holding_its_name_pg() 
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// Both selector-clear routes leave the selectors and transcript watermark of a
+/// Herdr-configured channel's legacy row and of stored Pending/Bound rows as they were,
+/// and clear an unconfigured legacy row as before.
+#[tokio::test(flavor = "current_thread")]
+async fn selector_clears_keep_configured_and_hosted_rows_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (configured, sid) = ("1479671301387069100", "stale-p9b1-selector");
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("mac-mini"),
+        &[(configured.parse().unwrap(), "mac-mini")],
+    );
+    let rows = [
+        ("plain", "1479671301387069101", None),
+        ("configured", configured, None),
+        ("pending", "1479671301387069102", Some(HostedState::Pending)),
+        ("bound", "1479671301387069103", Some(HostedState::Bound)),
+    ];
+    let seed = || async {
+        for (name, channel, state) in rows {
+            let raw = state.map(|state| wire(&record(&owner(channel), "n1", state)));
+            sqlx::query(
+                "INSERT INTO sessions (session_key, provider, status, channel_id, hosted_execution,
+                     claude_session_id, raw_provider_session_id, claude_session_id_recorded_at,
+                     raw_provider_transcript_len_watermark,
+                     raw_provider_transcript_watermark_session_id,
+                     raw_provider_transcript_growth_proven)
+                 VALUES ($1, 'claude', 'idle', $2, $3, $4, $4, NOW(), 42, $4, TRUE)
+                 ON CONFLICT (session_key) DO UPDATE SET claude_session_id = $4,
+                     raw_provider_session_id = $4, claude_session_id_recorded_at = NOW(),
+                     raw_provider_transcript_len_watermark = 42,
+                     raw_provider_transcript_watermark_session_id = $4,
+                     raw_provider_transcript_growth_proven = TRUE",
+            )
+            .bind(format!("host:p9b1-selector-{name}"))
+            .bind(channel)
+            .bind(raw)
+            .bind(sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let kept = || async {
+        let sql = "SELECT session_key FROM sessions WHERE session_key LIKE 'host:p9b1-selector-%'
+                   AND claude_session_id IS NOT NULL AND raw_provider_session_id IS NOT NULL
+                   AND claude_session_id_recorded_at IS NOT NULL
+                   AND raw_provider_transcript_len_watermark = 42
+                   AND raw_provider_transcript_watermark_session_id IS NOT NULL
+                   AND raw_provider_transcript_growth_proven ORDER BY session_key";
+        let keys = sqlx::query_scalar::<_, String>(sql).fetch_all(&pool).await;
+        let keys = keys.unwrap().into_iter();
+        keys.map(|key| key.trim_start_matches("host:p9b1-selector-").to_string())
+            .collect::<Vec<_>>()
+    };
+    let protected = ["bound", "configured", "pending"];
+
+    seed().await;
+    let body = Json(serde_json::json!({ "session_id": sid }));
+    let (_, Json(cleared)) = super::clear_stale_session_id(State(test_state(pool.clone())), body)
+        .await
+        .unwrap();
+    assert_eq!(
+        cleared["cleared"], 1,
+        "by sid: only the unconfigured legacy row"
+    );
+    assert_eq!(kept().await, protected, "by sid");
+
+    seed().await;
+    for (name, _, _) in rows {
+        let key = format!("host:p9b1-selector-{name}");
+        let body = Json(serde_json::json!({ "session_key": key }));
+        let state = State(test_state(pool.clone()));
+        let (_, Json(cleared)) = super::clear_session_id_by_key(state, body).await.unwrap();
+        assert_eq!(
+            cleared["cleared"],
+            u64::from(name == "plain"),
+            "by key: {name}"
+        );
+    }
+    assert_eq!(kept().await, protected, "by key");
+    pool.close().await;
+    pg_db.drop().await;
+}

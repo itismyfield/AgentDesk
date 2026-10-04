@@ -70,6 +70,11 @@ async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     };
     let mut safe_expired = Vec::new();
     for mut candidate in expired {
+        // A Herdr-configured channel keeps its session, returned input, mailbox and worktree.
+        let configured = super::admin_host_guard::configured_refusal;
+        if configured(candidate.channel_id.get()).is_some() {
+            continue;
+        }
         // A missing watcher/inflight record can be a relay failure while the
         // actual provider still works. Do not clear its mailbox or worktree.
         let Some(pool) = shared.pg_pool.as_ref() else {
