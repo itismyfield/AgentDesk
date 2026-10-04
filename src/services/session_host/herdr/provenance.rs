@@ -1,6 +1,5 @@
-//! OS reads behind E7 and the pane probe: the socket peer pid, a process's parent, start,
-//! environment and exec path, and one consistent read of a config file. Unsupported
-//! platforms read as Unverified.
+//! OS reads behind E7 and the pane probe: socket peer, a process's parent, start, environment
+//! and exec path, and one consistent config read. Unsupported platforms read as Unverified.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fs::{File, Metadata};
