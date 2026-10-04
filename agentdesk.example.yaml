@@ -453,6 +453,8 @@ prompt_manifest_retention:
 #   stale_paused_alert_secs: 0
 #   stale_paused_alert_ttl_secs: 86400
 #   failure_pause_auto_resume_secs: 0
+#   startup_grace_secs: 120
+#   max_consecutive_failures: 3
 
 # 자동/수동 escalation 대상 설정입니다. 기본값은 mode=pm, owner_user_id/pm_channel_id 없음,
 # schedule은 pm_hours=00:00-08:00, timezone=Asia/Seoul로 해석됩니다. user/scheduled 라우팅 때 설정하세요.

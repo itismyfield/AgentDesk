@@ -201,6 +201,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::pipeline_override::pipeline_override_pg_tests
   --skip services::pipeline_routes::tests
   --skip services::routines::agent_executor::reliability::tests
+  --skip services::routines::reliability_pg_tests
   --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
@@ -888,6 +889,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::pipeline_override::pipeline_override_pg_tests
   services::pipeline_routes::tests
   services::routines::agent_executor::reliability::tests
+  services::routines::reliability_pg_tests
   services::routines::session_control::tests
   services::scheduled_messages::context_snapshot::postgres_tests
   services::scheduled_messages::postgres_tests

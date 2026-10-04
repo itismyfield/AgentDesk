@@ -2708,9 +2708,10 @@ async fn routine_runtime_loop(
     tick_interval_secs: u64,
 ) {
     use crate::services::routines::{
-        RoutineAction, RoutineAgentExecutor, RoutineDiscordLogger, RoutineStore, poll_agent_turns,
-        run_due_tick,
+        RoutineAction, RoutineAgentExecutor, RoutineDiscordLogger, RoutineStore,
+        after_startup_grace, poll_agent_turns, run_due_tick,
     };
+    let boot = tokio::time::Instant::now();
     let Some(tick_interval_secs) = std::num::NonZeroU64::new(tick_interval_secs) else {
         tracing::warn!("routine runtime not started: tick_interval_secs must be greater than zero");
         return;
@@ -2840,6 +2841,8 @@ async fn routine_runtime_loop(
         // disables it, e.g. 3600 resumes after a 1-hour backoff.
         let auto_resume_secs = routines_config.failure_pause_auto_resume_secs;
         let pause_on_terminal_failure = routines_config.failure_pause_auto_resume_secs > 0;
+        // Failure alerts are not tied to the pause knob: 0 there still alerts at this streak.
+        let max_consecutive_failures = routines_config.max_consecutive_failures;
         if pause_on_terminal_failure {
             let now = chrono::Utc::now();
             let cutoff = now - chrono::Duration::seconds(auto_resume_secs as i64);
@@ -2889,13 +2892,16 @@ async fn routine_runtime_loop(
             Ok(outcomes) if !outcomes.is_empty() => {
                 for outcome in &outcomes {
                     discord_logger.log_run_outcome(&store, outcome).await;
+                    discord_logger
+                        .alert_consecutive_failures(&store, outcome, max_consecutive_failures)
+                        .await;
                 }
                 tracing::info!(count = outcomes.len(), "routine agent turns completed")
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "routine agent turn polling failed"),
         }
-        match run_due_tick(
+        let due_tick = run_due_tick(
             &store,
             &script_loader,
             &routine_script_dirs,
@@ -2903,12 +2909,19 @@ async fn routine_runtime_loop(
             Some(&discord_logger),
             routines_config.max_due_per_tick,
             pause_on_terminal_failure,
-        )
-        .await
+        );
+        match after_startup_grace(boot.elapsed(), routines_config.startup_grace_secs, due_tick)
+            .await
         {
-            Ok(outcomes) if !outcomes.is_empty() => {
+            Ok(Some(outcomes)) if !outcomes.is_empty() => {
+                for outcome in &outcomes {
+                    discord_logger
+                        .alert_consecutive_failures(&store, outcome, max_consecutive_failures)
+                        .await;
+                }
                 tracing::info!(count = outcomes.len(), "routine due tick executed")
             }
+            Ok(None) => tracing::debug!("routine due tick held by startup grace"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "routine due tick failed"),
         }
