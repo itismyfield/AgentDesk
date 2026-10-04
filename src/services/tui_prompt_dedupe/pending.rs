@@ -136,6 +136,7 @@ impl Registration {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LaunchSeed {
     pub pending_seq: u64,
+    pub execution_nonce: String,
     /// The record a refusal of the registration names.
     pub line: u64,
     /// The verified current bound instead of the launch transcript, already judged against its pin.
@@ -446,6 +447,7 @@ pub(crate) fn judge_restore(
     }
     let seed = |line, pinned| LaunchSeed {
         pending_seq: live.pending.seq,
+        execution_nonce: current.to_owned(),
         line,
         pinned,
         launch: launch.clone(),
@@ -630,7 +632,14 @@ fn restore_under_source_authority(
             let outcome = seed.outcome(registered);
             if matches!(outcome, PendingRestore::Seeded { .. }) {
                 let (command, payload) = (&launch.session_id, &seed.payload_session_id);
-                adoption_retry::seed_restored(authority, command, payload, &seed.hook);
+                adoption_retry::seed_restored(
+                    authority,
+                    command,
+                    payload,
+                    &seed.hook,
+                    &seed.execution_nonce,
+                    (channel_id, seed.pending_seq),
+                );
             }
             outcome
         }
