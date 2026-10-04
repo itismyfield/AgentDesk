@@ -1730,6 +1730,8 @@ src/
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
+│   │   ├── input_transition.rs
+│   │   ├── input_transition_tests.rs
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
 │   │   ├── live_bridge.rs
@@ -2122,7 +2124,10 @@ src/
 │   │   ├── ledger.rs
 │   │   ├── mod.rs
 │   │   ├── rows.rs
-│   │   └── rows_tests.rs
+│   │   ├── rows_tests.rs
+│   │   ├── transition.rs
+│   │   ├── transition_fixture_tests.rs
+│   │   └── transition_tests.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/

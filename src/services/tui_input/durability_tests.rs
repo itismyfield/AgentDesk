@@ -19,7 +19,7 @@ pub(super) fn partial_blob_write(file: &mut std::fs::File, bytes: &[u8]) -> std:
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-mod supported {
+pub(super) mod supported {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
@@ -135,10 +135,10 @@ mod supported {
         static TRACE: RefCell<Option<Trace>> = const { RefCell::new(None) };
     }
 
-    struct Recording;
+    pub(crate) struct Recording;
 
     impl Recording {
-        fn start(root: &Path) -> Self {
+        pub(crate) fn start(root: &Path) -> Self {
             TRACE.with(|slot| {
                 assert!(slot.borrow().is_none());
                 *slot.borrow_mut() = Some(Trace {
@@ -151,7 +151,7 @@ mod supported {
             Self
         }
 
-        fn arm(&self, fail_at: Option<usize>) {
+        pub(crate) fn arm(&self, fail_at: Option<usize>) {
             TRACE.with(|slot| {
                 let mut slot = slot.borrow_mut();
                 let trace = slot.as_mut().unwrap();
@@ -164,6 +164,10 @@ mod supported {
         fn fail_on(&self, kind: &str) {
             self.arm(None);
             TRACE.with(|slot| slot.borrow_mut().as_mut().unwrap().fail_kind = Some(kind.into()));
+        }
+
+        pub(crate) fn events(&self) -> Vec<String> {
+            TRACE.with(|slot| slot.borrow().as_ref().unwrap().events.clone())
         }
 
         fn finish(self) -> (Projection, Vec<String>) {

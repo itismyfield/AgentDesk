@@ -119,6 +119,9 @@ pub enum Owner {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub since_seq: u64,
+    // The source WAL sequence survives compaction; old snapshots lack ordering evidence.
+    #[serde(default)]
+    pub received_seq: Option<u64>,
     pub state: RowState,
     pub input: Value,
 }
@@ -171,7 +174,7 @@ impl Rows {
         match Entry::decode(record)? {
             Entry::Received { key, input } => {
                 if self.can_activate(key) {
-                    self.activate(key, seq, input, RowState::Received);
+                    self.activate(key, seq, seq, input, RowState::Received);
                 } else {
                     self.ignored += 1;
                 }
@@ -204,7 +207,7 @@ impl Rows {
         for &key in ids {
             match bound.remove(&key) {
                 Some(row) if self.can_activate(key) => {
-                    self.activate(key, seq, row.input, row.state);
+                    self.activate(key, seq, row.seq, row.input, row.state);
                 }
                 Some(_) => self.ignored += 1,
                 None if self.owner(key) == Owner::Legacy => {
@@ -234,12 +237,24 @@ impl Rows {
             .is_none_or(|row| row.state.released_to_legacy())
     }
 
-    fn activate(&mut self, key: u64, seq: u64, input: Value, state: RowState) {
+    fn activate(&mut self, key: u64, seq: u64, received_seq: u64, input: Value, state: RowState) {
         self.unbound.remove(&key);
         self.rows.insert(
             key,
             Row {
                 since_seq: seq,
+                received_seq: {
+                    #[cfg(test)]
+                    if super::transition::mutant("drop_order") {
+                        None
+                    } else {
+                        Some(received_seq)
+                    }
+                    #[cfg(not(test))]
+                    {
+                        Some(received_seq)
+                    }
+                },
                 state,
                 input,
             },
@@ -285,6 +300,11 @@ impl Rows {
             .filter(|row| row.seq >= first_seq)
             .map(|row| row.key)
             .collect()
+    }
+
+    // A commit or handback closes this staging window; it is not an execution authority.
+    pub fn boundary_since(&self, first_seq: u64) -> bool {
+        self.boundary_seq >= first_seq
     }
 
     pub fn folded_seq(&self) -> u64 {
