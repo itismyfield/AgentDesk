@@ -57,7 +57,14 @@ mod supported {
 
     fn set(ledger: &mut Ledger, key: u64, state: RowState) {
         ledger
-            .append_entry(&Entry::Transition { key, state }, &[])
+            .append_entry(
+                &Entry::Transition {
+                    key,
+                    state,
+                    attempt: None,
+                },
+                &[],
+            )
             .unwrap();
     }
 

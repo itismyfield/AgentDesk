@@ -204,11 +204,14 @@ impl FakePane {
 }
 
 impl Pane for FakePane {
-    async fn capture(&mut self) -> Result<String, String> {
+    fn execution_nonce(&self) -> Option<String> {
+        Some("test-nonce".into())
+    }
+    fn capture(&mut self) -> Result<String, String> {
         Ok(self.screen.clone())
     }
 
-    async fn submit(&mut self, text: &str) -> SendOutcome {
+    fn submit(&mut self, text: &str) -> SendOutcome {
         self.submitted.push(text.to_string());
         self.outcomes.pop_front().unwrap_or(SendOutcome::Sent)
     }
@@ -345,7 +348,14 @@ async fn unconfirmed_or_indeterminate_inputs_are_never_injected_again() {
     for (channel, state) in [(4, RowState::Injecting), (5, RowState::AwaitTurn)] {
         let mut ledger = world.ledger_for(channel, &[(1, "in flight")]);
         ledger
-            .append_entry(&Entry::Transition { key: 1, state }, &[])
+            .append_entry(
+                &Entry::Transition {
+                    key: 1,
+                    state,
+                    attempt: None,
+                },
+                &[],
+            )
             .unwrap();
         let mut restarted = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
         let step = restarted.step(&mut ledger, Some(&world.idle()), t0).await;
@@ -489,7 +499,7 @@ async fn bounded_tmux_separates_not_sent_from_indeterminate() {
     ];
     for (behavior, expected) in cases {
         let tmux = FakeTmux::new(CLAUDE_READY, behavior);
-        let outcome = tmux.pane().submit("hello").await;
+        let outcome = tmux.pane().submit("hello");
         let kind = match outcome {
             SendOutcome::Sent => "sent",
             SendOutcome::NotSent(_) => "not-sent",
@@ -501,17 +511,14 @@ async fn bounded_tmux_separates_not_sent_from_indeterminate() {
 
     let missing = PathBuf::from("/nonexistent/agentdesk-tmux");
     let mut pane = TmuxPane::with_program("s", missing, Duration::from_millis(300));
-    assert!(matches!(
-        pane.submit("hello").await,
-        SendOutcome::NotSent(_)
-    ));
-    assert!(pane.capture().await.is_err());
+    assert!(matches!(pane.submit("hello"), SendOutcome::NotSent(_)));
+    assert!(pane.capture().is_err());
 
     // An oversized prompt is refused before any tmux call.
     let tmux = FakeTmux::new(CLAUDE_READY, "");
     let oversized = "x".repeat(MAX_PROMPT_BYTES + 1);
     assert!(matches!(
-        tmux.pane().submit(&oversized).await,
+        tmux.pane().submit(&oversized),
         SendOutcome::Refused(_)
     ));
     assert!(tmux.calls().is_empty());

@@ -348,7 +348,14 @@ pub fn handback(root: &Path, channel: u64, host: &mut impl Host) -> io::Result<O
             Handback::Settled => None,
         };
         if let Some(state) = closed {
-            ledger.append_entry(&Entry::Transition { key, state }, &[])?;
+            ledger.append_entry(
+                &Entry::Transition {
+                    key,
+                    state,
+                    attempt: None,
+                },
+                &[],
+            )?;
         }
         // Do not append later inputs ahead of a rejected earlier input on restart.
         if held {

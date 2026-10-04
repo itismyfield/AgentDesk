@@ -1,12 +1,13 @@
 //! Bounded tmux effects for the input actor: capture, then paste and Enter.
 
-use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
 use super::super::bounded_tmux::{BoundedTmuxError, run_with_budget};
+use super::gate::{PaneVerdict, judge_pane, own_draft};
+use crate::services::tui_o::shadow::ShadowProvider;
 
 /// Larger prompts are refused before any tmux call.
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
@@ -25,14 +26,20 @@ pub enum SendOutcome {
 }
 
 pub trait Pane {
-    fn capture(&mut self) -> impl Future<Output = Result<String, String>> + Send;
-    fn submit(&mut self, text: &str) -> impl Future<Output = SendOutcome> + Send;
+    fn capture(&mut self) -> Result<String, String>;
+    fn submit(&mut self, text: &str) -> SendOutcome;
+    fn with_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        Some(operation(self))
+    }
+    fn execution_nonce(&self) -> Option<String>;
 }
 
 pub struct TmuxPane {
     session: String,
     program: PathBuf,
     budget: Duration,
+    provider: ShadowProvider,
+    pre_empty: bool,
 }
 
 impl TmuxPane {
@@ -45,6 +52,8 @@ impl TmuxPane {
             session: session.to_string(),
             program,
             budget,
+            provider: ShadowProvider::Claude,
+            pre_empty: false,
         }
     }
 
@@ -59,11 +68,32 @@ impl TmuxPane {
         format!("={}:", self.session)
     }
 
-    async fn run(&self, args: &[&str]) -> Result<std::process::Output, BoundedTmuxError> {
-        run_with_budget(&mut self.command(args), self.budget).await
+    fn run(&self, args: &[&str]) -> Result<std::process::Output, BoundedTmuxError> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(BoundedTmuxError::Spawn)?
+                        .block_on(run_with_budget(&mut self.command(args), self.budget))
+                })
+                .join()
+                .unwrap_or_else(|_| {
+                    Err(BoundedTmuxError::Spawn(std::io::Error::other(
+                        "tmux worker panicked",
+                    )))
+                })
+        })
     }
 
-    async fn submit_inner(&self, text: &str) -> SendOutcome {
+    pub fn for_provider(session: &str, provider: ShadowProvider) -> Self {
+        let mut pane = Self::new(session);
+        pane.provider = provider;
+        pane
+    }
+
+    fn submit_inner(&mut self, text: &str) -> SendOutcome {
         if text.len() > MAX_PROMPT_BYTES {
             return SendOutcome::Refused(format!("prompt exceeds {MAX_PROMPT_BYTES} bytes"));
         }
@@ -78,10 +108,11 @@ impl TmuxPane {
         if let Err(error) = file.write_all(text.as_bytes()).and_then(|()| file.flush()) {
             return SendOutcome::NotSent(error.to_string());
         }
+        let nonce = self.execution_nonce();
         let buffer = format!("agentdesk-input-{}", uuid::Uuid::new_v4());
         let path = file.path().to_string_lossy().into_owned();
         // Loading a buffer never touches the pane, so every failure here is NotSent.
-        match self.run(&["load-buffer", "-b", &buffer, &path]).await {
+        match self.run(&["load-buffer", "-b", &buffer, &path]) {
             Ok(output) if output.status.success() => {}
             Ok(output) => return SendOutcome::NotSent(stderr_of(&output)),
             Err(error) => return SendOutcome::NotSent(error.to_string()),
@@ -97,18 +128,26 @@ impl TmuxPane {
             "-t",
             &target,
         ];
-        match self.run(&paste).await {
+        match self.run(&paste) {
             Ok(output) if output.status.success() => {}
             // tmux rejects a missing pane or buffer before pasting anything.
-            Ok(output) => return SendOutcome::NotSent(stderr_of(&output)),
+            Ok(output) => return SendOutcome::Indeterminate(stderr_of(&output)),
             Err(error) if error.may_have_effect() => {
                 return SendOutcome::Indeterminate(error.to_string());
             }
             Err(error) => return SendOutcome::NotSent(error.to_string()),
         }
-        tokio::time::sleep(BEFORE_ENTER_SETTLE).await;
+        std::thread::sleep(BEFORE_ENTER_SETTLE);
+        let Ok(after) = self.capture() else {
+            return SendOutcome::Indeterminate("post-paste capture unavailable".into());
+        };
+        if self.execution_nonce() != nonce
+            || !own_draft(self.provider, &after, text, self.pre_empty)
+        {
+            return SendOutcome::Indeterminate("own draft or modal changed".into());
+        }
         // The paste landed, so any Enter failure leaves our text in the composer.
-        match self.run(&["send-keys", "-t", &target, "Enter"]).await {
+        match self.run(&["send-keys", "-t", &target, "Enter"]) {
             Ok(output) if output.status.success() => SendOutcome::Sent,
             Ok(output) => SendOutcome::Indeterminate(stderr_of(&output)),
             Err(error) => SendOutcome::Indeterminate(error.to_string()),
@@ -125,17 +164,17 @@ fn stderr_of(output: &std::process::Output) -> String {
 }
 
 impl Pane for TmuxPane {
-    async fn capture(&mut self) -> Result<String, String> {
+    fn capture(&mut self) -> Result<String, String> {
         let output = self
             .run(&[
                 "capture-pane",
                 "-p",
+                "-e",
                 "-t",
                 &self.session,
                 "-S",
                 CAPTURE_SCROLLBACK,
             ])
-            .await
             .map_err(|error| error.to_string())?;
         if !output.status.success() {
             return Err(stderr_of(&output));
@@ -143,7 +182,40 @@ impl Pane for TmuxPane {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    async fn submit(&mut self, text: &str) -> SendOutcome {
-        self.submit_inner(text).await
+    fn submit(&mut self, text: &str) -> SendOutcome {
+        self.submit_inner(text)
+    }
+
+    fn execution_nonce(&self) -> Option<String> {
+        use crate::services::tui_prompt_dedupe::binding_context::{
+            SpawnNonceMarker, observe_spawn_nonce_marker,
+        };
+        match observe_spawn_nonce_marker(&self.session) {
+            SpawnNonceMarker::Known(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn with_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        let session = self.session.clone();
+        let provider = self.provider;
+        let callback = || {
+            self.pre_empty = self
+                .capture()
+                .is_ok_and(|c| judge_pane(provider, &c) == PaneVerdict::Ready);
+            operation(self)
+        };
+        match provider {
+            ShadowProvider::Claude => {
+                crate::services::claude_tui::composer_lock::try_with_composer_mutation_lock(
+                    &session, callback,
+                )
+            }
+            ShadowProvider::Codex => {
+                crate::services::codex_tui::input::try_with_composer_mutation_lock(
+                    &session, callback,
+                )
+            }
+        }
     }
 }

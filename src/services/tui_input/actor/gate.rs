@@ -3,7 +3,8 @@
 use crate::services::claude_tui::prompt_readiness::normalize_prompt_readiness_panel_in_capture;
 use crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog;
 use crate::services::codex_tui::input::{
-    PromptReadinessSnapshot, pane_looks_ready_for_codex_prompt, steering_snapshot_decision,
+    PromptReadinessSnapshot, active_composer_visible_prompt_draft_in_pane,
+    prompt_readiness_from_ansi_pane, steering_snapshot_decision, strip_ansi_escape_sequences,
 };
 use crate::services::tmux_common::{
     tmux_capture_indicates_claude_tui_busy, tmux_capture_indicates_claude_tui_exact_empty_composer,
@@ -33,7 +34,8 @@ pub fn judge_pane(provider: ShadowProvider, capture: &str) -> PaneVerdict {
 }
 
 fn judge_claude(capture: &str) -> PaneVerdict {
-    let pane = normalize_prompt_readiness_panel_in_capture(capture);
+    let plain = strip_ansi_escape_sequences(capture);
+    let pane = normalize_prompt_readiness_panel_in_capture(&plain);
     if detect_claude_startup_dialog(&pane).is_some()
         || tmux_capture_indicates_claude_tui_interactive_modal(&pane)
         || tmux_capture_indicates_claude_tui_mcp_auth_required(&pane)
@@ -52,12 +54,13 @@ fn judge_claude(capture: &str) -> PaneVerdict {
 }
 
 fn judge_codex(capture: &str) -> PaneVerdict {
-    let lines: Vec<&str> = capture.lines().collect();
+    let (composer_marker_detected, prompt_draft_detected, pane) =
+        prompt_readiness_from_ansi_pane(capture);
+    let lines: Vec<&str> = pane.lines().collect();
     let tail = lines[lines.len().saturating_sub(CODEX_MODAL_TAIL_LINES)..].join("\n");
-    // With composer and draft forced clean, steering refuses only for modal wording.
     let raw = PromptReadinessSnapshot {
-        composer_marker_detected: true,
-        prompt_draft_detected: false,
+        composer_marker_detected,
+        prompt_draft_detected,
         tmux_pane_alive: true,
         capture_available: true,
         pane_tail: tail,
@@ -65,9 +68,77 @@ fn judge_codex(capture: &str) -> PaneVerdict {
     if steering_snapshot_decision(&raw).is_err() {
         return PaneVerdict::Modal;
     }
-    if pane_looks_ready_for_codex_prompt(capture) {
+    if composer_marker_detected && !prompt_draft_detected {
         PaneVerdict::Ready
     } else {
         PaneVerdict::NotReady
     }
+}
+
+// Only the bottom composer body can prove our paste; scrollback and chrome cannot.
+pub(crate) fn own_draft(
+    provider: ShadowProvider,
+    capture: &str,
+    frame: &str,
+    pre_empty: bool,
+) -> bool {
+    if !pre_empty {
+        return false;
+    }
+    let plain = strip_ansi_escape_sequences(capture);
+    if provider == ShadowProvider::Codex {
+        let Some(draft) = active_composer_visible_prompt_draft_in_pane(&plain) else {
+            return false;
+        };
+        return draft == frame
+            && !plain.contains("[Pasted Content ")
+            && !plain.to_ascii_lowercase().contains("approval required");
+    }
+    if detect_claude_startup_dialog(&plain).is_some()
+        || tmux_capture_indicates_claude_tui_interactive_modal(&plain)
+        || tmux_capture_indicates_claude_tui_mcp_auth_required(&plain)
+    {
+        return false;
+    }
+    let lines: Vec<_> = plain.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('❯'))
+    else {
+        return false;
+    };
+    let Some(end) = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim().chars().all(|c| c == '─') && line.trim().len() >= 3)
+        .map(|(i, _)| i)
+    else {
+        return false;
+    };
+    let first = lines[start].trim_start().strip_prefix('❯').unwrap();
+    let first = first
+        .strip_prefix(' ')
+        .or_else(|| first.strip_prefix('\u{00a0}'))
+        .unwrap_or(first);
+    let body = std::iter::once(first)
+        .chain(lines[start + 1..end].iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body == frame {
+        return true;
+    }
+    let Some(rest) = body.strip_prefix("[Pasted text #") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return false;
+    }
+    let suffix = &rest[digits..];
+    let newlines = frame.bytes().filter(|b| *b == b'\n').count();
+    if newlines == 0 {
+        return frame.chars().count() > 800 && suffix == "]";
+    }
+    suffix == format!(" +{newlines} lines]")
 }

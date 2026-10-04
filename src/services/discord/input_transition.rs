@@ -193,6 +193,13 @@ impl<E: Effects> Host for Files<E> {
         let mut markers = Vec::new();
         for token in children(&queue_root)? {
             if !fs::symlink_metadata(&token)?.file_type().is_dir() {
+                if token
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| matches!(n, ".DS_Store" | ".gitkeep"))
+                {
+                    continue;
+                }
                 return Err(invalid("queue token is not a directory"));
             }
             if let Some(value) = self.capture(

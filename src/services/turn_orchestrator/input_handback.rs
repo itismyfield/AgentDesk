@@ -59,6 +59,33 @@ pub(crate) fn enqueue(destination: &Destination<'_>, input: &Value) -> io::Resul
     {
         return Ok(EnqueueOutcome::Rejected);
     }
+    let mut input = input.get("legacy_input").unwrap_or(input).clone();
+    let Some(fields) = input.as_object_mut() else {
+        return Ok(EnqueueOutcome::Rejected);
+    };
+    fields.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "author_id"
+                | "author_is_bot"
+                | "message_id"
+                | "created_at_wall_time_ms"
+                | "queued_generation"
+                | "source_message_ids"
+                | "source_message_queued_generations"
+                | "source_text_segments"
+                | "text"
+                | "reply_context"
+                | "has_reply_boundary"
+                | "merge_consecutive"
+                | "pending_uploads"
+                | "channel_id"
+                | "channel_name"
+                | "override_channel_id"
+                | "voice_announcement"
+        )
+    });
+    let input = &input;
     let mut token = Path::new(destination.token_hash).components();
     if !matches!(token.next(), Some(std::path::Component::Normal(_))) || token.next().is_some() {
         return Err(io::Error::other("invalid queue token"));
@@ -106,30 +133,14 @@ pub(crate) fn enqueue(destination: &Destination<'_>, input: &Value) -> io::Resul
     }
     let now = SystemTime::now();
     let instant = Instant::now();
-    let mut queue: Vec<_> = items
-        .into_iter()
-        .map(|item| pending_queue_item_to_intervention(item, now, instant))
-        .collect();
+    // Test admission on the incoming item alone; distinct IDs must not merge or text-dedup.
+    if items.len() >= super::MAX_INTERVENTIONS_PER_CHANNEL {
+        return Ok(EnqueueOutcome::Rejected);
+    }
+    let mut queue = Vec::new();
     let incoming = pending_queue_item_to_intervention(incoming, now, instant);
     let result = enqueue_with_settlement(&mut queue, incoming, None, None);
     if !result.enqueued || !result.queue_exit_events.is_empty() {
-        return Ok(EnqueueOutcome::Rejected);
-    }
-    // Policy validates admission, but handback cannot merge or rewrite the existing tail.
-    let mut expected: Vec<PendingQueueItem> = serde_json::from_value(original.clone())?;
-    expected.push(serde_json::from_value(input.clone())?);
-    let expected: Vec<_> = expected.iter().map(ids).collect();
-    let resulting: Vec<Vec<u64>> = queue
-        .iter()
-        .map(|item| {
-            let mut sources: Vec<_> = item.source_message_ids.iter().map(|id| id.get()).collect();
-            if !sources.contains(&item.message_id.get()) {
-                sources.push(item.message_id.get());
-            }
-            sources
-        })
-        .collect();
-    if resulting != expected {
         return Ok(EnqueueOutcome::Rejected);
     }
     let mut payload = original;

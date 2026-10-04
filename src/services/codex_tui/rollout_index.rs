@@ -44,7 +44,7 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -216,14 +216,33 @@ fn strict_session_meta_from_header(
     let mut line = Vec::new();
     for _ in 0..HEADER_SCAN_LINE_LIMIT {
         line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
+        if reader
+            .by_ref()
+            .take(64 * 1024 + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
             break;
+        }
+        if line.len() > 64 * 1024 || !line.ends_with(b"\n") {
+            return Err(std::io::Error::other(
+                "incomplete or oversized rollout header",
+            ));
         }
         if let Some(found) = header_line_meta(&line) {
             return Ok(found);
         }
     }
     Ok(None)
+}
+
+pub(crate) fn strict_parent_session(path: &Path, session_id: &str) -> std::io::Result<()> {
+    let meta = strict_session_meta_from_header(std::fs::File::open(path)?)?
+        .ok_or_else(|| std::io::Error::other("parent session_meta unavailable"))?;
+    if meta.is_subagent() || meta.id.as_deref() != Some(session_id) {
+        return Err(std::io::Error::other("parent session identity mismatch"));
+    }
+    Ok(())
 }
 
 /// `None` means keep scanning; `Some(None)` is a `session_meta` whose cwd is blank.
