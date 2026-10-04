@@ -1,61 +1,8 @@
-"""Mutation proof for scripts/check_reachability_canonical_equivalence.py (#5071 T4-B2a).
-
-The gate is the machine half of 4987 blocker B1'. A gate that only ever runs
-green on the real corpus proves nothing about what it would catch, so every
-check it makes is exercised here against a synthetic repo root reproducing one
-defect at a time:
-
-  * a Python output that no longer matches the golden corpus;
-  * a corpus thinned below the floor, which is the vacuous-pass shape — a gate
-    finding nothing to compare must never read as a gate that compared and
-    agreed;
-  * a mutation whose anchor text no longer exists, i.e. a mutation that is
-    silently never applied. This is the failure mode a mutation runner is most
-    likely to develop and least likely to notice;
-  * a mutation the implementation no longer kills;
-  * a consumer added outside the tree, the tree's module declaration removed,
-    and a verdict read added to the observation-only B2c consumer;
-  * the two ways a consumer can reach the tree WITHOUT writing `reachability::`
-    — an `as` alias at the call site, and a re-export from the allowlisted file
-    — each with the control that keeps the widened scan from reporting every
-    local that happens to be called `reachability`. A gate whose central claim
-    is "only the named observation and sanctioned consumers, machine-checked"
-    is worth exactly what its weakest spelling catches;
-  * a SANCTIONED consumer (#5071 T4-B4) that drifts off its contract — naming
-    the tree in a `use` item (the alias/re-export laundering shape) or reading
-    a tree path other than the sanctioned `divergence::` one (a fully-qualified
-    verdict read). The tier is empty since #5071 T4-B6 promoted its only
-    member, so a synthetic member patched into the set holds the rule;
-  * a JUDGMENT consumer (#5071 T4-B6) that drifts off its wider contract —
-    renaming the tree in a `use` item, re-exporting it, or reading a tree path
-    outside the four T4-B6 unlocks (the ledger above all) — next to the
-    allowance itself: a plain `use` plus a fully-qualified verdict read is
-    exactly what T4-B6 landed, and must scan clean;
-  * the TWO-STEP form of that laundering, which the r1 review reproduced
-    against the live gate with a real compile: a judgment consumer imports a
-    tree item with a plain `use` (allowed), then publishes it as a `pub type`
-    alias or a `pub use` of the imported name, and the sibling that reads it
-    never writes `reachability`. Both steps are legal on their own, which is
-    why the gate has to see the pair. The private-alias control sits beside
-    them: a `type` alias with no `pub` binds a spelling inside one file and
-    must stay allowed, or the rule would be refusing readability rather than
-    republication;
-  * an allowance whose file no longer names the tree at all (a stale allowance
-    nobody would notice);
-  * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
-
-The live-repo cases at the end pin that the gate command is wired into
-`scripts/ci-script-checks.sh`, that the checked-in tree passes it, and that the
-declared Rust mutations still anchor on text that exists — a `--with-rust` run
-needs a compiler and does not belong in the fast lane, but a Rust mutation
-silently anchoring on deleted text is exactly the rot this file exists to catch,
-and checking the ANCHOR costs nothing.
-"""
+"""Mutation proof for the reachability judgment-authority source lint."""
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import shutil
 import subprocess
 import sys
@@ -89,7 +36,7 @@ def _mirror_repo(tmp: str) -> Path:
     (root / "tests/fixtures").mkdir(parents=True)
     (root / "src/services/discord/health").mkdir(parents=True)
 
-    for name in ("relay_watchdog.py", "check_clippy_allow_ratchet.py"):
+    for name in ("check_clippy_allow_ratchet.py",):
         shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts" / name)
     shutil.copytree(
         REPO_ROOT / "tests/fixtures/relay_obligation",
@@ -132,11 +79,7 @@ JUDGMENT_CONSUMER_REL = "src/services/discord/health/snapshot.rs"
 
 
 def _run(root: Path) -> list[str]:
-    cases = GATE.load_corpus(root)
-    problems = GATE.check_corpus_equivalence(root, cases)
-    problems += GATE.run_python_mutations(root, cases)
-    problems += GATE.check_no_judgment_authority(root)
-    return problems
+    return GATE.check_no_judgment_authority(root)
 
 
 def _patch(path: Path, before: str, after: str) -> None:
@@ -155,65 +98,6 @@ class SyntheticRootTests(unittest.TestCase):
     def test_the_mirrored_root_is_clean(self):
         with TemporaryDirectory() as tmp:
             self.assertEqual(_run(_mirror_repo(tmp)), [])
-
-    def test_a_python_output_that_drifts_from_the_corpus_is_reported(self):
-        with TemporaryDirectory() as tmp:
-            root = _mirror_repo(tmp)
-            _patch(
-                root / "scripts/relay_watchdog.py",
-                'CANONICAL_SCHEMA_HEADER = "relay_obligation_canonical_v1"',
-                'CANONICAL_SCHEMA_HEADER = "relay_obligation_canonical_v2"',
-            )
-            self.assertProblem(_run(root), "!= golden corpus")
-
-    def test_a_corpus_thinned_below_the_floor_is_not_a_clean_run(self):
-        with TemporaryDirectory() as tmp:
-            root = _mirror_repo(tmp)
-            manifest = root / "tests/fixtures/relay_obligation/cases.json"
-            entries = json.loads(manifest.read_text(encoding="utf-8"))
-            manifest.write_text(json.dumps(entries[:2]), encoding="utf-8")
-            self.assertProblem(_run(root), "below the")
-
-    def test_a_mutation_whose_anchor_vanished_is_reported_not_skipped(self):
-        """The anchor is dissolved by an edit that changes NOTHING semantically
-        — the same byte spelled `\\x0d` instead of `\\r`. So the corpus still
-        matches and the ONLY complaint is that a declared mutation could not be
-        applied, which is precisely the silent-skip the runner must never
-        tolerate: a runner that applies nothing reports no survivors."""
-        with TemporaryDirectory() as tmp:
-            root = _mirror_repo(tmp)
-            name, before, _after = GATE.PYTHON_MUTATIONS[0]
-            _patch(
-                root / "scripts/relay_watchdog.py",
-                before,
-                before.replace('b"\\r"', 'b"\\x0d"'),
-            )
-            problems = _run(root)
-            self.assertProblem(problems, f"{name!r} anchors on text appearing 0")
-
-    def test_a_surviving_mutation_is_reported(self):
-        """A mutation that applies cleanly and changes nothing observable must
-        be named, not counted as killed.
-
-        Constructed by adding one deliberately semantics-free mutation to the
-        declared set — renaming a local — rather than by weakening the
-        implementation: the claim under test is about the RUNNER's verdict, and
-        a real rule broken in a way that happened to survive would be testing
-        the rule instead."""
-        original = GATE.PYTHON_MUTATIONS
-        GATE.PYTHON_MUTATIONS = original + (
-            (
-                "no-op-local-rename",
-                "    line_start = 0\n    while True:",
-                "    line_start = 0\n    del_me = line_start\n    line_start = del_me\n    while True:",
-            ),
-        )
-        try:
-            with TemporaryDirectory() as tmp:
-                problems = _run(_mirror_repo(tmp))
-        finally:
-            GATE.PYTHON_MUTATIONS = original
-        self.assertProblem(problems, "'no-op-local-rename' SURVIVED")
 
     def test_a_consumer_outside_the_tree_is_reported(self):
         with TemporaryDirectory() as tmp:
@@ -695,12 +579,6 @@ class LiveRepoTests(unittest.TestCase):
                 self.assertGreaterEqual(source.count(before), 1)
                 self.assertEqual(source.count(after), 0)
 
-    def test_every_declared_python_mutation_still_anchors_on_real_source(self):
-        source = (REPO_ROOT / GATE.WATCHDOG_REL).read_text(encoding="utf-8")
-        for name, before, after in GATE.PYTHON_MUTATIONS:
-            with self.subTest(mutation=name):
-                self.assertEqual(source.count(before), 1)
-                self.assertNotEqual(before, after)
 
 
 if __name__ == "__main__":

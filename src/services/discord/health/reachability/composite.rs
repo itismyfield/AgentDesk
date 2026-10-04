@@ -28,9 +28,7 @@ use crate::services::provider::ProviderKind;
 use super::super::session_enrichment::ExecutorWitness;
 use super::coverage::{CoverageProvenanceCounts, CoverageReport};
 use super::divergence::{CoordinateObservation, RowCoordinateDivergence, divergence};
-use super::external_verdict::{
-    ExternalRelayVerdict, classify_external_verdict_at, external_verdict_path,
-};
+use super::external_verdict::ExternalRelayVerdict;
 use super::ledger::{LedgerObligation, ReachabilityLedger, ledger_path, read_ledger_snapshot_at};
 #[cfg(test)]
 use super::ledger_ttl::ledger_committed_at_epoch_ms;
@@ -68,7 +66,7 @@ pub(in crate::services::discord) enum RelayVerdictTier {
     /// Tier A (obligation ↔ receipt), including every case where the external
     /// tier said nothing or said something no worse.
     InBand,
-    /// Tier B (the out-of-band watchdog sidecar), which reached this only by
+    /// Tier B (the retired external input), which reached this only by
     /// claiming strictly worse than Tier A.
     External,
 }
@@ -95,7 +93,7 @@ fn in_band_rank(verdict: &ReachabilityVerdict) -> u8 {
     match verdict {
         // `Expired` shares rank 0 with `Reachable`: it claims no loss for the
         // external tier to outrank, not health — `permits_health` is false for
-        // it, and a watchdog that DID see loss still degrades it (#5942).
+        // it, and a stronger external loss claim still degrades it.
         ReachabilityVerdict::Reachable | ReachabilityVerdict::Expired { .. } => 0,
         ReachabilityVerdict::Degraded { .. } => 1,
         ReachabilityVerdict::TransportUnknown { .. } | ReachabilityVerdict::Unknown { .. } => 2,
@@ -753,14 +751,8 @@ pub(in crate::services::discord) struct RelayVerdictProbe<'a> {
     pub process_started_at_epoch_ms: u64,
 }
 
-/// Read this channel's durable materials and compose one verdict. Three small
-/// reads (T4-B2c ledger, T4-B3 receipt projection, T4-B5 sidecar), each a
-/// whole-file read published by atomic rename so a concurrent writer shows
-/// old or new bytes, never torn. Takes no lock, mutates nothing. The sidecar
-/// is gated on the ledger's own incarnation: one written for a previous
-/// incarnation classifies `WrongIncarnation` and contributes
-/// `ExternalRelayVerdict::Unknown`, which [`compose_relay_verdict`] leaves the
-/// in-band verdict untouched by.
+/// Read the ledger and receipts without mutation or locks.
+/// The retired external input contributes no authority, as when it was absent.
 pub(in crate::services::discord) fn observe_relay_verdict(
     probe: RelayVerdictProbe<'_>,
 ) -> RelayVerdict {
@@ -816,17 +808,7 @@ pub(in crate::services::discord) fn observe_relay_verdict(
         process_started_at_epoch_ms: probe.process_started_at_epoch_ms,
     });
 
-    let external = ledger
-        .as_ref()
-        .map_or(ExternalRelayVerdict::Unknown, |ledger| {
-            external_verdict_path(provider, probe.channel_id)
-                .as_deref()
-                .map_or(ExternalRelayVerdict::Unknown, |path| {
-                    classify_external_verdict_at(path, &ledger.incarnation, None).verdict()
-                })
-        });
-
-    let mut verdict = compose_relay_verdict(in_band, external);
+    let mut verdict = compose_relay_verdict(in_band, ExternalRelayVerdict::Unknown);
     verdict.coverage = coverage;
     verdict
 }

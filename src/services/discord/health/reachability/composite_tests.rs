@@ -2184,3 +2184,49 @@ fn a_rowless_turn_inside_its_grace_takes_the_ladder_a_row_backed_turn_takes() {
         "an empty ledger with a growing transcript is the transition window, not a stall"
     );
 }
+
+#[test]
+fn retired_external_input_preserves_absent_input_verdict_and_health() {
+    let root = tempdir().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let provider = provider();
+    let observed = observe_relay_verdict(RelayVerdictProbe {
+        provider: Some(&provider),
+        channel_id: 6_597_000_000_000_000_001,
+        row_output_path: None,
+        registry_output_path: None,
+        pane_idle_confirmed: false,
+        rowless_turn: RowlessTurn::None,
+        placeholder_present: false,
+        executor: ExecutorWitness::Unwitnessed,
+        now_epoch_ms: NOW_MS,
+        process_started_at_epoch_ms: PROCESS_STARTED_MS,
+    });
+    let mut absent = compose_relay_verdict(
+        ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 0),
+        ExternalRelayVerdict::Unknown,
+    );
+    absent.coverage.observation_state = "never_observed";
+    assert_eq!(observed, absent);
+    assert_eq!(observed.external(), ExternalRelayVerdict::Unknown);
+    assert!(!observed.permits_health());
+    let mut reasons = Vec::new();
+    let mut expired = Vec::new();
+    let mut status = HealthStatus::Healthy;
+    apply_relay_verdict_polarity(
+        true,
+        &observed,
+        "claude",
+        6597,
+        &mut reasons,
+        &mut expired,
+        &mut status,
+    );
+    assert_eq!(status, HealthStatus::Degraded);
+    assert_eq!(reasons, vec!["relay_verdict_unknown_claude_6597"]);
+    assert!(expired.is_empty());
+    assert_eq!(
+        RelayVerdictReport::of(&observed, true),
+        RelayVerdictReport::of(&absent, true)
+    );
+}

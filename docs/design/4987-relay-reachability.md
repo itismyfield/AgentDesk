@@ -1,5 +1,11 @@
 # 릴레이 도달(reachability) 기반 판정 모델 재설계
 
+> 2026-10-04 운영자 결정으로 out-of-band 감시와 외부 verdict 인테이크는
+> 제거되었다. 아래 watchdog/Tier B/§5/S6 및 Python 동등성 요구는 설계 당시의
+> 역사적 기록이며 현행 설치·알림·health 계약이 아니다. 현재 health는 외부
+> 입력이 없던 때와 동일하게 `ExternalRelayVerdict::Unknown`을 합성하며,
+> in-band 판정과 Rust corpus·행 독립성·판정 권위 린트만 유지한다.
+
 > **R2 개정본.** 카운터리뷰(gpt-5.6-luna)가 R1/R2/R3로 수용 기준 3개 중 2개를
 > 코드로 반증했다. **§-1을 먼저 읽어라.** §2.5 / §6 / §8.2 / §9 / §11은 §-1이 대체한다.
 

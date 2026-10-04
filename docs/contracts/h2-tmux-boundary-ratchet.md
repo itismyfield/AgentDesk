@@ -355,7 +355,7 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H2‴ | SUBPROC_W 2-hop 이상 간접 실행 | SUBPROC 사이트·1-hop 호출자 래칫, PR-2 정책 제한, 리뷰; 완전 폐포는 CLI 표면 과포함으로 불채택 |
 | H3 | build.rs·빌드 스크립트·proc-macro의 실행과 임의 I/O | lib 측정 범위 밖, 리뷰 |
 | H4 | 외부 크레이트 내부 실행으로 우회 | Cargo.lock tmux/pty 이름 거부, 의존성 리뷰; 모든 우회 크레이트 검출은 아님 |
-| H5 | scripts/routines/E2E의 직접 tmux | 범위 밖; deploy-release.sh, session-anchor*.zsh, relay_watchdog.py, _defaults.sh 및 E2E/smoke 스크립트 |
+| H5 | scripts/routines/E2E의 직접 tmux | 범위 밖; deploy-release.sh, session-anchor*.zsh, _defaults.sh 및 E2E/smoke 스크립트 |
 | H6 | gh/git allowlist도 git -c core.sshCommand·gh alias 등의 셸 우회를 막지 못함 | 인자 검사 미구현, 리뷰 |
 | H7 | Clippy lint 이름 변경·삭제, compiler 속성 전개 규칙 변경 | 1.94.1 고정, 업그레이드 시 실제 진단·liveness 및 H15 소형 compile fixture 재검증 |
 | H8 | impl의 익명 const/static/closure enclosing_item 이름 충돌 | span 시작 줄 보조 필드, 충돌 admission에 lines 요구 |
