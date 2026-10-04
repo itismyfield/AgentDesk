@@ -249,7 +249,6 @@ async fn a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes() {
     assert_eq!(spooled, std::fs::metadata(&path).unwrap().len());
     assert!(harness.port.posts().is_empty());
     assert_eq!(harness.channel().ledger().next_serial(), 0);
-    assert_eq!(harness.alarms.taken(), [WriterAlarm::PausedNoGateway]);
     harness.gate.acquired();
     polls(3).await;
     assert_eq!(
@@ -257,6 +256,7 @@ async fn a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes() {
         ["first", "second"],
         "a Stop, an abort or EOF is not a delivery"
     );
+    assert_eq!(harness.alarms.taken(), [WriterAlarm::PausedNoGateway]);
     halt(stop, task).await;
 }
 

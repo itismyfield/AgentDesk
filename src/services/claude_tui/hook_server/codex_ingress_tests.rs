@@ -245,11 +245,13 @@ fn codex_clear_fixture_binds_the_verified_rollout_and_preserves_repeat_cursor() 
     assert_eq!(marker.rollout_path, source(event).path);
     assert_eq!(marker.session_id, h.binding().session_id);
     assert_eq!(h.binding().last_offset, 0);
+    // The binding holds the canonical path; a symlinked temp root (macOS /var) would skip the advance.
     session::advance_codex_tui_runtime_binding_and_marker_offset(
         &h.context.tmux_session,
-        &h.path,
+        &h.path.canonicalize().unwrap(),
         47,
     );
+    assert_eq!(h.binding().last_offset, 47);
     let stable = h.snapshot();
     assert_eq!(h.hook().0, 202);
     assert_eq!(
