@@ -99,6 +99,62 @@ fn escapes(calls: &[String]) -> Vec<&str> {
 }
 
 #[test]
+fn c1_stop_some_none_and_unreachable_preserve_exact_authority() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::c1_stop_some_none_and_unreachable_preserve_exact_authority"
+    )) {
+        return;
+    }
+    let _fx = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let _binding_root = TestBindingRoot::enter(Some(root.path()));
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_443);
+        let provider = ProviderKind::Claude;
+        let session = "c1-stop-parent";
+        let path = root.path().join("parent.jsonl");
+        open(&path, "first");
+        bind(&shared, &provider, channel, session, &path);
+        let _confirmed = TestConfirmation::new(channel.get());
+        let token = bound_token(&provider, session);
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                serenity::UserId::new(7),
+                serenity::MessageId::new(8),
+            )
+            .await
+        );
+        let stopped = super::super::begin_command_stop(&shared, &provider, channel, true).await;
+        let CommandStop::Stop(stop) = stopped else {
+            panic!("Some token must retain ChannelStop authority")
+        };
+        assert!(Arc::ptr_eq(stop.token(), &token));
+        assert!(token.cancelled.load(Ordering::SeqCst));
+        crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
+        let mailbox = shared.mailbox_peek(channel).unwrap();
+        assert!(mailbox.cancel_token().await.unwrap().is_none());
+        let empty = super::super::begin_command_stop(&shared, &provider, channel, true).await;
+        assert!(
+            matches!(empty, CommandStop::Session(_)),
+            "Ok(None) retains SessionStop fallback"
+        );
+        shared.mailboxes.remove_fixture_for_test(channel);
+        shared.mailboxes.insert_unreachable_for_test(channel);
+        let unreachable = super::super::begin_command_stop(&shared, &provider, channel, true).await;
+        assert!(
+            matches!(unreachable, CommandStop::HostRefused),
+            "Err cannot borrow the parent SessionStop authority"
+        );
+        shared.mailboxes.remove_fixture_for_test(channel);
+    });
+}
+
+#[test]
 fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused() {
     if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
         module_path!(),

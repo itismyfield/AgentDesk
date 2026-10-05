@@ -55,9 +55,11 @@ impl ChannelStop {
         let Some(handle) = shared.mailbox_peek(channel) else {
             return Ok(None);
         };
-        // An actor that cannot answer holds no token to judge: the stop goes on as with no turn,
-        // and the cancel reports what it could not observe as null.
-        let Some(token) = handle.cancel_token().await.ok().flatten() else {
+        let Some(token) = handle
+            .cancel_token()
+            .await
+            .map_err(|_| unobserved(channel, "mailbox actor unreachable".to_string()))?
+        else {
             return Ok(None);
         };
         let bound = token.tmux_session_name();
