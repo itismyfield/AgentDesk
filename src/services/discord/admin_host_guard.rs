@@ -110,6 +110,108 @@ pub(super) async fn managed_reset_refusal(
     Some(reason)
 }
 
+/// Where a channel clear goes, judged before its first change.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum ResetTarget {
+    /// Main's managed tmux reset.
+    LegacyTmux,
+    /// The provider's own `/clear` through its host's adapter; the pane is kept.
+    NativeClear(HostAdapter),
+    Refused(String),
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum HostAdapter {
+    #[cfg(unix)]
+    Herdr(Box<crate::services::session_host::HerdrClearPlan>),
+}
+
+/// A channel clear's target. With the Herdr turn switch off or no Herdr endpoint for the channel
+/// it is exactly [`managed_reset_refusal`]'s verdict.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) async fn clear_reset_target(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    explicit_session_key: Option<&str>,
+    session_key: Option<&str>,
+) -> ResetTarget {
+    #[cfg(unix)]
+    if crate::services::turn_host::herdr_turn_switched_on()
+        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
+    {
+        let pool = shared.pg_pool.as_ref();
+        let read = read_herdr_clear(pool, provider, channel_id.get(), session_key).await;
+        let read = match read {
+            Ok(read) => read,
+            Err(reason) => return ResetTarget::Refused(reason),
+        };
+        let judged = tokio::task::spawn_blocking(move || read.target()).await;
+        return judged.unwrap_or_else(|error| ResetTarget::Refused(error.to_string()));
+    }
+    #[cfg(not(unix))]
+    let _ = session_key;
+    let refusal = managed_reset_refusal;
+    match refusal(
+        shared,
+        provider,
+        channel_id,
+        true,
+        false,
+        explicit_session_key,
+    )
+    .await
+    {
+        Some(reason) => ResetTarget::Refused(reason),
+        None => ResetTarget::LegacyTmux,
+    }
+}
+
+/// What a configured channel's clear is judged on: its row as the turn host reads it, and O's
+/// rotation projection, both read before any Herdr I/O.
+#[cfg(unix)]
+pub(crate) struct HerdrClearRead {
+    channel: u64,
+    row: Option<crate::db::dispatched_sessions::hosted_execution::HostedRecord>,
+    unsettled: Option<usize>,
+}
+
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn read_herdr_clear(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel: u64,
+    session_key: Option<&str>,
+) -> Result<HerdrClearRead, String> {
+    use crate::services::turn_host::{TurnHost, for_turn};
+    let plan = match for_turn(pool, provider, channel, session_key).await {
+        TurnHost::Herdr(plan) => plan,
+        TurnHost::Refused(refusal) => return Err(refusal.to_string()),
+        TurnHost::Tmux => return Err("herdr clear: the channel resolved to tmux".into()),
+    };
+    let row = plan.row.map(|observed| observed.record);
+    let unsettled = crate::services::tui_o::writer::host::rotation_unsettled(channel);
+    Ok(HerdrClearRead {
+        channel,
+        row,
+        unsettled,
+    })
+}
+
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
+impl HerdrClearRead {
+    /// Plans the clear on the pane; it blocks on the socket.
+    pub(crate) fn target(self) -> ResetTarget {
+        let plan = crate::services::session_host::plan_clear;
+        match plan(self.channel, self.row.as_ref(), self.unsettled) {
+            Ok(plan) => ResetTarget::NativeClear(HostAdapter::Herdr(Box::new(plan))),
+            Err(refusal) => ResetTarget::Refused(refusal.to_string()),
+        }
+    }
+}
+
 /// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
 pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
     let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;

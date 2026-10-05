@@ -16,6 +16,8 @@ mod herdr {
     pub(crate) mod wire;
 }
 mod consumer_guard;
+#[cfg(unix)]
+mod herdr_clear_adapter;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
@@ -32,6 +34,12 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
+// A channel clear's Herdr side; the clear command wires it in.
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use herdr_clear_adapter::{
+    ClearSession, HerdrClear, HerdrClearPlan, HerdrClearRefusal, plan_clear,
+};
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{

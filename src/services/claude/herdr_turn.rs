@@ -34,7 +34,7 @@ use crate::services::session_host::{
 use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 use crate::services::tui_prompt_dedupe::binding_context::{PreparedIncarnation, execution_context};
 use crate::services::tui_prompt_dedupe::binding_events::{
-    BindingEvent, BindingTarget, binding_events_since,
+    BindingCause, BindingEvent, BindingTarget, binding_events_since,
 };
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
@@ -128,7 +128,8 @@ pub(crate) fn execute(
     prompt_and_read(&turn, &runtime, attached, sender)
 }
 
-/// A Bound execution keeps the source attached when it launched; a restart reattach is not here.
+/// A Bound execution keeps the source attached when it launched, or takes the session its own
+/// clear awaits; a restart reattach is not here.
 fn bound_source(
     turn: &HerdrTurn<'_>,
     ports: &dyn HerdrTurnPorts,
@@ -137,6 +138,9 @@ fn bound_source(
     let target = gate(record)?;
     ports.confirm_bound(&turn.owner, record, &target)?;
     let logical = &turn.owner.logical_key;
+    if let Some(session_id) = awaited_clear(turn.channel_id, logical, &record.execution_nonce) {
+        return cleared_source(turn, record, target, session_id);
+    }
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
         .ok_or_else(|| format!("herdr turn: {logical} has no attached source"))?;
     let session_id = binding
@@ -146,6 +150,55 @@ fn bound_source(
         nonce: record.execution_nonce.clone(),
         session_id,
         transcript: PathBuf::from(binding.output_path),
+        target,
+        bound: true,
+    })
+}
+
+/// The session execution `nonce`'s own SessionStart(clear) Pending awaits, while that Pending is
+/// the pane's latest record and was taken from the source that execution logged just before it.
+fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<String> {
+    let events = binding_events_since(channel, 0).unwrap_or_default();
+    let moved = |event: &BindingEvent| !matches!(event.new, BindingTarget::Rejected { .. });
+    let pane = events
+        .into_iter()
+        .filter(|event| event.tmux_session == logical);
+    let records: Vec<BindingEvent> = pane.filter(moved).collect();
+    let (pending, earlier) = records.split_last()?;
+    let BindingTarget::Pending {
+        payload_session_id, ..
+    } = &pending.new
+    else {
+        return None;
+    };
+    let own = |event: &BindingEvent| event.execution_nonce.as_deref() == Some(nonce);
+    let from = earlier.last().filter(|event| own(event));
+    let from = from.and_then(|event| match &event.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => Some(source),
+        _ => None,
+    });
+    let canonical = own(pending)
+        && pending.cause == BindingCause::Clear
+        && pending.evidence.hook_event.as_deref() == Some("session_start");
+    (canonical && from.is_some_and(|source| pending.old.as_ref() == Some(source)))
+        .then(|| payload_session_id.clone())
+}
+
+/// The cleared session of a Bound execution: nothing is attached until its first prompt writes
+/// the transcript, whose registration then resolves the Pending.
+fn cleared_source(
+    turn: &HerdrTurn<'_>,
+    record: &HostedExecution,
+    target: HerdrTarget,
+    session_id: String,
+) -> Result<Attached, String> {
+    let transcript = claude_transcript_path(Path::new(turn.working_dir), &session_id, None)?;
+    let logical = &turn.owner.logical_key;
+    crate::services::tui_prompt_dedupe::register_tmux_channel(logical, turn.channel_id);
+    Ok(Attached {
+        nonce: record.execution_nonce.clone(),
+        session_id,
+        transcript,
         target,
         bound: true,
     })
@@ -273,15 +326,23 @@ pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     Ok(holds)
 }
 
-/// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
-fn not_held(nonce: &str) -> Result<(), String> {
+/// Whether an earlier prompt may sit in execution `nonce`'s composer; `Err` when unreadable.
+pub(crate) fn input_held(nonce: &str) -> Result<bool, String> {
     match std::fs::symlink_metadata(hold_path(nonce)?) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(format!(
-            "herdr turn: input held after an unclear prompt to {nonce}"
-        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(_) => Ok(true),
         Err(error) => Err(format!(
             "herdr turn: input hold of {nonce} unreadable: {error}"
+        )),
+    }
+}
+
+/// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
+fn not_held(nonce: &str) -> Result<(), String> {
+    match input_held(nonce)? {
+        false => Ok(()),
+        true => Err(format!(
+            "herdr turn: input held after an unclear prompt to {nonce}"
         )),
     }
 }

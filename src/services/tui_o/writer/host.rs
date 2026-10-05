@@ -75,6 +75,7 @@ pub struct Readiness {
 struct Live {
     gate: Arc<OwnershipGate>,
     resumed: watch::Receiver<bool>,
+    unsettled: watch::Receiver<Option<usize>>,
 }
 
 fn locked<T>(set: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -100,8 +101,18 @@ impl Readiness {
         locked(&self.hosted).insert(channel)
     }
 
-    fn track(&self, channel: u64, gate: Arc<OwnershipGate>, resumed: watch::Receiver<bool>) {
-        locked(&self.live).insert(channel, Live { gate, resumed });
+    fn track(
+        &self,
+        channel: u64,
+        gate: Arc<OwnershipGate>,
+        (resumed, unsettled): (watch::Receiver<bool>, watch::Receiver<Option<usize>>),
+    ) {
+        let live = Live {
+            gate,
+            resumed,
+            unsettled,
+        };
+        locked(&self.live).insert(channel, live);
     }
 
     /// Ready and, read now rather than from the published flag that trails them, the gate is Owned
@@ -114,6 +125,15 @@ impl Readiness {
         let owned = matches!(live.gate.current(), GatewayOwnership::Owned { .. });
         owned && live.resumed.has_changed().is_ok() && *live.resumed.borrow()
     }
+
+    /// Rotated-away sources the channel's running actor has not retired, as its last poll read
+    /// them; `None` when no actor runs or its store could not be read.
+    pub fn rotation_unsettled(&self, channel: u64) -> Option<usize> {
+        let live = locked(&self.live);
+        let unsettled = &live.get(&channel)?.unsettled;
+        unsettled.has_changed().ok()?;
+        *unsettled.borrow()
+    }
 }
 
 static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
@@ -125,6 +145,11 @@ pub(crate) fn process_readiness() -> Arc<Readiness> {
 /// Whether this process's writer can take work for `channel`; false for any channel O does not own.
 pub(crate) fn channel_accepts(channel: u64) -> bool {
     PROCESS.accepts(channel)
+}
+
+/// [`Readiness::rotation_unsettled`] of this process's writer.
+pub(crate) fn rotation_unsettled(channel: u64) -> Option<usize> {
+    PROCESS.rotation_unsettled(channel)
 }
 
 /// What hosting needs once a channel is owned; built only then, so an off or empty writer takes nothing.
@@ -341,11 +366,13 @@ async fn host_channel<I: HostIo>(
     let writer = ChannelWriter::new(store, Arc::clone(&gate), port, io.lease(), alarms);
     let (stop_tx, stop) = watch::channel(false);
     let (resumed_tx, resumed) = watch::channel(false);
+    let (unsettled_tx, unsettled) = watch::channel(None);
     let config = WriterConfig { enabled: true };
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
-    let spawned = actor::spawn_if_enabled(&config, writer, provider, bindings, stop, resumed_tx);
+    let watches = (stop, resumed_tx, unsettled_tx);
+    let spawned = actor::spawn_projecting(&config, writer, provider, bindings, watches);
     let Some(actor) = spawned else { return };
-    readiness.track(channel, Arc::clone(&gate), resumed.clone());
+    readiness.track(channel, Arc::clone(&gate), (resumed.clone(), unsettled));
     publish(channel, &readiness, gate.subscribe(), resumed, actor).await;
     drop(stop_tx);
 }
