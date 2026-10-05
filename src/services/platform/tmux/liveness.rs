@@ -5,11 +5,11 @@ pub(crate) mod tests;
 
 pub(super) fn pane_liveness_using(
     session_name: &str,
-    mut prepare: impl FnMut() -> Command,
+    mut prepare: impl FnMut() -> Option<Command>,
     mut run: impl FnMut(Command, Duration, &str) -> Result<Output, String>,
 ) -> PaneLiveness {
     probe_pane_liveness(session_name, |args| {
-        let mut command = prepare();
+        let mut command = prepare().ok_or("tmux is not on the runtime PATH")?;
         command.args(args);
         run(
             command,
@@ -21,7 +21,7 @@ pub(super) fn pane_liveness_using(
 
 pub(super) fn prepared_tmux_command() -> Option<Command> {
     let path = binary_resolver::prepared_runtime_path()?;
-    let mut command = binary_resolver::command_with_path("tmux".as_ref(), Some(path));
+    let mut command = binary_resolver::command_with_path("tmux".as_ref(), Some(path)).ok()?;
     command.arg("-u");
     Some(command)
 }
@@ -40,7 +40,7 @@ pub(super) fn pane_liveness_within_using(
         if Instant::now() >= deadline {
             return Err("pane liveness budget exhausted".into());
         }
-        let mut command = prepare().ok_or("runtime PATH is not ready")?;
+        let mut command = prepare().ok_or("tmux is not on the ready runtime PATH")?;
         command.args(args);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

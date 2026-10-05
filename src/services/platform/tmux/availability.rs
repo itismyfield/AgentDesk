@@ -51,7 +51,7 @@ fn classify_probe_spawn_error(error: &std::io::Error) -> TmuxAvailabilityProbe {
 }
 
 fn probe_tmux_availability() -> TmuxAvailabilityProbe {
-    match tmux_command().arg("-V").output() {
+    match tmux_command().and_then(|mut command| command.arg("-V").output()) {
         Ok(output) if output.status.success() => TmuxAvailabilityProbe::Available,
         Ok(_) => TmuxAvailabilityProbe::Unavailable,
         Err(error) => classify_probe_spawn_error(&error),

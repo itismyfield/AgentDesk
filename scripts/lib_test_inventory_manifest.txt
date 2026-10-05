@@ -9165,7 +9165,7 @@ services::pipeline_routes::tests::stage_json_absent_backoff_is_null
 services::pipeline_routes::tests::stage_json_emits_backoff_field
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
-services::platform::binary_resolver::runtime_path::tests::command_with_path_resolves_bare_names_and_falls_back_keeping_path
+services::platform::binary_resolver::runtime_path::tests::command_with_path_spawns_only_absolute_programs_and_keeps_path
 services::platform::binary_resolver::tests::codex_app_bundle_candidate_gets_codex_only_priority
 services::platform::binary_resolver::tests::codex_fallback_dirs_include_app_bundle_resources_on_macos
 services::platform::binary_resolver::tests::codex_probe_selects_newest_successful_candidate_not_first_path_hit

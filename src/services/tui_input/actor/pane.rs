@@ -79,11 +79,11 @@ impl TmuxPane {
         self.test_nonce = Some(nonce.into());
     }
 
-    fn command(&self, args: &[&str]) -> Command {
+    fn command(&self, args: &[&str]) -> std::io::Result<Command> {
         let mut command =
-            crate::services::platform::binary_resolver::runtime_command(&self.program);
+            crate::services::platform::binary_resolver::runtime_command(&self.program)?;
         command.arg("-u").args(args);
-        command
+        Ok(command)
     }
 
     fn target(&self) -> String {
@@ -94,11 +94,12 @@ impl TmuxPane {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
+                    let mut command = self.command(args).map_err(BoundedTmuxError::Spawn)?;
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .map_err(BoundedTmuxError::Spawn)?
-                        .block_on(run_with_budget(&mut self.command(args), self.budget))
+                        .block_on(run_with_budget(&mut command, self.budget))
                 })
                 .join()
                 .unwrap_or_else(|_| {

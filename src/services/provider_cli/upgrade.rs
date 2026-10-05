@@ -122,7 +122,8 @@ struct UpgradeCommandOutput {
 fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeError> {
     let (cmd, args) = argv.split_first().expect("command_argv is non-empty");
 
-    let mut command = crate::services::platform::binary_resolver::runtime_command(cmd);
+    let mut command = crate::services::platform::binary_resolver::runtime_command(cmd)
+        .map_err(UpgradeError::Io)?;
     command.args(args);
     command.stdout(Stdio::null()).stderr(Stdio::null());
     crate::services::process::configure_child_process_group(&mut command);
