@@ -2,11 +2,11 @@
 use super::*;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::input_transition::Files;
-use crate::services::tui_input::ledger::{Ledger, OPENS};
+use crate::services::tui_input::ledger::{Ledger, LedgerLease, OPENS};
 use crate::services::tui_input::rows::{
     AbandonReason, AttemptEvidence, DoneReason, Entry, HeldReason, Owner, RowState,
 };
-use crate::services::tui_input::transition::{Move, Outcome, handback};
+use crate::services::tui_input::transition::{Host, Move, Outcome, handback};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use serde_json::json;
@@ -96,8 +96,9 @@ fn e1_production_effects_move_population_and_request_one_actor() {
         &json!({"notice_message_id": 108, "busy_retry_count": 1, "first_busy_retry_at_ms": 100}),
     );
     let mut host = files(root.path(), effects(root.path(), frozen(), &rt));
-    let mut movement = Move::prepare(root.path(), CHANNEL, &mut host).unwrap();
-    assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+    let mut lease = LedgerLease::new(root.path(), CHANNEL);
+    let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+    assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
     for path in [&queue, &marker, &placeholder, &busy] {
         assert!(!path.exists(), "{} must be retired", path.display());
     }
@@ -129,8 +130,13 @@ fn e1_open_or_unreadable_outbox_never_moves_anything() {
         let mut effects = effects(root.path(), frozen(), &rt);
         effects.outbox_for_test = outbox;
         let mut host = files(root.path(), effects);
-        let mut movement = Move::prepare(root.path(), CHANNEL, &mut host).unwrap();
-        assert_eq!(movement.advance(&mut host), Outcome::Legacy, "{outbox:?}");
+        let mut lease = LedgerLease::new(root.path(), CHANNEL);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(
+            movement.advance(&mut lease, &mut host),
+            Outcome::Legacy,
+            "{outbox:?}"
+        );
         assert_eq!(fs::read(&queue).unwrap(), original);
         let rows = Ledger::open(root.path(), CHANNEL).unwrap().rows().unwrap();
         assert_eq!(rows.owner(8), Owner::Legacy);
@@ -164,8 +170,9 @@ fn e1_turn_row_residue_is_held_with_notice_never_reinjected() {
     let path = root.path().join("discord_inflight/claude/9.json");
     save(&path, &serde_json::to_value(&row).unwrap());
     let mut host = files(root.path(), effects(root.path(), frozen(), &rt));
-    let mut movement = Move::prepare(root.path(), CHANNEL, &mut host).unwrap();
-    assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+    let mut lease = LedgerLease::new(root.path(), CHANNEL);
+    let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+    assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
     assert!(!path.exists());
     assert_eq!(
         state(root.path(), 20),
@@ -200,7 +207,7 @@ fn e1_pinned_upload_handback_copies_outside_the_guard_with_one_ledger_handle() {
     let mut host = files(root.path(), effects(root.path(), closing, &rt));
     let opens = OPENS.with(|opens| opens.get());
     assert_eq!(
-        handback(root.path(), CHANNEL, &mut host).unwrap(),
+        handback(&mut LedgerLease::new(root.path(), CHANNEL), &mut host).unwrap(),
         Outcome::Legacy
     );
     assert_eq!(
@@ -297,7 +304,7 @@ fn e1_handback_judges_a_ledger_attempt_by_its_own_exact_witness() {
         let closing = frozen();
         closing.begin_handback().unwrap();
         let mut host = files(root.path(), effects(root.path(), closing, &rt));
-        let outcome = handback(root.path(), CHANNEL, &mut host).unwrap();
+        let outcome = handback(&mut LedgerLease::new(root.path(), CHANNEL), &mut host).unwrap();
         let queue = root
             .path()
             .join("discord_pending_queue/claude/token/9.json");
@@ -411,5 +418,58 @@ fn e1_production_effects_take_the_runtime_root_and_reject_a_foreign_capability()
     assert!(
         rt.block_on(async { ProdEffects::new(deps(foreign)) })
             .is_err()
+    );
+}
+
+#[test]
+fn unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired() {
+    use std::os::unix::fs::MetadataExt;
+    let (unbound, bound) = (31, 32);
+    let rt = runtime();
+    let root = sandbox();
+    let queue = root
+        .path()
+        .join("discord_pending_queue/claude/token/9.json");
+    save(&queue, &json!([item(unbound), item(bound)]));
+    let mut ledger = Ledger::open(root.path(), CHANNEL).unwrap();
+    let staged = Entry::Staged {
+        key: bound,
+        input: item(bound),
+        state: RowState::Received,
+    };
+    ledger.append_entry(&staged, &[]).unwrap();
+    let commit = Entry::MoveCommitted {
+        first_staged_seq: 1,
+        ids: vec![unbound, bound],
+    };
+    ledger.append_entry(&commit, &[]).unwrap();
+    drop(ledger);
+    let (bytes, inode) = (
+        fs::read(&queue).unwrap(),
+        fs::metadata(&queue).unwrap().ino(),
+    );
+    let mut host = files(root.path(), effects(root.path(), frozen(), &rt));
+    let mut lease = LedgerLease::new(root.path(), CHANNEL);
+    let collected: Vec<u64> = (host.collect(lease.get().unwrap()).unwrap().iter())
+        .map(|input| input.key)
+        .collect();
+    assert_eq!(
+        collected,
+        [unbound, bound],
+        "no other guard refuses this population"
+    );
+    if let Ok(mut movement) = Move::prepare(&mut lease, &mut host) {
+        movement.advance(&mut lease, &mut host);
+    }
+    assert_eq!(fs::read(&queue).unwrap(), bytes);
+    assert_eq!(fs::metadata(&queue).unwrap().ino(), inode);
+    let rows = Ledger::open(root.path(), CHANNEL).unwrap().rows().unwrap();
+    assert_eq!(
+        rows.unbound().iter().copied().collect::<Vec<_>>(),
+        [unbound]
+    );
+    assert_eq!(
+        host.effects_mut().take_notices(),
+        vec![(Some(unbound), "move_unbound")]
     );
 }

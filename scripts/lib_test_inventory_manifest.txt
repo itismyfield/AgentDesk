@@ -4129,6 +4129,7 @@ services::discord::input_runtime::effects::tests::e1_pinned_upload_handback_copi
 services::discord::input_runtime::effects::tests::e1_production_effects_move_population_and_request_one_actor
 services::discord::input_runtime::effects::tests::e1_production_effects_take_the_runtime_root_and_reject_a_foreign_capability
 services::discord::input_runtime::effects::tests::e1_turn_row_residue_is_held_with_notice_never_reinjected
+services::discord::input_runtime::effects::tests::unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired
 services::discord::input_runtime::fence::modes::tests::e1_abort_returns_only_a_history_free_close_and_hold_refuses_both_owners
 services::discord::input_runtime::fence::modes::tests::e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barrier
 services::discord::input_runtime::fence::modes::tests::e1_drain_timeout_holds_closing_and_keeps_the_admitted_permit_valid
@@ -4146,6 +4147,20 @@ services::discord::input_runtime::fence::tests::ordinary_writer_waits_for_releas
 services::discord::input_runtime::fence::tests::queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_stall
 services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
+services::discord::input_runtime::supervisor::tests::abandoned_clear_loan_pins_the_slot_poisons_the_channel_and_keeps_the_worker_write
+services::discord::input_runtime::supervisor::tests::baseline_and_wakes_apply_each_event_once_in_seq_order
+services::discord::input_runtime::supervisor::tests::closed_binding_watch_during_clear_retry_reports_then_resubscribes
+services::discord::input_runtime::supervisor::tests::crash_left_clear_resumes_before_move_and_retries_at_once_on_a_binding_change
+services::discord::input_runtime::supervisor::tests::failed_append_reopens_on_the_next_access_and_keeps_the_chain
+services::discord::input_runtime::supervisor::tests::finished_clear_loan_returns_the_handle_to_the_slot
+services::discord::input_runtime::supervisor::tests::held_move_never_enters_handback_while_a_finished_one_does
+services::discord::input_runtime::supervisor::tests::one_slot_handle_continues_through_move_append_checkpoint_and_reopen
+services::discord::input_runtime::supervisor::tests::refused_session_host_reopens_legacy_only_without_ledger_history
+services::discord::input_runtime::supervisor::tests::registered_holds_join_fence_health_and_leave_on_release
+services::discord::input_runtime::supervisor::tests::seq_gap_or_closed_watch_holds_until_a_resubscribe_rereads
+services::discord::input_runtime::supervisor::tests::unbound_key_stays_held_visible_and_noticed_once_across_retries_and_restart
+services::discord::input_runtime::supervisor::tests::unconfirmed_reset_backs_off_within_the_boot_budget_and_only_advancing_wakes_skip_it
+services::discord::input_runtime::supervisor::tests::unused_registry_leaves_health_to_the_fence
 services::discord::input_transition::tests::supported::b2_all_token_capture_and_each_phase_preserves_changed_bytes
 services::discord::input_transition::tests::supported::b2_collect_requires_frozen_capability_and_contention_probes_no_effect
 services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
@@ -10149,6 +10164,8 @@ services::tui_input::transition_fixture_tests::deletion_boundaries_restart_keep_
 services::tui_input::transition_fixture_tests::e1_probe_reports_history_without_creating_a_ledger
 services::tui_input::transition_fixture_tests::e1_unbound_handback_holds_and_names_every_unbound_key
 services::tui_input::transition_fixture_tests::handback_rejection_preserves_order_and_enqueue_crash_is_idempotent
+services::tui_input::transition_fixture_tests::host_error_on_a_usable_handle_still_reopens_before_the_next_step
+services::tui_input::transition_fixture_tests::moved_running_row_needs_the_accepted_record_end
 services::tui_input::transition_fixture_tests::old_snapshot_without_received_order_holds_without_enqueue
 services::tui_input::transition_fixture_tests::retry_backoff_is_bounded
 services::tui_input::transition_fixture_tests::second_staging_failure_requires_another_successful_reopen_before_legacy
