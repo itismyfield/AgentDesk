@@ -134,6 +134,13 @@ fn input_fence_wrapper_posts_source_notices_and_health_even_when_http_fails() {
             let baseline = serde_json::to_value(baseline).unwrap();
             let channel = ChannelId::new(6_325_301);
             let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+            struct ClearHealth(Arc<Gate>);
+            impl Drop for ClearHealth {
+                fn drop(&mut self) {
+                    self.0.clear_failure_for_test();
+                }
+            }
+            let _health = ClearHealth(gate.clone());
             let empty = crate::services::discord::health::build_health_snapshot(&registry).await;
             let empty = serde_json::to_value(empty).unwrap();
             assert_eq!(baseline["degraded_reasons"], empty["degraded_reasons"]);

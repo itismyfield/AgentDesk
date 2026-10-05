@@ -148,11 +148,22 @@ mod input_fence_contract_tests {
     use crate::services::provider::ProviderKind;
     use crate::services::turn_orchestrator::QueuePersistenceContext;
 
+    struct Env(Option<std::ffi::OsString>);
+    impl Drop for Env {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(old) => std::env::set_var("AGENTDESK_ROOT_DIR", old),
+                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+                }
+            }
+        }
+    }
     #[test]
     fn input_fence_session_helper_drains_before_lock_and_holds_lock_through_ack() {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let _env = Env(std::env::var_os("AGENTDESK_ROOT_DIR"));
         unsafe {
             std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
         }
@@ -189,12 +200,6 @@ mod input_fence_contract_tests {
                 drop(transition);
                 assert!(lock.try_lock().is_ok());
             });
-        unsafe {
-            match old {
-                Some(old) => std::env::set_var("AGENTDESK_ROOT_DIR", old),
-                None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
-            }
-        }
     }
 
     #[tokio::test(start_paused = true)]

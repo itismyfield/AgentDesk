@@ -109,6 +109,10 @@ impl Gate {
             self.channel
         ));
     }
+    #[cfg(test)]
+    pub(crate) fn clear_failure_for_test(&self) {
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
     // Registration is dormant until all population writers consume the capability.
     pub(crate) fn protect(provider: ProviderKind, channel: u64) -> Result<Arc<Self>, Failure> {
         let mut slot = &GATES;
@@ -423,7 +427,7 @@ impl PopulationScope {
     pub(crate) fn hold(guard: ClosedPopulationGuard) -> Self {
         Self::install(guard.0)
     }
-    fn writer(
+    pub(crate) fn writer(
         root: &Path,
         provider: &ProviderKind,
         channel: u64,
