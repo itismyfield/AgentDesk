@@ -204,6 +204,7 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
+│   ├── session_transcripts_native_clear_record.rs
 │   ├── session_transcripts_native_clear_tests.rs
 │   └── turns.rs
 ├── dispatch/
@@ -736,6 +737,8 @@ src/
 │   │   │   └── too_old_notice.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── input_clear.rs
+│   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
@@ -861,6 +864,8 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── transcript_binding_stall.rs
+│   │   │   ├── transcript_turn.rs
+│   │   │   ├── transcript_turn_tests.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
@@ -933,6 +938,8 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── input_runtime/
+│   │   │   ├── clear.rs
+│   │   │   ├── clear_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   └── mod.rs
@@ -1032,7 +1039,8 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
-│   │   │   └── tick.rs
+│   │   │   ├── tick.rs
+│   │   │   └── tick_cleanup_tests.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs

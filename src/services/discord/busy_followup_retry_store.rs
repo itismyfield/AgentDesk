@@ -489,6 +489,20 @@ pub(in crate::services::discord) fn sweep_expired() -> usize {
     removed
 }
 
+/// Busy-notice bindings kept for one channel, counted per input file.
+pub(in crate::services::discord) fn channel_presence(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> super::health::transcript_turn::Presence {
+    let dir = runtime_store::discord_busy_followup_retries_root()
+        .map(|root| root.join(provider.as_str()).join(channel_id.to_string()));
+    super::health::transcript_turn::Presence::of_dir(dir, |path| {
+        Ok(usize::from(
+            path.extension().is_some_and(|ext| ext == "json"),
+        ))
+    })
+}
+
 pub(in crate::services::discord) fn clear_for_input(
     provider: &ProviderKind,
     channel_id: u64,

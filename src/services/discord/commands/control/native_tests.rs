@@ -608,6 +608,7 @@ fn restart_admission_holds_undecidable_rows_until_a_new_clear_pg() {
             "marker-unreadable",
             "other-host",
             "other-tmux",
+            "input-cutoff",
             "pending-moved",
             "save-fails",
             "state-unreadable",
@@ -622,11 +623,23 @@ fn restart_admission_holds_undecidable_rows_until_a_new_clear_pg() {
                     std::fs::remove_file(fixture.marker()).unwrap();
                     std::fs::create_dir(fixture.marker()).unwrap();
                 }
-                "other-host" | "other-tmux" => {
+                "other-host" | "other-tmux" | "input-cutoff" => {
                     let mut moved = ticket.clone();
                     match case {
                         "other-host" => moved.context.host = Some("other-node".into()),
-                        _ => moved.context.tmux_session = format!("{}-other", fixture.tmux),
+                        "other-tmux" => {
+                            moved.context.tmux_session = format!("{}-other", fixture.tmux)
+                        }
+                        // A ledger clear's cutoff is the input runtime's to settle, never native's.
+                        _ => {
+                            let cutoff =
+                                crate::services::tui_prompt_dedupe::native_clear::InputCutoff {
+                                    ledger_generation: 0,
+                                    ledger_seq: 1,
+                                    affected_keys: vec![11],
+                                };
+                            moved.input = Some(cutoff);
+                        }
                     }
                     let tx = session_transcripts::begin_channel_clear_boundary_tx(&fixture.pool)
                         .await

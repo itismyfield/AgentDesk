@@ -138,6 +138,24 @@ pub(super) async fn finish_boundary(
     }
 }
 
+/// The cleared channel's in-memory provider session, history, uploads and role override.
+pub(super) async fn clear_session_memory(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) {
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            super::super::super::settings::cleanup_channel_uploads(channel_id);
+            session.clear_provider_session();
+            session.history.clear();
+            session.pending_uploads.clear();
+            session.cleared = true;
+        }
+    }
+    shared.dispatch.role_overrides.remove(&channel_id);
+}
+
 /// A process reset applies the pending fast-mode, goals and model resets, so their markers go.
 pub(super) async fn clear_process_reset_pending(
     shared: &Arc<SharedData>,

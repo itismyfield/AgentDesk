@@ -198,6 +198,39 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
     cleared
 }
 
+fn is_pending_tui_anchor(record: &PersistedTargetState, provider: &str) -> bool {
+    record.version == PERSISTED_STATE_VERSION
+        && record.provider == provider
+        && TurnViewTargetKind::from_str(&record.kind)
+            == Some(TurnViewTargetKind::TuiDirectBotAnchor)
+        && TurnViewState::from_str(&record.applied) == Some(TurnViewState::Pending)
+}
+
+/// Persisted `⏳` anchors of one channel; unlike the sweep's enumeration, a failed read is
+/// reported instead of skipped.
+pub(in crate::services::discord) fn pending_anchor_presence(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> crate::services::discord::health::transcript_turn::Presence {
+    let dir = crate::services::discord::runtime_store::discord_turn_view_reconciler_root()
+        .map(|root| root.join(TurnViewTargetKind::TuiDirectBotAnchor.as_str()));
+    crate::services::discord::health::transcript_turn::Presence::of_dir(dir, |path| {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            return Ok(0);
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        Ok(usize::from(
+            serde_json::from_str::<PersistedTargetState>(&text).is_ok_and(|record| {
+                record.channel_id == channel_id && is_pending_tui_anchor(&record, provider.as_str())
+            }),
+        ))
+    })
+}
+
 impl TurnViewReconciler {
     /// Enumerate persisted `tui_direct_bot_anchor` targets currently in the
     /// `⏳` (Pending) state that belong to THIS runtime's provider. Read-only:
@@ -229,14 +262,7 @@ impl TurnViewReconciler {
             let Ok(record) = serde_json::from_str::<PersistedTargetState>(&text) else {
                 continue;
             };
-            if record.version != PERSISTED_STATE_VERSION
-                || record.provider != shared.provider.as_str()
-                || TurnViewTargetKind::from_str(&record.kind)
-                    != Some(TurnViewTargetKind::TuiDirectBotAnchor)
-            {
-                continue;
-            }
-            if TurnViewState::from_str(&record.applied) != Some(TurnViewState::Pending) {
+            if !is_pending_tui_anchor(&record, shared.provider.as_str()) {
                 continue;
             }
             let attached_age = entry
@@ -693,5 +719,28 @@ mod tests {
         assert_eq!(sweep.await, 0);
         assert!(!hourglass_removed(&shared.turn_view_reconciler, 18_003));
         assert!(before.is_some() && anchor_fingerprint(channel, 18_003) == before);
+    }
+
+    /// Health counts one channel's pending ⏳ records and reports an unreadable record as
+    /// unknown, where the sweep's enumeration would skip it.
+    #[test]
+    fn pending_anchor_presence_counts_one_channel_and_reports_unreadable_records() {
+        use crate::services::discord::health::transcript_turn::Presence;
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let (channel, other) = (6_325_408_101, 6_325_408_102);
+        let presence = || pending_anchor_presence(&shared.provider, channel);
+        assert_eq!(presence(), Presence::Absent);
+        write_pending_anchor(&shared, channel, 18_101);
+        write_pending_anchor(&shared, channel, 18_102);
+        write_pending_anchor(&shared, other, 18_103);
+        assert_eq!(presence(), Presence::Present(2));
+        let path = TurnViewReconciler::persisted_target_path(anchor_target(channel, 18_104));
+        std::fs::create_dir(path.unwrap()).unwrap();
+        assert!(
+            matches!(presence(), Presence::Unknown(_)),
+            "{:?}",
+            presence()
+        );
     }
 }
