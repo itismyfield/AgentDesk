@@ -1516,8 +1516,9 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/herdr/launch_host.rs", 0),
         ("src/services/session_host/model.rs", 3),
         ("src/services/session_host/resolve.rs", 2),
-        // The input gate and the boot registry, the one place a Herdr host is built.
-        ("src/services/session_host/herdr_gate.rs", 0),
+        // The input gate (its own `.host_kind` check) and the boot registry, the one place a
+        // Herdr host is built.
+        (INPUT_GATE, 1),
         (REGISTRY, 0),
         // Claude input: a Herdr target exists only through the registry and its gate.
         ("src/services/claude_tui/host_input.rs", 4),
@@ -1580,6 +1581,7 @@ fn herdr_items_have_no_production_caller() {
     const CLAUDE_TURN_GATE: &str = "src/services/claude/host_gate.rs";
     const RECONCILE: &str = "src/services/discord/recovery_engine/host_reconcile.rs";
     const WATCH_HOST: &str = "src/services/discord/watchers/lifecycle/watch_host.rs";
+    const INPUT_GATE: &str = "src/services/session_host/herdr_gate.rs";
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
@@ -1606,6 +1608,7 @@ fn herdr_items_have_no_production_caller() {
                 CLAUDE_TURN_GATE,
                 RECONCILE,
                 WATCH_HOST,
+                INPUT_GATE,
             ],
         ),
         (
@@ -1619,6 +1622,7 @@ fn herdr_items_have_no_production_caller() {
                 CLAUDE_TURN_GATE,
                 RECONCILE,
                 WATCH_HOST,
+                INPUT_GATE,
             ],
         ),
         (
@@ -1632,6 +1636,7 @@ fn herdr_items_have_no_production_caller() {
                 CLAUDE_TURN_GATE,
                 RECONCILE,
                 WATCH_HOST,
+                INPUT_GATE,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),

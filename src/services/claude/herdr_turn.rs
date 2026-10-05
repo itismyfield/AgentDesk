@@ -1,5 +1,5 @@
-//! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: attach
-//! after SessionStart, one gated prompt, and no resend, relaunch or kill after a refused send.
+//! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: one
+//! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
-use crate::services::claude_tui::host_input::run_herdr;
+use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::herdr_launch::{
@@ -33,7 +33,9 @@ use crate::services::session_host::{
 };
 use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 use crate::services::tui_prompt_dedupe::binding_context::{PreparedIncarnation, execution_context};
-use crate::services::tui_prompt_dedupe::binding_events::{BindingTarget, binding_events_since};
+use crate::services::tui_prompt_dedupe::binding_events::{
+    BindingEvent, BindingTarget, binding_events_since,
+};
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
 
@@ -113,9 +115,11 @@ pub(crate) fn execute(
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
     let attached = match turn.row {
         Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
+            not_held(&record.execution_nonce)?;
             bound_source(&turn, ports, record)?
         }
         Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
+            not_held(&record.execution_nonce)?;
             pending_source(&turn, &runtime, ports, record)?
         }
         Some(HostedRecord::Unknown(_)) => return Err("herdr turn: unreadable hosted record".into()),
@@ -147,14 +151,25 @@ fn bound_source(
     })
 }
 
-/// A Pending execution from an earlier turn: its pane is probed again when it has no evidence,
-/// then attached under the session its launch named. Its SessionStart has already passed.
+/// A Pending execution from an earlier turn, only once the log holds its own record for the
+/// session its launch named: only an attach after SessionStart, or the pane's hooks, write one.
 fn pending_source(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,
     record: &HostedExecution,
 ) -> Result<Attached, String> {
+    let nonce = &record.execution_nonce;
+    let session_id = execution_context("claude", nonce)?
+        .expected_native_session_id
+        .ok_or("herdr turn: the pending launch named no session")?;
+    let started = latest_logged(turn).is_some_and(|event| {
+        event.execution_nonce.as_deref() == Some(nonce.as_str())
+            && logged_session(&event.new) == Some(session_id.as_str())
+    });
+    if !started {
+        return Err(format!("herdr turn: no logged start of {session_id}"));
+    }
     if record.expected.is_none() {
         let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
         let never = |_: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
@@ -167,11 +182,76 @@ fn pending_source(
             host,
         )))?;
     }
-    let nonce = &record.execution_nonce;
-    let session_id = execution_context("claude", nonce)?
-        .expected_native_session_id
-        .ok_or("herdr turn: the pending launch named no session")?;
     attach(turn, runtime, ports, nonce, &session_id)
+}
+
+/// The pane's latest logged record that moved it; refusal audits do not.
+fn latest_logged(turn: &HerdrTurn<'_>) -> Option<BindingEvent> {
+    let logical = turn.owner.logical_key.as_str();
+    let events = binding_events_since(turn.channel_id, 0).ok()?;
+    events
+        .into_iter()
+        .rev()
+        .filter(|event| event.tmux_session == logical)
+        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. }))
+}
+
+fn logged_session(target: &BindingTarget) -> Option<&str> {
+    match target {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
+            Some(&source.session_id)
+        }
+        BindingTarget::Pending {
+            payload_session_id, ..
+        } => Some(payload_session_id),
+        BindingTarget::Rejected { .. } => None,
+    }
+}
+
+/// Where a prompt that may sit unsubmitted in execution `nonce`'s composer is recorded.
+fn hold_path(nonce: &str) -> Result<PathBuf, String> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    if nonce.is_empty() || !nonce.chars().all(plain) {
+        return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
+    }
+    let root = crate::config::runtime_root().ok_or("herdr turn: no runtime root")?;
+    Ok(root.join("runtime/herdr_input_holds").join(nonce))
+}
+
+/// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
+fn not_held(nonce: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(hold_path(nonce)?) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(format!(
+            "herdr turn: input held after an unclear prompt to {nonce}"
+        )),
+        Err(error) => Err(format!(
+            "herdr turn: input hold of {nonce} unreadable: {error}"
+        )),
+    }
+}
+
+/// Recorded and synced before the first write, so even a crash mid-send leaves it.
+fn hold(nonce: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let path = hold_path(nonce)?;
+    let written = std::fs::create_dir_all(path.parent().unwrap_or(&path))
+        .and_then(|()| std::fs::File::create(&path))
+        .and_then(|mut file| {
+            file.write_all(chrono::Utc::now().to_rfc3339().as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| crate::services::discord::runtime_store::fsync_parent_dir(&path));
+    written.map_err(|error| format!("herdr turn: input hold not recorded: {error}"))?;
+    Ok(path)
+}
+
+/// Whether the composer is as before the run: submitted, or never written.
+fn composer_settled(run: &InputRun) -> bool {
+    matches!(
+        run,
+        InputRun::Applied | InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
+    )
 }
 
 /// A new execution: create, evidence, SessionStart, then attach; no prompt before the attach.
@@ -345,7 +425,14 @@ fn prompt_and_read(
         TuiInputAction::Enter,
     ];
     let cancel = turn.cancel.as_deref();
-    run_herdr(&attached.target, &plan, cancel).into_legacy()?;
+    let held = hold(&attached.nonce)?;
+    let run = run_herdr(&attached.target, &plan, cancel);
+    if composer_settled(&run)
+        && let Err(error) = std::fs::remove_file(&held)
+    {
+        tracing::warn!(logical = %turn.owner.logical_key, %error, "herdr turn: input hold kept");
+    }
+    run.into_legacy()?;
     let start = super::claude_tui_turn_start_offset_after_timestamp(path, started_at, before);
     let logical = turn.owner.logical_key.as_str();
     let unread = || PromptReadinessSnapshot {
@@ -408,13 +495,7 @@ fn prompt_and_read(
 /// stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
     let logical = turn.owner.logical_key.as_str();
-    let events = binding_events_since(turn.channel_id, 0).unwrap_or_default();
-    let latest = events
-        .iter()
-        .rev()
-        .filter(|event| event.tmux_session == logical)
-        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. }));
-    let logged = latest.is_some_and(|event| {
+    let logged = latest_logged(turn).is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce)
             && matches!(
                 event.new,

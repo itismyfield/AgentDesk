@@ -27,7 +27,7 @@ use crate::services::herdr_admission::{Admission, ForcedAdmission, force_for_tes
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
 };
-use crate::services::session_host::test_support::herdr::{HerdrRig, KEY, NODE, PANE, SESSION};
+use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::session_host::{
     EvidenceGap, HerdrMutation, HostMutation, HostRefusal, RestoreResume, ServerWitness,
     herdr_endpoints,
@@ -45,6 +45,8 @@ const LIMIT: Duration = Duration::from_secs(30);
 struct Launcher {
     creates: AtomicUsize,
     nonces: Mutex<Vec<String>>,
+    /// The provider is not confirmed: the launch keeps its pane Pending without evidence.
+    unconfirmed: AtomicBool,
 }
 
 impl HerdrLaunchHost for Launcher {
@@ -66,6 +68,9 @@ impl HerdrLaunchHost for Launcher {
             .lock()
             .unwrap()
             .push(probe.execution_nonce.clone());
+        if self.unconfirmed.load(Ordering::SeqCst) {
+            return Err(EvidenceGap::NoneYet);
+        }
         Ok(expected(&probe.execution_nonce))
     }
 }
@@ -93,6 +98,9 @@ struct Ports<'a> {
     started: &'a AtomicBool,
     /// Pane writes and whether SessionStart was sent, as each attach began.
     attaches: Mutex<Vec<(usize, bool)>>,
+    /// The turn is cancelled once its attach returns, before its prompt.
+    cancel_after_attach: bool,
+    cancel: &'a Mutex<Arc<CancelToken>>,
 }
 
 impl HerdrTurnPorts for Ports<'_> {
@@ -107,7 +115,12 @@ impl HerdrTurnPorts for Ports<'_> {
     fn attach(&self, request: &AttachRequest<'_>) -> Result<bool, String> {
         let seen = (self.rig.sends().len(), self.started.load(Ordering::SeqCst));
         self.attaches.lock().unwrap().push(seen);
-        self.boot.attach(request)
+        let attached = self.boot.attach(request);
+        if self.cancel_after_attach {
+            let cancel = self.cancel.lock().unwrap().clone();
+            cancel.cancelled.store(true, Ordering::SeqCst);
+        }
+        attached
     }
 
     fn confirm_bound(
@@ -131,6 +144,7 @@ struct Fixture {
     cwd: tempfile::TempDir,
     started: AtomicBool,
     finished: AtomicBool,
+    cancel: Mutex<Arc<CancelToken>>,
     _home: (Guard, tempfile::TempDir, Guard),
     _root: TestRuntimeRootGuard,
 }
@@ -186,6 +200,7 @@ impl Fixture {
             cwd: tempfile::tempdir().unwrap(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            cancel: Mutex::new(Arc::new(CancelToken::new())),
             _home: (env, home, bin),
             _root: root,
         }
@@ -266,7 +281,102 @@ impl Fixture {
             rig: &self.rig,
             started: &self.started,
             attaches: Mutex::default(),
+            cancel_after_attach: false,
+            cancel: &self.cancel,
         }
+    }
+
+    /// Cancels the turn now running.
+    fn cancel_now(&self) {
+        let cancel = self.cancel.lock().unwrap().clone();
+        cancel.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// The row as the turn host reads it.
+    fn record(&self) -> HostedRecord {
+        let raw: Option<Value> = self.rt.block_on(async {
+            sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id = $1")
+                .bind(CHANNEL.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        });
+        HostedRecord::decode(raw.as_ref())
+    }
+
+    /// `bound()` written to the row, with the pane running its provider.
+    fn store_bound(&self) -> HostedRecord {
+        let record = self.bound();
+        self.rt.block_on(async {
+            sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
+                .bind(serde_json::to_value(&record).unwrap())
+                .bind(CHANNEL.to_string())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        });
+        self.rig.run_provider(&self.rig.context(NONCE), false);
+        HostedRecord::Known(record)
+    }
+
+    /// Plays a launched pane's provider once its launch is evidenced, up to its SessionStart
+    /// when `start`; `None` once the turn ended first.
+    fn start_provider(&self, launcher: &Launcher, start: bool) -> Option<Started> {
+        if !wait_for(&self.finished, "launch evidence", || {
+            !launcher.nonces.lock().unwrap().is_empty()
+        }) {
+            return None;
+        }
+        let nonce = launcher.nonces.lock().unwrap()[0].clone();
+        let root = crate::config::runtime_root().unwrap();
+        let context = root.join(format!("runtime/binding_contexts/claude/{nonce}.json"));
+        self.rig.run_provider(&context, false);
+        let launched = crate::services::tui_prompt_dedupe::binding_context::execution_context(
+            "claude", &nonce,
+        )
+        .unwrap();
+        let session = launched.expected_native_session_id.unwrap();
+        let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            self.cwd.path(),
+            &session,
+            None,
+        )
+        .unwrap();
+        // The pane's hook relay names the launch context its environment carries.
+        let envelope = HookBindingEnvelope::capture_from_env("claude", |name| {
+            (name == "AGENTDESK_BINDING_CONTEXT").then(|| context.clone().into_os_string())
+        });
+        let started = Started {
+            session,
+            path,
+            envelope: envelope.encode().unwrap(),
+        };
+        if start {
+            let payload = json!({"session_id": started.session, "source": "startup",
+                "transcript_path": started.path});
+            self.started.store(true, Ordering::SeqCst);
+            assert_eq!(started.hook(self, "SessionStart", &payload), 202);
+        }
+        Some(started)
+    }
+
+    /// The provider's answer to the prompt once its paste and Enter arrived.
+    fn answer(&self, started: &Started) {
+        if !wait_for(&self.finished, "the prompt", || self.rig.sends().len() == 2) {
+            return;
+        }
+        let session = &started.session;
+        let user = json!({"type": "user", "sessionId": session,
+            "message": {"role": "user", "content": "질문"}});
+        append(&started.path, &[user]);
+        let payload =
+            json!({"session_id": session, "prompt": "질문", "transcript_path": started.path});
+        assert_eq!(started.hook(self, "UserPromptSubmit", &payload), 202);
+        let answer = json!({"type": "assistant", "sessionId": session, "message": {
+            "role": "assistant", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "답"}]}});
+        let done = json!({"type": "system", "subtype": "turn_duration", "sessionId": session});
+        append(&started.path, &[answer, done]);
     }
 
     /// Runs one turn on its own thread, as provider dispatch does on a blocking thread, while
@@ -281,8 +391,10 @@ impl Fixture {
         let (rt, rig, pool) = (&self.rt, &self.rig, &self.pool);
         let (owner, endpoint, cwd) = (self.owner.clone(), self.endpoint(), self.cwd.path());
         let finished = &self.finished;
+        finished.store(false, Ordering::SeqCst);
         let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
         let cancel = Arc::new(CancelToken::new());
+        *self.cancel.lock().unwrap() = cancel.clone();
         let token = cancel.clone();
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
@@ -318,9 +430,9 @@ impl Fixture {
                 std::thread::sleep(Duration::from_millis(20));
             }
             let outlived = played.is_ok() && !finished.load(Ordering::SeqCst);
-            cancel
-                .cancelled
-                .store(played.is_err() || outlived, Ordering::SeqCst);
+            if played.is_err() || outlived {
+                cancel.cancelled.store(true, Ordering::SeqCst);
+            }
             let joined = executor.join();
             if let Err(panic) = played {
                 std::panic::resume_unwind(panic);
@@ -382,6 +494,28 @@ fn prompt_sends() -> Vec<Value> {
     ]
 }
 
+/// A launched provider's session, transcript and the hook envelope its pane relays.
+struct Started {
+    session: String,
+    path: PathBuf,
+    envelope: String,
+}
+
+impl Started {
+    fn hook(&self, fx: &Fixture, event: &str, payload: &Value) -> u16 {
+        let uri = format!("/hooks/claude/{event}?session_id={}", self.session);
+        let sent = fx
+            .ingress
+            .send_envelope(&uri, payload, None, Some(&self.envelope));
+        sent.0
+    }
+}
+
+fn hold_of(nonce: &str) -> PathBuf {
+    let root = crate::config::runtime_root().unwrap();
+    root.join("runtime/herdr_input_holds").join(nonce)
+}
+
 // A Legacy row: one create, the attach after SessionStart and before any pane write, one paste
 // and Enter, then Bound once the transcript resolves the Pending source, and the watcher handoff.
 #[test]
@@ -391,53 +525,10 @@ fn t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_the
     let ports = fx.ports(&launcher);
     let transcript = Mutex::new(PathBuf::new());
     let (result, messages) = fx.turn(&HostedRecord::Legacy, &ports, || {
-        if !wait_for(&fx.finished, "launch evidence", || {
-            !launcher.nonces.lock().unwrap().is_empty()
-        }) {
-            return;
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            *transcript.lock().unwrap() = started.path.clone();
+            fx.answer(&started);
         }
-        let nonce = launcher.nonces.lock().unwrap()[0].clone();
-        let root = crate::config::runtime_root().unwrap();
-        let context = root.join(format!("runtime/binding_contexts/claude/{nonce}.json"));
-        fx.rig.run_provider(&context, false);
-        let launched = crate::services::tui_prompt_dedupe::binding_context::execution_context(
-            "claude", &nonce,
-        )
-        .unwrap();
-        let session = launched.expected_native_session_id.unwrap();
-        let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-            fx.cwd.path(),
-            &session,
-            None,
-        )
-        .unwrap();
-        *transcript.lock().unwrap() = path.clone();
-        // The pane's hook relay names the launch context its environment carries.
-        let envelope = HookBindingEnvelope::capture_from_env("claude", |name| {
-            (name == "AGENTDESK_BINDING_CONTEXT").then(|| context.clone().into_os_string())
-        });
-        let envelope = envelope.encode().unwrap();
-        let hook = |event: &str, payload: &Value| {
-            let uri = format!("/hooks/claude/{event}?session_id={session}");
-            fx.ingress
-                .send_envelope(&uri, payload, None, Some(&envelope))
-        };
-        let payload = json!({"session_id": session, "source": "startup", "transcript_path": path});
-        fx.started.store(true, Ordering::SeqCst);
-        assert_eq!(hook("SessionStart", &payload).0, 202);
-        if !wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
-            return;
-        }
-        let user = json!({"type": "user", "sessionId": session,
-            "message": {"role": "user", "content": "질문"}});
-        append(&path, &[user]);
-        let payload = json!({"session_id": session, "prompt": "질문", "transcript_path": path});
-        assert_eq!(hook("UserPromptSubmit", &payload).0, 202);
-        let answer = json!({"type": "assistant", "sessionId": session, "message": {
-            "role": "assistant", "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "답"}]}});
-        let done = json!({"type": "system", "subtype": "turn_duration", "sessionId": session});
-        append(&path, &[answer, done]);
     });
     assert_eq!(result, Ok(()));
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
@@ -459,19 +550,11 @@ fn t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_the
 #[test]
 fn t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg() {
     let fx = Fixture::new("mismatch", None);
-    let record = fx.bound();
-    fx.rt.block_on(async {
-        sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
-            .bind(serde_json::to_value(&record).unwrap())
-            .bind(CHANNEL.to_string())
-            .execute(&fx.pool)
-            .await
-            .unwrap();
-    });
+    let record = fx.store_bound();
     fx.rig.run_provider(&fx.rig.context(NONCE), true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    let (result, _) = fx.turn(&HostedRecord::Known(record), &ports, || {});
+    let (result, _) = fx.turn(&record, &ports, || {});
     let error = result.unwrap_err();
     assert!(error.contains("bound execution not confirmed"), "{error}");
     assert!(fx.rig.sends().is_empty());
@@ -484,23 +567,172 @@ fn t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg() {
 #[test]
 fn t_e3_an_unclear_send_is_never_sent_again_pg() {
     let fx = Fixture::new("unclear", None);
-    let record = fx.bound();
-    fx.rt.block_on(async {
-        sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
-            .bind(serde_json::to_value(&record).unwrap())
-            .bind(CHANNEL.to_string())
-            .execute(&fx.pool)
-            .await
-            .unwrap();
-    });
-    fx.rig.run_provider(&fx.rig.context(NONCE), false);
-    fx.rig.leave_sends_unanswered();
+    let record = fx.store_bound();
+    fx.rig.leave_sends_unanswered(true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    let (result, _) = fx.turn(&HostedRecord::Known(record), &ports, || {});
+    let (result, _) = fx.turn(&record, &ports, || {});
     assert!(result.is_err());
     assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+}
+
+// A launch whose SessionStart never came stays Pending with its evidence; the next turn neither
+// attaches nor prompts it, and nothing is created again.
+#[test]
+fn a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg() {
+    let fx = Fixture::new("unstarted", None);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if fx.start_provider(&launcher, false).is_some() {
+            fx.cancel_now();
+        }
+    });
+    let first = first.unwrap_err();
+    assert!(first.contains("no SessionStart"), "{first}");
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&fx.record(), &ports, || {});
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+}
+
+// A Pending pane launched without evidence, whose provider would now probe as its own, is still
+// neither attached nor prompted while no start of it is logged.
+#[test]
+fn a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg() {
+    let fx = Fixture::new("reprobe", None);
+    let launcher = Arc::new(Launcher::default());
+    launcher.unconfirmed.store(true, Ordering::SeqCst);
+    let ports = fx.ports(&launcher);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
+    assert!(first.is_err());
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    let HostedRecord::Known(pending) = fx.record() else {
+        panic!("no stored execution");
+    };
+    assert_eq!(pending.state, HostedState::Pending);
+    assert!(pending.expected.is_none());
+    launcher.unconfirmed.store(false, Ordering::SeqCst);
+    let root = crate::config::runtime_root().unwrap();
+    let context = root.join(format!("runtime/binding_contexts/claude/{nonce}.json"));
+    fx.rig.run_provider(&context, false);
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&fx.record(), &ports, || {});
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+}
+
+// A Pending execution attached after its SessionStart, whose first prompt was cancelled before
+// any write, takes the next turn's prompt once and turns Bound.
+#[test]
+fn a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg() {
+    let fx = Fixture::new("started", None);
+    let launcher = Arc::new(Launcher::default());
+    let mut ports = fx.ports(&launcher);
+    ports.cancel_after_attach = true;
+    let started = Mutex::new(None);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        *started.lock().unwrap() = fx.start_provider(&launcher, true);
+    });
+    assert!(first.is_err());
+    assert_eq!(ports.attaches.lock().unwrap().len(), 1);
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    let started = started.into_inner().unwrap().unwrap();
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(!hold_of(&nonce).exists());
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&fx.record(), &ports, || fx.answer(&started));
+    assert_eq!(second, Ok(()));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+}
+
+// A paste that may have landed without its Enter holds the execution: the next turn writes
+// nothing, so the earlier text is never submitted with it.
+#[test]
+fn after_an_unclear_paste_the_next_prompt_is_held_pg() {
+    let fx = Fixture::new("held", None);
+    let record = fx.store_bound();
+    let launcher = Arc::new(Launcher::default());
+    fx.rig.leave_sends_unanswered(true);
+    let (first, _) = fx.turn(&record, &fx.ports(&launcher), || {});
+    assert!(first.is_err());
+    fx.rig.leave_sends_unanswered(false);
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&record, &ports, || {});
+    let second = second.unwrap_err();
+    assert!(second.contains("input held"), "{second}");
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+}
+
+// A turn cancelled after its paste was confirmed leaves that text in the composer: the next turn
+// is held the same way.
+#[test]
+fn after_a_paste_then_cancel_the_next_prompt_is_held_pg() {
+    let fx = Fixture::new("pasted", None);
+    let record = fx.store_bound();
+    let launcher = Arc::new(Launcher::default());
+    let (first, _) = fx.turn(&record, &fx.ports(&launcher), || {
+        if wait_for(&fx.finished, "the paste", || !fx.rig.sends().is_empty()) {
+            fx.cancel_now();
+        }
+    });
+    assert!(first.is_err());
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
+    let (second, _) = fx.turn(&record, &fx.ports(&launcher), || {});
+    let second = second.unwrap_err();
+    assert!(second.contains("input held"), "{second}");
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
+}
+
+// A matched Bound execution with a settled composer takes the prompt exactly once, reads its
+// answer and hands the transcript on, with nothing launched and no hold left.
+#[test]
+fn a_matched_bound_execution_takes_one_prompt_pg() {
+    let fx = Fixture::new("warm", None);
+    let record = fx.store_bound();
+    let launcher = Arc::new(Launcher::default());
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical()).unwrap();
+    let started = Started {
+        session: binding.session_id.clone().unwrap(),
+        path: PathBuf::from(&binding.output_path),
+        envelope: String::new(),
+    };
+    let (result, messages) = fx.turn(&record, &fx.ports(&launcher), || {
+        if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
+            let user = json!({"type": "user", "sessionId": started.session,
+                "message": {"role": "user", "content": "질문"}});
+            append(&started.path, &[user]);
+            let answer = json!({"type": "assistant", "sessionId": started.session, "message": {
+                "role": "assistant", "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "답"}]}});
+            let done =
+                json!({"type": "system", "subtype": "turn_duration", "sessionId": started.session});
+            append(&started.path, &[answer, done]);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert!(!hold_of(NONCE).exists());
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, StreamMessage::RuntimeReady { .. })),
+        "{messages:?}"
+    );
 }
 
 // A judgment that no send used is gone after a refused pane, a refused paste or a buffer load the
@@ -508,6 +740,9 @@ fn t_e3_an_unclear_send_is_never_sent_again_pg() {
 #[test]
 fn a_judgment_left_by_an_early_exit_admits_no_later_send() {
     let _root = TestRuntimeRootGuard::new();
+    let marker =
+        crate::services::tmux_common::session_temp_path("AgentDesk-claude-p9b3b-pin", "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     let _admission = open_admission();

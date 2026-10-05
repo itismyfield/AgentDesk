@@ -19,6 +19,8 @@ mod consumer_guard;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+#[cfg(test)]
+pub(crate) mod herdr_socket_rig_tests;
 pub(crate) mod legacy_collapse;
 mod model;
 mod process_host;
