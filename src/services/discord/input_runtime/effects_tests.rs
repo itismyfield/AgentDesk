@@ -1,3 +1,4 @@
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 use super::*;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::input_transition::Files;
