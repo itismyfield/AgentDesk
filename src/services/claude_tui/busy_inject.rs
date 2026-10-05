@@ -280,16 +280,34 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
     if request.text.trim().is_empty() || text.len() > MAX_INPUT_BYTES {
         return Outcome::NotSent(Veto::InvalidInput);
     }
-    for wait in timing.lock_retries {
-        std::thread::sleep(*wait);
-        let locked = super::composer_lock::try_with_composer_mutation_lock(request.session, || {
-            inject_locked(pane, request, &text, timing)
-        });
-        if let Some(outcome) = locked {
-            return outcome;
+    let started = Instant::now();
+    let locked = at_offsets(
+        timing.lock_retries,
+        || started.elapsed(),
+        std::thread::sleep,
+        || {
+            super::composer_lock::try_with_composer_mutation_lock(request.session, || {
+                inject_locked(pane, request, &text, timing)
+            })
+        },
+    );
+    locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
+}
+
+/// Runs `attempt` at each offset until one returns a value.
+pub(crate) fn at_offsets<T>(
+    offsets: &[Duration],
+    _elapsed: impl Fn() -> Duration,
+    mut sleep: impl FnMut(Duration),
+    mut attempt: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    for offset in offsets {
+        sleep(*offset);
+        if let Some(value) = attempt() {
+            return Some(value);
         }
     }
-    Outcome::NotSent(Veto::LockContended)
+    None
 }
 
 fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing) -> Outcome {
