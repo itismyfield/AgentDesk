@@ -291,65 +291,37 @@ pub(crate) async fn native_channel_clear_state(
     pool: &PgPool,
     channel_id: &str,
 ) -> Result<NativeClearBoundary> {
-    let row = sqlx::query_as::<_, NativeClearStateRow>(NATIVE_CLEAR_STATE_SQL)
+    classify_native_clear_boundary(native_clear_row(pool, channel_id).await?)
+}
+
+async fn native_clear_row(pool: &PgPool, channel_id: &str) -> Result<Option<NativeClearStateRow>> {
+    sqlx::query_as::<_, NativeClearStateRow>(NATIVE_CLEAR_STATE_SQL)
         .bind(channel_id.trim())
         .fetch_optional(pool)
         .await
-        .map_err(|error| anyhow!("native channel clear state lookup failed: {error}"))?;
-    classify_native_clear_boundary(row)
+        .map_err(|error| anyhow!("native channel clear state lookup failed: {error}"))
 }
 
-/// The native correlation as stored, whatever its state, so a cutoff is never forgotten unread.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct NativeClearRecord {
-    pub(crate) generation: NativeClearGeneration,
-    pub(crate) ticket: Option<serde_json::Value>,
-    pub(crate) resolved: bool,
-    /// A later boundary write replaced this generation.
-    pub(crate) superseded: bool,
-    pub(crate) after_frontier: bool,
-}
-
-pub(crate) async fn native_channel_clear_record(
-    pool: &PgPool,
-    channel_id: &str,
-) -> Result<Option<NativeClearRecord>> {
-    let row = sqlx::query_as::<_, NativeClearStateRow>(NATIVE_CLEAR_STATE_SQL)
-        .bind(channel_id.trim())
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| anyhow!("native channel clear record lookup failed: {error}"))?;
-    Ok(native_clear_record(row))
-}
-
-fn native_clear_record(row: Option<NativeClearStateRow>) -> Option<NativeClearRecord> {
-    let (clear_generation, native_generation, ticket, resolved, after_frontier) = row?;
-    Some(NativeClearRecord {
-        generation: NativeClearGeneration(native_generation?),
-        ticket,
-        resolved,
-        superseded: clear_generation != native_generation?,
-        after_frontier,
-    })
-}
+#[path = "session_transcripts_native_clear_record.rs"]
+mod native_clear_record;
+pub(crate) use native_clear_record::{NativeClearRecord, native_channel_clear_record};
 
 // A generation mismatch means another writer (or an older binary) cleared after this ticket; the
 // frontier check is sound because, at an equal generation, the native write set the frontier.
 fn classify_native_clear_boundary(row: Option<NativeClearStateRow>) -> Result<NativeClearBoundary> {
-    let Some(record) = native_clear_record(row) else {
+    let Some((clear_generation, Some(native_generation), ticket, resolved, after_frontier)) = row
+    else {
         return Ok(NativeClearBoundary::Legacy);
     };
-    if record.resolved {
+    if resolved {
         return Ok(NativeClearBoundary::Resolved);
     }
-    if record.superseded || record.after_frontier {
+    if clear_generation != native_generation || after_frontier {
         return Ok(NativeClearBoundary::Superseded);
     }
-    let ticket = record
-        .ticket
-        .ok_or_else(|| anyhow!("native clear generation without a ticket"))?;
+    let ticket = ticket.ok_or_else(|| anyhow!("native clear generation without a ticket"))?;
     Ok(NativeClearBoundary::Unresolved {
-        generation: record.generation,
+        generation: NativeClearGeneration(native_generation),
         ticket,
     })
 }

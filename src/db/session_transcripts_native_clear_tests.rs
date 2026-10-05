@@ -288,8 +288,7 @@ async fn existing_boundary_readers_treat_native_and_legacy_clears_alike_pg() {
     db.drop().await;
 }
 
-/// The raw record and the boundary classification read the same row; the classification of every
-/// row shape is unchanged by reading it through the record.
+/// The raw record and the boundary classification read the same row shapes the same way.
 #[test]
 fn record_and_classification_agree_on_every_row_shape() {
     let t = || Some(json!({"context": {"execution_nonce": "n"}}));
@@ -337,7 +336,7 @@ fn record_and_classification_agree_on_every_row_shape() {
     for (row, boundary, record) in cases {
         let classified = classify_native_clear_boundary(row.clone()).ok();
         assert_eq!(classified, boundary, "{row:?}");
-        let read = native_clear_record(row.clone()).map(|r| (r.resolved, r.superseded));
+        let read = native_clear_record::from_row(row.clone()).map(|r| (r.resolved, r.superseded));
         assert_eq!(read, record, "{row:?}");
     }
 }

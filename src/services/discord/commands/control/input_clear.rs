@@ -216,7 +216,7 @@ impl ClearHost for LedgerClear {
                 return false;
             }
             self.effects.reset_process(self.cleared.name());
-            super::clear_session_memory(&self.shared, self.channel_id).await;
+            super::native::clear_session_memory(&self.shared, self.channel_id).await;
             super::native::clear_process_reset_pending(&self.shared, self.channel_id).await;
             true
         })

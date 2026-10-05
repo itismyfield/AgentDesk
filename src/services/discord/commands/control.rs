@@ -10,7 +10,6 @@ use super::super::admin_host_guard::ManagedReset;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
-use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::{CommandStop, stop_active_turn};
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
@@ -493,7 +492,7 @@ async fn clear_channel_session_state_fenced(
         }
     };
 
-    clear_session_memory(shared, channel_id).await;
+    native::clear_session_memory(shared, channel_id).await;
 
     if native.is_none() {
         native::clear_process_reset_pending(shared, channel_id).await;
@@ -547,21 +546,6 @@ async fn clear_channel_session_state_fenced(
     }
 
     Ok(())
-}
-
-/// The cleared channel's in-memory provider session, history, uploads and role override.
-async fn clear_session_memory(shared: &Arc<SharedData>, channel_id: serenity::ChannelId) {
-    {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            cleanup_channel_uploads(channel_id);
-            session.clear_provider_session();
-            session.history.clear();
-            session.pending_uploads.clear();
-            session.cleared = true;
-        }
-    }
-    shared.dispatch.role_overrides.remove(&channel_id);
 }
 
 /// /stop — Cancel in-progress AI request
