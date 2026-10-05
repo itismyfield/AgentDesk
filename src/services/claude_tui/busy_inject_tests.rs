@@ -64,12 +64,16 @@ const FAKE_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 next() { n=$(cat "$d/$1.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/$1.n"; f="$d/$1.$n"; [ -f "$f" ] || f="$d/$1"; cat "$f"; }
 effects() {
-  [ "$1" = send-keys ] && [ -f "$d/on_enter" ] || return 0
-  if [ -f "$d/on_enter_delay" ]; then
+  [ "$1" = send-keys ] || return 0
+  if [ ! -f "$d/on_enter" ]; then :
+  elif [ -f "$d/on_enter_delay" ]; then
     (sleep "$(cat "$d/on_enter_delay")"; cat "$d/on_enter" >> '@T@') </dev/null >/dev/null 2>&1 &
   else
     cat "$d/on_enter" >> '@T@'
   fi
+  # A slow after-send-keys hook delays the reply, not the key.
+  [ -f "$d/reply_delay" ] && sleep "$(cat "$d/reply_delay")"
+  return 0
 }
 echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
@@ -147,6 +151,11 @@ impl Fake {
     fn accept_on_enter_after(&self, seconds: &str) {
         self.accept_on_enter();
         fs::write(self.dir.path().join("on_enter_delay"), seconds).unwrap();
+    }
+
+    /// The Enter command replies `seconds` after the key took effect.
+    fn reply_after(&self, seconds: &str) {
+        fs::write(self.dir.path().join("reply_delay"), seconds).unwrap();
     }
 
     fn session(&self) -> String {
@@ -458,6 +467,31 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
             true
         ),
         "late transcript"
+    );
+    // Production window. The Enter takes effect at once, the input is recorded 4s later and
+    // the Enter command replies at 4.3s; the window must not start from the reply.
+    let production = Timing {
+        confirm_window: TIMING.confirm_window,
+        confirm_poll: TIMING.confirm_poll,
+        ..FAST
+    };
+    let fake = Fake::new();
+    fake.caps(&[busy_empty(), screen(&text(), "")]);
+    fake.accept_on_enter_after("4");
+    fake.reply_after("4.3");
+    let outcome = fake.run(&production);
+    assert_eq!(
+        (
+            outcome,
+            fake.keys(),
+            transcript_carries(&fake.transcript, 0, NONCE)
+        ),
+        (
+            Outcome::Unconfirmed(Unconfirmed::NotObserved),
+            (1, 1, 0),
+            true
+        ),
+        "slow Enter reply"
     );
     for (name, subcommand, outcome) in [
         ("paste fails", "paste-buffer", Unconfirmed::PasteFailed),
