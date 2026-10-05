@@ -1143,6 +1143,7 @@ mod tests {
             "activity",
             "o-shadow",
             "o",
+            "herdr",
             "help",
         ];
 
