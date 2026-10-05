@@ -1322,8 +1322,8 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   form standing there today: that one reads the raw field from outside `discord::health`
   and so measures nothing, and adopting it unchanged MOVES the category error into a
   second gate rather than repairing it. The grade needs the coordinate under "What I20
-  does NOT give you"; until that lands this consumer has no admissible liveness term at
-  all, and it may not substitute one — not depth, not age, not the ungraded conjunction.
+  does NOT give you"; this consumer has no admissible liveness term today, and it may not
+  substitute one — not depth, not age, not the ungraded conjunction.
   Carry it with the row precondition named above, because that branch is reached today
   only after `queue_depth > 0` has returned CONFLICT, and retiring the depth gate admits
   queued channels to it.
@@ -1368,10 +1368,13 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   the REAL-USER arm, where `classify_reclaimable_mailbox_owner` demands the ledger's
   `finished` bit through `is_readopted_mailbox_owner`. A SYNTHETIC owner leaves that
   classifier before any ledger read, and the reason function answers `OwnerInflightAbsent`
-  on a `None` row before inspecting anything, so a synthetic-owned ROWLESS mailbox — the
-  #5996 shape — is retired on absence plus age alone; only demand bounds that today, and
-  periodizing this arm unchanged is the retirement I20 forbids. The age is never the
-  authority, and may not be extended to a reason whose witness IS readable.
+  on a `None` row before inspecting anything. `empirical_reclaim_witness` therefore returns
+  `None` for a synthetic-owned ROWLESS mailbox — the #5996 shape — and
+  `release_reclaimable_stale_synthetic_mailbox_owner_if_current` refuses retirement even
+  after the positive age gate. Absence plus age alone are not authority; demand only
+  triggers the evaluation, and periodizing this arm unchanged would only repeat the refusal.
+  The age is never the authority, and may not be extended to a reason whose witness IS
+  readable.
 - What I20 does NOT give you. It does not authorize retiring state on the ABSENCE of
   progress evidence — absence is the unmeasured case, which this invariant sends to
   (b); a consumer reading "no witness" as "retire it" builds the very (b) loss the
