@@ -75,12 +75,13 @@ impl Closing {
     /// Releases protection after a complete handback while keeping the catch-up order barrier.
     pub(crate) fn release_after_handback(&self) -> Result<(), Failure> {
         let key = (self.provider().as_str().to_owned(), self.channel());
-        ORDER_BARRIERS
+        let inserted = ORDER_BARRIERS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.clone());
         let released = self.release_protection_after_handback();
-        if released.is_err() {
+        // A refused retry keeps a barrier an earlier release installed; catch-up still owes its settle.
+        if released.is_err() && inserted {
             ORDER_BARRIERS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

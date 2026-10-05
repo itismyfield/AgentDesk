@@ -96,6 +96,11 @@ fn e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barri
             closing.release_after_handback().unwrap();
             assert!(lookup(&ProviderKind::Claude, channel).is_none());
             assert!(order_barrier(&ProviderKind::Claude, channel));
+            assert_eq!(closing.release_after_handback(), Err(Failure::Busy));
+            assert!(
+                order_barrier(&ProviderKind::Claude, channel),
+                "a stale release must preserve an already installed catch-up barrier"
+            );
             assert!(settle_order_barrier(&ProviderKind::Claude, channel));
             assert!(!order_barrier(&ProviderKind::Claude, channel));
             drop(transition);
