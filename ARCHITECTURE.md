@@ -204,6 +204,7 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
+│   ├── session_transcripts_native_clear_record.rs
 │   ├── session_transcripts_native_clear_tests.rs
 │   └── turns.rs
 ├── dispatch/
@@ -736,6 +737,8 @@ src/
 │   │   │   └── too_old_notice.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── input_clear.rs
+│   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
@@ -935,6 +938,8 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── input_runtime/
+│   │   │   ├── clear.rs
+│   │   │   ├── clear_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   └── mod.rs

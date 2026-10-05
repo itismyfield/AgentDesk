@@ -98,6 +98,7 @@ src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
+src/services/discord/commands/control/input_clear_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
 src/services/discord/commands/tui_passthrough.rs
@@ -301,6 +302,7 @@ services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::control::input_clear::tests
 services::discord::commands::control::native::tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::tui_passthrough::host_guard_tests
@@ -709,6 +711,7 @@ db::session_transcripts::native_clear_pg_tests::existing_boundary_readers_treat_
 db::session_transcripts::native_clear_pg_tests::native_columns_split_counterexamples_the_legacy_markers_cannot_pg
 db::session_transcripts::native_clear_pg_tests::native_write_is_all_or_nothing_and_partial_correlation_is_refused_pg
 db::session_transcripts::native_clear_pg_tests::older_boundary_writers_keep_native_columns_and_supersede_them_pg
+db::session_transcripts::native_clear_pg_tests::record_keeps_the_ticket_after_resolve_and_supersession_pg
 db::session_transcripts::native_clear_pg_tests::resolve_marks_only_the_current_unresolved_generation_pg
 db::session_transcripts::native_clear_pg_tests::transcript_past_frontier_supersedes_and_uncorrelated_rows_are_legacy_pg
 dispatch::dispatch_cancel::pg_observability_tests::cancel_emits_dispatch_result_observability_event
@@ -1058,6 +1061,13 @@ services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_ou
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
+services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
+services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
+services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
+services::discord::commands::control::input_clear::tests::a_superseded_ticket_holds_until_a_new_clear_cuts_its_inputs_pg
+services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg
+services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
+services::discord::commands::control::input_clear::tests::the_production_adapter_cuts_resets_and_resolves_for_both_providers_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
 services::discord::commands::control::native::tests::native_clear_marks_completion_before_the_worker_releases_admission_pg

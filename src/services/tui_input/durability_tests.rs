@@ -19,7 +19,7 @@ pub(super) fn partial_blob_write(file: &mut std::fs::File, bytes: &[u8]) -> std:
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(super) mod supported {
+pub(crate) mod supported {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::ffi::OsString;

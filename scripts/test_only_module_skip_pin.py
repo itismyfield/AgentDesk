@@ -37,6 +37,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_server/native_clear_fence_tests.rs",
         "src/services/discord/adk_session_selector_checked_tests.rs",
         "src/services/discord/commands/control/native_tests.rs",
+        "src/services/discord/commands/control/input_clear_tests.rs",
+        "src/services/discord/input_runtime/clear_tests.rs",
         "src/services/discord/input_transition_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
         "src/services/turn_orchestrator/input_fence_tests.rs",

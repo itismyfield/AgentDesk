@@ -18,7 +18,7 @@ macro_rules! log_info_event {
 
 mod command_policy;
 mod config;
-mod control;
+pub(in crate::services::discord) mod control;
 mod diagnostics;
 mod fast_mode;
 mod goals;
