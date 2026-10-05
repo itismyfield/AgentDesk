@@ -223,6 +223,25 @@ pub(crate) fn context_names_execution(
     execution_context(provider, nonce)
 }
 
+/// A candidate must retain both the canonical launch snapshot and its current nonce.
+#[allow(dead_code)]
+pub(crate) fn codex_context_candidate(
+    captured: &BindingContext,
+    prepared: &BindingContext,
+    current_nonce: Option<&str>,
+) -> Result<(), String> {
+    let canonical = execution_context("codex", &prepared.execution_nonce)?;
+    if captured != prepared
+        || canonical != *prepared
+        || current_nonce != Some(prepared.execution_nonce.as_str())
+        || prepared.channel_id.is_none()
+        || prepared.provider_root.is_none()
+    {
+        return Err("Codex launch context does not name the current execution".into());
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub(crate) fn decode_binding_header(header: &str) -> Result<HookBindingEnvelope, String> {
     if header.len() > HEADER_LIMIT {
