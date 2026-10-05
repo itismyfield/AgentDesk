@@ -95,7 +95,7 @@ pub(super) fn save_channel_queued_placeholders(
     if let Err(error) = fence::write(provider, channel_id.get(), || {
         save_entries_checked(channel_file_path(provider, token_hash, channel_id), entries)
     }) {
-        tracing::warn!(channel = channel_id.get(), %error, "input accessory persistence refused");
+        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
     }
 }
 
@@ -204,7 +204,7 @@ pub(super) fn save_channel_queue_exit_placeholder_clears(
             entries,
         )
     }) {
-        tracing::warn!(channel = channel_id.get(), %error, "input accessory persistence refused");
+        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
     }
 }
 
@@ -313,7 +313,7 @@ pub(super) fn persist_channel_from_map(
             &snapshot_map(map, channel_id),
         )
     }) {
-        tracing::warn!(channel = channel_id.get(), %error, "input accessory persistence refused");
+        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
     }
 }
 
@@ -354,7 +354,7 @@ pub(super) fn persist_queue_exit_placeholder_clears_channel_from_map(
             &snapshot_map(map, channel_id),
         )
     }) {
-        tracing::warn!(channel = channel_id.get(), %error, "input accessory persistence refused");
+        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
     }
 }
 
