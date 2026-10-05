@@ -108,6 +108,24 @@ fn run_cli_with_name(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn run_rendered_codex_hook_for_test(args: &[String], payload: &[u8]) {
+    let value = |flag| args.windows(2).find(|pair| pair[0] == flag).unwrap()[1].as_str();
+    run_cli_with_io_and_transport(
+        value("--endpoint"),
+        value("--provider"),
+        value("--event"),
+        value("--session-id"),
+        "codex-hook-relay",
+        &mut std::io::Cursor::new(payload),
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        handoff_non_wait_hook_event,
+        handoff_ordered_hook_event_response_with_timeout,
+    )
+    .unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cli_with_io_and_transport<R, W, E, Relay, RelayResponse>(
     endpoint: &str,

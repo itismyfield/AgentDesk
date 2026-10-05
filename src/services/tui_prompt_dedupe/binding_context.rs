@@ -27,6 +27,10 @@ pub(crate) struct BindingContext {
     pub expected_native_session_id: Option<String>,
     pub launch_mode: String,
     pub provider_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_policy: Option<String>,
 }
 
 #[derive(Debug)]
@@ -292,6 +296,27 @@ impl PreparedIncarnation {
         resume: bool,
         provider_root: Option<PathBuf>,
     ) -> Result<Self, String> {
+        Self::prepare_pinned(
+            provider,
+            tmux,
+            channel_id,
+            expected,
+            resume,
+            provider_root,
+            (None, None),
+        )
+    }
+
+    /// Pins the exact argv digest and source policy before immutable publication.
+    pub(crate) fn prepare_pinned(
+        provider: &str,
+        tmux: &str,
+        channel_id: Option<u64>,
+        expected: Option<&str>,
+        resume: bool,
+        provider_root: Option<PathBuf>,
+        pinned: (Option<String>, Option<String>),
+    ) -> Result<Self, String> {
         let context = BindingContext {
             schema: 1,
             provider: provider.to_owned(),
@@ -304,6 +329,8 @@ impl PreparedIncarnation {
             expected_native_session_id: expected.map(str::to_owned),
             launch_mode: if resume { "resume" } else { "fresh" }.to_owned(),
             provider_root,
+            first_prompt_digest: pinned.0,
+            source_policy: pinned.1,
         };
         sweep(
             provider,

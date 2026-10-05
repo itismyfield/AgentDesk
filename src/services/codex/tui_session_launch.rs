@@ -20,6 +20,12 @@ pub(super) fn prepare_codex_tui_launch_script(
     if herdr_configured_for_tui_launch(report_channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
+    let policy = codex_source_mode_snapshot().launch_policy()?;
+    use sha2::{Digest, Sha256};
+    let digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(launch_options.prompt.as_bytes())
+    );
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
         tmux_session_name,
@@ -36,13 +42,14 @@ pub(super) fn prepare_codex_tui_launch_script(
         None if unpinned => crate::services::codex_tui::rollout_tail::default_codex_home(),
         None => dirs::home_dir().map(|home| home.join(".codex")),
     };
-    let prepared = match PreparedIncarnation::prepare_at(
+    let prepared = match PreparedIncarnation::prepare_pinned(
         "codex",
         tmux_session_name,
         report_channel_id,
         launch_options.resume_session_id.as_deref(),
         launch_options.resume_session_id.is_some(),
         codex_home.as_ref().map(|home| home.join("sessions")),
+        (Some(digest), Some(policy.to_owned())),
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -64,6 +71,10 @@ pub(super) fn prepare_codex_tui_launch_script(
     env_lines
         .push_str(&crate::services::provider_auth_profile::overlay_shell_env_lines(auth_overlay));
     env_lines.push_str(&prepared.env_lines());
+    env_lines.push_str(&format!(
+        "export AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE={}\n",
+        shell_escape(policy)
+    ));
     let mut args = build_codex_tui_args(launch_options);
     let hooks_injected = codex_direct_tui_hook_overrides_enabled()
         && {
@@ -150,6 +161,69 @@ fn add_codex_tui_hooks(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[test]
+    fn source_mode_snapshot_is_immutable_and_invalid_launches_write_nothing() {
+        if std::env::var_os("ADK_SOURCE_SNAPSHOT_CHILD").is_some() {
+            assert_eq!(codex_source_mode_snapshot(), CodexSourceMode::Shadow);
+            unsafe {
+                std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE", "legacy");
+            }
+            assert_eq!(codex_source_mode_snapshot(), CodexSourceMode::Shadow);
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "services::codex::tui_session_launch::tests::source_mode_snapshot_is_immutable_and_invalid_launches_write_nothing"])
+            .env("ADK_SOURCE_SNAPSHOT_CHILD","1").env("AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE","shadow").output().unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (root, _guards) = tests::fixture_after_shared_test_env_lock();
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        for (value, reason) in [
+            (Some("verified"), "SourceModeVerifiedNotLanded"),
+            (Some("typo"), "SourceModeInvalid"),
+            (Some(""), "SourceModeInvalid"),
+            (Some("SHADOW"), "SourceModeInvalid"),
+        ] {
+            let mode = CodexSourceMode::parse(value);
+            SOURCE_MODE_TEST.with(|m| m.set(Some(mode)));
+            let result = prepare_codex_tui_launch_script(
+                "source-mode-held",
+                None,
+                "unused",
+                &CodexLaunchOptions::new("actual argv"),
+                None,
+                None,
+                false,
+                &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                    ProviderKind::Codex,
+                ),
+            );
+            SOURCE_MODE_TEST.with(|m| m.set(None));
+            assert_eq!(result.err().as_deref(), Some(reason));
+            assert!(!std::path::Path::new(&tmux_owner_path("source-mode-held")).exists());
+            assert!(
+                !std::path::Path::new(&crate::services::tmux_common::session_temp_path(
+                    "source-mode-held",
+                    "sh"
+                ))
+                .exists()
+            );
+            assert!(!root.path().join("runtime/binding_contexts").exists());
+        }
+        assert_eq!(CodexSourceMode::parse(None).launch_policy(), Ok("legacy"));
+        assert_eq!(
+            CodexSourceMode::parse(Some("legacy")).launch_policy(),
+            Ok("legacy")
+        );
+    }
+
     #[test]
     fn binding_context_t7_codex_launch_fails_before_tmux() {
         use super::prepare_codex_tui_launch_script as launch;
@@ -267,62 +341,100 @@ mod tests {
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &codex);
         let _server = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &dir.join("server"));
-        for (flag, hooks) in [(Some("0"), false), (Some("1"), true), (None, true)] {
-            let _flag =
-                Guard::capture_after_shared_test_env_lock("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
-            match flag {
-                Some(value) => unsafe {
-                    std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value)
-                },
-                None => unsafe { std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS") },
-            }
-            let _published = hooks.then(|| {
-                crate::services::claude_tui::hook_server::publish_hook_endpoint(
-                    "http://127.0.0.1:9".to_string(),
-                )
-            });
-            for profile in [false, true] {
-                let mut overlay = ProviderAuthOverlay::default_for(ProviderKind::Codex);
-                if profile {
-                    let home = dir.join("profile").display().to_string();
-                    overlay.env.insert("CODEX_HOME".into(), home);
+        let mut baseline = std::collections::HashMap::new();
+        for mode in [
+            CodexSourceMode::parse(None),
+            CodexSourceMode::parse(Some("legacy")),
+            CodexSourceMode::Shadow,
+        ] {
+            SOURCE_MODE_TEST.with(|m| m.set(Some(mode)));
+            for (flag, hooks) in [(Some("0"), false), (Some("1"), true), (None, true)] {
+                let _flag =
+                    Guard::capture_after_shared_test_env_lock("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+                match flag {
+                    Some(value) => unsafe {
+                        std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value)
+                    },
+                    None => unsafe { std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS") },
                 }
-                let tmux = format!("codex-home-{}-{profile}", flag.unwrap_or("unset"));
-                let options = CodexLaunchOptions::new("");
-                let script = prepare_codex_tui_launch_script(
-                    &tmux, None, "", &options, None, None, false, &overlay,
-                )
-                .unwrap();
-                let output = std::process::Command::new("/bin/bash")
-                    .arg(&script.script_path)
-                    .env("CODEX_HOME", dir.join("tmux"))
-                    .output()
+                let _published = hooks.then(|| {
+                    crate::services::claude_tui::hook_server::publish_hook_endpoint(
+                        "http://127.0.0.1:9".to_string(),
+                    )
+                });
+                for profile in [false, true] {
+                    let mut overlay = ProviderAuthOverlay::default_for(ProviderKind::Codex);
+                    if profile {
+                        let home = dir.join("profile").display().to_string();
+                        overlay.env.insert("CODEX_HOME".into(), home);
+                    }
+                    let tmux = format!("codex-home-{}-{profile}", flag.unwrap_or("unset"));
+                    let options = CodexLaunchOptions::new("actual argv\n한글");
+                    let script = prepare_codex_tui_launch_script(
+                        &tmux, None, "", &options, None, None, false, &overlay,
+                    )
                     .unwrap();
-                let stdout = String::from_utf8(output.stdout).unwrap();
-                let expected = match (profile, hooks) {
-                    (true, _) => dir.join("profile"),
-                    (false, false) => dir.join("tmux"),
-                    (false, true) => dir.join("server"),
-                };
-                let case = format!("flag={flag:?} profile={profile}");
-                assert!(
-                    stdout.contains(&format!("home={}\n", expected.display())),
-                    "child must run under the auth profile home, else the hook-verified one: {case}\n{stdout}"
-                );
-                assert_eq!(
-                    stdout.contains("arg=--dangerously-bypass-hook-trust\n"),
-                    hooks,
-                    "hook argv follows the flag: {case}"
-                );
-                if hooks || profile {
                     assert_eq!(
-                        script.prepared.context.provider_root,
-                        Some(expected.join("sessions")),
-                        "recorded root must be the child's home: {case}"
+                        script.prepared.context.source_policy.as_deref(),
+                        mode.launch_policy().ok()
                     );
+                    use sha2::{Digest, Sha256};
+                    assert_eq!(
+                        script.prepared.context.first_prompt_digest,
+                        Some(format!(
+                            "sha256:{:x}",
+                            Sha256::digest(options.prompt.as_bytes())
+                        ))
+                    );
+                    assert_eq!(
+                        crate::services::tui_prompt_dedupe::binding_context::input_context(
+                            "codex",
+                            &script.prepared.context.execution_nonce
+                        ),
+                        Some(script.prepared.context.clone())
+                    );
+                    let output = std::process::Command::new("/bin/bash")
+                        .arg(&script.script_path)
+                        .env("CODEX_HOME", dir.join("tmux"))
+                        .output()
+                        .unwrap();
+                    let stdout = String::from_utf8(output.stdout).unwrap();
+                    let expected = match (profile, hooks) {
+                        (true, _) => dir.join("profile"),
+                        (false, false) => dir.join("tmux"),
+                        (false, true) => dir.join("server"),
+                    };
+                    let case = format!("flag={flag:?} profile={profile}");
+                    assert!(
+                        stdout.contains("arg=actual argv\n한글\n"),
+                        "exact argv bytes: {stdout}"
+                    );
+                    if let Some(old) = baseline.get(&case) {
+                        assert_eq!(&stdout, old, "mode must not change native argv/home/hooks");
+                    } else {
+                        baseline.insert(case.clone(), stdout.clone());
+                    }
+
+                    assert!(
+                        stdout.contains(&format!("home={}\n", expected.display())),
+                        "child must run under the auth profile home, else the hook-verified one: {case}\n{stdout}"
+                    );
+                    assert_eq!(
+                        stdout.contains("arg=--dangerously-bypass-hook-trust\n"),
+                        hooks,
+                        "hook argv follows the flag: {case}"
+                    );
+                    if hooks || profile {
+                        assert_eq!(
+                            script.prepared.context.provider_root,
+                            Some(expected.join("sessions")),
+                            "recorded root must be the child's home: {case}"
+                        );
+                    }
                 }
             }
+            dedupe::reset_state_for_tests();
         }
-        dedupe::reset_state_for_tests();
+        SOURCE_MODE_TEST.with(|m| m.set(None));
     }
 }

@@ -30,6 +30,8 @@ fn context(pane: &ProducerPane, session: &str, mode: &str) -> BindingContext {
         expected_native_session_id: Some(session.into()),
         launch_mode: mode.into(),
         provider_root: None,
+        first_prompt_digest: None,
+        source_policy: None,
     }
 }
 

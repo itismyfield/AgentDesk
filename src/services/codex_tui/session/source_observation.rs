@@ -380,7 +380,6 @@ fn verify_rollout(
 }
 
 /// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.
-#[allow(dead_code)]
 pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bool {
     use sha2::{Digest, Sha256};
     let (Some(hex), Some(prompt)) = (
@@ -396,7 +395,6 @@ pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bo
         && hex == format!("{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
-#[allow(dead_code)]
 pub(crate) struct CodexFirstProof<'a> {
     pub captured: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     pub prepared: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
@@ -405,40 +403,62 @@ pub(crate) struct CodexFirstProof<'a> {
     pub no_prior_claim_or_transition: bool,
     pub event: &'a str,
     pub source: Option<&'a str>,
-    pub expected_digest: Option<&'a str>,
     pub prompt: &'a Value,
 }
 
-/// Dormant initial-parent qualification, not publication or delivery authority.
-#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CodexFirstProofRejection {
+    Context,
+    Ineligible,
+    Native(CodexHookSourceRejection),
+}
+impl CodexFirstProofRejection {
+    pub(crate) fn verdict(&self) -> &'static str {
+        match self {
+            Self::Ineligible => "ineligible",
+            Self::Native(error) if error.may_resolve_later() => "pending",
+            _ => "rejected",
+        }
+    }
+}
+
+/// Read-only initial-parent qualification, not publication or delivery authority.
 pub(crate) fn codex_first_proof_candidate(
     launch: &CodexFirstProof<'_>,
     claim: &CodexHookSourceClaim<'_>,
-) -> Result<VerifiedCodexHookSource, String> {
+) -> Result<VerifiedCodexHookSource, CodexFirstProofRejection> {
     crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
         launch.captured,
         launch.prepared,
         launch.current_nonce,
-    )?;
+    )
+    .map_err(|_| CodexFirstProofRejection::Context)?;
     if !launch.verified_fresh_spawn
         || !launch.no_prior_claim_or_transition
         || launch.prepared.launch_mode != "fresh"
         || launch.prepared.expected_native_session_id.is_some()
+        || !matches!(
+            launch.prepared.source_policy.as_deref(),
+            Some("shadow" | "verified")
+        )
         || claim.expected_source != CodexRolloutSource::Cli
         || !match launch.event {
             "SessionStart" => launch.source == Some("startup"),
-            "UserPromptSubmit" => first_prompt_matches(launch.expected_digest, launch.prompt),
+            "UserPromptSubmit" => first_prompt_matches(
+                launch.prepared.first_prompt_digest.as_deref(),
+                launch.prompt,
+            ),
             _ => false,
         }
     {
-        return Err("Codex hook is not a fresh first-proof candidate".into());
+        return Err(CodexFirstProofRejection::Ineligible);
     }
     let root = launch
         .prepared
         .provider_root
         .as_deref()
-        .ok_or("missing Codex root")?;
-    verify_codex_hook_source(root, claim).map_err(|error| format!("{error:?}"))
+        .ok_or(CodexFirstProofRejection::Context)?;
+    verify_codex_hook_source(root, claim).map_err(CodexFirstProofRejection::Native)
 }
 
 #[cfg(test)]

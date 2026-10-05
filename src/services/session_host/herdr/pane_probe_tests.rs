@@ -136,6 +136,8 @@ pub(crate) fn context(nonce: &str) -> PathBuf {
         expected_native_session_id: None,
         launch_mode: "fresh".into(),
         provider_root: None,
+        first_prompt_digest: None,
+        source_policy: None,
     };
     PreparedIncarnation::create(context).unwrap().path
 }

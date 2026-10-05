@@ -570,6 +570,8 @@ fn launch_cause_comes_from_the_execution_context_only_once() {
             expected_native_session_id: None,
             launch_mode: mode.into(),
             provider_root: None,
+            first_prompt_digest: None,
+            source_policy: None,
         };
         PreparedIncarnation::create(context).unwrap();
         fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();

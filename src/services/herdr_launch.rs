@@ -537,6 +537,8 @@ fn herdr_incarnation(
         provider_root: (owner.provider == "claude")
             .then(configured_claude_projects_root)
             .flatten(),
+        first_prompt_digest: None,
+        source_policy: None,
     };
     PreparedIncarnation::create(context).map_err(|error| format!("create binding context: {error}"))
 }

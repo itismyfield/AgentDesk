@@ -56,6 +56,8 @@ impl Pane {
             expected_native_session_id: Some(a.clone()),
             launch_mode: "fresh".into(),
             provider_root: Some(home.clone()),
+            first_prompt_digest: None,
+            source_policy: None,
         };
         let prepared = PreparedIncarnation::create(context).unwrap();
         let script = tc::session_temp_path(&tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);
@@ -658,6 +660,8 @@ fn a_resume_into_another_worktree_is_bound_there_again_after_a_restart() {
         expected_native_session_id: Some(a.clone()),
         launch_mode: "fresh".into(),
         provider_root: Some(home.clone()),
+        first_prompt_digest: None,
+        source_policy: None,
     };
     let prepared = PreparedIncarnation::create(context).unwrap();
     let script = tc::session_temp_path(&tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);
