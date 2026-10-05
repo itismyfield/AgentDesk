@@ -12,32 +12,20 @@ pub(super) const CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE: &str =
 pub(super) fn claude_tui_busy_followup_refusal_notice(
     reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 ) -> &'static str {
+    use crate::services::turn_orchestrator::EnqueueRefusalReason as E;
     match reason {
         Some(
-            crate::services::turn_orchestrator::EnqueueRefusalReason::AlreadyActiveTurn
-            | crate::services::turn_orchestrator::EnqueueRefusalReason::AbsorbedByActiveTurn
-            | crate::services::turn_orchestrator::EnqueueRefusalReason::ClaimedSinceObservation
-            | crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdPendingOrActive,
+            E::AlreadyActiveTurn
+            | E::AbsorbedByActiveTurn
+            | E::ClaimedSinceObservation
+            | E::SourceIdPendingOrActive,
         ) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE,
-        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued) => {
-            CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE
-        }
-        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup) => {
-            CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE
-        }
-        // #3297 r3 — a post-retry purge-tombstone refusal is user-actionable
-        // the same way as an unreachable actor: resend shortly.
-        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::ActorUnreachable)
-        | Some(crate::services::turn_orchestrator::EnqueueRefusalReason::MailboxClosed) => {
+        Some(E::SourceIdAlreadyQueued) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE,
+        Some(E::LastItemDedup) => CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE,
+        Some(E::ActorUnreachable | E::MailboxClosed | E::LockTimeout | E::InputPersistence) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
         }
-        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::InputModeFenced(_)) => {
-            crate::services::discord::queue_io::INPUT_PENDING_NOTICE
-        }
-        Some(
-            crate::services::turn_orchestrator::EnqueueRefusalReason::LockTimeout
-            | crate::services::turn_orchestrator::EnqueueRefusalReason::InputPersistence,
-        ) => CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE,
+        Some(E::InputModeFenced(_)) => crate::services::discord::queue_io::INPUT_PENDING_NOTICE,
         None => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
     }
 }

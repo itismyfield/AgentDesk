@@ -332,6 +332,36 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
         );
         assert_eq!(std::fs::read(marker).unwrap(), bytes);
         drop(taken);
+        let channel = ChannelId::new(6_325_209);
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let successor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+            "successor".into(),
+        )));
+        assert!(
+            handle
+                .try_start_turn(successor.clone(), UserId::new(7), MessageId::new(53))
+                .await
+        );
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _closing = gate.close().unwrap();
+        let finish = handle
+            .finish_turn_if_matches_episode_started_before(
+                MessageId::new(53),
+                Some("predecessor".into()),
+                Instant::now(),
+                context(),
+            )
+            .await;
+        assert!(finish.removed_token.is_none());
+        assert!(finish.persistence_error.is_some());
+        assert!(Arc::ptr_eq(
+            &handle.cancel_token().await.unwrap().unwrap(),
+            &successor
+        ));
+        assert_eq!(
+            handle.snapshot().await.active_turn_nonce.as_deref(),
+            Some("successor")
+        );
         let channel = ChannelId::new(6_325_206);
         let handle = ChannelMailboxRegistry::default().handle(channel);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
