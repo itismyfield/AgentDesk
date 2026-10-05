@@ -60,12 +60,39 @@ pub struct Ledger {
     records: Vec<Record>,
 }
 
+/// What exists for a channel's ledger, judged without creating anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    Absent,
+    Present,
+    Unreadable,
+}
+
+pub fn dir(runtime_root: &Path, channel_id: u64) -> PathBuf {
+    runtime_root
+        .join("input_ledger")
+        .join(channel_id.to_string())
+}
+
+#[cfg(test)]
+thread_local! { pub(crate) static OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 impl Ledger {
+    // Any directory, even an empty one, is history: a failed open may have left it behind.
+    pub fn probe(runtime_root: &Path, channel_id: u64) -> Presence {
+        let dir = dir(runtime_root, channel_id);
+        match fs::symlink_metadata(&dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Presence::Absent,
+            Ok(meta) if meta.is_dir() && fs::read_dir(&dir).is_ok() => Presence::Present,
+            _ => Presence::Unreadable,
+        }
+    }
+
     pub fn open(runtime_root: &Path, channel_id: u64) -> io::Result<Self> {
         durable::supported()?;
-        let dir = runtime_root
-            .join("input_ledger")
-            .join(channel_id.to_string());
+        #[cfg(test)]
+        OPENS.with(|opens| opens.set(opens.get() + 1));
+        let dir = dir(runtime_root, channel_id);
         durable::ensure_dir(&dir)?;
         let snapshot_path = dir.join("snapshot.json");
         let snapshot: Option<Snapshot> = match durable::open_file(&snapshot_path, false) {

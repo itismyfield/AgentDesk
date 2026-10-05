@@ -12,7 +12,7 @@ use crate::services::tui_o::writer::input_facts::{ChannelFact, TurnState};
 
 pub mod gate;
 pub mod pane;
-mod witness;
+pub(crate) mod witness;
 
 use gate::{PaneVerdict, judge_pane};
 use pane::{Pane, SendOutcome};

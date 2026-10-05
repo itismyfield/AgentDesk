@@ -508,6 +508,7 @@ db::idempotency::tests::pg_integration::crash_window_retry_blocks_until_expiry_t
 db::idempotency::tests::pg_integration::gc_expired_removes_only_past_due_rows
 db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
+db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
 db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows
 db::intake_outbox::migration_pg_tests::intake_outbox_one_open_route_per_channel_blocks_second_open_row
@@ -4118,6 +4119,16 @@ services::discord::input_runtime::clear::tests::superseded_foreign_or_mismatched
 services::discord::input_runtime::clear::tests::the_clear_owns_the_transition_guard_until_it_resolves
 services::discord::input_runtime::clear::tests::the_production_resume_host_is_reachable_from_the_input_runtime
 services::discord::input_runtime::clear::tests::unbound_oversized_or_unidentified_cutoffs_are_refused_before_commit
+services::discord::input_runtime::effects::tests::e1_every_effect_refuses_an_async_worker_and_runs_under_the_blocking_marker
+services::discord::input_runtime::effects::tests::e1_handback_judges_a_ledger_attempt_by_its_own_exact_witness
+services::discord::input_runtime::effects::tests::e1_open_or_unreadable_outbox_never_moves_anything
+services::discord::input_runtime::effects::tests::e1_pinned_upload_handback_copies_outside_the_guard_with_one_ledger_handle
+services::discord::input_runtime::effects::tests::e1_production_effects_move_population_and_request_one_actor
+services::discord::input_runtime::effects::tests::e1_production_effects_take_the_runtime_root_and_reject_a_foreign_capability
+services::discord::input_runtime::effects::tests::e1_turn_row_residue_is_held_with_notice_never_reinjected
+services::discord::input_runtime::fence::modes::tests::e1_abort_returns_only_a_history_free_close_and_hold_refuses_both_owners
+services::discord::input_runtime::fence::modes::tests::e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barrier
+services::discord::input_runtime::fence::modes::tests::e1_drain_timeout_holds_closing_and_keeps_the_admitted_permit_valid
 services::discord::input_runtime::fence::tests::admitted_writer_scope_finishes_after_close_without_new_admission
 services::discord::input_runtime::fence::tests::b2_borrowed_row_keeps_episode_cas_and_never_reacquires_sidecar
 services::discord::input_runtime::fence::tests::b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io
@@ -4136,6 +4147,7 @@ services::discord::input_transition::tests::supported::b2_all_token_capture_and_
 services::discord::input_transition::tests::supported::b2_collect_requires_frozen_capability_and_contention_probes_no_effect
 services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
 services::discord::input_transition::tests::supported::contended_row_lock_holds_without_waiting_and_resumes_after_release
+services::discord::input_transition::tests::supported::e1_exit_clear_records_neither_block_nor_leave_with_the_move
 services::discord::input_transition::tests::supported::malformed_population_and_outbox_leave_legacy_while_dead_row_stays_held
 services::discord::input_transition::tests::supported::marker_only_and_merged_payload_survive_move_and_checkpoint
 services::discord::input_transition::tests::supported::missing_upload_is_allowed_only_after_terminal_disposition
@@ -10125,6 +10137,8 @@ services::tui_input::rows_tests::supported::repeated_ledger_legacy_ledger_transi
 services::tui_input::rows_tests::supported::replay_is_deterministic_and_a_cut_commit_leaves_its_inputs_with_legacy
 services::tui_input::transition_fixture_tests::bounded_retry_resumes_transient_failure_and_holds_permanent_failure
 services::tui_input::transition_fixture_tests::deletion_boundaries_restart_keep_one_owner_and_order
+services::tui_input::transition_fixture_tests::e1_probe_reports_history_without_creating_a_ledger
+services::tui_input::transition_fixture_tests::e1_unbound_handback_holds_and_names_every_unbound_key
 services::tui_input::transition_fixture_tests::handback_rejection_preserves_order_and_enqueue_crash_is_idempotent
 services::tui_input::transition_fixture_tests::old_snapshot_without_received_order_holds_without_enqueue
 services::tui_input::transition_fixture_tests::retry_backoff_is_bounded

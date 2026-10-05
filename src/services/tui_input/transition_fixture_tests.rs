@@ -1,7 +1,7 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use super::handover::{Composer, EnqueueOutcome, MoveEvidence, MoveSource};
-use super::ledger::Ledger;
+use super::ledger::{Ledger, Presence};
 use super::rows::{Entry, Owner, Row};
 use super::transition::{DeletePhase, Host, Input, Move, Outcome, backoff, handback};
 use serde_json::json;
@@ -15,6 +15,7 @@ struct Fixture {
     enqueued: Vec<u64>,
     actor: usize,
     notices: usize,
+    noticed: Vec<(Option<u64>, &'static str)>,
     reject: bool,
 }
 impl Fixture {
@@ -29,6 +30,7 @@ impl Fixture {
             enqueued: vec![99],
             actor: 0,
             notices: 0,
+            noticed: Vec::new(),
             reject: false,
         }
     }
@@ -100,8 +102,9 @@ impl Host for Fixture {
             Ok(EnqueueOutcome::Persisted)
         }
     }
-    fn notice(&mut self, _: Option<u64>, _: &'static str) -> io::Result<()> {
+    fn notice(&mut self, key: Option<u64>, reason: &'static str) -> io::Result<()> {
         self.notices += 1;
+        self.noticed.push((key, reason));
         Ok(())
     }
 }
@@ -312,4 +315,71 @@ async fn bounded_retry_resumes_transient_failure_and_holds_permanent_failure() {
         );
         assert_eq!(host.actor, if permanent { 0 } else { 1 });
     }
+}
+
+#[test]
+fn e1_unbound_handback_holds_and_names_every_unbound_key() {
+    let root = sandbox();
+    let mut ledger = Ledger::open(root.path(), 9).unwrap();
+    ledger
+        .append_entry(
+            &Entry::Received {
+                key: 5,
+                input: json!({"text":"bound"}),
+            },
+            &[],
+        )
+        .unwrap();
+    // A commit claiming keys without a Staged record in its window leaves them unbound.
+    ledger
+        .append_entry(
+            &Entry::MoveCommitted {
+                first_staged_seq: 2,
+                ids: vec![11, 12],
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        ledger
+            .rows()
+            .unwrap()
+            .unbound()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![11, 12]
+    );
+    drop(ledger);
+    let mut host = Fixture::new(root.path());
+    assert_eq!(handback(root.path(), 9, &mut host).unwrap(), Outcome::Held);
+    assert_eq!(
+        host.noticed,
+        vec![
+            (Some(11), "handback_unbound"),
+            (Some(12), "handback_unbound")
+        ]
+    );
+    assert_eq!(
+        host.enqueued,
+        vec![99],
+        "a later row never jumps an unbound key"
+    );
+}
+
+#[test]
+fn e1_probe_reports_history_without_creating_a_ledger() {
+    let root = sandbox();
+    let opens = super::ledger::OPENS.with(|opens| opens.get());
+    assert_eq!(Ledger::probe(root.path(), 9), Presence::Absent);
+    assert!(!root.path().join("input_ledger").exists());
+    assert_eq!(super::ledger::OPENS.with(|opens| opens.get()), opens);
+    std::fs::create_dir_all(root.path().join("input_ledger/9")).unwrap();
+    assert_eq!(Ledger::probe(root.path(), 9), Presence::Present);
+    std::fs::write(root.path().join("input_ledger/10"), b"not a directory").unwrap();
+    assert_eq!(Ledger::probe(root.path(), 10), Presence::Unreadable);
+    assert!(
+        !root.path().join("input_ledger/9/wal.0.jsonl").exists(),
+        "probing must not open the ledger"
+    );
 }
