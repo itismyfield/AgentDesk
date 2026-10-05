@@ -124,15 +124,49 @@ impl NativeSelection {
     }
 }
 
-/// The clear a host adapter planned; it never takes the tmux selection or its managed reset.
-pub(super) fn hosted(
-    adapter: super::super::super::admin_host_guard::HostAdapter,
-) -> NativeSelection {
-    use super::super::super::admin_host_guard::HostAdapter;
-    match adapter {
-        #[cfg(unix)]
-        HostAdapter::Herdr(plan, session_key) => NativeSelection::Herdr(plan, session_key),
+/// A clear's target, judged before it changes anything: a host's planned clear, `None` for main's
+/// tmux path, or main's refusal message.
+pub(super) async fn target(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    explicit_session_key: Option<&str>,
+) -> anyhow::Result<Option<NativeSelection>> {
+    use super::super::super::admin_host_guard::{HostAdapter, ResetTarget, clear_reset_target};
+    let key = || async {
+        let resolved = super::resolve_session_key_for_clear(http, shared, channel_id, provider);
+        super::choose_clear_session_key(explicit_session_key, resolved.await)
+    };
+    let judged = clear_reset_target(shared, provider, channel_id, explicit_session_key, key);
+    match judged.await {
+        ResetTarget::Refused(reason) => anyhow::bail!("세션을 초기화하지 못했어요: {reason}"),
+        ResetTarget::LegacyTmux => Ok(None),
+        ResetTarget::NativeClear(adapter) => match adapter {
+            #[cfg(unix)]
+            HostAdapter::Herdr(plan, key) => Ok(Some(NativeSelection::Herdr(plan, key))),
+        },
     }
+}
+
+/// A host clear cannot stop a running turn, so it is refused under the transition guard before
+/// the queue is touched; an unreadable mailbox counts as busy.
+pub(super) async fn refuse_a_running_turn(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    hosted: Option<&NativeSelection>,
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if let Some(NativeSelection::Herdr(..)) = hosted {
+        let probe = super::super::super::mailbox_probe::mailbox_has_active_turn_or_unreachable;
+        if probe(shared, channel_id).await {
+            let refusal = crate::services::session_host::HerdrClearRefusal::TurnInProgress;
+            anyhow::bail!("세션을 초기화하지 못했어요: {refusal}");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (shared, channel_id, hosted);
+    Ok(())
 }
 
 pub(super) struct TmuxSelection {
@@ -198,9 +232,10 @@ pub(super) async fn clear_process_reset_pending(
     super::persist_codex_goals_reset_marker(shared, channel_id, false).await;
 }
 
-/// Native clear applies only to an O-owned Claude tmux channel whose running execution is fully
-/// identified; any miss keeps the managed reset with no native column written.
+/// A host's planned clear as it is; otherwise native clear applies only to an O-owned Claude tmux
+/// channel whose running execution is fully identified, and any miss keeps the managed reset.
 pub(super) async fn select(
+    hosted: Option<NativeSelection>,
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -208,6 +243,9 @@ pub(super) async fn select(
     tmux: Option<&str>,
     explicit_session_key: Option<&str>,
 ) -> Option<NativeSelection> {
+    if hosted.is_some() {
+        return hosted;
+    }
     let effects = switched_on()?;
     let tmux = tmux?;
     let owned = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux;
