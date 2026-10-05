@@ -3450,6 +3450,7 @@ services::discord::health::session_enrichment::tests::transcript_discovery_prefe
 services::discord::health::snapshot::relay_probe::tests::health_grace_and_stall_threshold_for_a_rowless_turn_move_independently
 services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
 services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
+services::discord::health::snapshot::tests::a_ledger_open_channel_raises_no_legacy_reason
 services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
 services::discord::health::snapshot::tests::an_expired_relay_verdict_is_recorded_without_degrading_the_snapshot
 services::discord::health::snapshot::tests::an_o_owned_channel_keeps_the_legacy_relay_verdict_off_health
@@ -3555,6 +3556,14 @@ services::discord::health::transcript_binding_stall::tests::a_superseded_binding
 services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
+services::discord::health::transcript_turn::tests::eligibility_clock_counts_only_uninterrupted_offerable_idle_time
+services::discord::health::transcript_turn::tests::empty_retired_set_leaves_health_and_reports_unchanged
+services::discord::health::transcript_turn::tests::mailbox_residue_spans_every_runtime_of_the_provider
+services::discord::health::transcript_turn::tests::residue_changes_only_on_a_confirmed_observation
+services::discord::health::transcript_turn::tests::retired_residue_degrades_public_and_detail_health
+services::discord::health::transcript_turn::tests::row_observation_tells_a_missing_row_from_a_failed_stat
+services::discord::health::transcript_turn::tests::store_presence_tells_a_missing_store_from_an_unreadable_one
+services::discord::health::transcript_turn::tests::view_goes_stale_after_120_seconds_without_a_push
 services::discord::health::turn_deliver::tests::each_mailbox_state_reaches_exactly_one_commit_point
 services::discord::health::turn_deliver::tests::only_listed_authors_of_an_owned_bot_pass_even_when_allow_all_is_on
 services::discord::health::unpaired_active_token::tests::a_built_snapshot_is_reconfirmed_only_for_a_token_without_a_row
@@ -4787,6 +4796,7 @@ services::discord::placeholder_sweeper::safety_net_threshold_tests::initial_dela
 services::discord::placeholder_sweeper::safety_net_threshold_tests::off_to_on_stale_panel_still_reaches_sweeper_reclaim_target
 services::discord::placeholder_sweeper::safety_net_threshold_tests::stall_threshold_is_at_least_five_minutes
 services::discord::placeholder_sweeper::safety_net_threshold_tests::sweep_interval_is_within_a_minute
+services::discord::placeholder_sweeper::tick::cleanup_tests::retired_cleanup_detail_needs_every_runtime_to_confirm_absence
 services::discord::placeholder_sweeper::tick::tests::retired_channels_skip_every_tick_effect_while_legacy_channels_converge
 services::discord::placeholder_sweeper::tick::tests::tick_rejudges_after_each_probe_await
 services::discord::prompt_builder::channel_recent_context::tests::disabled_manifest_reasons_report_the_actual_gate
@@ -8422,6 +8432,7 @@ services::discord::turn_teardown_clearance::tests::a_turn_is_cleared_only_by_the
 services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
 services::discord::turn_view_reconciler::orphan_sweep::tests::enumerate_returns_only_matching_provider_pending_anchors
 services::discord::turn_view_reconciler::orphan_sweep::tests::orphan_verdict_requires_aged_and_no_live_turn_and_no_marker
+services::discord::turn_view_reconciler::orphan_sweep::tests::pending_anchor_presence_counts_one_channel_and_reports_unreadable_records
 services::discord::turn_view_reconciler::orphan_sweep::tests::production_sweep_skips_retired_channel_anchor
 services::discord::turn_view_reconciler::orphan_sweep::tests::retire_during_target_lock_wait_blocks_removal
 services::discord::turn_view_reconciler::orphan_sweep::tests::sweep_aborts_when_hold_appears_between_verdict_and_removal

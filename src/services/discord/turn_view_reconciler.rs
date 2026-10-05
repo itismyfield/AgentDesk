@@ -27,7 +27,9 @@ mod queue_repair;
 mod reaction_set;
 mod resolution;
 mod store;
-pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
+pub(in crate::services::discord) use orphan_sweep::{
+    pending_anchor_presence, sweep_orphan_tui_anchor_reactions,
+};
 
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
