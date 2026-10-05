@@ -422,7 +422,7 @@ impl Fixture {
                 (result, receiver.try_iter().collect())
             });
             // A provider that gave up, or a turn still reading after it, is cancelled, so the
-            // executor never outlives the test.
+            // executor never outlives the test; an overrun turns into the turn's error.
             let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(claude));
             let deadline = Instant::now() + LIMIT;
             while played.is_ok() && !finished.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -432,15 +432,15 @@ impl Fixture {
             if played.is_err() || outlived {
                 cancel.cancelled.store(true, Ordering::SeqCst);
             }
-            let joined = executor.join();
+            let (result, messages) = executor.join().unwrap();
             if let Err(panic) = played {
                 std::panic::resume_unwind(panic);
             }
-            assert!(
-                !outlived,
-                "the turn was still running after its provider finished"
-            );
-            joined.unwrap()
+            let result = match outlived {
+                true => Err(format!("the turn outlived its provider: {result:?}")),
+                false => result,
+            };
+            (result, messages)
         })
     }
 }
@@ -535,10 +535,10 @@ fn t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_the
             fx.answer(&started);
         }
     });
-    assert_eq!(result, Ok(()));
-    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(*ports.attaches.lock().unwrap(), [(0, true)]);
     assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(result, Ok(()));
     assert_eq!(fx.row(), Some(HostedState::Bound));
     let transcript = transcript.lock().unwrap().display().to_string();
     assert!(
@@ -560,10 +560,10 @@ fn t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg() {
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     let (result, _) = fx.turn(&record, &ports, || {});
-    let error = result.unwrap_err();
-    assert!(error.contains("bound execution not confirmed"), "{error}");
     assert!(fx.rig.sends().is_empty());
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    let error = result.unwrap_err();
+    assert!(error.contains("bound execution not confirmed"), "{error}");
     assert_eq!(fx.row(), Some(HostedState::Bound));
 }
 
@@ -577,9 +577,9 @@ fn t_e3_an_unclear_send_is_never_sent_again_pg() {
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     let (result, _) = fx.turn(&record, &ports, || {});
-    assert!(result.is_err());
     assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert!(result.is_err());
 }
 
 // A launch whose SessionStart never came stays Pending with its evidence; the next turn neither
@@ -599,11 +599,11 @@ fn a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg() {
     assert_eq!(fx.row(), Some(HostedState::Pending));
     let ports = fx.ports(&launcher);
     let (second, _) = fx.turn(&fx.record(), &ports, || {});
-    let second = second.unwrap_err();
-    assert!(second.contains("no logged start"), "{second}");
     assert!(ports.attaches.lock().unwrap().is_empty());
     assert!(fx.rig.sends().is_empty());
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
 }
 
 // A Pending pane launched without evidence, whose provider would now probe as its own, is still
@@ -626,11 +626,11 @@ fn a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted
     fx.rig.run_provider(&context_of(&nonce), false);
     let ports = fx.ports(&launcher);
     let (second, _) = fx.turn(&fx.record(), &ports, || {});
-    let second = second.unwrap_err();
-    assert!(second.contains("no logged start"), "{second}");
     assert!(ports.attaches.lock().unwrap().is_empty());
     assert!(fx.rig.sends().is_empty());
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
 }
 
 // A Pending execution attached after its SessionStart, whose first prompt was cancelled before
@@ -654,8 +654,8 @@ fn a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg() {
     assert!(!hold_of(&nonce).exists());
     let ports = fx.ports(&launcher);
     let (second, _) = fx.turn(&fx.record(), &ports, || fx.answer(&started));
-    assert_eq!(second, Ok(()));
     assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(second, Ok(()));
     assert_eq!(fx.row(), Some(HostedState::Bound));
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
 }
@@ -673,10 +673,11 @@ fn after_an_unclear_paste_the_next_prompt_is_held_pg() {
     fx.rig.leave_sends_unanswered(false);
     let ports = fx.ports(&launcher);
     let (second, _) = fx.turn(&record, &ports, || {});
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
     let second = second.unwrap_err();
     assert!(second.contains("input held"), "{second}");
-    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
-    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
 }
 
 // A turn cancelled after its paste was confirmed leaves that text in the composer: the next turn
@@ -694,9 +695,9 @@ fn after_a_paste_then_cancel_the_next_prompt_is_held_pg() {
     assert!(first.is_err());
     assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
     let (second, _) = fx.turn(&record, &fx.ports(&launcher), || {});
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
     let second = second.unwrap_err();
     assert!(second.contains("input held"), "{second}");
-    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
 }
 
 // A matched Bound execution with a settled composer takes the prompt exactly once, reads its
@@ -726,9 +727,9 @@ fn a_matched_bound_execution_takes_one_prompt_pg() {
             append(&started.path, &[answer, done]);
         }
     });
-    assert_eq!(result, Ok(()));
     assert_eq!(fx.rig.sends(), prompt_sends());
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(result, Ok(()));
     assert!(!hold_of(NONCE).exists());
     assert!(
         messages
