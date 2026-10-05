@@ -158,7 +158,8 @@ fn add_codex_tui_hooks(
     true
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     #[test]
