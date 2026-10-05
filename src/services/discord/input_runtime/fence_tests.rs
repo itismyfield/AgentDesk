@@ -536,6 +536,7 @@ fn queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_st
         closing.population(&root).is_ok(),
         "scope drop must release its guard"
     );
+    gate.clear_failure_for_test();
 }
 
 #[test]
