@@ -1063,6 +1063,7 @@ services::discord::commands::control::clear_persist_failure_tests::clear_commits
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
 services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
+services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
 services::discord::commands::control::input_clear::tests::a_superseded_ticket_holds_until_a_new_clear_cuts_its_inputs_pg
 services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg
 services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
