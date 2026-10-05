@@ -96,7 +96,8 @@ pub(in crate::services::discord) fn inflight_state_path(
 }
 
 pub(crate) struct InflightStateFileLock {
-    file: fs::File,
+    file: Option<fs::File>,
+    _population: Option<crate::services::discord::input_runtime::fence::PopulationWriter>,
     state_path: PathBuf,
 }
 
@@ -110,7 +111,9 @@ impl Drop for InflightStateFileLock {
     fn drop(&mut self) {
         // Ignore explicit-unlock failure: closing the handle immediately after
         // this remains the advisory lock's release fallback.
-        let _ = self.file.unlock();
+        if let Some(file) = &self.file {
+            let _ = file.unlock();
+        }
     }
 }
 
@@ -139,22 +142,67 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 /// network-filesystem behavior and non-cooperating writers are outside the
 /// contract.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
+        .map_err(|failure| format!("input fence: {failure:?}"))?
+    {
+        return Ok(InflightStateFileLock {
+            file: None,
+            _population: Some(population),
+            state_path: path.to_owned(),
+        });
+    }
     let file = open_inflight_lock_file(path)?;
     file.lock().map_err(|e| e.to_string())?;
     Ok(InflightStateFileLock {
-        file,
+        file: Some(file),
+        _population: None,
         state_path: path.to_path_buf(),
     })
 }
 
 // Contention is retryable; scheduler callers must not wait for another open handle.
 pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
+        .map_err(|failure| format!("input fence: {failure:?}"))?
+    {
+        return Ok(InflightStateFileLock {
+            file: None,
+            _population: Some(population),
+            state_path: path.to_owned(),
+        });
+    }
     let file = open_inflight_lock_file(path)?;
     file.try_lock().map_err(|e| e.to_string())?;
     Ok(InflightStateFileLock {
-        file,
+        file: Some(file),
+        _population: None,
         state_path: path.to_path_buf(),
     })
+}
+
+pub(in crate::services::discord) struct BorrowedInflightRow<'a> {
+    path: PathBuf,
+    _guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
+}
+impl<'a> BorrowedInflightRow<'a> {
+    pub(in crate::services::discord) fn new(
+        guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
+        root: &Path,
+        provider: &ProviderKind,
+        channel: u64,
+    ) -> std::io::Result<Self> {
+        guard.borrowed(root, provider, channel, || Ok(()))?;
+        Ok(Self {
+            path: root
+                .join("discord_inflight")
+                .join(provider.as_str())
+                .join(format!("{channel}.json")),
+            _guard: guard,
+        })
+    }
+    pub(super) fn state_path(&self) -> &Path {
+        &self.path
+    }
 }
 
 fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
@@ -168,6 +216,120 @@ fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
         .create(true)
         .open(&lock_path)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod population_tests {
+    use super::*;
+    #[test]
+    fn b2_off_lock_error_detail_and_representative_writer_results_are_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let channel = 6_325_311;
+        let blocker = root.path().join("blocker");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let path = blocker.join(format!("claude/{channel}.json"));
+        let expected = open_inflight_lock_file(&path).err().unwrap();
+        assert_eq!(lock_inflight_state_path(&path).err().unwrap(), expected);
+        assert_eq!(try_lock_inflight_state_path(&path).err().unwrap(), expected);
+        let mkdir_error = fs::create_dir_all(path.parent().unwrap()).unwrap_err();
+        assert_eq!(mkdir_error.kind(), std::io::ErrorKind::NotADirectory);
+        let state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel,
+            None,
+            7,
+            8,
+            0,
+            "input".into(),
+            None,
+            Some("off".into()),
+            None,
+            None,
+            0,
+        );
+        assert_eq!(
+            super::super::save_store::save_inflight_state_in_root(&blocker, &state).unwrap_err(),
+            mkdir_error.to_string()
+        );
+        use super::super::ownership_ops::{
+            StatusPanelBindGuard, StatusPanelBindOutcome, bind_status_panel_in_root,
+        };
+        assert_eq!(
+            bind_status_panel_in_root(
+                &blocker,
+                &ProviderKind::Claude,
+                channel,
+                100,
+                &StatusPanelBindGuard::default()
+            ),
+            StatusPanelBindOutcome::IoError
+        );
+        use super::super::watcher_state::{
+            WatcherProgressOutcome, WatcherStreamProgressPatch,
+            persist_watcher_stream_progress_locked_in_root,
+        };
+        let patch = WatcherStreamProgressPatch {
+            current_msg_id: None,
+            full_response: String::new(),
+            response_sent_offset: 0,
+            current_tool_line: None,
+            prev_tool_status: None,
+            task_notification_kind: None,
+            any_tool_used: false,
+            has_post_tool_text: false,
+            streaming_rollover_frozen_msg_ids: vec![],
+        };
+        assert_eq!(
+            persist_watcher_stream_progress_locked_in_root(
+                &blocker,
+                &ProviderKind::Claude,
+                channel,
+                None,
+                "off",
+                patch.clone()
+            ),
+            WatcherProgressOutcome::IoError
+        );
+        let empty = root.path().join("empty");
+        assert_eq!(
+            bind_status_panel_in_root(
+                &empty,
+                &ProviderKind::Claude,
+                channel,
+                100,
+                &StatusPanelBindGuard::default()
+            ),
+            StatusPanelBindOutcome::Missing
+        );
+        assert_eq!(
+            persist_watcher_stream_progress_locked_in_root(
+                &empty,
+                &ProviderKind::Claude,
+                channel,
+                None,
+                "off",
+                patch
+            ),
+            WatcherProgressOutcome::RowAbsent
+        );
+        let absent = empty.join(format!("claude/{channel}.json"));
+        assert!(!absent.exists());
+        assert!(
+            absent.with_extension("json.lock").exists(),
+            "original off writers create sidecar before missing-row result"
+        );
+        let held = lock_inflight_state_path(&absent).unwrap();
+        let baseline = open_inflight_lock_file(&absent)
+            .unwrap()
+            .try_lock()
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            try_lock_inflight_state_path(&absent).err().unwrap(),
+            baseline
+        );
+        drop(held);
+    }
 }
 
 // #3835: shared lock-held persist tail + save-side validation gate, consumed

@@ -1723,7 +1723,9 @@ fn spawn_channel_mailbox(
             {
                 let signal = own_recovery_done.clone();
                 state = tokio::task::spawn_blocking(move || {
-                    input_mailbox_step(state, channel_id, msg, &signal)
+                    crate::services::discord::input_runtime::fence::blocking(|| {
+                        input_mailbox_step(state, channel_id, msg, &signal)
+                    })
                 })
                 .await
                 .expect("input mailbox step panicked");

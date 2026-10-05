@@ -38,6 +38,7 @@ pub(in crate::services::discord) struct Files<E> {
     provider: ProviderKind,
     channel: u64,
     captured: Vec<Captured>,
+    closing: Option<std::sync::Arc<super::input_runtime::fence::Closing>>,
     effects: E,
 }
 
@@ -96,17 +97,171 @@ impl<E: Effects> Files<E> {
             provider,
             channel,
             captured: Vec::new(),
+            closing: None,
             effects,
         }
     }
 
-    fn capture(&mut self, path: PathBuf, phase: DeletePhase) -> io::Result<Option<Value>> {
-        let Some(bytes) = read(&path)? else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(&bytes)?;
-        self.captured.push(Captured { path, bytes, phase });
-        Ok(Some(value))
+    pub fn frozen(
+        root: &Path,
+        provider: ProviderKind,
+        channel: u64,
+        closing: std::sync::Arc<super::input_runtime::fence::Closing>,
+        effects: E,
+    ) -> io::Result<Self> {
+        if closing.channel() != channel || closing.provider() != &provider {
+            return Err(invalid("population capability identity mismatch"));
+        }
+        let mut files = Self::new(root, provider, channel, effects);
+        files.closing = Some(closing);
+        Ok(files)
+    }
+
+    fn population(&self) -> io::Result<super::input_runtime::fence::ClosedPopulationGuard> {
+        super::input_runtime::fence::require_worker()
+            .map_err(|failure| invalid(format!("input fence: {failure:?}")))?;
+        self.closing
+            .as_ref()
+            .ok_or_else(|| invalid("Frozen population capability required"))?
+            .frozen_population(&self.root)
+            .map_err(|failure| invalid(format!("input fence: {failure:?}")))
+    }
+
+    fn snapshot(&mut self) -> io::Result<()> {
+        let provider = self.provider.as_str();
+        for (name, phases) in [
+            (
+                "discord_pending_queue",
+                &[DeletePhase::Queue, DeletePhase::Dispatch][..],
+            ),
+            (
+                "discord_queued_placeholders",
+                &[DeletePhase::Accessories][..],
+            ),
+            (
+                "discord_queue_exit_placeholder_clears",
+                &[DeletePhase::Accessories][..],
+            ),
+        ] {
+            for token in children(&self.root.join(name).join(provider))? {
+                if !fs::symlink_metadata(&token)?.file_type().is_dir() {
+                    if token
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| matches!(n, ".DS_Store" | ".gitkeep"))
+                    {
+                        continue;
+                    }
+                    return Err(invalid("population token is not a directory"));
+                }
+                for phase in phases {
+                    let extension = if *phase == DeletePhase::Dispatch {
+                        "dispatch"
+                    } else {
+                        "json"
+                    };
+                    let path = token.join(format!("{}.{extension}", self.channel));
+                    if let Some(bytes) = read(&path)? {
+                        self.captured.push(Captured {
+                            path,
+                            bytes,
+                            phase: *phase,
+                        });
+                    }
+                }
+            }
+        }
+        let row = self
+            .root
+            .join("discord_inflight")
+            .join(provider)
+            .join(format!("{}.json", self.channel));
+        if let Some(bytes) = read(&row)? {
+            self.captured.push(Captured {
+                path: row,
+                bytes,
+                phase: DeletePhase::Row,
+            });
+        }
+        for path in children(
+            &self
+                .root
+                .join("discord_busy_followup_retries")
+                .join(provider)
+                .join(self.channel.to_string()),
+        )? {
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(bytes) = read(&path)?
+            {
+                self.captured.push(Captured {
+                    path,
+                    bytes,
+                    phase: DeletePhase::Accessories,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_snapshot(&mut self) -> io::Result<(Vec<Input>, Vec<Input>, Option<Input>)> {
+        let mut queued = Vec::new();
+        let mut markers = Vec::new();
+        let mut active = None;
+        let mut synthetic = false;
+        for file in &self.captured {
+            let value: Value = serde_json::from_slice(&file.bytes)?;
+            match file.phase {
+                DeletePhase::Queue => {
+                    for value in value
+                        .as_array()
+                        .ok_or_else(|| invalid("queue is not an array"))?
+                    {
+                        queued.push(self.input(value.clone(), MoveSource::Queue)?);
+                    }
+                }
+                DeletePhase::Dispatch => markers.push(self.input(value, MoveSource::DispatchOnly)?),
+                DeletePhase::Row => {
+                    let state: InflightTurnState = serde_json::from_value(value)?;
+                    if state.provider != self.provider.as_str() || state.channel_id != self.channel
+                    {
+                        return Err(invalid("row belongs to another channel"));
+                    }
+                    synthetic =
+                        state.user_msg_id == 0 || inflight::is_synthetic_create_state(&state);
+                    if !synthetic {
+                        active = Some(self.input(json!({
+                            "author_id":state.request_owner_user_id, "message_id":state.user_msg_id,
+                            "text":state.user_text, "source_message_ids":state.source_message_ids,
+                            "queued_generation":state.born_generation, "reply_context":state.followup_reply_context,
+                            "has_reply_boundary":state.followup_has_reply_boundary, "merge_consecutive":state.followup_merge_consecutive,
+                            "pending_uploads":state.followup_pending_uploads, "voice_announcement":state.followup_voice_announcement,
+                            "channel_id":self.channel,
+                        }), MoveSource::TurnRow)?);
+                    }
+                }
+                DeletePhase::Accessories => {
+                    if file
+                        .path
+                        .starts_with(self.root.join("discord_busy_followup_retries"))
+                    {
+                        file.path
+                            .file_stem()
+                            .and_then(|n| n.to_str())
+                            .and_then(|n| n.parse::<u64>().ok())
+                            .ok_or_else(|| invalid("invalid busy retry source id"))?;
+                        let _: super::busy_followup_retry_store::BusyFollowupRetryState =
+                            serde_json::from_value(value)?;
+                    } else {
+                        let _: Vec<super::queued_placeholders_store::QueuedPlaceholderEntry> =
+                            serde_json::from_value(value)?;
+                    }
+                }
+            }
+        }
+        if synthetic {
+            self.captured.retain(|file| file.phase != DeletePhase::Row);
+        }
+        Ok((queued, markers, active))
     }
 
     fn input(&self, payload: Value, source: MoveSource) -> io::Result<Input> {
@@ -184,79 +339,15 @@ impl<E: Effects> Files<E> {
 impl<E: Effects> Host for Files<E> {
     fn collect(&mut self, ledger: &Ledger) -> io::Result<Vec<Input>> {
         self.captured.clear();
+        // Validate without holding a file guard across the external outbox probe.
+        drop(self.population()?);
         if self.effects.intake_outbox_open()? {
             return Err(invalid("channel has open intake outbox rows"));
         }
-        let provider = self.provider.as_str().to_owned();
-        let queue_root = self.root.join("discord_pending_queue").join(&provider);
-        let mut queued = Vec::new();
-        let mut markers = Vec::new();
-        for token in children(&queue_root)? {
-            if !fs::symlink_metadata(&token)?.file_type().is_dir() {
-                if token
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| matches!(n, ".DS_Store" | ".gitkeep"))
-                {
-                    continue;
-                }
-                return Err(invalid("queue token is not a directory"));
-            }
-            if let Some(value) = self.capture(
-                token.join(format!("{}.json", self.channel)),
-                DeletePhase::Queue,
-            )? {
-                let values = value
-                    .as_array()
-                    .ok_or_else(|| invalid("queue is not an array"))?;
-                for value in values {
-                    queued.push(self.input(value.clone(), MoveSource::Queue)?);
-                }
-            }
-            if let Some(value) = self.capture(
-                token.join(format!("{}.dispatch", self.channel)),
-                DeletePhase::Dispatch,
-            )? {
-                markers.push(self.input(value, MoveSource::DispatchOnly)?);
-            }
-            let accessory = self
-                .root
-                .join("discord_queued_placeholders")
-                .join(&provider)
-                .join(token.file_name().unwrap())
-                .join(format!("{}.json", self.channel));
-            if let Some(value) = self.capture(accessory, DeletePhase::Accessories)? {
-                let _: Vec<super::queued_placeholders_store::QueuedPlaceholderEntry> =
-                    serde_json::from_value(value)?;
-            }
-        }
-        let row_path = self
-            .root
-            .join("discord_inflight")
-            .join(&provider)
-            .join(format!("{}.json", self.channel));
-        let row = self.capture(row_path, DeletePhase::Row)?;
-        let mut active = if let Some(value) = row {
-            let state: InflightTurnState = serde_json::from_value(value)?;
-            if state.provider != provider || state.channel_id != self.channel {
-                return Err(invalid("row belongs to another channel"));
-            }
-            if state.user_msg_id == 0 || inflight::is_synthetic_create_state(&state) {
-                self.captured.retain(|file| file.phase != DeletePhase::Row);
-                None
-            } else {
-                Some(self.input(json!({
-                    "author_id": state.request_owner_user_id, "message_id": state.user_msg_id,
-                    "text": state.user_text, "source_message_ids": state.source_message_ids,
-                    "queued_generation": state.born_generation,
-                    "reply_context": state.followup_reply_context, "has_reply_boundary": state.followup_has_reply_boundary,
-                    "merge_consecutive": state.followup_merge_consecutive, "pending_uploads": state.followup_pending_uploads,
-                    "voice_announcement": state.followup_voice_announcement, "channel_id": self.channel,
-                }), MoveSource::TurnRow)?)
-            }
-        } else {
-            None
-        };
+        let guard = self.population()?;
+        self.snapshot()?;
+        drop(guard);
+        let (queued, markers, mut active) = self.decode_snapshot()?;
         for queued_input in &queued {
             let ids = source_ids(&queued_input.payload)?;
             if active
@@ -327,11 +418,12 @@ impl<E: Effects> Host for Files<E> {
                 row.input.get("legacy_input").unwrap_or(&row.input),
             )?);
         }
-        for file in self
-            .captured
-            .iter()
-            .filter(|file| file.phase == DeletePhase::Accessories)
-        {
+        for file in self.captured.iter().filter(|file| {
+            file.phase == DeletePhase::Accessories
+                && !file
+                    .path
+                    .starts_with(self.root.join("discord_busy_followup_retries"))
+        }) {
             let entries: Vec<super::queued_placeholders_store::QueuedPlaceholderEntry> =
                 serde_json::from_slice(&file.bytes)?;
             if entries
@@ -341,28 +433,16 @@ impl<E: Effects> Host for Files<E> {
                 return Err(invalid("placeholder is not associated with a moved input"));
             }
         }
-        let busy_root = self
-            .root
-            .join("discord_busy_followup_retries")
-            .join(&provider)
-            .join(self.channel.to_string());
-        for path in children(&busy_root)? {
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let key = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .and_then(|stem| stem.parse::<u64>().ok())
-                .ok_or_else(|| invalid("invalid busy retry source id"))?;
-            if !covered.contains(&key) {
-                continue;
-            }
-            if let Some(value) = self.capture(path, DeletePhase::Accessories)? {
-                let _: super::busy_followup_retry_store::BusyFollowupRetryState =
-                    serde_json::from_value(value)?;
-            }
-        }
+        let busy_root = self.root.join("discord_busy_followup_retries");
+        self.captured.retain(|file| {
+            !file.path.starts_with(&busy_root)
+                || file
+                    .path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.parse::<u64>().ok())
+                    .is_some_and(|key| covered.contains(&key))
+        });
         Ok(inputs)
     }
 
@@ -392,9 +472,15 @@ impl<E: Effects> Host for Files<E> {
         Ok(evidence)
     }
     fn delete(&mut self, phase: DeletePhase) -> io::Result<()> {
+        let population = self.population()?;
         for file in self.captured.iter().filter(|file| file.phase == phase) {
             if phase == DeletePhase::Row {
-                let guard = inflight::try_lock_inflight_state_path(&file.path).map_err(invalid)?;
+                let guard = inflight::BorrowedInflightRow::new(
+                    &population,
+                    &self.root,
+                    &self.provider,
+                    self.channel,
+                )?;
                 let Some(bytes) = read(&file.path)? else {
                     runtime_store::fsync_parent_dir(&file.path)?;
                     continue;
@@ -408,7 +494,7 @@ impl<E: Effects> Host for Files<E> {
                 }
                 let state: InflightTurnState =
                     serde_json::from_slice(if skip_check { &bytes } else { &file.bytes })?;
-                let outcome = inflight::operator_disposition_remove_pinned(
+                let outcome = inflight::operator_disposition_remove_borrowed(
                     &guard,
                     &InflightEpisodePin::from_state(&state),
                 )

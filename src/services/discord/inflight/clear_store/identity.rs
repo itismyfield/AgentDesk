@@ -2,7 +2,9 @@ use super::*;
 
 #[path = "operator_disposition.rs"]
 mod operator_disposition;
-pub(in crate::services::discord) use operator_disposition::operator_disposition_remove_pinned;
+pub(in crate::services::discord) use operator_disposition::{
+    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
+};
 
 pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_in_root(
     root: &std::path::Path,

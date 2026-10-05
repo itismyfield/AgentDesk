@@ -48,8 +48,35 @@ pub(super) fn freeze(
     {
         return Err(Failure::Busy);
     }
+    fence::require_worker()?;
     let root = fence::population_root().ok_or(Failure::Persistence)?;
     let guard = closing.population(&root)?;
+    let tokens = root
+        .join("discord_pending_queue")
+        .join(persistence.provider.as_str());
+    match std::fs::read_dir(&tokens) {
+        Ok(entries) => {
+            for entry in entries {
+                let token = entry.map_err(|_| Failure::Persistence)?.path();
+                if token.file_name().and_then(|n| n.to_str()) == Some(&persistence.token_hash) {
+                    continue;
+                }
+                for extension in ["json", "dispatch"] {
+                    match std::fs::symlink_metadata(token.join(format!(
+                        "{}.{}",
+                        channel.get(),
+                        extension
+                    ))) {
+                        Ok(_) => return Err(Failure::Busy),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(Failure::Persistence),
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Failure::Persistence),
+    }
     let _scope = fence::PopulationScope::hold(guard);
     super::pending_queue_persistence::load_channel_pending_queue_checked(
         &persistence.provider,
@@ -148,6 +175,7 @@ pub(super) fn enter(
             _permit: None,
         });
     }
+    fence::require_worker()?;
     let permit = match msg {
         M::Enqueue { input_permit, .. } | M::RequeueFront { input_permit, .. } => {
             input_permit.take()

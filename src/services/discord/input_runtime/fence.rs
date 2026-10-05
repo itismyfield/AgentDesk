@@ -70,6 +70,11 @@ pub(crate) fn health_reasons() -> Vec<String> {
     let mut reasons = Vec::new();
     let mut slot = &GATES;
     while let Some(entry) = slot.get() {
+        #[cfg(test)]
+        if !test_health::visible(&entry.gate) {
+            slot = &entry.next;
+            continue;
+        }
         if entry
             .gate
             .protected
@@ -285,7 +290,38 @@ impl Closing {
             .store(state.epoch, std::sync::atomic::Ordering::Release);
         Ok(())
     }
+    pub(crate) fn frozen_population(&self, root: &Path) -> Result<ClosedPopulationGuard, Failure> {
+        if self.gate.mode() != Mode::Frozen {
+            return Err(Failure::Busy);
+        }
+        let guard = self.population(root)?;
+        if self.gate.mode() != Mode::Frozen {
+            return Err(Failure::Busy);
+        }
+        Ok(guard)
+    }
+    #[cfg(test)]
+    pub(crate) fn frozen_for_test(provider: ProviderKind, channel: u64) -> Arc<Self> {
+        Arc::new(Self {
+            gate: Arc::new(Gate {
+                provider,
+                channel,
+                state: Mutex::new(State {
+                    mode: Mode::Frozen,
+                    epoch: 1,
+                    effects: 0,
+                }),
+                drained: Notify::new(),
+                protected: std::sync::atomic::AtomicBool::new(true),
+                health: Mutex::new(None),
+            }),
+            epoch: std::sync::atomic::AtomicU64::new(1),
+        })
+    }
     pub(crate) fn population(&self, root: &Path) -> Result<ClosedPopulationGuard, Failure> {
+        if scope_held() {
+            return Err(Failure::Busy);
+        }
         let state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.effects != 0
             || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
@@ -302,6 +338,30 @@ impl Closing {
             .map(ClosedPopulationGuard)
     }
 }
+// A worker capability is installed only around synchronous blocking-task work.
+thread_local! { static BLOCKING_WORK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+pub(crate) fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            BLOCKING_WORK.with(|held| held.set(self.0));
+        }
+    }
+    let _reset = Reset(BLOCKING_WORK.with(|held| held.replace(true)));
+    work()
+}
+pub(crate) fn require_worker() -> Result<(), Failure> {
+    if BLOCKING_WORK.with(std::cell::Cell::get) || tokio::runtime::Handle::try_current().is_err() {
+        Ok(())
+    } else {
+        Err(Failure::Busy)
+    }
+}
+thread_local! { static INFLIGHT_WRITER: RefCell<std::sync::Weak<()>> = const { RefCell::new(std::sync::Weak::new()) }; }
+pub(crate) fn scope_held() -> bool {
+    POPULATION.with(|held| held.borrow().is_some())
+        || INFLIGHT_WRITER.with(|held| held.borrow().upgrade().is_some())
+}
 pub(crate) struct ClosedPopulationGuard(PopulationGuard);
 impl ClosedPopulationGuard {
     pub(crate) fn borrowed<T>(
@@ -313,6 +373,54 @@ impl ClosedPopulationGuard {
     ) -> io::Result<T> {
         self.0.borrowed(root, provider, channel, work)
     }
+}
+pub(crate) struct PopulationWriter {
+    _guard: PopulationGuard,
+    _scope: Arc<()>,
+    _permit: Permit,
+}
+pub(crate) fn inflight_writer(path: &Path) -> Result<Option<PopulationWriter>, Failure> {
+    let Some(provider_dir) = path.parent() else {
+        return Ok(None);
+    };
+    let channel = path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.parse().ok());
+    let Some(gate) = find(|gate| {
+        Some(gate.channel) == channel
+            && provider_dir.file_name().and_then(|n| n.to_str()) == Some(gate.provider.as_str())
+    }) else {
+        return Ok(None);
+    };
+    let failed = |failure| {
+        gate.record_failure(&[], failure);
+        failure
+    };
+    if scope_held() {
+        return Err(failed(Failure::Busy));
+    }
+    let permit = gate.admit().map_err(failed)?;
+    require_worker().map_err(failed)?;
+    let inflight = provider_dir
+        .parent()
+        .ok_or_else(|| failed(Failure::Persistence))?;
+    if inflight.file_name().and_then(|n| n.to_str()) != Some("discord_inflight") {
+        return Err(failed(Failure::StalePermit));
+    }
+    let root = inflight
+        .parent()
+        .ok_or_else(|| failed(Failure::Persistence))?;
+    let guard =
+        PopulationGuard::writer(root, &gate.provider, gate.channel, &permit).map_err(failed)?;
+    // Weak origin-thread marker expires even when an owned guard is dropped on another worker.
+    let scope = Arc::new(());
+    INFLIGHT_WRITER.with(|held| *held.borrow_mut() = Arc::downgrade(&scope));
+    Ok(Some(PopulationWriter {
+        _guard: guard,
+        _scope: scope,
+        _permit: permit,
+    }))
 }
 pub(crate) struct PopulationGuard {
     _file: std::fs::File,
@@ -433,6 +541,9 @@ impl PopulationScope {
         channel: u64,
         permit: &Permit,
     ) -> Result<Self, Failure> {
+        if scope_held() {
+            return Err(Failure::Busy);
+        }
         PopulationGuard::writer(root, provider, channel, permit).map(Self::install)
     }
     fn install(guard: PopulationGuard) -> Self {
@@ -448,6 +559,9 @@ impl Drop for PopulationScope {
         POPULATION.with(|held| held.borrow_mut().take());
     }
 }
+pub(crate) fn any_protected() -> bool {
+    find(|_| true).is_some()
+}
 pub(crate) fn write<T>(
     provider: &ProviderKind,
     channel: u64,
@@ -456,18 +570,25 @@ pub(crate) fn write<T>(
     let Some(gate) = lookup(provider, channel) else {
         return work();
     };
-    let root = population_root().ok_or_else(|| "input population root unavailable".to_owned())?;
+    let failed = |failure| {
+        gate.record_failure(&[], failure);
+        format!("input fence: {failure:?}")
+    };
+    let root = population_root().ok_or_else(|| failed(Failure::Persistence))?;
     if POPULATION.with(|held| {
         held.borrow()
             .as_ref()
             .is_some_and(|guard| guard.matches(&root, provider, channel))
     }) {
-        return work();
+        return work().inspect_err(|_| gate.record_failure(&[], Failure::Persistence));
     }
-    let permit = gate.admit().map_err(|e| format!("input fence: {e:?}"))?;
-    let _guard = PopulationGuard::writer(&root, provider, channel, &permit)
-        .map_err(|e| format!("input persistence: {e:?}"))?;
-    work()
+    if scope_held() {
+        return Err(failed(Failure::Busy));
+    }
+    let permit = gate.admit().map_err(failed)?;
+    require_worker().map_err(failed)?;
+    let _scope = PopulationScope::writer(&root, provider, channel, &permit).map_err(failed)?;
+    work().inspect_err(|_| gate.record_failure(&[], Failure::Persistence))
 }
 
 #[cfg(test)]
@@ -487,4 +608,38 @@ pub(crate) fn install_wait_observer(channel: u64, hook: Box<dyn FnOnce() + Send>
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(channel, hook);
+}
+
+#[cfg(test)]
+pub(crate) mod test_health {
+    use super::*;
+    static OWNERS: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<u64, std::thread::ThreadId>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    pub(crate) struct Clear(Arc<Gate>);
+    impl Clear {
+        pub(crate) fn new(gate: &Arc<Gate>) -> Self {
+            OWNERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(gate.channel, std::thread::current().id());
+            Self(gate.clone())
+        }
+    }
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            self.0.clear_failure_for_test();
+            OWNERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0.channel);
+        }
+    }
+    pub(super) fn visible(gate: &Gate) -> bool {
+        OWNERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&gate.channel)
+            .is_none_or(|owner| *owner == std::thread::current().id())
+    }
 }

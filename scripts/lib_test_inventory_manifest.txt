@@ -2768,6 +2768,7 @@ services::discord::answer_flush_barrier::tests::waiter_times_out_when_flush_neve
 services::discord::answer_flush_barrier::tests::waiter_unblocks_when_flush_ends
 services::discord::bot_role::tests::utility_bot_role_aliases_round_trip_and_are_unique
 services::discord::bot_role::tests::utility_bot_role_metadata_is_exhaustive
+services::discord::busy_followup_retry_store::tests::b2_busy_off_delta_zero_and_frozen_sweep_preserves_population
 services::discord::busy_followup_retry_store::tests::crash_before_first_retry_binding_is_swept_by_file_mtime_4888
 services::discord::busy_followup_retry_store::tests::elapsed_cap_and_identity_guarded_clear_preserve_current_binding_4888
 services::discord::busy_followup_retry_store::tests::merged_head_inherits_source_retry_identity_and_unrelated_head_does_not_4888
@@ -4056,6 +4057,7 @@ services::discord::inflight::stall_recovery_tests::watcher_stream_progress_skips
 services::discord::inflight::stall_recovery_tests::watcher_terminal_commit_advances_forward_offset
 services::discord::inflight::stall_recovery_tests::watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
 services::discord::inflight::stall_recovery_tests::watcher_terminal_commit_max_serializes_backward_offsets
+services::discord::inflight::store::population_tests::b2_off_lock_error_detail_and_representative_writer_results_are_unchanged
 services::discord::inflight::store::relay_state_contract_refs::contract_symbols_exist
 services::discord::inflight::terminal_delivery_evidence_loss::tests::identity_mismatch_bridge_outcome_emits_lost_evidence_warn
 services::discord::inflight::terminal_delivery_evidence_loss::tests::skipped_watcher_outcome_emits_lost_evidence_warn
@@ -4072,6 +4074,10 @@ services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_de
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
 services::discord::input_runtime::fence::tests::admitted_writer_scope_finishes_after_close_without_new_admission
+services::discord::input_runtime::fence::tests::b2_borrowed_row_keeps_episode_cas_and_never_reacquires_sidecar
+services::discord::input_runtime::fence::tests::b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io
+services::discord::input_runtime::fence::tests::b2_scheduler_late_protection_refuses_inflight_before_any_io
+services::discord::input_runtime::fence::tests::b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait
 services::discord::input_runtime::fence::tests::borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
 services::discord::input_runtime::fence::tests::canonical_borrowing_and_supervisor_contention_never_prepare
 services::discord::input_runtime::fence::tests::closing_drains_only_existing_permits_and_rejects_redirect
@@ -4081,6 +4087,8 @@ services::discord::input_runtime::fence::tests::ordinary_writer_waits_for_releas
 services::discord::input_runtime::fence::tests::queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_stall
 services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
+services::discord::input_transition::tests::supported::b2_all_token_capture_and_each_phase_preserves_changed_bytes
+services::discord::input_transition::tests::supported::b2_collect_requires_frozen_capability_and_contention_probes_no_effect
 services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
 services::discord::input_transition::tests::supported::contended_row_lock_holds_without_waiting_and_resumes_after_release
 services::discord::input_transition::tests::supported::malformed_population_and_outbox_leave_legacy_while_dead_row_stays_held
@@ -4911,6 +4919,7 @@ services::discord::queued_placeholder_cluster_characterization_tests::insert_rem
 services::discord::queued_placeholder_cluster_characterization_tests::queue_exit_placeholder_clears_round_trip_with_sidecar
 services::discord::queued_placeholder_cluster_characterization_tests::queued_placeholder_still_owned_branches
 services::discord::queued_placeholder_cluster_characterization_tests::queued_placeholders_persist_lock_identity
+services::discord::queued_placeholders_store::tests::b2_placeholder_off_delta_zero_and_protected_failures_are_observable
 services::discord::reaction_cleanup::tests::recovered_catch_up_message_removes_stale_hourglass
 services::discord::reaction_lifecycle::tests::dispatch_thread_reaction_targets_parent_channel
 services::discord::reaction_lifecycle::tests::real_discord_message_id_guard_rejects_synthetic_ranges
@@ -10734,6 +10743,8 @@ services::turn_orchestrator::inbound_order::tests::an_immediate_turn_cycle_never
 services::turn_orchestrator::inbound_order::tests::nothing_ahead_of_the_claim_clears_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_three_idle_queue_backstop_rounds
 services::turn_orchestrator::input_fence::tests::actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_take
+services::turn_orchestrator::input_fence::tests::b2_freeze_refuses_other_token_queue_or_marker_without_ack_or_mutation
+services::turn_orchestrator::input_fence::tests::b2_late_protection_between_actor_selection_and_enter_has_no_scheduler_io
 services::turn_orchestrator::input_fence::tests::freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_population
 services::turn_orchestrator::input_fence::tests::freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mutation
 services::turn_orchestrator::input_fence::tests::off_path_has_no_sidecar_and_registry_does_not_remint_on_fence
