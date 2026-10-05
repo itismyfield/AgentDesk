@@ -81,12 +81,15 @@ send-keys|paste-buffer)
   [ "$(next keyattach)" = 0 ] || echo "$*" >> "$d/keys_while_attached"
   effects "$2" ;;
 if-shell)
-  if [ "$(next keyattach)" = 0 ]; then
+  k=$(next keyattach)
+  if [ "$k" = 0 ]; then
     echo "-u $7" >> "$d/log"
     [ -f "$d/fail.${7%% *}" ] && exit 1
     effects "${7%% *}"
+  elif [ "$k" = gone ]; then
+    echo "agentdesk-busy-inject-vetoed"
   else
-    echo "agentdesk-busy-inject-vetoed 1"
+    echo "agentdesk-busy-inject-vetoed $k"
   fi ;;
 esac
 exit 0
@@ -258,7 +261,7 @@ fn the_header_names_the_source_and_cannot_start_a_command_or_close_early() {
 #[test]
 fn every_pre_paste_veto_leaves_the_pane_untouched() {
     type Setup = fn(&Fake);
-    let cases: [(&str, Setup, Veto); 8] = [
+    let cases: [(&str, Setup, Veto); 9] = [
         (
             "attached",
             |f| f.answers("attach", &["1"]),
@@ -293,6 +296,11 @@ fn every_pre_paste_veto_leaves_the_pane_untouched() {
             Veto::NotBusy,
         ),
         ("load fails", |f| f.fail("load-buffer"), Veto::LoadFailed),
+        (
+            "session gone at the paste",
+            |f| f.answers("keyattach", &["gone"]),
+            Veto::PaneUnavailable,
+        ),
     ];
     for (name, setup, veto) in cases {
         let fake = Fake::new();
@@ -301,6 +309,22 @@ fn every_pre_paste_veto_leaves_the_pane_untouched() {
         assert_eq!(fake.run(&FAST), Outcome::NotSent(veto), "{name}");
         assert_eq!(fake.keys(), (0, 0, 0), "{name}");
     }
+    // A session or nonce that could leave a tmux command string is refused before any call.
+    let fake = Fake::new();
+    let pane = Pane::with_program("x'y", fake.dir.path().join("tmux"));
+    for (session, nonce) in [("x'y", NONCE), ("plain", "ab cd")] {
+        let request = Request {
+            session,
+            transcript: &fake.transcript,
+            source: "iMessage",
+            author: "ann",
+            nonce,
+            text: "are you there?",
+        };
+        let outcome = inject(&pane, &request, &FAST);
+        assert_eq!(outcome, Outcome::NotSent(Veto::InvalidInput), "{session}");
+    }
+    assert!(fs::read_to_string(fake.dir.path().join("log")).is_err());
 }
 
 #[test]

@@ -13,6 +13,7 @@ use crate::services::tui_o::shadow::ShadowProvider;
 /// Larger inputs are refused before any tmux call.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
 const CAPTURE_SCROLLBACK: &str = "-80";
+const VETOED: &str = "agentdesk-busy-inject-vetoed";
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +226,34 @@ impl Pane {
         out.trim().parse().ok()
     }
 
+    /// Runs `command` in the server only while no client is attached. tmux runs a client's
+    /// queued commands in one pass, so an attach cannot land between the test and the key.
+    fn guarded(&self, command: &str) -> Guard {
+        let vetoed = format!(
+            "display-message -p -t '{}' '{VETOED} #{{session_attached}}'",
+            self.target
+        );
+        let args = [
+            "if-shell",
+            "-F",
+            "-t",
+            &self.target,
+            "#{==:#{session_attached},0}",
+            command,
+            &vetoed,
+        ];
+        let Some(out) = self.ok(&args) else {
+            return Guard::Failed;
+        };
+        // The else branch ran, so the command did not; its count says whether a client held it.
+        match out.trim().strip_prefix(VETOED).map(str::trim) {
+            None if out.trim().is_empty() => Guard::Applied,
+            None => Guard::Failed,
+            Some(count) if count.parse::<u32>().is_ok_and(|clients| clients > 0) => Guard::Vetoed,
+            Some(_) => Guard::Gone,
+        }
+    }
+
     fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
@@ -236,6 +265,13 @@ impl Pane {
             CAPTURE_SCROLLBACK,
         ])
     }
+}
+
+enum Guard {
+    Applied,
+    Vetoed,
+    Gone,
+    Failed,
 }
 
 fn modal(capture: &str) -> bool {
@@ -277,7 +313,19 @@ fn judge_before_paste(capture: &str, transcript: &Path) -> Result<(), Veto> {
 /// Tries the composer lock a bounded number of times, then injects under it.
 pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Outcome {
     let text = frame(request.source, request.author, request.nonce, request.text);
-    if request.text.trim().is_empty() || text.len() > MAX_INPUT_BYTES {
+    // Both names reach tmux command strings, so only plain characters are accepted.
+    let plain = |value: &str, extra: &[char]| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_alphanumeric() || extra.contains(&c))
+    };
+    if request.text.trim().is_empty()
+        || text.len() > MAX_INPUT_BYTES
+        || !plain(request.session, &['-', '_'])
+        || !request.nonce.chars().all(|c| c.is_ascii_alphanumeric())
+        || request.nonce.is_empty()
+    {
         return Outcome::NotSent(Veto::InvalidInput);
     }
     let started = Instant::now();
@@ -294,15 +342,15 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
     locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
 }
 
-/// Runs `attempt` at each offset until one returns a value.
+/// Runs `attempt` at each offset from the first try until one returns a value.
 pub(crate) fn at_offsets<T>(
     offsets: &[Duration],
-    _elapsed: impl Fn() -> Duration,
+    elapsed: impl Fn() -> Duration,
     mut sleep: impl FnMut(Duration),
     mut attempt: impl FnMut() -> Option<T>,
 ) -> Option<T> {
     for offset in offsets {
-        sleep(*offset);
+        sleep(offset.saturating_sub(elapsed()));
         if let Some(value) = attempt() {
             return Some(value);
         }
@@ -342,18 +390,18 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
         return Outcome::NotSent(Veto::LoadFailed);
     }
     // From the paste on, absence of evidence never proves the input was not taken.
-    let paste = [
-        "paste-buffer",
-        "-p",
-        "-r",
-        "-d",
-        "-b",
-        &buffer,
-        "-t",
-        &pane.target,
-    ];
-    if pane.ok(&paste).is_none() {
-        return Outcome::Unconfirmed(Unconfirmed::PasteFailed);
+    let paste = format!("paste-buffer -p -r -d -b {buffer} -t '{}'", pane.target);
+    match pane.guarded(&paste) {
+        Guard::Applied => {}
+        guard @ (Guard::Vetoed | Guard::Gone) => {
+            let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
+            return Outcome::NotSent(if matches!(guard, Guard::Vetoed) {
+                Veto::HumanAttached
+            } else {
+                Veto::PaneUnavailable
+            });
+        }
+        Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::PasteFailed),
     }
     std::thread::sleep(timing.settle);
     let mut owned = false;
@@ -380,21 +428,24 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
     if !owned {
         return Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
     }
-    // A race remains after the last check; observed doubt above already withheld every key.
-    if pane
-        .ok(&["send-keys", "-t", &pane.target, "Enter"])
-        .is_none()
-    {
-        return Outcome::Unconfirmed(Unconfirmed::EnterFailed);
+    // A person may still type after the last capture; an attach by then withholds the Enter.
+    match pane.guarded(&format!("send-keys -t '{}' Enter", pane.target)) {
+        Guard::Applied => {}
+        Guard::Vetoed => return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
+        Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
     }
+    // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
     let deadline = Instant::now() + timing.confirm_window;
     loop {
-        if transcript_carries(request.transcript, offset, request.nonce) {
-            return Outcome::Injected;
-        }
         if Instant::now() >= deadline {
             return Outcome::Unconfirmed(Unconfirmed::NotObserved);
         }
-        std::thread::sleep(timing.confirm_poll);
+        if transcript_carries(request.transcript, offset, request.nonce)
+            && Instant::now() < deadline
+        {
+            return Outcome::Injected;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(timing.confirm_poll.min(left));
     }
 }
