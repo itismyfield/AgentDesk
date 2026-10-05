@@ -2096,6 +2096,7 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
     const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
+    const LEDGER: &str = "behind the ledger clear's managed-reset refusal and keyed clearance";
     const CALLS: &[(&str, Listed)] = &[
         (
             "record_termination_for_tmux",
@@ -2160,6 +2161,11 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             &[
                 ("src/services/discord/commands/control.rs", 2, MISSING),
                 ("src/services/discord/commands/control/native.rs", 1, NATIVE),
+                (
+                    "src/services/discord/commands/control/input_clear.rs",
+                    1,
+                    LEDGER,
+                ),
                 ("src/services/discord/commands/mod.rs", 0, ENTRY),
                 ("src/services/discord/health/recovery.rs", 1, MISSING),
                 ("src/services/discord/admin_host_guard.rs", 1, MISSING),

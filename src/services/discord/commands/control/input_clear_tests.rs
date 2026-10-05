@@ -7,6 +7,7 @@ use crate::db::session_transcripts::native_channel_clear_record;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::input_runtime::clear::{self, Outcome, PG_RETRY_NOTICE, Unresolved};
+use crate::services::discord::input_runtime::fence::{self, Gate, Mode};
 use crate::services::tui_input::durability_tests::supported::Recording;
 use crate::services::tui_input::ledger::Ledger;
 use crate::services::tui_input::rows::{AbandonReason, DoneReason, Entry, RowState};
@@ -23,6 +24,8 @@ const CUT: RowState = RowState::Abandoned(AbandonReason::UserClear);
 struct Fake {
     calls: Mutex<Vec<String>>,
     dead: AtomicBool,
+    // A reset under a held population scope would self-deadlock on the channel lock.
+    scoped: AtomicBool,
 }
 
 impl Fake {
@@ -41,6 +44,7 @@ impl ClearEffects for Fake {
     }
     fn reset_process(&self, tmux: &str) {
         self.note(format!("reset:{tmux}"));
+        self.scoped.fetch_or(fence::scope_held(), Ordering::SeqCst);
         self.dead.store(true, Ordering::SeqCst);
     }
     fn alive(&self, _: &str) -> bool {
@@ -499,6 +503,40 @@ fn a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg() {
         assert_eq!(outcome, Outcome::Cleared);
         assert!(fixture.record().await.resolved);
         assert_eq!(fixture.states(), BTreeMap::from([(11, CUT), (12, CUT)]));
+        fixture.drop_db().await;
+    });
+}
+
+// A protected, closed gate refuses every Legacy population writer and records it as health.
+#[test]
+fn a_fenced_channel_clears_without_a_legacy_population_write_pg() {
+    runtime().block_on(async {
+        let fixture = Fixture::new(7, ProviderKind::Codex).await;
+        let channel = fixture.channel_id.get();
+        let gate = Gate::protect(fixture.provider.clone(), channel).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let _closing = gate.close().unwrap();
+        let fake = Arc::new(Fake::default());
+        let mut host = fixture.host(&fake).await;
+        let mut ledger = fixture.ledger(&[11]);
+        // The binding test root is per thread, so the clear runs on this one.
+        let outcome = clear::run(&mut ledger, &mut host, fixture.guard().await).await;
+        assert_eq!(outcome, Outcome::Cleared);
+        assert_eq!(fixture.states(), BTreeMap::from([(11, CUT)]));
+        assert!(fake.calls().contains(&format!("reset:{}", fixture.tmux)));
+        assert!(!fake.scoped.load(Ordering::SeqCst));
+        let needle = format!(" channel={channel} ");
+        let fenced = || fence::health_reasons().iter().any(|r| r.contains(&needle));
+        assert!(!fenced(), "{:?}", fence::health_reasons());
+        assert_eq!(gate.mode(), Mode::Closing);
+        let lock = fence::population_root().unwrap().join("discord_inflight");
+        let lock = lock
+            .join(fixture.provider.as_str())
+            .join(format!("{channel}.json.lock"));
+        assert!(!lock.exists());
+        // The fixture sees a Legacy writer: one refused write is reported.
+        assert!(fence::write(&fixture.provider, channel, || Ok(())).is_err());
+        assert!(fenced());
         fixture.drop_db().await;
     });
 }
