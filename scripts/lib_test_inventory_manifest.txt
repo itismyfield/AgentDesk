@@ -2737,6 +2737,7 @@ services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_i
 services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
+services::discord::admin_host_guard::tests::the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg
 services::discord::agent_handoff::tests::channel_kind_defaults_to_cc
 services::discord::agent_handoff::tests::channel_kind_rejects_unknown_value
 services::discord::agent_handoff::tests::channel_kind_unset_reports_available_kinds
@@ -5598,8 +5599,10 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::a_re
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_a_paste_then_cancel_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_an_unclear_paste_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r1_a_restart_reconnects_a_matched_bound_pane_and_its_next_turn_prompts_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
@@ -9753,6 +9756,12 @@ services::session_host::herdr::transport::tests::herdr_socket_writes_a_mutation_
 services::session_host::herdr::wire::tests::herdr_line_frame_bounds_and_partial_frames
 services::session_host::herdr::wire::tests::herdr_wire_matches_the_vendored_schema
 services::session_host::herdr::wire::tests::herdr_write_failure_reports_bytes_already_sent
+services::session_host::herdr_clear_adapter::tests::a_draft_in_the_composer_sends_nothing_and_holds_pg
+services::session_host::herdr_clear_adapter::tests::a_pending_clear_commits_with_one_line_and_keeps_the_pane_and_row_pg
+services::session_host::herdr_clear_adapter::tests::an_earlier_or_foreign_clear_event_holds_without_a_second_line_pg
+services::session_host::herdr_clear_adapter::tests::an_input_hold_refuses_the_clear_and_stays_pg
+services::session_host::herdr_clear_adapter::tests::an_unsettled_or_unread_rotation_refuses_the_clear_pg
+services::session_host::herdr_clear_adapter::tests::every_failed_check_refuses_before_any_change_pg
 services::session_host::herdr_gate::tests::a_failed_gate_check_writes_nothing_and_names_why
 services::session_host::herdr_gate::tests::a_herdr_followup_retire_is_refused_and_kills_nothing
 services::session_host::herdr_gate::tests::a_marker_not_naming_herdr_refuses_every_write
@@ -10300,6 +10309,10 @@ services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_pro
 services::tui_o::writer::tests::actor::host_start::reclaim::an_adopted_resume_holds_its_rows_until_an_operator_resolves
 services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
+services::tui_o::writer::tests::actor::host_start::rotation_unsettled::a_cleared_source_stays_unsettled_until_retired_and_its_tail_posts_once
+services::tui_o::writer::tests::actor::host_start::rotation_unsettled::an_unreadable_rotation_or_an_ended_actor_reports_no_projection
+services::tui_o::writer::tests::actor::host_start::rotation_unsettled::clears_repeated_within_ten_seconds_stay_unsettled_until_all_retire
+services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readiness_map_reports_a_running_actors_projection_only
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source

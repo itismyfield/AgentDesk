@@ -110,8 +110,8 @@ pub(super) async fn managed_reset_refusal(
     Some(reason)
 }
 
-/// Where a channel clear goes, judged before its first change.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Where a channel clear goes, judged before its first change; the clear command consumes it.
+#[allow(dead_code)]
 pub(crate) enum ResetTarget {
     /// Main's managed tmux reset.
     LegacyTmux,
@@ -120,7 +120,7 @@ pub(crate) enum ResetTarget {
     Refused(String),
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) enum HostAdapter {
     #[cfg(unix)]
     Herdr(Box<crate::services::session_host::HerdrClearPlan>),

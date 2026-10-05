@@ -2096,6 +2096,7 @@ src/
 │   │   │   └── wire.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_clear_adapter.rs
+│   │   ├── herdr_clear_adapter_tests.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs
@@ -2216,6 +2217,7 @@ src/
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
+│   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs

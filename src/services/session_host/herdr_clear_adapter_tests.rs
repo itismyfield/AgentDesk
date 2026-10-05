@@ -111,6 +111,15 @@ impl Fixture {
             "AGENTDESK_INSTANCE_ID",
             HOST.as_ref() as &std::ffi::OsStr,
         );
+        // The node identity comes from this root's config, never the operator's.
+        let config =
+            crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, format!("cluster:\n  instance_id: {HOST}\n")).unwrap();
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::binding_context::stable_host_identity().as_deref(),
+            Some(HOST)
+        );
         let log = tempfile::tempdir().unwrap();
         binding_events::set_test_root(Some(log.path()));
         let rig = HerdrRig::start();
@@ -380,16 +389,20 @@ fn a_pending_clear_commits_with_one_line_and_keeps_the_pane_and_row_pg() {
     let outcome = fx.run(plan, &session, || {
         fx.record("cleared", BindingCause::Clear, true)
     });
+    assert!(fx.marker_names_execution(), "the execution is kept");
+    assert_eq!(fx.rig.sends(), clear_line(), "one gated line, never again");
+    assert_eq!(
+        *session.saved.lock().unwrap(),
+        ["cleared"],
+        "the cleared session"
+    );
+    assert_eq!(session.selector_clears.load(Ordering::SeqCst), 1);
+    assert!(matches!(fx.row(), HostedRecord::Known(r) if r.state == HostedState::Bound));
     let ClearOutcome::Native(commit) = outcome else {
         panic!("a durable Pending commit is a native clear: {outcome:?}");
     };
     assert_eq!(commit.session, "cleared");
     assert!(commit.source.is_none(), "committed on the Pending");
-    assert_eq!(fx.rig.sends(), clear_line(), "one gated line, never again");
-    assert_eq!(session.selector_clears.load(Ordering::SeqCst), 1);
-    assert_eq!(*session.saved.lock().unwrap(), ["cleared"]);
-    assert!(fx.marker_names_execution(), "the execution is kept");
-    assert!(matches!(fx.row(), HostedRecord::Known(r) if r.state == HostedState::Bound));
     let restarted = judge_native_clear_restart(&restart_boundary(&ticket), Some(HOST));
     assert_eq!(restarted, NativeClearRestart::CompleteDurable(commit));
 }
@@ -413,11 +426,11 @@ fn an_earlier_or_foreign_clear_event_holds_without_a_second_line_pg() {
         fx.record("foreign", BindingCause::Clear, true);
         std::fs::write(session_temp_path(&fx.logical, "spawn_nonce"), &fx.nonce).unwrap();
     });
-    assert_eq!(outcome, ClearOutcome::Hold(None));
     assert_eq!(fx.rig.sends(), clear_line(), "no second line");
     assert!(session.saved.lock().unwrap().is_empty(), "nothing saved");
     assert!(fx.marker_names_execution(), "no reset or kill");
     assert!(matches!(fx.row(), HostedRecord::Known(r) if r.state == HostedState::Bound));
+    assert_eq!(outcome, ClearOutcome::Hold(None));
     let restarted = judge_native_clear_restart(&restart_boundary(&ticket), Some(HOST));
     assert_eq!(restarted, NativeClearRestart::ResetUnresolved);
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
@@ -439,6 +452,7 @@ fn every_failed_check_refuses_before_any_change_pg() {
         std::fs::write(&stop, "").unwrap();
         let _off = force_for_test(Admission::new(None, Some(stop)));
         let refused = fx.clear(Some(0), &session, || {}).err();
+        fx.assert_untouched(&session, "admission off");
         assert!(
             matches!(
                 refused,
@@ -449,22 +463,21 @@ fn every_failed_check_refuses_before_any_change_pg() {
             "{refused:?}"
         );
     }
-    fx.assert_untouched(&session, "admission off");
     fx.rig.serve_as(&[7, 8]);
     let refused = fx.clear(Some(0), &session, || {}).err();
+    fx.assert_untouched(&session, "E7 on another server");
     assert!(
         matches!(refused, Some(HerdrClearRefusal::Gate(_))),
         "{refused:?}"
     );
-    fx.assert_untouched(&session, "E7 on another server");
     fx.rig.serve_as(&[7]);
     fx.rig.run_provider(&fx.context, true);
     let refused = fx.clear(Some(0), &session, || {}).err();
+    fx.assert_untouched(&session, "identity mismatch");
     assert!(
         matches!(refused, Some(HerdrClearRefusal::Gate(_))),
         "{refused:?}"
     );
-    fx.assert_untouched(&session, "identity mismatch");
     let mut pending = fx.bound();
     pending.state = HostedState::Pending;
     let refused = plan_clear(CHANNEL, Some(&HostedRecord::Known(pending)), Some(0)).err();
@@ -488,9 +501,9 @@ fn an_input_hold_refuses_the_clear_and_stays_pg() {
     std::fs::create_dir_all(fx.hold().parent().unwrap()).unwrap();
     std::fs::write(fx.hold(), "2026-10-05T00:00:00Z").unwrap();
     let refused = fx.clear(Some(0), &session, || {}).err();
-    assert_eq!(refused, Some(HerdrClearRefusal::InputHeld));
     fx.assert_untouched(&session, "held");
     assert!(fx.hold().exists(), "the hold is kept");
+    assert_eq!(refused, Some(HerdrClearRefusal::InputHeld));
 }
 
 // T-C6/T-C7/T-C9: while O still reads a source an earlier rotation left, or its projection is
@@ -506,8 +519,8 @@ fn an_unsettled_or_unread_rotation_refuses_the_clear_pg() {
         (None, HerdrClearRefusal::RotationUnread),
     ] {
         let refused = fx.clear(unsettled, &session, || {}).err();
-        assert_eq!(refused, Some(refusal));
         fx.assert_untouched(&session, &format!("{unsettled:?}"));
+        assert_eq!(refused, Some(refusal));
     }
 }
 
@@ -519,7 +532,7 @@ fn a_draft_in_the_composer_sends_nothing_and_holds_pg() {
     fx.rig.answer("pane.read", screen(DRAFT));
     let session = Session::default();
     let outcome = fx.clear(Some(0), &session, || {}).unwrap();
+    assert_eq!(fx.rig.sends(), Vec::<Value>::new(), "nothing sent");
+    assert!(fx.marker_names_execution(), "no reset or kill");
     assert_eq!(outcome, ClearOutcome::Hold(None));
-    assert_eq!(fx.rig.sends(), Vec::<Value>::new());
-    assert!(fx.marker_names_execution());
 }

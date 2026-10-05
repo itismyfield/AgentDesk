@@ -206,11 +206,15 @@ fn a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg() {
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(binding, None, "no source is restored for a waiting clear");
-    assert_eq!(cleared_turn(&fx, &launcher, &cleared, &path), Ok(()));
+    let result = cleared_turn(&fx, &launcher, &cleared, &path);
     let sends = fx.rig.sends();
-    assert_eq!(sends.len(), 4, "{sends:?}");
+    assert_eq!(sends.len(), 4, "{sends:?} {result:?}");
     assert_eq!(sends[2..], prompt_sends()[..]);
-    assert!(resolved_to(&cleared, fx.logical()));
+    assert!(
+        resolved_to(&cleared, fx.logical()),
+        "the Pending resolved: {result:?}"
+    );
+    assert_eq!(result, Ok(()));
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(binding.and_then(|b| b.session_id), Some(cleared));
@@ -233,9 +237,13 @@ fn the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg() {
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(binding.and_then(|b| b.session_id), Some(started.session));
-    assert_eq!(cleared_turn(&fx, &launcher, &cleared, &path), Ok(()));
+    let result = cleared_turn(&fx, &launcher, &cleared, &path);
     let sends = fx.rig.sends();
-    assert_eq!(sends.len(), 4, "{sends:?}");
+    assert_eq!(sends.len(), 4, "{sends:?} {result:?}");
     assert_eq!(sends[2..], prompt_sends()[..]);
-    assert!(resolved_to(&cleared, fx.logical()));
+    assert!(
+        resolved_to(&cleared, fx.logical()),
+        "the Pending resolved: {result:?}"
+    );
+    assert_eq!(result, Ok(()));
 }
