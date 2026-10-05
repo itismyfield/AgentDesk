@@ -70,6 +70,11 @@ pub(crate) fn health_reasons() -> Vec<String> {
     let mut reasons = Vec::new();
     let mut slot = &GATES;
     while let Some(entry) = slot.get() {
+        #[cfg(test)]
+        if !test_health::visible(&entry.gate) {
+            slot = &entry.next;
+            continue;
+        }
         if entry
             .gate
             .protected
@@ -603,4 +608,38 @@ pub(crate) fn install_wait_observer(channel: u64, hook: Box<dyn FnOnce() + Send>
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(channel, hook);
+}
+
+#[cfg(test)]
+pub(crate) mod test_health {
+    use super::*;
+    static OWNERS: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<u64, std::thread::ThreadId>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    pub(crate) struct Clear(Arc<Gate>);
+    impl Clear {
+        pub(crate) fn new(gate: &Arc<Gate>) -> Self {
+            OWNERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(gate.channel, std::thread::current().id());
+            Self(gate.clone())
+        }
+    }
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            self.0.clear_failure_for_test();
+            OWNERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0.channel);
+        }
+    }
+    pub(super) fn visible(gate: &Gate) -> bool {
+        OWNERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&gate.channel)
+            .is_none_or(|owner| *owner == std::thread::current().id())
+    }
 }

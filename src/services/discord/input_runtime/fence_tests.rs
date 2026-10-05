@@ -3,6 +3,7 @@ use super::*;
 #[tokio::test]
 async fn closing_drains_only_existing_permits_and_rejects_redirect() {
     let gate = Gate::protect(ProviderKind::Claude, 6_325_101).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let permit = gate.admit().unwrap();
     let closing = gate.close().unwrap();
     assert!(matches!(gate.admit(), Err(Failure::Mode(Mode::Closing))));
@@ -29,6 +30,7 @@ async fn closing_drains_only_existing_permits_and_rejects_redirect() {
 fn canonical_borrowing_and_supervisor_contention_never_prepare() {
     let root = tempfile::tempdir().unwrap();
     let gate = Gate::protect(ProviderKind::Claude, 6_325_103).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let closing = gate.close().unwrap();
     let guard = closing.population(root.path()).unwrap();
     assert!(matches!(
@@ -73,6 +75,7 @@ fn canonical_borrowing_and_supervisor_contention_never_prepare() {
 fn ordinary_writer_waits_for_release_and_timeout_is_typed() {
     let root = tempfile::tempdir().unwrap();
     let gate = Gate::protect(ProviderKind::Claude, 6_325_105).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let permit = gate.admit().unwrap();
     let held = PopulationGuard::try_acquire(root.path(), &ProviderKind::Claude, 6_325_105).unwrap();
     let mut held = Some(held);
@@ -118,6 +121,7 @@ fn ordinary_writer_waits_for_release_and_timeout_is_typed() {
 #[test]
 fn stale_epoch_is_not_mode_or_duplicate() {
     let gate = Gate::protect(ProviderKind::Claude, 6_325_106).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let permit = gate.admit().unwrap();
     gate.state.lock().unwrap().epoch += 1;
     assert_eq!(
@@ -129,13 +133,25 @@ fn stale_epoch_is_not_mode_or_duplicate() {
 #[test]
 fn off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore() {
     let gate = Gate::protect(ProviderKind::Claude, 6_325_107).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let closing = gate.close().unwrap();
     assert_eq!(
         closing.release_protection_after_handback(),
         Err(Failure::Busy)
     );
+    gate.record_failure(&[], Failure::Mode(Mode::Closing));
+    assert!(
+        health_reasons()
+            .iter()
+            .any(|reason| reason.contains("channel=6325107"))
+    );
     gate.state.lock().unwrap().mode = Mode::Handback;
     closing.release_protection_after_handback().unwrap();
+    assert!(
+        !health_reasons()
+            .iter()
+            .any(|reason| reason.contains("channel=6325107"))
+    );
     let state = gate.state.lock().unwrap();
     let (send, receive) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -184,6 +200,7 @@ fn borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
     };
     let item = |id| serde_json::json!({"author_id":7,"message_id":id,"source_message_ids":[id],"text":"same","channel_id":channel});
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let closing = gate.close().unwrap();
     let guard = closing.population(root.path()).unwrap();
     assert!(enqueue(&destination, &item(2)).is_err());
@@ -223,6 +240,7 @@ fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
     let root = tempfile::tempdir().unwrap();
     let channel = 6_325_301;
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let permit = gate.admit().unwrap();
     let scope =
         PopulationScope::writer(root.path(), &ProviderKind::Claude, channel, &permit).unwrap();
@@ -322,6 +340,7 @@ fn b2_scheduler_late_protection_refuses_inflight_before_any_io() {
     let channel = 6_325_303;
     assert!(lookup(&ProviderKind::Claude, channel).is_none());
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let path = root
         .path()
         .join(format!("discord_inflight/claude/{channel}.json"));
@@ -368,6 +387,7 @@ fn b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io() {
     let channel = 6_325_312;
     let root = population_root().unwrap();
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let held = PopulationGuard::try_acquire(&root, &ProviderKind::Claude, channel).unwrap();
     let state = InflightTurnState::new(
         ProviderKind::Claude,
@@ -480,6 +500,7 @@ fn queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_st
     )
     .unwrap();
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -544,6 +565,7 @@ fn released_registration_and_stale_closing_cannot_issue_capabilities() {
     let root = tempfile::tempdir().unwrap();
     let channel = 6_325_110;
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let closing = gate.close().unwrap();
     gate.state.lock().unwrap().mode = Mode::Handback;
     closing.release_protection_after_handback().unwrap();
@@ -585,6 +607,7 @@ fn admitted_writer_scope_finishes_after_close_without_new_admission() {
     let _env = Env::set(root.path());
     let channel = 6_325_111;
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let permit = gate.admit().unwrap();
     let closing = gate.close().unwrap();
     let scope = PopulationScope::writer(
@@ -613,6 +636,7 @@ fn off_failure_health_does_not_change_actual_snapshot() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let channel = 6_325_112;
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let closing = gate.close().unwrap();
     gate.record_failure(&[71], Failure::Mode(Mode::Closing));
     gate.state.lock().unwrap().mode = Mode::Handback;

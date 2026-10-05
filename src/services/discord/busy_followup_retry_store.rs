@@ -616,6 +616,8 @@ mod tests {
             );
             let protected = 6_325_310;
             let gate = fence::Gate::protect(provider.clone(), protected).unwrap();
+            let _health =
+                crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
             let protected_path = input_file_path_in_root(&root, &provider, protected, 8);
             bind_notice_if_absent(&provider, protected, 8, 108).unwrap();
             assert!(!clear_if_current(&provider, protected, 8, 999));

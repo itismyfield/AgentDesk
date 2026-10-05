@@ -419,6 +419,8 @@ mod tests {
         );
         let channel = ChannelId::new(6_325_308);
         let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let protected = channel_file_path(&provider, "blocked", channel).unwrap();
         fs::create_dir_all(protected.parent().unwrap().parent().unwrap()).unwrap();
         fs::write(protected.parent().unwrap(), b"not a directory").unwrap();
