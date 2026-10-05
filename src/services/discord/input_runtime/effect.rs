@@ -24,10 +24,10 @@ pub(crate) fn admit(provider: &ProviderKind, channel: u64) -> Result<Option<Perm
         .transpose()
 }
 
-pub(crate) async fn scope<F: Future>(permit: Option<Permit>, work: F) -> F::Output {
+pub(crate) fn scope<F: Future>(permit: Option<Permit>, work: F) -> impl Future<Output = F::Output> {
     match permit {
-        Some(permit) => TASK.scope(Some(permit), work).await,
-        None => work.await,
+        Some(permit) => futures::future::Either::Right(TASK.scope(Some(permit), work)),
+        None => futures::future::Either::Left(work),
     }
 }
 
