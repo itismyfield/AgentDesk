@@ -86,7 +86,8 @@ pub(super) fn gate_closed_arm(
         return Some(msg);
     }
     let arm = match msg {
-        M::Snapshot { .. }
+        M::FreezeInput { .. }
+        | M::Snapshot { .. }
         | M::HasActiveTurn { .. }
         | M::HasBlockingActiveTurn { .. }
         | M::ActiveTurnKind { .. }
@@ -226,9 +227,29 @@ impl ChannelMailboxRegistry {
         observed: Option<ClaimObservation>,
     ) -> EnqueueInterventionResult {
         for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
+            let input_permit = match crate::services::discord::input_runtime::fence::lookup(
+                &persistence.provider,
+                channel_id.get(),
+            ) {
+                Some(gate) => match gate.admit() {
+                    Ok(permit) => Some(permit),
+                    Err(reason) => {
+                        return EnqueueInterventionResult::refused(
+                            super::input_fence::enqueue_reason(reason),
+                            Vec::new(),
+                        );
+                    }
+                },
+                None => None,
+            };
             let result = self
                 .handle(channel_id)
-                .enqueue_observed(intervention.clone(), persistence.clone(), observed)
+                .enqueue_observed_with_permit(
+                    intervention.clone(),
+                    persistence.clone(),
+                    observed,
+                    input_permit,
+                )
                 .await;
             if result.refusal_reason != Some(EnqueueRefusalReason::MailboxClosed) {
                 return result;
@@ -279,6 +300,7 @@ impl ChannelMailboxRegistry {
 /// #3029(D): outcome of a `PurgeQueue` request.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub(crate) struct PurgeQueueResult {
+    pub(crate) input_refusal: Option<crate::services::discord::input_runtime::fence::Failure>,
     /// Number of intervention-queue entries drained.
     pub(crate) drained: usize,
     /// Number of persisted pending-queue/dispatch files removed across token

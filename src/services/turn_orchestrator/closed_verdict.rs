@@ -17,19 +17,27 @@ pub(crate) enum MailboxRefusal {
     Closed,
     /// The actor task is gone.
     Unreachable,
+    InputFenced(crate::services::discord::input_runtime::fence::Failure),
 }
 
 /// Reply of a verdict arm: `send` is its answer; only the closed gate refuses.
-pub(super) struct VerdictReply<T>(oneshot::Sender<Option<T>>);
+pub(super) struct VerdictReply<T>(oneshot::Sender<Result<T, MailboxRefusal>>);
 
 impl<T> VerdictReply<T> {
-    pub(super) fn send(self, value: T) -> Result<(), Option<T>> {
-        self.0.send(Some(value))
+    pub(super) fn send(self, value: T) -> Result<(), Result<T, MailboxRefusal>> {
+        self.0.send(Ok(value))
+    }
+
+    pub(super) fn input_refuse(
+        self,
+        failure: crate::services::discord::input_runtime::fence::Failure,
+    ) {
+        let _ = self.0.send(Err(MailboxRefusal::InputFenced(failure)));
     }
 
     /// The closed gate's answer; returns `arm` for its log line.
     pub(super) fn refuse(self, arm: &'static str) -> &'static str {
-        let _ = self.0.send(None);
+        let _ = self.0.send(Err(MailboxRefusal::Closed));
         arm
     }
 }
@@ -40,8 +48,7 @@ impl ChannelMailboxHandle {
         build: impl FnOnce(VerdictReply<T>) -> ChannelMailboxMsg,
     ) -> Result<T, MailboxRefusal> {
         match self.request(|reply| build(VerdictReply(reply))).await {
-            Ok(Some(value)) => Ok(value),
-            Ok(None) => Err(MailboxRefusal::Closed),
+            Ok(value) => value,
             Err(MailboxUnreachable) => Err(MailboxRefusal::Unreachable),
         }
     }

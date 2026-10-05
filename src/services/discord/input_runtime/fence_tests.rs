@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn closing_drains_only_existing_permits_and_rejects_redirect() {
-    let gate = Gate::protect(ProviderKind::Claude, 6_325_101);
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_101).unwrap();
     let permit = gate.admit().unwrap();
     let closing = gate.close().unwrap();
     assert!(matches!(gate.admit(), Err(Failure::Mode(Mode::Closing))));
@@ -28,7 +28,7 @@ async fn closing_drains_only_existing_permits_and_rejects_redirect() {
 #[test]
 fn canonical_borrowing_and_supervisor_contention_never_prepare() {
     let root = tempfile::tempdir().unwrap();
-    let gate = Gate::protect(ProviderKind::Claude, 6_325_103);
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_103).unwrap();
     let closing = gate.close().unwrap();
     let guard = closing.population(root.path()).unwrap();
     assert!(matches!(
@@ -72,7 +72,7 @@ fn canonical_borrowing_and_supervisor_contention_never_prepare() {
 #[test]
 fn ordinary_writer_waits_for_release_and_timeout_is_typed() {
     let root = tempfile::tempdir().unwrap();
-    let gate = Gate::protect(ProviderKind::Claude, 6_325_105);
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_105).unwrap();
     let permit = gate.admit().unwrap();
     let held = PopulationGuard::try_acquire(root.path(), &ProviderKind::Claude, 6_325_105).unwrap();
     let mut held = Some(held);
@@ -117,7 +117,7 @@ fn ordinary_writer_waits_for_release_and_timeout_is_typed() {
 
 #[test]
 fn stale_epoch_is_not_mode_or_duplicate() {
-    let gate = Gate::protect(ProviderKind::Claude, 6_325_106);
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_106).unwrap();
     let permit = gate.admit().unwrap();
     gate.state.lock().unwrap().epoch += 1;
     assert_eq!(
@@ -128,7 +128,7 @@ fn stale_epoch_is_not_mode_or_duplicate() {
 
 #[test]
 fn off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore() {
-    let gate = Gate::protect(ProviderKind::Claude, 6_325_107);
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_107).unwrap();
     let closing = gate.close().unwrap();
     assert_eq!(
         closing.release_protection_after_handback(),
@@ -183,7 +183,7 @@ fn borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
         active_sources: &[],
     };
     let item = |id| serde_json::json!({"author_id":7,"message_id":id,"source_message_ids":[id],"text":"same","channel_id":channel});
-    let gate = Gate::protect(ProviderKind::Claude, channel);
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
     let closing = gate.close().unwrap();
     let guard = closing.population(root.path()).unwrap();
     assert!(enqueue(&destination, &item(2)).is_err());
@@ -274,7 +274,7 @@ fn queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_st
         None,
     )
     .unwrap();
-    let gate = Gate::protect(ProviderKind::Claude, channel.get());
+    let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -322,4 +322,105 @@ fn queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_st
         closing.population(&root).is_ok(),
         "scope drop must release its guard"
     );
+}
+
+#[test]
+fn released_registration_and_stale_closing_cannot_issue_capabilities() {
+    let root = tempfile::tempdir().unwrap();
+    let channel = 6_325_110;
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let closing = gate.close().unwrap();
+    gate.state.lock().unwrap().mode = Mode::Handback;
+    closing.release_protection_after_handback().unwrap();
+    assert!(matches!(
+        Gate::protect(ProviderKind::Claude, channel),
+        Err(Failure::StalePermit)
+    ));
+    assert!(matches!(
+        closing.population(root.path()),
+        Err(Failure::Busy)
+    ));
+    assert!(!root.path().join("discord_inflight").exists());
+    gate.restore_protection().unwrap();
+    assert!(matches!(
+        closing.population(root.path()),
+        Err(Failure::Busy)
+    ));
+    let fresh = gate.close().unwrap();
+    assert!(matches!(
+        closing.population(root.path()),
+        Err(Failure::Busy)
+    ));
+    let guard = fresh.population(root.path()).unwrap();
+    let scope = PopulationScope::hold(guard);
+    drop(scope);
+    assert!(fresh.population(root.path()).is_ok());
+    drop(fresh);
+    assert_eq!(
+        gate.mode(),
+        Mode::Closing,
+        "dropping Closing must never reopen admission"
+    );
+}
+
+#[test]
+fn admitted_writer_scope_finishes_after_close_without_new_admission() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    let channel = 6_325_111;
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let permit = gate.admit().unwrap();
+    let closing = gate.close().unwrap();
+    let scope = PopulationScope::writer(
+        &population_root().unwrap(),
+        &ProviderKind::Claude,
+        channel,
+        &permit,
+    )
+    .unwrap();
+    crate::services::turn_orchestrator::save_channel_queue(
+        &ProviderKind::Claude,
+        "admitted",
+        poise::serenity_prelude::ChannelId::new(channel),
+        &[],
+        None,
+    )
+    .unwrap();
+    drop(scope);
+    drop(permit);
+    futures::executor::block_on(closing.drain());
+    assert!(matches!(gate.admit(), Err(Failure::Mode(Mode::Closing))));
+}
+
+#[test]
+fn off_failure_health_does_not_change_actual_snapshot() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let channel = 6_325_112;
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let closing = gate.close().unwrap();
+    gate.record_failure(&[71], Failure::Mode(Mode::Closing));
+    gate.state.lock().unwrap().mode = Mode::Handback;
+    closing.release_protection_after_handback().unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let registry = crate::services::discord::health::HealthRegistry::new();
+            let before = crate::services::discord::health::build_health_snapshot(&registry).await;
+            let before = serde_json::to_value(before).unwrap();
+            record_failure(&ProviderKind::Claude, channel, &[72], Failure::Persistence);
+            let after = crate::services::discord::health::build_health_snapshot(&registry).await;
+            let after = serde_json::to_value(after).unwrap();
+            assert_eq!(before["status"], after["status"]);
+            assert_eq!(before["degraded_reasons"], after["degraded_reasons"]);
+            assert!(
+                after["degraded_reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| !r.as_str().unwrap().contains("channel=6325112"))
+            );
+        });
 }

@@ -69,7 +69,7 @@ pub(crate) fn enqueue(destination: &Destination<'_>, input: &Value) -> io::Resul
 pub(crate) fn enqueue_borrowed(
     destination: &Destination<'_>,
     input: &Value,
-    guard: &crate::services::discord::input_runtime::fence::PopulationGuard,
+    guard: &crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
 ) -> io::Result<EnqueueOutcome> {
     if input.get("blob_pins").is_some() {
         return Err(io::Error::other(

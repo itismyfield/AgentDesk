@@ -381,6 +381,16 @@ pub(super) fn legacy_restitution_refusal(refusal: MailboxRefusal) -> HydratePend
             persistence_error: Some("mailbox still purge-closed after retries".to_string()),
             ..Default::default()
         },
+        MailboxRefusal::InputFenced(reason) => {
+            tracing::warn!(
+                ?reason,
+                "input fence refused queue restitution; source retained"
+            );
+            HydratePendingQueueResult {
+                persistence_error: Some(format!("input fence: {reason:?}")),
+                ..Default::default()
+            }
+        }
         MailboxRefusal::Unreachable => HydratePendingQueueResult::default(),
     }
 }
@@ -397,5 +407,17 @@ mod relay_state_contract_refs {
         let _ = |snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot| {
             let _ = &snapshot.active_turn_nonce;
         };
+    }
+}
+
+#[cfg(test)]
+mod input_fence_contract_tests {
+    #[test]
+    fn input_fence_restitution_is_observable_failure() {
+        use crate::services::discord::input_runtime::fence::{Failure, Mode};
+        let result = super::legacy_restitution_refusal(super::MailboxRefusal::InputFenced(
+            Failure::Mode(Mode::Held),
+        ));
+        assert!(result.persistence_error.unwrap().contains("Held"));
     }
 }

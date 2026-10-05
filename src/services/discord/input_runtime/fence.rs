@@ -36,6 +36,7 @@ pub(crate) struct Gate {
     state: Mutex<State>,
     drained: Notify,
     protected: std::sync::atomic::AtomicBool,
+    health: Mutex<Option<String>>,
 }
 struct Registration {
     gate: Arc<Gate>,
@@ -54,6 +55,38 @@ pub(crate) fn lookup(provider: &ProviderKind, channel: u64) -> Option<Arc<Gate>>
 pub(crate) fn channel_gate(channel: u64) -> Option<Arc<Gate>> {
     find(|gate| gate.channel == channel)
 }
+// Observability only, never admission or durable ownership evidence.
+pub(crate) fn record_failure(
+    provider: &ProviderKind,
+    channel: u64,
+    sources: &[u64],
+    failure: Failure,
+) {
+    if let Some(gate) = lookup(provider, channel) {
+        gate.record_failure(sources, failure);
+    }
+}
+pub(crate) fn health_reasons() -> Vec<String> {
+    let mut reasons = Vec::new();
+    let mut slot = &GATES;
+    while let Some(entry) = slot.get() {
+        if entry
+            .gate
+            .protected
+            .load(std::sync::atomic::Ordering::Acquire)
+            && let Some(reason) = entry
+                .gate
+                .health
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        {
+            reasons.push(reason);
+        }
+        slot = &entry.next;
+    }
+    reasons
+}
 fn find(matches: impl Fn(&Gate) -> bool) -> Option<Arc<Gate>> {
     let mut slot = &GATES;
     while let Some(entry) = slot.get() {
@@ -70,8 +103,14 @@ fn find(matches: impl Fn(&Gate) -> bool) -> Option<Arc<Gate>> {
     None
 }
 impl Gate {
+    pub(crate) fn record_failure(&self, sources: &[u64], failure: Failure) {
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!(
+            "input_fence channel={} sources={sources:?} reason={failure:?}",
+            self.channel
+        ));
+    }
     // Registration is dormant until all population writers consume the capability.
-    pub(crate) fn protect(provider: ProviderKind, channel: u64) -> Arc<Self> {
+    pub(crate) fn protect(provider: ProviderKind, channel: u64) -> Result<Arc<Self>, Failure> {
         let mut slot = &GATES;
         loop {
             let entry = slot.get_or_init(|| {
@@ -86,12 +125,21 @@ impl Gate {
                         }),
                         drained: Notify::new(),
                         protected: std::sync::atomic::AtomicBool::new(true),
+                        health: Mutex::new(None),
                     }),
                     next: OnceLock::new(),
                 })
             });
             if entry.gate.channel == channel && entry.gate.provider == provider {
-                return entry.gate.clone();
+                return if entry
+                    .gate
+                    .protected
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    Ok(entry.gate.clone())
+                } else {
+                    Err(Failure::StalePermit)
+                };
             }
             slot = &entry.next;
         }
@@ -103,6 +151,7 @@ impl Gate {
         }
         state.epoch += 1;
         state.mode = Mode::LegacyOpen;
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.protected
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
@@ -135,7 +184,7 @@ impl Gate {
         state.mode = Mode::Closing;
         Ok(Closing {
             gate: self.clone(),
-            epoch: state.epoch,
+            epoch: std::sync::atomic::AtomicU64::new(state.epoch),
         })
     }
 }
@@ -169,7 +218,7 @@ impl Drop for Permit {
 }
 pub(crate) struct Closing {
     gate: Arc<Gate>,
-    epoch: u64,
+    epoch: std::sync::atomic::AtomicU64,
 }
 impl Closing {
     pub(crate) async fn drain(&self) {
@@ -199,7 +248,10 @@ impl Closing {
     // This port is for the supervisor after durable handback, not cancellation cleanup.
     pub(crate) fn release_protection_after_handback(&self) -> Result<(), Failure> {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.effects != 0 || state.epoch != self.epoch || state.mode != Mode::Handback {
+        if state.effects != 0
+            || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
+            || state.mode != Mode::Handback
+        {
             return Err(Failure::Busy);
         }
         state.epoch += 1;
@@ -209,15 +261,53 @@ impl Closing {
             .store(false, std::sync::atomic::Ordering::Release);
         Ok(())
     }
-    pub(crate) fn population(&self, root: &Path) -> Result<PopulationGuard, Failure> {
+    pub(crate) fn freeze(
+        &self,
+        ack: crate::services::turn_orchestrator::input_fence::FreezeAck,
+    ) -> Result<(), Failure> {
+        let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.mode != Mode::Closing
+            || state.effects != 0
+            || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
+            || ack.channel() != self.channel()
+            || ack.provider() != self.provider()
+            || !ack.matches(self)
+        {
+            return Err(Failure::Busy);
+        }
+        state.mode = Mode::Frozen;
+        state.epoch += 1;
+        self.epoch
+            .store(state.epoch, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+    pub(crate) fn population(&self, root: &Path) -> Result<ClosedPopulationGuard, Failure> {
         let state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.effects != 0
+            || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
+            || !self
+                .gate
+                .protected
+                .load(std::sync::atomic::Ordering::Acquire)
             || !matches!(state.mode, Mode::Closing | Mode::Frozen | Mode::Handback)
         {
             return Err(Failure::Busy);
         }
         drop(state);
         PopulationGuard::try_acquire(root, self.provider(), self.channel())
+            .map(ClosedPopulationGuard)
+    }
+}
+pub(crate) struct ClosedPopulationGuard(PopulationGuard);
+impl ClosedPopulationGuard {
+    pub(crate) fn borrowed<T>(
+        &self,
+        root: &Path,
+        provider: &ProviderKind,
+        channel: u64,
+        work: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.0.borrowed(root, provider, channel, work)
     }
 }
 pub(crate) struct PopulationGuard {
@@ -248,11 +338,7 @@ impl PopulationGuard {
             channel,
         })
     }
-    pub(crate) fn try_acquire(
-        root: &Path,
-        provider: &ProviderKind,
-        channel: u64,
-    ) -> Result<Self, Failure> {
+    fn try_acquire(root: &Path, provider: &ProviderKind, channel: u64) -> Result<Self, Failure> {
         let guard = Self::open(root, provider, channel)?;
         guard._file.try_lock().map_err(|e| match e {
             std::fs::TryLockError::WouldBlock => Failure::Busy,
@@ -260,7 +346,7 @@ impl PopulationGuard {
         })?;
         Ok(guard)
     }
-    pub(crate) fn writer(
+    fn writer(
         root: &Path,
         provider: &ProviderKind,
         channel: u64,
@@ -294,6 +380,14 @@ impl PopulationGuard {
                             hook();
                         }
                     });
+                    #[cfg(test)]
+                    if let Some(hook) = ACTOR_WAIT
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&channel)
+                    {
+                        hook();
+                    }
                     wait();
                 }
                 Err(std::fs::TryLockError::WouldBlock) => return Err(Failure::LockTimeout),
@@ -326,7 +420,18 @@ impl Drop for PopulationGuard {
 thread_local! { static POPULATION: RefCell<Option<PopulationGuard>> = const { RefCell::new(None) }; }
 pub(crate) struct PopulationScope(std::marker::PhantomData<std::rc::Rc<()>>);
 impl PopulationScope {
-    pub(crate) fn hold(guard: PopulationGuard) -> Self {
+    pub(crate) fn hold(guard: ClosedPopulationGuard) -> Self {
+        Self::install(guard.0)
+    }
+    fn writer(
+        root: &Path,
+        provider: &ProviderKind,
+        channel: u64,
+        permit: &Permit,
+    ) -> Result<Self, Failure> {
+        PopulationGuard::writer(root, provider, channel, permit).map(Self::install)
+    }
+    fn install(guard: PopulationGuard) -> Self {
         POPULATION.with(|held| {
             assert!(held.borrow().is_none(), "nested population scope");
             *held.borrow_mut() = Some(guard);
@@ -367,3 +472,15 @@ thread_local! { static WAIT_OBSERVER: RefCell<Option<Box<dyn FnOnce()>>> = const
 #[cfg(test)]
 #[path = "fence_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+static ACTOR_WAIT: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<u64, Box<dyn FnOnce() + Send>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+#[cfg(test)]
+pub(crate) fn install_wait_observer(channel: u64, hook: Box<dyn FnOnce() + Send>) {
+    ACTOR_WAIT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(channel, hook);
+}
