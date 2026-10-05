@@ -44,7 +44,7 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -216,14 +216,34 @@ fn strict_session_meta_from_header(
     let mut line = Vec::new();
     for _ in 0..HEADER_SCAN_LINE_LIMIT {
         line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
+        if reader
+            .by_ref()
+            .take(64 * 1024 + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
             break;
+        }
+        if line.len() > 64 * 1024 {
+            return Err(std::io::Error::other("oversized rollout header"));
+        }
+        if !line.ends_with(b"\n") {
+            return Ok(None);
         }
         if let Some(found) = header_line_meta(&line) {
             return Ok(found);
         }
     }
     Ok(None)
+}
+
+pub(crate) fn strict_parent_session(path: &Path, session_id: &str) -> std::io::Result<()> {
+    let meta = strict_session_meta_from_header(std::fs::File::open(path)?)?
+        .ok_or_else(|| std::io::Error::other("parent session_meta unavailable"))?;
+    if meta.is_subagent() || meta.id.as_deref() != Some(session_id) {
+        return Err(std::io::Error::other("parent session identity mismatch"));
+    }
+    Ok(())
 }
 
 /// `None` means keep scanning; `Some(None)` is a `session_meta` whose cwd is blank.
@@ -771,6 +791,60 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn torn_header_does_not_hide_a_complete_rollout_or_prove_a_parent() {
+        let _guard = lock_test();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let good = write_rollout(dir.path(), "rollout-good.jsonl", "good", cwd.path());
+        let torn = dir.path().join("rollout-torn.jsonl");
+        let header =
+            serde_json::json!({"type":"session_meta","payload":{"id":"torn","cwd":cwd.path()}})
+                .to_string();
+        for body in [header.as_str(), "{\"type\":\"session_meta\",\"payload\":"] {
+            std::fs::write(&torn, body).unwrap();
+            let found = complete_indexed_rollouts(dir.path())
+                .expect("a torn EOF header must not fail discovery of complete siblings");
+            assert_eq!(found.len(), 2);
+            assert!(
+                found
+                    .iter()
+                    .find(|row| row.path == torn)
+                    .unwrap()
+                    .meta
+                    .is_none()
+            );
+            assert_eq!(
+                found
+                    .iter()
+                    .find(|row| row.path == good)
+                    .unwrap()
+                    .meta
+                    .as_ref()
+                    .unwrap()
+                    .id
+                    .as_deref(),
+                Some("good")
+            );
+            assert!(strict_parent_session(&torn, "torn").is_err());
+            assert!(strict_parent_session(&good, "good").is_ok());
+        }
+    }
+
+    #[test]
+    fn oversized_header_still_fails_complete_discovery() {
+        let _guard = lock_test();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_rollout(dir.path(), "rollout-good.jsonl", "good", cwd.path());
+        let oversized = dir.path().join("rollout-oversized.jsonl");
+        for suffix in ["", "\n"] {
+            std::fs::write(&oversized, format!("{}{suffix}", "x".repeat(64 * 1024 + 1))).unwrap();
+            assert!(complete_indexed_rollouts(dir.path()).is_err());
+            assert!(strict_parent_session(&oversized, "oversized").is_err());
+        }
     }
 
     // TEST-006: the shared discovery primitive finds exactly the rollout files.

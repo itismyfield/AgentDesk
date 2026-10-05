@@ -61,6 +61,7 @@ impl Host for Fixture {
         Ok(MoveEvidence {
             user_record: false,
             turn_open: false,
+            never_started: true,
             composer: Composer::Empty,
         })
     }

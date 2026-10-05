@@ -3,7 +3,7 @@
 use chrono::Utc;
 use serde_json::Value;
 
-use crate::services::codex_tui::rollout_index::rollout_is_subagent;
+use crate::services::codex_tui::rollout_index::strict_parent_session;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
 use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
@@ -45,7 +45,11 @@ impl InputFacts {
             .any(|part| part.as_os_str() == "subagents");
         let child = match binding.provider {
             ShadowProvider::Claude => child_path,
-            ShadowProvider::Codex => rollout_is_subagent(&binding.source.path),
+            ShadowProvider::Codex => {
+                strict_parent_session(&binding.source.path, &binding.source.session_id)
+                    .map_err(|e| e.to_string())?;
+                false
+            }
         };
         if child {
             return Err("input facts require a parent transcript".into());
@@ -76,6 +80,10 @@ impl InputFacts {
     }
 
     fn poll_inner(&mut self, max_bytes: u64) -> Result<ChannelFact, String> {
+        if self.binding.provider == ShadowProvider::Codex {
+            strict_parent_session(&self.binding.source.path, &self.binding.source.session_id)
+                .map_err(|e| e.to_string())?;
+        }
         let batch = match self.capture.poll(max_bytes) {
             CaptureOutcome::Batch(batch) => batch,
             CaptureOutcome::Anomaly(anomaly) => return Err(anomaly.detail),

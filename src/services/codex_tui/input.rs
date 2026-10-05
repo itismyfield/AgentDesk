@@ -430,7 +430,7 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     }
 }
 
-fn prompt_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
+pub(crate) fn prompt_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
     let pane = strip_ansi_escape_sequences(pane_with_escapes);
     let composer_marker_detected = pane_looks_ready_for_codex_prompt_with_ansi(pane_with_escapes);
     let dim_placeholder_detected = pane_has_dim_legacy_codex_prompt_in_pane(pane_with_escapes);
@@ -924,7 +924,7 @@ fn active_composer_visible_prompt_draft(snapshot: &PromptReadinessSnapshot) -> O
     active_composer_visible_prompt_draft_in_pane(&snapshot.pane_tail)
 }
 
-fn active_composer_visible_prompt_draft_in_pane(pane: &str) -> Option<&str> {
+pub(crate) fn active_composer_visible_prompt_draft_in_pane(pane: &str) -> Option<&str> {
     let recent: Vec<&str> = pane
         .lines()
         .map(str::trim_end)
@@ -1585,7 +1585,7 @@ fn contains_dim_sgr(input: &str) -> bool {
     false
 }
 
-fn strip_ansi_escape_sequences(input: &str) -> String {
+pub(crate) fn strip_ansi_escape_sequences(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {

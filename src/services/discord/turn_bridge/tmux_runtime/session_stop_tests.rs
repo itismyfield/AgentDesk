@@ -240,7 +240,8 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         let codex_path = root.path().join("codex-parent.jsonl");
         let codex_open =
             json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"codex-parent"}});
-        std::fs::write(&codex_path, format!("{codex_open}\n")).unwrap();
+        let codex_meta = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path()}});
+        std::fs::write(&codex_path, format!("{codex_meta}\n{codex_open}\n")).unwrap();
         bind(&shared, &data.provider, channel, codex_session, &codex_path);
         fx.ready(codex_session);
         command(&ctx, &data, channel).await;
@@ -257,7 +258,11 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         assert!(crate::services::discord::tmux::recent_turn_stop_for_channel(channel).is_none());
         let codex_idle =
             json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"codex-parent"}});
-        std::fs::write(&codex_path, format!("{codex_open}\n{codex_idle}\n")).unwrap();
+        std::fs::write(
+            &codex_path,
+            format!("{codex_meta}\n{codex_open}\n{codex_idle}\n"),
+        )
+        .unwrap();
         command(&ctx, &data, channel).await;
         assert!(
             fx.take_calls().is_empty(),
@@ -295,6 +300,83 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             8,
             "two idle turns, four refusals, pending and child must reply"
         );
+        server.abort();
+    });
+}
+
+#[test]
+fn codex_parent_without_session_meta_refuses_stop_and_replies() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::codex_parent_without_session_meta_refuses_stop_and_replies"
+    )) {
+        return;
+    }
+    let fx = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let _binding_root = TestBindingRoot::enter(Some(root.path()));
+    run(async {
+        let mock = discord_mock::DiscordMockState::new();
+        let (proxy, gateway, server) = discord_mock::start(mock).await;
+        let mut ctx = discord_mock::serenity_context(proxy, gateway).await;
+        let replies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let reply_state = replies.clone();
+        let app = axum::Router::new().route(
+            "/api/v10/channels/{channel}/messages",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let replies = reply_state.clone();
+                async move {
+                    let content = body["content"].as_str().unwrap().to_owned();
+                    replies.lock().unwrap().push(content.clone());
+                    let mut message = serenity::Message::default();
+                    message.id = serenity::MessageId::new(9001);
+                    message.channel_id = ChannelId::new(discord_mock::CHANNEL_ID);
+                    message.content = content;
+                    axum::Json(message)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reply_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        ctx.http = Arc::new(
+            serenity::HttpBuilder::new("test-token")
+                .proxy(format!("http://{address}"))
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.settings.write().await.owner_user_id = Some(7);
+        let mut voice_config = crate::voice::VoiceConfig::default();
+        voice_config.keep_recordings = true;
+        voice_config.audio.recordings_dir = root.path().join("recordings");
+        let data = Data {
+            shared: shared.clone(),
+            token: "test-token".into(),
+            provider: ProviderKind::Codex,
+            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+            voice_config,
+        };
+        let channel = ChannelId::new(discord_mock::CHANNEL_ID);
+        let session = "codex-without-parent-header";
+        let path = root.path().join("codex-no-meta.jsonl");
+        let turn = json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"parent"}});
+        std::fs::write(&path, format!("{turn}\n")).unwrap();
+        bind(&shared, &data.provider, channel, session, &path);
+        let _confirmed = TestConfirmation::new(channel.get());
+        fx.ready(session);
+        command(&ctx, &data, channel).await;
+        assert!(
+            fx.take_calls().is_empty(),
+            "unknown parent must receive no provider I/O"
+        );
+        assert_eq!(
+            replies.lock().unwrap().as_slice(),
+            ["이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요."],
+            "a missing parent header must refuse visibly, not silently"
+        );
+        assert!(shared.mailbox_peek(channel).is_none());
+        reply_server.abort();
         server.abort();
     });
 }

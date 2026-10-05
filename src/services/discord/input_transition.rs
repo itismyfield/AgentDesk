@@ -193,6 +193,13 @@ impl<E: Effects> Host for Files<E> {
         let mut markers = Vec::new();
         for token in children(&queue_root)? {
             if !fs::symlink_metadata(&token)?.file_type().is_dir() {
+                if token
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| matches!(n, ".DS_Store" | ".gitkeep"))
+                {
+                    continue;
+                }
                 return Err(invalid("queue token is not a directory"));
             }
             if let Some(value) = self.capture(
@@ -250,6 +257,23 @@ impl<E: Effects> Host for Files<E> {
         } else {
             None
         };
+        for queued_input in &queued {
+            let ids = source_ids(&queued_input.payload)?;
+            if active
+                .iter()
+                .chain(markers.iter())
+                .any(|input| source_ids(&input.payload).is_ok_and(|other| !ids.is_disjoint(&other)))
+            {
+                let evidence = self
+                    .effects
+                    .evidence(queued_input.key, &queued_input.payload)?;
+                if !evidence.user_record || evidence.turn_open {
+                    return Err(invalid(
+                        "queued input overlaps an effect-bearing population",
+                    ));
+                }
+            }
+        }
         let mut represented = BTreeSet::new();
         for input in &queued {
             represented.extend(source_ids(&input.payload)?);

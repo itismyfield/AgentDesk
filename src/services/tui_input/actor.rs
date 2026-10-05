@@ -3,18 +3,16 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
-
 use super::ledger::Ledger;
-use super::rows::{DoneReason, Entry, HeldReason, Row, RowState, Rows};
+use super::rows::{AttemptEvidence, DoneReason, Entry, HeldReason, Row, RowState, Rows};
 use crate::services::tui_o::shadow::capture::SourceCapture;
-use crate::services::tui_o::shadow::identity::{RecordFact, classify};
-use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, SourceBinding};
+
+use crate::services::tui_o::shadow::SourceBinding;
 use crate::services::tui_o::writer::input_facts::{ChannelFact, TurnState};
-use crate::services::tui_prompt_dedupe::prompts_match;
 
 pub mod gate;
 pub mod pane;
+mod witness;
 
 use gate::{PaneVerdict, judge_pane};
 use pane::{Pane, SendOutcome};
@@ -23,8 +21,6 @@ use pane::{Pane, SendOutcome};
 pub const ACCEPT_WINDOW: Duration = Duration::from_secs(15);
 /// An idle channel whose pane stays unready this long holds the input for a person.
 pub const READY_WINDOW: Duration = Duration::from_secs(120);
-const CONFIRM_READ_BYTES: u64 = 1024 * 1024;
-const CONFIRM_POLLS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -35,13 +31,10 @@ pub enum Step {
     Moved(u64, RowState),
 }
 
-// The transcript cursor opened just before the paste; only records after it can confirm.
 struct Attempt {
     key: u64,
-    capture: SourceCapture,
     entered_at: Instant,
     activity: bool,
-    record_end: Option<u64>,
 }
 
 pub struct InputActor<P> {
@@ -59,6 +52,11 @@ impl<P: Pane> InputActor<P> {
             attempt: None,
             unready_since: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entered_at(&self) -> Instant {
+        self.attempt.as_ref().unwrap().entered_at
     }
 
     #[cfg(test)]
@@ -85,6 +83,16 @@ impl<P: Pane> InputActor<P> {
         {
             self.attempt = None;
         }
+        if row.received_seq.is_none() {
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        }
+        if row.attempt.as_ref().is_some_and(|attempt| {
+            attempt.binding != self.binding
+                || self.pane.binding_nonce(&self.binding).as_deref()
+                    != Some(&attempt.execution_nonce)
+        }) {
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        }
         // A fact read from another transcript says nothing about this channel's pane.
         let fact = fact
             .filter(|fact| fact.binding == self.binding)
@@ -94,11 +102,9 @@ impl<P: Pane> InputActor<P> {
             RowState::AwaitTurn if self.attempt.is_some() => {
                 self.confirm(ledger, key, &row, fact, now)
             }
-            RowState::Running => self.finish(ledger, key, fact),
+            RowState::Running => self.finish(ledger, key, &row, fact),
             // This process holds no paste anchor, so the effect cannot be judged; never re-inject.
-            RowState::Injecting | RowState::AwaitTurn => {
-                set(ledger, key, RowState::Held(HeldReason::Ambiguous))
-            }
+            RowState::Injecting | RowState::AwaitTurn => self.reconcile(ledger, key, &row),
             state => Ok(Step::Blocked(key, state)),
         }
     }
@@ -115,50 +121,119 @@ impl<P: Pane> InputActor<P> {
             self.unready_since = None;
             return Ok(Step::Wait("turn_not_idle"));
         }
-        let Some(text) = row.input.get("text").and_then(Value::as_str) else {
+        let Some((mut text, source_ids)) = witness::frame(key, row) else {
             return set(ledger, key, RowState::Held(HeldReason::NotReady));
         };
-        let verdict = match self.pane.capture().await {
-            Ok(capture) => judge_pane(self.binding.provider, &capture),
-            Err(_) => PaneVerdict::NotReady,
-        };
-        match verdict {
-            PaneVerdict::Modal => return set(ledger, key, RowState::Held(HeldReason::Modal)),
-            PaneVerdict::NotReady => {
-                let since = *self.unready_since.get_or_insert(now);
-                if now.saturating_duration_since(since) >= READY_WINDOW {
-                    self.unready_since = None;
-                    return set(ledger, key, RowState::Held(HeldReason::NotReady));
-                }
-                return Ok(Step::Wait("pane_not_ready"));
+        if let Some(attempt) = &row.attempt {
+            if attempt.source_ids != source_ids {
+                return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
             }
-            PaneVerdict::Ready => self.unready_since = None,
+            text = attempt.rendered_prompt.clone();
         }
-        // Without a transcript cursor the paste could never be confirmed, so nothing is sent.
-        let source = self.binding.source.clone();
-        let Ok(capture) = std::fs::metadata(&source.path)
-            .and_then(|meta| SourceCapture::open(source, meta.len()))
-        else {
-            return Ok(Step::Wait("transcript_unavailable"));
+        let binding = self.binding.clone();
+        let unready_since = &mut self.unready_since;
+        let mut entered = None;
+        let result = self.pane.with_composer(|pane| {
+            let verdict = pane
+                .capture()
+                .map(|c| judge_pane(binding.provider, &c))
+                .unwrap_or(PaneVerdict::NotReady);
+            match verdict {
+                PaneVerdict::Modal => return set(ledger, key, RowState::Held(HeldReason::Modal)),
+                PaneVerdict::NotReady => {
+                    let since = *unready_since.get_or_insert(now);
+                    if now.saturating_duration_since(since) >= READY_WINDOW {
+                        *unready_since = None;
+                        return set(ledger, key, RowState::Held(HeldReason::NotReady));
+                    }
+                    return Ok(Step::Wait("pane_not_ready"));
+                }
+                PaneVerdict::Ready => *unready_since = None,
+            }
+            let Some(execution_nonce) = pane.binding_nonce(&binding) else {
+                return Ok(Step::Wait("execution_unknown"));
+            };
+            let source = binding.source.clone();
+            let Ok(eof) = std::fs::metadata(&source.path).map(|meta| meta.len()) else {
+                return Ok(Step::Wait("transcript_unavailable"));
+            };
+            if SourceCapture::open(source, eof).is_err() {
+                return Ok(Step::Wait("transcript_unavailable"));
+            }
+            let evidence = AttemptEvidence {
+                binding: binding.clone(),
+                execution_nonce: execution_nonce.clone(),
+                eof,
+                rendered_prompt: text.clone(),
+                source_ids,
+                record_end: None,
+                native_turn_id: None,
+            };
+            ledger.append_entry(
+                &Entry::Transition {
+                    key,
+                    state: RowState::Injecting,
+                    attempt: Some(evidence.clone()),
+                },
+                &[],
+            )?;
+            if pane.binding_nonce(&binding).as_deref() != Some(&execution_nonce) {
+                return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+            }
+            let state = match pane.submit_for_binding(&text, &binding) {
+                SendOutcome::Sent => RowState::AwaitTurn,
+                SendOutcome::NotSent(_) => RowState::Ready,
+                SendOutcome::Indeterminate(_) => RowState::Held(HeldReason::Ambiguous),
+                SendOutcome::Refused(_) => RowState::Held(HeldReason::NotReady),
+            };
+            entered = (state == RowState::AwaitTurn).then(Instant::now);
+            set(ledger, key, state)
+        });
+        let Some(result) = result else {
+            return Ok(Step::Wait("composer_locked"));
         };
-        set(ledger, key, RowState::Injecting)?;
-        let state = match self.pane.submit(text).await {
-            SendOutcome::Sent => RowState::AwaitTurn,
-            SendOutcome::NotSent(_) => RowState::Ready,
-            SendOutcome::Indeterminate(_) => RowState::Held(HeldReason::Ambiguous),
-            SendOutcome::Refused(_) => RowState::Held(HeldReason::NotReady),
-        };
-        let step = set(ledger, key, state)?;
-        if state == RowState::AwaitTurn {
+        let step = result?;
+        if step == Step::Moved(key, RowState::AwaitTurn) {
             self.attempt = Some(Attempt {
                 key,
-                capture,
-                entered_at: now,
+                entered_at: {
+                    #[cfg(test)]
+                    if super::transition::mutant("entered_start") {
+                        now
+                    } else {
+                        entered.expect("sent attempt timestamp")
+                    }
+                    #[cfg(not(test))]
+                    {
+                        entered.expect("sent attempt timestamp")
+                    }
+                },
                 activity: false,
-                record_end: None,
             });
         }
         Ok(step)
+    }
+
+    fn reconcile(&mut self, ledger: &mut Ledger, key: u64, row: &Row) -> io::Result<Step> {
+        let Some(mut evidence) = row.attempt.clone() else {
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        };
+        match witness::scan(&evidence, false) {
+            Ok(Some((end, native))) => {
+                evidence.record_end = Some(end);
+                evidence.native_turn_id = native;
+                ledger.append_entry(
+                    &Entry::Transition {
+                        key,
+                        state: RowState::Running,
+                        attempt: Some(evidence),
+                    },
+                    &[],
+                )?;
+                Ok(Step::Moved(key, RowState::Running))
+            }
+            _ => set(ledger, key, RowState::Held(HeldReason::Ambiguous)),
+        }
     }
 
     fn confirm(
@@ -169,17 +244,27 @@ impl<P: Pane> InputActor<P> {
         fact: Option<(&TurnState, u64)>,
         now: Instant,
     ) -> io::Result<Step> {
-        let provider = self.binding.provider;
-        let attempt = self.attempt.as_mut().expect("confirm requires an attempt");
-        let expected = row.input.get("text").and_then(Value::as_str).unwrap_or("");
-        match find_user_record(&mut attempt.capture, provider, expected) {
+        let Some(mut evidence) = row.attempt.clone() else {
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        };
+        match witness::scan(&evidence, false) {
             Err(_) => return set(ledger, key, RowState::Held(HeldReason::Ambiguous)),
-            Ok(Some(end)) => {
-                attempt.record_end = Some(end);
-                return set(ledger, key, RowState::Running);
+            Ok(Some((end, native))) => {
+                evidence.record_end = Some(end);
+                evidence.native_turn_id = native;
+                ledger.append_entry(
+                    &Entry::Transition {
+                        key,
+                        state: RowState::Running,
+                        attempt: Some(evidence),
+                    },
+                    &[],
+                )?;
+                return Ok(Step::Moved(key, RowState::Running));
             }
             Ok(None) => {}
         }
+        let attempt = self.attempt.as_mut().expect("confirm requires an attempt");
         match fact {
             Some((TurnState::Open { .. }, _)) => attempt.activity = true,
             // A turn opened and closed after Enter without our record: it was someone else's.
@@ -198,59 +283,54 @@ impl<P: Pane> InputActor<P> {
         &mut self,
         ledger: &mut Ledger,
         key: u64,
+        row: &Row,
         fact: Option<(&TurnState, u64)>,
     ) -> io::Result<Step> {
-        let record_end = self.attempt.as_ref().and_then(|attempt| attempt.record_end);
-        match fact {
-            // Only an Idle read past our own record closes the turn it opened.
-            Some((TurnState::Idle, through)) if record_end.is_none_or(|end| through >= end) => {
+        #[cfg(test)]
+        if super::transition::mutant("missing_witness")
+            && matches!(fact, Some((TurnState::Idle, _)))
+        {
+            return set(ledger, key, RowState::Done(DoneReason::Completed));
+        }
+        let Some(evidence) = row.attempt.as_ref().filter(|e| e.record_end.is_some()) else {
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        };
+        if !matches!(fact, Some((TurnState::Idle, through)) if through >= evidence.record_end.unwrap())
+        {
+            return Ok(Step::Wait("turn_open"));
+        }
+        match witness::scan(evidence, true) {
+            Ok(Some(_)) => {
                 self.attempt = None;
                 set(ledger, key, RowState::Done(DoneReason::Completed))
             }
-            _ => Ok(Step::Wait("turn_open")),
+            Ok(None) => Ok(Step::Wait("turn_open")),
+            Err(_) => set(ledger, key, RowState::Held(HeldReason::Ambiguous)),
         }
     }
 }
 
-// Rows keep arrival order: the activation seq, then the Discord message id.
 fn head(rows: &Rows) -> Option<(u64, Row)> {
+    #[cfg(test)]
+    if super::transition::mutant("head_key") {
+        return rows
+            .open_rows()
+            .min_by_key(|(key, _)| *key)
+            .map(|(key, row)| (key, row.clone()));
+    }
     rows.open_rows()
-        .min_by_key(|(key, row)| (row.since_seq, *key))
+        .min_by_key(|(_, row)| row.received_seq.unwrap_or(0))
         .map(|(key, row)| (key, row.clone()))
 }
 
 fn set(ledger: &mut Ledger, key: u64, state: RowState) -> io::Result<Step> {
-    ledger.append_entry(&Entry::Transition { key, state }, &[])?;
+    ledger.append_entry(
+        &Entry::Transition {
+            key,
+            state,
+            attempt: None,
+        },
+        &[],
+    )?;
     Ok(Step::Moved(key, state))
-}
-
-fn find_user_record(
-    capture: &mut SourceCapture,
-    provider: crate::services::tui_o::shadow::ShadowProvider,
-    expected: &str,
-) -> Result<Option<u64>, String> {
-    for _ in 0..CONFIRM_POLLS {
-        let batch = match capture.poll(CONFIRM_READ_BYTES) {
-            CaptureOutcome::Batch(batch) => batch,
-            CaptureOutcome::Anomaly(anomaly) => return Err(anomaly.detail),
-        };
-        if batch.records.is_empty() {
-            return Ok(None);
-        }
-        for record in batch.records {
-            let Ok(value) = serde_json::from_slice::<Value>(&record.line) else {
-                continue;
-            };
-            if value.get("isSidechain") == Some(&Value::Bool(true)) {
-                continue;
-            }
-            let matched = classify(provider, &value).into_iter().any(|fact| {
-                matches!(fact, RecordFact::Prompt(_, text) if prompts_match(expected, &text))
-            });
-            if matched {
-                return Ok(Some(record.end));
-            }
-        }
-    }
-    Ok(None)
 }

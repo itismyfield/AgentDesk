@@ -89,6 +89,8 @@ pub enum Entry {
     Transition {
         key: u64,
         state: RowState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<AttemptEvidence>,
     },
 }
 
@@ -117,12 +119,25 @@ pub enum Owner {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttemptEvidence {
+    pub binding: crate::services::tui_o::shadow::SourceBinding,
+    pub execution_nonce: String,
+    pub eof: u64,
+    pub rendered_prompt: String,
+    pub source_ids: Vec<u64>,
+    pub record_end: Option<u64>,
+    pub native_turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub since_seq: u64,
     // The source WAL sequence survives compaction; old snapshots lack ordering evidence.
     #[serde(default)]
     pub received_seq: Option<u64>,
     pub state: RowState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<AttemptEvidence>,
     pub input: Value,
 }
 
@@ -189,7 +204,24 @@ impl Rows {
                 first_staged_seq,
                 ids,
             } => self.commit(seq, first_staged_seq, &ids),
-            Entry::Transition { key, state } => self.transition(seq, key, state),
+            Entry::Transition {
+                key,
+                state,
+                attempt,
+            } => {
+                let writable = self
+                    .rows
+                    .get(&key)
+                    .is_some_and(|row| !row.state.is_terminal());
+                self.transition(seq, key, state);
+                if writable
+                    && let Some(attempt) = attempt
+                    && let Some(row) = self.rows.get_mut(&key)
+                    && row.state == state
+                {
+                    row.attempt = Some(attempt);
+                }
+            }
         }
         self.folded_seq = seq;
         Ok(())
@@ -256,6 +288,7 @@ impl Rows {
                     }
                 },
                 state,
+                attempt: serde_json::from_value(input["move_attempt"].clone()).ok(),
                 input,
             },
         );

@@ -2555,6 +2555,7 @@ services::codex_tui::rollout_index::tests::membership_probe_checks_old_known_lea
 services::codex_tui::rollout_index::tests::membership_probe_detects_new_child_leaf_with_restored_parent_mtime
 services::codex_tui::rollout_index::tests::missing_root_then_created_is_picked_up
 services::codex_tui::rollout_index::tests::new_rollout_after_warm_lookup_is_discovered
+services::codex_tui::rollout_index::tests::oversized_header_still_fails_complete_discovery
 services::codex_tui::rollout_index::tests::reset_clears_cache
 services::codex_tui::rollout_index::tests::rollout_files_under_collects_only_rollout_jsonl
 services::codex_tui::rollout_index::tests::same_leaf_content_rewrite_reparses_header
@@ -2564,6 +2565,7 @@ services::codex_tui::rollout_index::tests::session_meta_without_id_preserves_cwd
 services::codex_tui::rollout_index::tests::signature_hit_reuses_cached_file_list_without_rewalk
 services::codex_tui::rollout_index::tests::signature_hit_still_rereads_on_mtime_len_change
 services::codex_tui::rollout_index::tests::signature_miss_reuses_surviving_file_headers
+services::codex_tui::rollout_index::tests::torn_header_does_not_hide_a_complete_rollout_or_prove_a_parent
 services::codex_tui::rollout_index::tests::tree_signature_changes_when_rollout_added
 services::codex_tui::rollout_index::tests::warm_lookup_end_to_end_reuses_cache
 services::codex_tui::rollout_index::tests::warm_scan_reuses_cached_header_without_reread
@@ -4063,6 +4065,7 @@ services::discord::input_transition::tests::supported::contended_row_lock_holds_
 services::discord::input_transition::tests::supported::malformed_population_and_outbox_leave_legacy_while_dead_row_stays_held
 services::discord::input_transition::tests::supported::marker_only_and_merged_payload_survive_move_and_checkpoint
 services::discord::input_transition::tests::supported::missing_upload_is_allowed_only_after_terminal_disposition
+services::discord::input_transition::tests::supported::queued_marker_overlap_cannot_be_reclassified_as_never_pasted
 services::discord::input_transition::tests::supported::row_restart_after_marker_retirement_preserves_richer_metadata
 services::discord::input_transition::tests::supported::terminal_boundary_accessories_resume_after_queue_retirement
 services::discord::input_transition::tests::supported::upload_bytes_are_pinned_and_original_population_reads_are_nonmutating
@@ -8107,6 +8110,7 @@ services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_times_out_when_child_keeps_running
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::codex_parent_without_session_meta_refuses_stop_and_replies
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
@@ -9959,10 +9963,19 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_input::actor_tests::actual_binding_context_mismatch_and_post_paste_replacement_veto_enter
+services::tui_input::actor_tests::actual_tmux_adapter_folded_frames_and_800_boundary_enter_once
+services::tui_input::actor_tests::actual_tmux_adapter_foreign_draft_modal_mixed_and_lock_contention_enter_zero
+services::tui_input::actor_tests::arrival_order_and_restart_missing_witness_cannot_be_guessed
 services::tui_input::actor_tests::bounded_tmux_separates_not_sent_from_indeterminate
+services::tui_input::actor_tests::exact_source_frame_and_restart_witness_survive_only_ordered_closer
+services::tui_input::actor_tests::folded_own_draft_requires_exact_k_empty_attestation_and_no_other_text
 services::tui_input::actor_tests::indeterminate_tmux_paste_is_held_and_never_pasted_again
 services::tui_input::actor_tests::input_responsibility_is_released_only_after_its_user_record_and_idle
+services::tui_input::actor_tests::merged_sources_require_the_whole_exact_persisted_frame
 services::tui_input::actor_tests::modal_and_unknown_screens_never_receive_input
+services::tui_input::actor_tests::optional_attempt_roundtrip_and_terminal_immutability
+services::tui_input::actor_tests::slow_success_starts_accept_window_after_enter_not_offer_time
 services::tui_input::actor_tests::unconfirmed_or_indeterminate_inputs_are_never_injected_again
 services::tui_input::bounded_tmux_tests::bounded_tmux_caller_cancellation_preserves_deadline_cleanup
 services::tui_input::bounded_tmux_tests::bounded_tmux_effect_uncertainty_is_independent_of_cleanup
@@ -10139,6 +10152,7 @@ services::tui_o::writer::input_facts::tests::codex_parent_stays_open_during_chil
 services::tui_o::writer::input_facts::tests::delayed_supply_replays_order_and_never_exposes_backlog_idle
 services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_supply_only_the_new_parent
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
+services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -10664,6 +10678,7 @@ services::turn_orchestrator::inbound_order::tests::an_aged_queue_item_does_not_r
 services::turn_orchestrator::inbound_order::tests::an_immediate_turn_cycle_never_refreshes_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::nothing_ahead_of_the_claim_clears_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_three_idle_queue_backstop_rounds
+services::turn_orchestrator::input_handback::tests::distinct_same_author_text_clean_wire_and_durable_upload_copy
 services::turn_orchestrator::input_handback::tests::supported::durable_handback_appends_and_recognizes_queue_marker_and_active_sources
 services::turn_orchestrator::lease_release::lease_release_identity_tests::a_provider_named_like_the_sentinel_stays_distinguishable_from_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::clear_arm_release_names_the_channel_and_the_message_provider
