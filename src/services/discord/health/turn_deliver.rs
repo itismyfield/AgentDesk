@@ -67,8 +67,21 @@ enum MailboxHolder {
     BackgroundTurn,
 }
 
+/// Queue reason when a turn that never claimed the mailbox holds the channel.
+pub const EXTERNAL_TURN_ACTIVE: &str = "external_turn_active";
+
+/// A TUI-direct, adopted or monitor turn owns the channel through its durable row alone; a
+/// headless start there could not create its own row and would lose the input.
+pub fn external_turn_holds_channel(provider: &ProviderKind, channel_id: u64) -> bool {
+    crate::services::discord::inflight::load_inflight_state_read_only(provider, channel_id)
+        .is_some_and(|row| {
+            row.turn_source != crate::services::discord::inflight::TurnSource::Managed
+        })
+}
+
 #[async_trait]
 trait DeliveryPorts: Send + Sync {
+    async fn external_turn_active(&self) -> bool;
     async fn try_start(&self) -> StartAttempt;
     async fn mailbox_holder(&self) -> MailboxHolder;
     async fn enqueue(&self) -> Result<String, String>;
@@ -77,15 +90,22 @@ trait DeliveryPorts: Send + Sync {
 async fn deliver_with_ports<P: DeliveryPorts>(
     ports: &P,
 ) -> Result<HumanInputDelivery, HumanInputError> {
-    match ports.try_start().await {
-        StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
-        StartAttempt::Unavailable(error) => return Err(HumanInputError::RuntimeUnavailable(error)),
-        StartAttempt::InvalidTarget(error) => return Err(HumanInputError::InvalidTarget(error)),
-        StartAttempt::Busy => {}
+    if !ports.external_turn_active().await {
+        match ports.try_start().await {
+            StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
+            StartAttempt::Unavailable(error) => {
+                return Err(HumanInputError::RuntimeUnavailable(error));
+            }
+            StartAttempt::InvalidTarget(error) => {
+                return Err(HumanInputError::InvalidTarget(error));
+            }
+            StartAttempt::Busy => {}
+        }
     }
     let reason = match ports.mailbox_holder().await {
         MailboxHolder::Turn => "turn_active",
         MailboxHolder::BackgroundTurn => "background_turn",
+        MailboxHolder::Nothing if ports.external_turn_active().await => EXTERNAL_TURN_ACTIVE,
         // A refused start with an empty slot is a session transition or a turn
         // that just ended; one more start attempt avoids queueing behind nothing.
         MailboxHolder::Nothing => match ports.try_start().await {
@@ -110,23 +130,31 @@ async fn deliver_with_ports<P: DeliveryPorts>(
 
 struct LivePorts {
     shared: Arc<SharedData>,
-    ctx: serenity::Context,
-    token: String,
+    /// Gateway context and bot token; only a start needs them, a queued delivery does not.
+    runtime: Result<(serenity::Context, String), String>,
     request: HumanInputRequest,
 }
 
 #[async_trait]
 impl DeliveryPorts for LivePorts {
+    async fn external_turn_active(&self) -> bool {
+        external_turn_holds_channel(&self.request.provider, self.request.channel_id.get())
+    }
+
     async fn try_start(&self) -> StartAttempt {
+        let (ctx, token) = match &self.runtime {
+            Ok(runtime) => runtime,
+            Err(error) => return StartAttempt::Unavailable(error.clone()),
+        };
         let request = &self.request;
         let result = router::start_reserved_headless_turn_with_owner(
-            &self.ctx,
+            ctx,
             request.channel_id,
             &request.text,
             &format!("{}:{}", request.source, request.author_id),
             UserId::new(request.author_id),
             &self.shared,
-            &self.token,
+            token,
             Some(request.source.as_str()),
             request.metadata.clone(),
             request.channel_name_hint.clone(),
@@ -215,27 +243,20 @@ pub async fn deliver_human_input(
     if !allowed {
         return Err(HumanInputError::AuthorNotAllowed);
     }
-    let ctx = shared
-        .http
-        .cached_serenity_ctx
-        .get()
-        .cloned()
-        .ok_or_else(|| {
-            HumanInputError::RuntimeUnavailable("provider runtime is not ready".to_string())
-        })?;
-    let token = shared
-        .http
-        .cached_bot_token
-        .get()
-        .cloned()
-        .or_else(|| crate::services::discord::resolve_discord_token_by_hash(&shared.token_hash))
-        .ok_or_else(|| {
-            HumanInputError::RuntimeUnavailable("provider token unavailable".to_string())
-        })?;
+    let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
+        None => Err("provider runtime is not ready".to_string()),
+        Some(ctx) => shared
+            .http
+            .cached_bot_token
+            .get()
+            .cloned()
+            .or_else(|| crate::services::discord::resolve_discord_token_by_hash(&shared.token_hash))
+            .map(|token| (ctx, token))
+            .ok_or_else(|| "provider token unavailable".to_string()),
+    };
     let ports = LivePorts {
         shared,
-        ctx,
-        token,
+        runtime,
         request,
     };
     deliver_with_ports(&ports).await
@@ -262,6 +283,29 @@ pub(crate) async fn register_bot_auth_for_tests(
     registry.register(provider.to_string(), shared).await;
 }
 
+/// Persists the durable row of a TUI-direct turn that never claimed the mailbox.
+#[cfg(test)]
+pub(crate) fn seed_external_turn_row_for_tests(provider: &ProviderKind, channel_id: u64) {
+    use crate::services::discord::inflight::{InflightTurnState, TurnSource};
+    let mut row = InflightTurnState::new(
+        provider.clone(),
+        channel_id,
+        None,
+        0,
+        0,
+        0,
+        "subagent report".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    row.turn_source = TurnSource::ExternalInput;
+    crate::services::discord::inflight::save_inflight_state_create_new(&row)
+        .expect("external turn row");
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -271,7 +315,9 @@ mod tests {
     use super::*;
 
     struct FakePorts {
+        externals: Mutex<VecDeque<bool>>,
         starts: Mutex<VecDeque<StartAttempt>>,
+        start_calls: AtomicUsize,
         holder: MailboxHolder,
         enqueue: Result<String, String>,
         enqueues: AtomicUsize,
@@ -279,7 +325,9 @@ mod tests {
 
     fn ports(starts: Vec<StartAttempt>, holder: MailboxHolder) -> FakePorts {
         FakePorts {
+            externals: Mutex::new(VecDeque::new()),
             starts: Mutex::new(starts.into()),
+            start_calls: AtomicUsize::new(0),
             holder,
             enqueue: Ok("discord:7:900".to_string()),
             enqueues: AtomicUsize::new(0),
@@ -288,7 +336,11 @@ mod tests {
 
     #[async_trait]
     impl DeliveryPorts for FakePorts {
+        async fn external_turn_active(&self) -> bool {
+            self.externals.lock().unwrap().pop_front().unwrap_or(false)
+        }
         async fn try_start(&self) -> StartAttempt {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
             let next = self.starts.lock().unwrap().pop_front();
             next.unwrap_or(StartAttempt::Busy)
         }
@@ -334,6 +386,35 @@ mod tests {
         ];
         for (fake, expected) in cases {
             assert_eq!(run(&fake).await, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons() {
+        use MailboxHolder::{BackgroundTurn, Nothing, Turn};
+        let started = || StartAttempt::Started("discord:7:1".into());
+        let external = |answers: Vec<bool>, starts: Vec<StartAttempt>, holder| {
+            let fake = ports(starts, holder);
+            *fake.externals.lock().unwrap() = answers.into();
+            fake
+        };
+        #[rustfmt::skip]
+        let cases = [
+            // The start a free mailbox would grant is never attempted.
+            (external(vec![true, true], vec![started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=0"),
+            (external(vec![true], vec![started()], Turn), "queued discord:7:900 turn_active enqueue=1 starts=0"),
+            (external(vec![true], vec![started()], BackgroundTurn), "queued discord:7:900 background_turn enqueue=1 starts=0"),
+            // A row that appears after a refused start labels the queue and stops the retry.
+            (external(vec![false, true], vec![StartAttempt::Busy, started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=1"),
+        ];
+        for (fake, expected) in cases {
+            let starts = |outcome: String| {
+                format!(
+                    "{outcome} starts={}",
+                    fake.start_calls.load(Ordering::SeqCst)
+                )
+            };
+            assert_eq!(starts(run(&fake).await), expected);
         }
     }
 
