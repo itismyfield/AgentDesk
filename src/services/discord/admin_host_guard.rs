@@ -110,8 +110,7 @@ pub(super) async fn managed_reset_refusal(
     Some(reason)
 }
 
-/// Where a channel clear goes, judged before its first change; the clear command consumes it.
-#[allow(dead_code)]
+/// Where a channel clear goes, judged before its first change.
 pub(crate) enum ResetTarget {
     /// Main's managed tmux reset.
     LegacyTmux,
@@ -120,33 +119,42 @@ pub(crate) enum ResetTarget {
     Refused(String),
 }
 
-#[allow(dead_code)]
 pub(crate) enum HostAdapter {
+    /// The planned pane clear and the session key whose selector it clears and saves.
     #[cfg(unix)]
-    Herdr(Box<crate::services::session_host::HerdrClearPlan>),
+    Herdr(Box<crate::services::session_host::HerdrClearPlan>, String),
 }
 
 /// A channel clear's target. With the Herdr turn switch off or no Herdr endpoint for the channel
-/// it is exactly [`managed_reset_refusal`]'s verdict.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) async fn clear_reset_target(
+/// it is exactly [`managed_reset_refusal`]'s verdict, and `session_key` is never resolved.
+pub(super) async fn clear_reset_target<F>(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     explicit_session_key: Option<&str>,
-    session_key: Option<&str>,
-) -> ResetTarget {
+    session_key: impl FnOnce() -> F,
+) -> ResetTarget
+where
+    F: std::future::Future<Output = Option<String>>,
+{
     #[cfg(unix)]
     if crate::services::turn_host::herdr_turn_switched_on()
         && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
     {
-        let pool = shared.pg_pool.as_ref();
-        let read = read_herdr_clear(pool, provider, channel_id.get(), session_key).await;
+        use crate::services::session_host::HerdrClearRefusal;
+        let refused = |refusal: HerdrClearRefusal| ResetTarget::Refused(refusal.to_string());
+        let Some(pool) = shared.pg_pool.as_ref() else {
+            return refused(HerdrClearRefusal::NoDatabase);
+        };
+        let Some(key) = session_key().await else {
+            return refused(HerdrClearRefusal::NoSessionKey);
+        };
+        let read = read_herdr_clear(Some(pool), provider, channel_id.get(), Some(&key)).await;
         let read = match read {
             Ok(read) => read,
             Err(reason) => return ResetTarget::Refused(reason),
         };
-        let judged = tokio::task::spawn_blocking(move || read.target()).await;
+        let judged = tokio::task::spawn_blocking(move || read.target(key)).await;
         return judged.unwrap_or_else(|error| ResetTarget::Refused(error.to_string()));
     }
     #[cfg(not(unix))]
@@ -177,7 +185,6 @@ pub(crate) struct HerdrClearRead {
 }
 
 #[cfg(unix)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn read_herdr_clear(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -200,13 +207,12 @@ pub(crate) async fn read_herdr_clear(
 }
 
 #[cfg(unix)]
-#[cfg_attr(not(test), allow(dead_code))]
 impl HerdrClearRead {
     /// Plans the clear on the pane; it blocks on the socket.
-    pub(crate) fn target(self) -> ResetTarget {
+    pub(crate) fn target(self, session_key: String) -> ResetTarget {
         let plan = crate::services::session_host::plan_clear;
         match plan(self.channel, self.row.as_ref(), self.unsettled) {
-            Ok(plan) => ResetTarget::NativeClear(HostAdapter::Herdr(Box::new(plan))),
+            Ok(plan) => ResetTarget::NativeClear(HostAdapter::Herdr(Box::new(plan), session_key)),
             Err(refusal) => ResetTarget::Refused(refusal.to_string()),
         }
     }

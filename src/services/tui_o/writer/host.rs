@@ -149,7 +149,28 @@ pub(crate) fn channel_accepts(channel: u64) -> bool {
 
 /// [`Readiness::rotation_unsettled`] of this process's writer.
 pub(crate) fn rotation_unsettled(channel: u64) -> Option<usize> {
+    #[cfg(test)]
+    if let Some(forced) = FORCED_UNSETTLED.with(std::cell::Cell::get) {
+        return forced;
+    }
     PROCESS.rotation_unsettled(channel)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_UNSETTLED: std::cell::Cell<Option<Option<usize>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Reports `unsettled` for every channel on this thread until dropped, as a running actor would.
+#[cfg(test)]
+pub(crate) fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
+    struct Restore(Option<Option<usize>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCED_UNSETTLED.with(|cell| cell.set(self.0));
+        }
+    }
+    Restore(FORCED_UNSETTLED.with(|cell| cell.replace(Some(unsettled))))
 }
 
 /// What hosting needs once a channel is owned; built only then, so an off or empty writer takes nothing.

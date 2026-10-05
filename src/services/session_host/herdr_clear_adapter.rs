@@ -1,6 +1,5 @@
 //! Herdr's side of the native `/clear` helper: every check before the first change, one gated
 //! `/clear` line, and Hold wherever tmux would reset; nothing here resets or kills a pane.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,6 +37,11 @@ pub(crate) enum HerdrClearRefusal {
     Gate(HerdrGateRefusal),
     /// The running execution, its launch context or its pinned source was not identified.
     SourceUnidentified,
+    /// No database holds the clear boundary and the cleared session.
+    NoDatabase,
+    NoSessionKey,
+    /// A turn still runs: no Herdr stop reaches its pane, so the clear would race its output.
+    TurnInProgress,
 }
 
 impl std::fmt::Display for HerdrClearRefusal {
@@ -52,6 +56,9 @@ impl std::fmt::Display for HerdrClearRefusal {
             Self::NotRegistered => f.write_str("not_registered"),
             Self::Gate(refusal) => write!(f, "gate({refusal:?})"),
             Self::SourceUnidentified => f.write_str("source_unidentified"),
+            Self::NoDatabase => f.write_str("no_database"),
+            Self::NoSessionKey => f.write_str("no_session_key"),
+            Self::TurnInProgress => f.write_str("turn_in_progress"),
         }
     }
 }

@@ -422,12 +422,18 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Refused before the clear changes anything: its session is not a legacy tmux one.
-    let refusal = super::super::admin_host_guard::managed_reset_refusal;
-    let target = explicit_session_key;
-    if let Some(reason) = refusal(shared, provider, channel_id, true, false, target).await {
-        anyhow::bail!("세션을 초기화하지 못했어요: {reason}");
-    }
+    // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
+    use super::super::admin_host_guard::{ResetTarget, clear_reset_target};
+    let key = || async {
+        let resolved = resolve_session_key_for_clear(http, shared, channel_id, provider).await;
+        choose_clear_session_key(explicit_session_key, resolved)
+    };
+    let hosted =
+        match clear_reset_target(shared, provider, channel_id, explicit_session_key, key).await {
+            ResetTarget::Refused(reason) => anyhow::bail!("세션을 초기화하지 못했어요: {reason}"),
+            ResetTarget::LegacyTmux => None,
+            ResetTarget::NativeClear(adapter) => Some(native::hosted(adapter)),
+        };
     let boundary = match shared.pg_pool.as_ref() {
         Some(pool) => Some(session_transcripts::begin_channel_clear_boundary_tx(pool).await?),
         None => None,
@@ -438,6 +444,15 @@ async fn clear_channel_session_state_fenced(
         .acquire_session_transition(channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
+    // A host clear cannot stop a running turn, so it is refused before the queue is touched.
+    #[cfg(unix)]
+    if hosted.is_some()
+        && super::super::mailbox_probe::mailbox_has_active_turn_or_unreachable(shared, channel_id)
+            .await
+    {
+        let refusal = crate::services::session_host::HerdrClearRefusal::TurnInProgress;
+        anyhow::bail!("세션을 초기화하지 못했어요: {refusal}");
+    }
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -467,15 +482,20 @@ async fn clear_channel_session_state_fenced(
     }
     let channel_key = channel_id.get().to_string();
     let tmux = tmux_name.as_deref();
-    let native = native::select(
-        http,
-        shared,
-        provider,
-        channel_id,
-        tmux,
-        explicit_session_key,
-    );
-    let native = native.await;
+    let native = match hosted {
+        Some(hosted) => Some(hosted),
+        None => {
+            let select = native::select(
+                http,
+                shared,
+                provider,
+                channel_id,
+                tmux,
+                explicit_session_key,
+            );
+            select.await
+        }
+    };
     // A failed boundary keeps the old transcript fence, so the session must
     // survive it too; only the released turn is stopped, still under the guard.
     let native = match native::finish_boundary(boundary, &channel_key, native).await {

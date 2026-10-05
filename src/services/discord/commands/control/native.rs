@@ -107,7 +107,35 @@ fn switched_on() -> Option<Arc<dyn NativeClearEffects>> {
 
 /// A clear whose target, host clearance and canonical baseline were all captured before its
 /// boundary is written.
-pub(super) struct NativeSelection {
+pub(super) enum NativeSelection {
+    Tmux(TmuxSelection),
+    /// A Herdr pane's planned clear and the session key whose selector it clears and saves.
+    #[cfg(unix)]
+    Herdr(Box<crate::services::session_host::HerdrClearPlan>, String),
+}
+
+impl NativeSelection {
+    fn ticket(&self) -> &ClearTicket {
+        match self {
+            Self::Tmux(selection) => &selection.waiter.ticket,
+            #[cfg(unix)]
+            Self::Herdr(plan, _) => &plan.waiter().ticket,
+        }
+    }
+}
+
+/// The clear a host adapter planned; it never takes the tmux selection or its managed reset.
+pub(super) fn hosted(
+    adapter: super::super::super::admin_host_guard::HostAdapter,
+) -> NativeSelection {
+    use super::super::super::admin_host_guard::HostAdapter;
+    match adapter {
+        #[cfg(unix)]
+        HostAdapter::Herdr(plan, session_key) => NativeSelection::Herdr(plan, session_key),
+    }
+}
+
+pub(super) struct TmuxSelection {
     effects: Arc<dyn NativeClearEffects>,
     waiter: CanonicalClearWaiter,
     cleared: ClearedHostSession,
@@ -126,7 +154,7 @@ pub(super) async fn finish_boundary(
 ) -> anyhow::Result<Option<ArmedClear>> {
     match (boundary, native) {
         (Some(tx), Some(selection)) => {
-            let ticket = serde_json::to_value(&selection.waiter.ticket)?;
+            let ticket = serde_json::to_value(selection.ticket())?;
             let finish = session_transcripts::finish_native_channel_clear_boundary_tx;
             let generation = finish(tx, channel_key, &ticket).await?;
             Ok(Some(ArmedClear(selection, generation)))
@@ -202,12 +230,12 @@ pub(super) async fn select(
     let cleared = cleared.await?;
     let capture = crate::services::tui_prompt_dedupe::native_clear::capture_live_clear;
     let waiter = capture(channel_id.get(), tmux)?;
-    Some(NativeSelection {
+    Some(NativeSelection::Tmux(TmuxSelection {
         effects,
         waiter,
         cleared,
         session_key,
-    })
+    }))
 }
 
 /// Runs the selected clear; the worker owns `guard` until the outcome and its completion mark are
@@ -221,14 +249,32 @@ pub(super) async fn complete(
     let Some(pool) = shared.pg_pool.clone() else {
         anyhow::bail!("postgres pool is required to complete a native clear");
     };
-    let host = LiveClear {
-        shared: shared.clone(),
-        pool,
-        channel_id,
-        generation,
-        selection,
+    let outcome = match selection {
+        NativeSelection::Tmux(selection) => {
+            let host = LiveClear {
+                shared: shared.clone(),
+                pool,
+                channel_id,
+                generation,
+                selection,
+            };
+            start_native_clear(host, ClearAdmission::Native, guard).await
+        }
+        #[cfg(unix)]
+        NativeSelection::Herdr(plan, session_key) => {
+            let session = HerdrSession {
+                effects: switched_on().unwrap_or_else(|| Arc::new(Production)),
+                shared: shared.clone(),
+                pool,
+                channel_id,
+                generation,
+                session_key,
+            };
+            let host = crate::services::session_host::HerdrClear::new(*plan, session);
+            start_native_clear(host, ClearAdmission::Native, guard).await
+        }
     };
-    match start_native_clear(host, ClearAdmission::Native, guard).await {
+    match outcome {
         Ok(ClearOutcome::Native(_) | ClearOutcome::Fallback) => Ok(()),
         outcome => anyhow::bail!(
             "세션을 초기화하지 못했어요: clear 결과를 확정하지 못해 다음 입력을 보류했어요 ({outcome:?})"
@@ -241,7 +287,41 @@ struct LiveClear {
     pool: sqlx::PgPool,
     channel_id: serenity::ChannelId,
     generation: NativeClearGeneration,
-    selection: NativeSelection,
+    selection: TmuxSelection,
+}
+
+/// A Herdr clear's channel session: the tmux clear's selector effects and settle.
+#[cfg(unix)]
+struct HerdrSession {
+    effects: Arc<dyn NativeClearEffects>,
+    shared: Arc<SharedData>,
+    pool: sqlx::PgPool,
+    channel_id: serenity::ChannelId,
+    generation: NativeClearGeneration,
+    session_key: String,
+}
+
+#[cfg(unix)]
+impl crate::services::session_host::ClearSession for HerdrSession {
+    fn clear_selector(&mut self) -> Effect<'_> {
+        self.effects.clear_selector(&self.session_key)
+    }
+    fn save(&mut self, commit: ClearCommit) -> Effect<'_> {
+        Box::pin(async move {
+            let (key, channel_id) = (&self.session_key, self.channel_id);
+            let saved = self.effects.save_selector(key, &commit.session, channel_id);
+            let generation = self.generation;
+            saved.await
+                && settle(
+                    &self.shared,
+                    &self.pool,
+                    channel_id,
+                    generation,
+                    Some(&commit),
+                )
+                .await
+        })
+    }
 }
 
 impl NativeClearHost for LiveClear {
@@ -350,7 +430,10 @@ pub(in crate::services::discord) async fn native_clear_admits(
     channel_id: serenity::ChannelId,
     state: &mut (Option<String>, bool, String),
 ) -> bool {
-    let Some(effects) = switched_on() else {
+    // A Herdr channel's clear is native whatever the switch says, so its boundary settles here too.
+    let herdr = || crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some();
+    let production = || Arc::new(Production) as Arc<dyn NativeClearEffects>;
+    let Some(effects) = switched_on().or_else(|| herdr().then(production)) else {
         return true;
     };
     let Some(pool) = shared

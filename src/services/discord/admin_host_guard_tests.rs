@@ -1090,6 +1090,9 @@ async fn the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_swi
     let (db, pool) = postgres().await;
     let shared = shared_on(&pool).await;
     let provider = ProviderKind::Claude;
+    let unresolved = || -> std::future::Ready<Option<String>> {
+        panic!("main's verdict resolves no session key")
+    };
     let same = |main: Option<String>, target: ResetTarget| match (main, target) {
         (Some(main), ResetTarget::Refused(reason)) => main == reason,
         (None, ResetTarget::LegacyTmux) => true,
@@ -1105,7 +1108,7 @@ async fn the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_swi
             case.seed(&pool, &channel_key(&shared, &name), &name, channel.get())
                 .await;
             let main = managed_reset_refusal(&shared, &provider, channel, true, false, None).await;
-            let target = clear_reset_target(&shared, &provider, channel, None, None).await;
+            let target = clear_reset_target(&shared, &provider, channel, None, unresolved).await;
             assert!(same(main, target), "{switch:?} {case:?}");
         }
     }
@@ -1119,7 +1122,11 @@ async fn the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_swi
     for switch in [None, Some(false), Some(true)] {
         let _switch = crate::services::turn_host::force_switch_for_test(switch);
         let main = managed_reset_refusal(&shared, &provider, channel, true, false, None).await;
-        let target = clear_reset_target(&shared, &provider, channel, None, None).await;
+        let key = || async { Some("p9b4-no-row".to_string()) };
+        let target = match switch {
+            Some(true) => clear_reset_target(&shared, &provider, channel, None, key).await,
+            _ => clear_reset_target(&shared, &provider, channel, None, unresolved).await,
+        };
         match switch {
             Some(true) => assert!(
                 matches!(&target, ResetTarget::Refused(reason) if reason.contains("herdr turn refused")),

@@ -34,9 +34,8 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
-// A channel clear's Herdr side; the clear command wires it in.
+// A channel clear's Herdr side, run by the clear command through the native clear helper.
 #[cfg(unix)]
-#[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_clear_adapter::{
     ClearSession, HerdrClear, HerdrClearPlan, HerdrClearRefusal, plan_clear,
 };
