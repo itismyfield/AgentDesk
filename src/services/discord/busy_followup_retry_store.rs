@@ -217,11 +217,17 @@ pub(in crate::services::discord) async fn requeue_inflight_for_followup_retry(
     let message_id = MessageId::new(user_msg_id);
     let retry_message_id = MessageId::new(retry_user_msg_id);
     let queued_generation = shared.restart.current_generation;
-    let source_message_ids = if retry_message_id == message_id {
-        vec![message_id]
-    } else {
-        vec![message_id, retry_message_id]
-    };
+    // Every merged id rides along so catch-up never recovers one twice. Row order stays because
+    // the text fallback maps lines to ids by position; a missing primary or retry goes last.
+    let mut source_message_ids: Vec<MessageId> = inflight_state
+        .source_message_ids
+        .iter()
+        .filter(|id| **id != 0)
+        .map(|id| MessageId::new(*id))
+        .collect();
+    source_message_ids.extend([message_id, retry_message_id]);
+    let mut seen = std::collections::HashSet::new();
+    source_message_ids.retain(|id| seen.insert(*id));
     let source_message_queued_generations = source_message_ids
         .iter()
         .map(|&source_id| {

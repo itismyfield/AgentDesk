@@ -83,11 +83,12 @@ pub use headless_turn::{
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
-#[cfg(test)]
-pub(crate) use turn_deliver::register_bot_auth_for_tests;
 pub use turn_deliver::{
-    HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
+    EXTERNAL_TURN_ACTIVE, HumanInputDelivery, HumanInputError, HumanInputRequest,
+    deliver_human_input, external_turn_holds_channel,
 };
+#[cfg(test)]
+pub(crate) use turn_deliver::{register_bot_auth_for_tests, seed_external_turn_row_for_tests};
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.

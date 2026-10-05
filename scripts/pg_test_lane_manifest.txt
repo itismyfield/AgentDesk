@@ -589,6 +589,7 @@ db::idempotency::tests::pg_integration::crash_window_retry_blocks_until_expiry_t
 db::idempotency::tests::pg_integration::gc_expired_removes_only_past_due_rows
 db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
+db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
 db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows
 db::intake_outbox::migration_pg_tests::intake_outbox_one_open_route_per_channel_blocks_second_open_row
@@ -799,6 +800,7 @@ server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_a
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
+server::routes::agents_turn_deliver::pg_tests::an_external_tui_turn_row_is_busy_for_start_and_deliver_pg
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg

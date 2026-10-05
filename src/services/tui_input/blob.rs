@@ -80,29 +80,34 @@ impl Ledger {
     }
 
     pub fn read_blob(&self, pin: &BlobPin) -> io::Result<Vec<u8>> {
-        let normalized: PathBuf = pin.local_path.components().collect();
-        if !pin.pinned
-            || !pin.local_path.starts_with("blobs/att")
-            || pin.local_path.components().count() != 4
-            || normalized.as_os_str() != pin.local_path.as_os_str()
-        {
-            return Err(invalid("invalid blob pin"));
-        }
-        let mut path = self.dir.clone();
-        for part in pin.local_path.components() {
-            let Component::Normal(part) = part else {
-                return Err(invalid("invalid blob path"));
-            };
-            component(part.to_str().ok_or_else(|| invalid("invalid blob path"))?)?;
-            path.push(part);
-            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
-                return Err(invalid("symlink in blob path"));
-            }
-        }
-        let bytes = fs::read(path)?;
-        if hex::encode(Sha256::digest(&bytes)) != pin.sha256 {
-            return Err(invalid("blob checksum mismatch"));
-        }
-        Ok(bytes)
+        read_pinned(&self.dir, pin)
     }
+}
+
+/// Verified pinned bytes read straight from a ledger directory, so no second handle is opened.
+pub fn read_pinned(ledger_dir: &Path, pin: &BlobPin) -> io::Result<Vec<u8>> {
+    let normalized: PathBuf = pin.local_path.components().collect();
+    if !pin.pinned
+        || !pin.local_path.starts_with("blobs/att")
+        || pin.local_path.components().count() != 4
+        || normalized.as_os_str() != pin.local_path.as_os_str()
+    {
+        return Err(invalid("invalid blob pin"));
+    }
+    let mut path = ledger_dir.to_path_buf();
+    for part in pin.local_path.components() {
+        let Component::Normal(part) = part else {
+            return Err(invalid("invalid blob path"));
+        };
+        component(part.to_str().ok_or_else(|| invalid("invalid blob path"))?)?;
+        path.push(part);
+        if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(invalid("symlink in blob path"));
+        }
+    }
+    let bytes = fs::read(path)?;
+    if hex::encode(Sha256::digest(&bytes)) != pin.sha256 {
+        return Err(invalid("blob checksum mismatch"));
+    }
+    Ok(bytes)
 }

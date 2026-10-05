@@ -114,6 +114,7 @@ pub(crate) struct VerifiedCodexHookSource {
     pub rollout_path: PathBuf,
     pub identity: SourceFileIdentity,
     pub route: CodexHookSourceRoute,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,8 +251,13 @@ const FIRST_RECORD_BYTES: u64 = 1024 * 1024;
 /// Judges only the first record: unfinished is retryable, a finished non-header is final.
 fn first_record_session_meta(
     file: &std::fs::File,
-) -> Result<crate::services::codex_tui::rollout_index::RolloutSessionMeta, CodexHookSourceRejection>
-{
+) -> Result<
+    (
+        crate::services::codex_tui::rollout_index::RolloutSessionMeta,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
+    CodexHookSourceRejection,
+> {
     use CodexHookSourceRejection as Reject;
     let mut line = Vec::new();
     BufReader::new(file.take(FIRST_RECORD_BYTES))
@@ -275,7 +281,7 @@ fn first_record_session_meta(
             .map(ToString::to_string)
     };
     match (record["type"].as_str(), text("cwd")) {
-        (Some("session_meta"), Some(cwd)) => Ok(
+        (Some("session_meta"), Some(cwd)) => Ok((
             crate::services::codex_tui::rollout_index::RolloutSessionMeta {
                 id: text("id"),
                 cwd: PathBuf::from(cwd),
@@ -283,7 +289,11 @@ fn first_record_session_meta(
                 parent_thread_id: text("parent_thread_id"),
                 originator: payload["originator"].as_str().map(ToString::to_string),
             },
-        ),
+            payload["timestamp"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|time| time.with_timezone(&chrono::Utc)),
+        )),
         _ => Err(Reject::FirstRecordNotSessionMeta),
     }
 }
@@ -294,6 +304,8 @@ enum VerifyStep {
     AfterOpen,
     AfterHeader,
     BeforeFinalIdentity,
+    #[cfg(test)]
+    AfterVerified,
 }
 
 #[cfg(test)]
@@ -348,7 +360,7 @@ fn verify_rollout(
     if identity == SourceFileIdentity::Unavailable {
         return Err(Reject::RolloutUnavailable);
     }
-    let meta = first_record_session_meta(&file)?;
+    let (meta, created_at) = first_record_session_meta(&file)?;
     run_verify_step(VerifyStep::AfterHeader);
     let meta_id = meta
         .id
@@ -371,11 +383,14 @@ fn verify_rollout(
     if current != canonical || path_identity(&current) != identity {
         return Err(Reject::RolloutReplaced);
     }
+    #[cfg(test)]
+    run_verify_step(VerifyStep::AfterVerified);
     Ok(VerifiedCodexHookSource {
         session_id: id.hyphenated().to_string(),
         rollout_path: canonical,
         identity,
         route: CodexHookSourceRoute::PayloadPath,
+        created_at,
     })
 }
 
@@ -469,21 +484,41 @@ impl CodexFirstProofRejection {
     }
 }
 
+#[cfg(test)]
+fn shadow_test_mutant(name: &str) -> bool {
+    std::env::var("AGENTDESK_CODEX_SHADOW_TEST_MUTATION").is_ok_and(|value| value == name)
+}
+
 /// Read-only initial-parent qualification, not publication or delivery authority.
 pub(crate) fn codex_first_proof_candidate(
     launch: &CodexFirstProof<'_>,
     claim: &CodexHookSourceClaim<'_>,
 ) -> Result<VerifiedCodexHookSource, CodexFirstProofRejection> {
-    crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
-        launch.captured,
-        launch.prepared,
-        launch.current_nonce,
-    )
-    .map_err(|_| CodexFirstProofRejection::Context)?;
+    #[cfg(test)]
+    let omit_context = shadow_test_mutant("context");
+    #[cfg(not(test))]
+    let omit_context = false;
+    if !omit_context {
+        crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
+            launch.captured,
+            launch.prepared,
+            launch.current_nonce,
+        )
+        .map_err(|_| CodexFirstProofRejection::Context)?;
+    }
+    #[cfg(test)]
+    let omit_fresh = shadow_test_mutant("fresh");
+    #[cfg(not(test))]
+    let omit_fresh = false;
+    #[cfg(test)]
+    let omit_digest = shadow_test_mutant("digest");
+    #[cfg(not(test))]
+    let omit_digest = false;
     if !launch.verified_fresh_spawn
         || !launch.no_prior_claim_or_transition
-        || launch.prepared.launch_mode != "fresh"
-        || launch.prepared.expected_native_session_id.is_some()
+        || (!omit_fresh
+            && (launch.prepared.launch_mode != "fresh"
+                || launch.prepared.expected_native_session_id.is_some()))
         || !matches!(
             launch.prepared.source_policy.as_deref(),
             Some("shadow" | "verified")
@@ -491,10 +526,13 @@ pub(crate) fn codex_first_proof_candidate(
         || claim.expected_source != CodexRolloutSource::Cli
         || !match launch.event {
             "SessionStart" => launch.source == Some("startup"),
-            "UserPromptSubmit" => first_prompt_matches(
-                launch.prepared.first_prompt_digest.as_deref(),
-                launch.prompt,
-            ),
+            "UserPromptSubmit" => {
+                omit_digest
+                    || first_prompt_matches(
+                        launch.prepared.first_prompt_digest.as_deref(),
+                        launch.prompt,
+                    )
+            }
             _ => false,
         }
     {

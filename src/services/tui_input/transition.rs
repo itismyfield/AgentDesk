@@ -299,6 +299,8 @@ impl Move {
     }
 
     // Bounded work per boot; exhausted retries stay held for the next boot.
+    // Test-only: advance does blocking IO, so production retries it from a blocking worker.
+    #[cfg(test)]
     pub async fn retry(&mut self, host: &mut impl Host, attempts: u32) -> Outcome {
         for attempt in 0..attempts.min(8) {
             let outcome = self.advance(host);
@@ -324,6 +326,10 @@ pub fn handback(root: &Path, channel: u64, host: &mut impl Host) -> io::Result<O
     let mut ledger = Ledger::open(root, channel)?;
     let rows = ledger.rows()?;
     if !rows.unbound().is_empty() {
+        // No row backs an unbound key, so only a notice naming each one can explain the hold.
+        for key in rows.unbound() {
+            host.notice(Some(*key), "handback_unbound")?;
+        }
         return Ok(Outcome::Held);
     }
     let mut open: Vec<_> = rows.open_rows().collect();

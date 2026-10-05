@@ -939,10 +939,15 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── input_runtime/
+│   │   │   ├── fence/
+│   │   │   │   ├── modes.rs
+│   │   │   │   └── modes_tests.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
 │   │   │   ├── effect.rs
 │   │   │   ├── effect_tests.rs
+│   │   │   ├── effects.rs
+│   │   │   ├── effects_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   └── mod.rs
@@ -1192,6 +1197,7 @@ src/
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
+│   │   │   │   ├── foreign_row.rs
 │   │   │   │   ├── goal_lifecycle.rs
 │   │   │   │   ├── headless_turn.rs
 │   │   │   │   ├── intake_turn.rs

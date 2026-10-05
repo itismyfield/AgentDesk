@@ -75,7 +75,7 @@ pub(super) fn frame(key: u64, row: &Row) -> Option<(String, Vec<u64>)> {
     Some((rendered, ids))
 }
 
-pub(super) fn scan(
+pub(crate) fn scan(
     evidence: &AttemptEvidence,
     completion: bool,
 ) -> Result<Option<(u64, Option<String>)>, String> {
