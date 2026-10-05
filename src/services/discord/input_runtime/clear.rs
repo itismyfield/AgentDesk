@@ -242,7 +242,7 @@ fn cutoff<H: ClearHost>(ledger: &Ledger, host: &mut H) -> Result<ClearTicket, Re
     Ok(ticket)
 }
 
-// A failed commit is re-read before anything else happens: only a confirmed absence fails the clear.
+// A failed commit is read back first; only a confirmed absence fails the clear.
 async fn commit<H: ClearHost>(
     host: &mut H,
     ticket: &ClearTicket,

@@ -1,5 +1,5 @@
-//! Production effects of a ledger `/clear`: the existing managed reset of the ticket's execution and
-//! the boundary ticket in Postgres. `/clear` does not select this path yet.
+//! Production effects of a ledger `/clear`: the existing managed reset of the ticket's execution
+//! and the boundary ticket in Postgres. `/clear` does not select this path yet.
 
 use std::sync::Arc;
 
