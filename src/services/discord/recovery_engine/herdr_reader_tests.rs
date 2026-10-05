@@ -94,7 +94,7 @@ fn the_socket_reader_reports_one_servers_reading_of_the_stored_pane() {
 
     rig.run_provider(&context, false);
     rig.foreground(&[PROVIDER]);
-    rig.serve_as(&[7, 8]);
+    rig.serve_as(&[7, 8, 7]);
     assert!(unreadable(read()), "a snapshot from another server");
     rig.serve_as(&[7, 7, 8]);
     assert!(unreadable(read()), "processes from another server");

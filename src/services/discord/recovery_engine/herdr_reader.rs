@@ -125,6 +125,10 @@ thread_local! {
     pub(crate) static PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The in-process Herdr server, for tests that drive a pass through its callers.
+#[cfg(test)]
+pub(crate) use crate::services::session_host::herdr_socket_rig_tests::HerdrRig;
+
 #[cfg(test)]
 fn with_results<R>(use_them: impl FnOnce(&mut Results) -> R) -> R {
     RECONNECTS.with_borrow_mut(use_them)
