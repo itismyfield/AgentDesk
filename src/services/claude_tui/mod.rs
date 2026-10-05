@@ -1,3 +1,8 @@
+// Dormant until the deliver route wires busy-turn injection.
+#[allow(dead_code)]
+pub(crate) mod busy_inject;
+#[cfg(all(test, unix))]
+mod busy_inject_tests;
 pub(crate) mod composer_lock;
 pub mod hook_bundle;
 pub(crate) mod hook_output_guard;
