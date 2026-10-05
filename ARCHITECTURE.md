@@ -2080,8 +2080,11 @@ src/
 │   │   │   ├── transport_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── consumer_guard.rs
+│   │   ├── herdr_gate.rs
+│   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
+│   │   ├── herdr_registry.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs

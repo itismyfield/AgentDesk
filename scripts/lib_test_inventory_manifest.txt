@@ -9679,6 +9679,14 @@ services::session_host::herdr::transport::tests::herdr_socket_writes_a_mutation_
 services::session_host::herdr::wire::tests::herdr_line_frame_bounds_and_partial_frames
 services::session_host::herdr::wire::tests::herdr_wire_matches_the_vendored_schema
 services::session_host::herdr::wire::tests::herdr_write_failure_reports_bytes_already_sent
+services::session_host::herdr_gate::tests::a_failed_gate_check_writes_nothing_and_names_why
+services::session_host::herdr_gate::tests::a_herdr_followup_retire_is_refused_and_kills_nothing
+services::session_host::herdr_gate::tests::a_server_changed_after_the_gate_gets_no_byte
+services::session_host::herdr_gate::tests::herdr_plan_pastes_once_bracketed_then_enter_each_on_its_own_connection
+services::session_host::herdr_gate::tests::host_for_herdr_reads_the_registry_endpoint_and_never_writes
+services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
+services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
+services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints
 services::session_host::herdr_host::tests::caller_scan_follows_aliases_scopes_and_lexer_edges
 services::session_host::herdr_host::tests::claude_warm_followup_reaches_tmux_only_through_the_executor
 services::session_host::herdr_host::tests::herdr_capture_maps_scroll_back_and_rejects_truncation
