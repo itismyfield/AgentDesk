@@ -167,6 +167,20 @@ mod tests {
             "ADK_INTAKE_ROUTING_MODE",
             std::ffi::OsStr::new("disabled"),
         );
+        // A cluster-less config and runtime root of its own, so a host config with the cluster
+        // enabled cannot block the Postgres-less local admission this test expects.
+        let root = tempfile::tempdir().expect("runtime root");
+        let config = crate::runtime_layout::config_file_path(root.path());
+        std::fs::create_dir_all(config.parent().expect("config dir")).expect("create config dir");
+        std::fs::write(&config, "server: {}\n").expect("write config");
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &config,
+        );
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = std::sync::Arc::new(serenity::Http::new("Bot queued-source-id-test"));
         let deps = super::super::super::message_handler::IntakeDeps {
