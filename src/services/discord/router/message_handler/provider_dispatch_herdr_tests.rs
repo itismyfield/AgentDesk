@@ -328,8 +328,7 @@ impl Fixture {
             return None;
         }
         let nonce = launcher.nonces.lock().unwrap()[0].clone();
-        let root = crate::config::runtime_root().unwrap();
-        let context = root.join(format!("runtime/binding_contexts/claude/{nonce}.json"));
+        let context = context_of(&nonce);
         self.rig.run_provider(&context, false);
         let launched = crate::services::tui_prompt_dedupe::binding_context::execution_context(
             "claude", &nonce,
@@ -511,6 +510,12 @@ impl Started {
     }
 }
 
+/// Where a launch writes execution `nonce`'s context.
+fn context_of(nonce: &str) -> PathBuf {
+    let root = crate::config::runtime_root().unwrap();
+    root.join(format!("runtime/binding_contexts/claude/{nonce}.json"))
+}
+
 fn hold_of(nonce: &str) -> PathBuf {
     let root = crate::config::runtime_root().unwrap();
     root.join("runtime/herdr_input_holds").join(nonce)
@@ -551,7 +556,7 @@ fn t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_the
 fn t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg() {
     let fx = Fixture::new("mismatch", None);
     let record = fx.store_bound();
-    fx.rig.run_provider(&fx.rig.context(NONCE), true);
+    fx.rig.run_provider(&context_of(NONCE), true);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     let (result, _) = fx.turn(&record, &ports, || {});
@@ -618,9 +623,7 @@ fn a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted
     assert_eq!(pending.state, HostedState::Pending);
     assert!(pending.expected.is_none());
     launcher.unconfirmed.store(false, Ordering::SeqCst);
-    let root = crate::config::runtime_root().unwrap();
-    let context = root.join(format!("runtime/binding_contexts/claude/{nonce}.json"));
-    fx.rig.run_provider(&context, false);
+    fx.rig.run_provider(&context_of(&nonce), false);
     let ports = fx.ports(&launcher);
     let (second, _) = fx.turn(&fx.record(), &ports, || {});
     let second = second.unwrap_err();
