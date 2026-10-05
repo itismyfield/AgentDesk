@@ -71,6 +71,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/config/session_hosts_tests.rs",
         "src/services/claude/host_gate_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs",
+        "src/services/session_host/herdr_socket_rig_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs",
         "src/services/discord/tui_prompt_relay/claude_idle_tail_host_tests.rs",
         "src/services/claude/c1_teardown_tests.rs",
