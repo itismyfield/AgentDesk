@@ -382,9 +382,8 @@ fn prompt_sends() -> Vec<Value> {
     ]
 }
 
-// A Legacy row: one create with its evidence, the attach only after the launch's SessionStart and
-// before any pane write, one paste and Enter, then Bound once the prompt's transcript resolved
-// the cold start's Pending source, and the watcher handoff on that transcript.
+// A Legacy row: one create, the attach after SessionStart and before any pane write, one paste
+// and Enter, then Bound once the transcript resolves the Pending source, and the watcher handoff.
 #[test]
 fn t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg() {
     let fx = Fixture::new("launch", None);
