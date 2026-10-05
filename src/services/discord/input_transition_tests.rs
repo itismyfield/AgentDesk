@@ -142,8 +142,8 @@ mod supported {
             assert_eq!(host.collect(&ledger).unwrap().len(), 3);
             assert_eq!(
                 host.captured.len(),
-                8,
-                "all token namespaces and busy retry must be captured"
+                6,
+                "all token namespaces and busy retry are captured; exit-clear records are not"
             );
             let path = match phase {
                 DeletePhase::Dispatch => marker,
@@ -594,5 +594,32 @@ mod supported {
             "snapshot mismatch must refuse row deletion"
         );
         assert!(path.exists(), "successor row must remain");
+    }
+    #[test]
+    fn e1_exit_clear_records_neither_block_nor_leave_with_the_move() {
+        let root = sandbox();
+        save(
+            &root
+                .path()
+                .join("discord_pending_queue/claude/token/9.json"),
+            &json!([item(8)]),
+        );
+        // The card belongs to an input that already left the queue, so no moved input covers it.
+        let clear = root
+            .path()
+            .join("discord_queue_exit_placeholder_clears/claude/token/9.json");
+        save(
+            &clear,
+            &json!([{"user_message_id":5,"placeholder_message_id":105}]),
+        );
+        let original = fs::read(&clear).unwrap();
+        let mut host = files(root.path());
+        let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+        assert_eq!(fs::read(&clear).unwrap(), original);
+        let rows = Ledger::open(root.path(), 9).unwrap().rows().unwrap();
+        assert_eq!(rows.owner(8), Owner::Ledger);
+        assert_eq!(rows.owner(5), Owner::Legacy);
+        assert_eq!(host.effects.actor_started, 1);
     }
 }

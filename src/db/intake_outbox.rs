@@ -921,6 +921,21 @@ pub(crate) async fn list_recent_rows(
     }
 }
 
+/// Whether the channel still has an intake row in an open status; that row owes Legacy execution.
+pub(crate) async fn channel_has_open_row(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM intake_outbox
+                         WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL}))"
+    );
+    sqlx::query_scalar(&sql)
+        .bind(channel_id)
+        .fetch_one(pool)
+        .await
+}
+
 /// Leader sweep that returns rows currently in `accepted` longer than
 /// `sla_secs` without reaching `spawned`. Round-3 P1 #3: the operator
 /// alert IS the recovery signal — auto-retry forbidden post-accept.
@@ -1268,6 +1283,32 @@ mod migration_pg_tests {
             .await
             .expect("fresh OPEN row after parent terminal");
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        assert!(!super::channel_has_open_row(&pool, "ch-e1").await.unwrap());
+        insert_minimal_row(&pool, "ch-e1", "msg-A", 1, "pending")
+            .await
+            .expect("open row");
+        assert!(super::channel_has_open_row(&pool, "ch-e1").await.unwrap());
+        assert!(
+            !super::channel_has_open_row(&pool, "ch-e1-other")
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "UPDATE intake_outbox SET status='done', completed_at=NOW()
+             WHERE channel_id='ch-e1' AND user_msg_id='msg-A'",
+        )
+        .execute(&pool)
+        .await
+        .expect("transition to done");
+        assert!(!super::channel_has_open_row(&pool, "ch-e1").await.unwrap());
         pool.close().await;
         pg_db.drop().await;
     }

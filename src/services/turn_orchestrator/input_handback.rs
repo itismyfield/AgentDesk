@@ -140,66 +140,8 @@ fn enqueue_locked(destination: &Destination<'_>, input: &Value) -> io::Result<En
     if !valid(&serde_json::from_value(input.clone())?) {
         return Ok(EnqueueOutcome::Rejected);
     }
-    if ledger_input.get("blob_pins").is_some() {
-        let pins: Vec<crate::services::tui_input::blob::BlobPin> =
-            serde_json::from_value(ledger_input["blob_pins"].clone())?;
-        if !pins.is_empty() {
-            let ledger = crate::services::tui_input::ledger::Ledger::open(
-                destination.root,
-                destination.channel,
-            )?;
-            let copy_root = destination
-                .root
-                .join("discord_uploads")
-                .join(destination.channel.to_string());
-            std::fs::create_dir_all(&copy_root)?;
-            runtime_store::fsync_parent_dir(&copy_root)?;
-            runtime_store::fsync_parent_dir(
-                copy_root
-                    .parent()
-                    .ok_or_else(|| io::Error::other("upload parent unavailable"))?,
-            )?;
-            let mut uploads = Vec::new();
-            for pin in pins {
-                let bytes = ledger.read_blob(&pin)?;
-                let name = pin
-                    .local_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .ok_or_else(|| io::Error::other("invalid blob path"))?;
-                let row = pin
-                    .local_path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|n| n.to_str())
-                    .ok_or_else(|| io::Error::other("invalid blob row"))?;
-                let filename = name
-                    .split_once('_')
-                    .map(|(_, name)| name)
-                    .ok_or_else(|| io::Error::other("invalid pinned filename"))?;
-                let path = copy_root.join(format!("handback-{row}-{name}"));
-                match std::fs::symlink_metadata(&path) {
-                    Ok(meta) if meta.is_file() && std::fs::read(&path)? == bytes => {}
-                    Ok(_) => return Err(io::Error::other("handback upload conflict")),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        use std::io::Write;
-                        let mut file = tempfile::NamedTempFile::new_in(&copy_root)?;
-                        file.write_all(&bytes)?;
-                        file.as_file().sync_all()?;
-                        file.persist_noclobber(&path).map_err(|e| e.error)?;
-                    }
-                    Err(error) => return Err(error),
-                }
-                sync_existing(&path)?;
-                uploads.push(Value::String(format!(
-                    "[File uploaded] {} → {} ({} bytes)",
-                    filename,
-                    path.display(),
-                    bytes.len()
-                )));
-            }
-            input["pending_uploads"] = Value::Array(uploads);
-        }
+    if let Some(uploads) = pinned_uploads(destination.root, destination.channel, ledger_input)? {
+        input["pending_uploads"] = Value::Array(uploads);
     }
     let input = &input;
     let base: PathBuf = destination
@@ -284,6 +226,79 @@ fn enqueue_locked(destination: &Destination<'_>, input: &Value) -> io::Result<En
     .map_err(io::Error::other)?;
     runtime_store::fsync_parent_dir(&path)?;
     Ok(EnqueueOutcome::Persisted)
+}
+
+/// The input as Legacy stores it: pinned uploads copied to Legacy-owned files and ledger pins dropped.
+pub(crate) fn without_pins(root: &Path, channel: u64, input: &Value) -> io::Result<Value> {
+    let mut legacy = input.get("legacy_input").unwrap_or(input).clone();
+    if let Some(uploads) = pinned_uploads(root, channel, input)? {
+        legacy["pending_uploads"] = Value::Array(uploads);
+    }
+    if let Some(fields) = legacy.as_object_mut() {
+        fields.remove("blob_pins");
+    }
+    Ok(legacy)
+}
+
+// Pins are read from the ledger directory so the caller's ledger handle stays the only one open.
+fn pinned_uploads(root: &Path, channel: u64, input: &Value) -> io::Result<Option<Vec<Value>>> {
+    let Some(pins) = input.get("blob_pins") else {
+        return Ok(None);
+    };
+    let pins: Vec<crate::services::tui_input::blob::BlobPin> =
+        serde_json::from_value(pins.clone())?;
+    if pins.is_empty() {
+        return Ok(None);
+    }
+    let ledger_dir = crate::services::tui_input::ledger::dir(root, channel);
+    let copy_root = root.join("discord_uploads").join(channel.to_string());
+    std::fs::create_dir_all(&copy_root)?;
+    runtime_store::fsync_parent_dir(&copy_root)?;
+    runtime_store::fsync_parent_dir(
+        copy_root
+            .parent()
+            .ok_or_else(|| io::Error::other("upload parent unavailable"))?,
+    )?;
+    let mut uploads = Vec::new();
+    for pin in pins {
+        let bytes = crate::services::tui_input::blob::read_pinned(&ledger_dir, &pin)?;
+        let name = pin
+            .local_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid blob path"))?;
+        let row = pin
+            .local_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid blob row"))?;
+        let filename = name
+            .split_once('_')
+            .map(|(_, name)| name)
+            .ok_or_else(|| io::Error::other("invalid pinned filename"))?;
+        let path = copy_root.join(format!("handback-{row}-{name}"));
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && std::fs::read(&path)? == bytes => {}
+            Ok(_) => return Err(io::Error::other("handback upload conflict")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                use std::io::Write;
+                let mut file = tempfile::NamedTempFile::new_in(&copy_root)?;
+                file.write_all(&bytes)?;
+                file.as_file().sync_all()?;
+                file.persist_noclobber(&path).map_err(|e| e.error)?;
+            }
+            Err(error) => return Err(error),
+        }
+        sync_existing(&path)?;
+        uploads.push(Value::String(format!(
+            "[File uploaded] {} → {} ({} bytes)",
+            filename,
+            path.display(),
+            bytes.len()
+        )));
+    }
+    Ok(Some(uploads))
 }
 
 #[cfg(test)]
