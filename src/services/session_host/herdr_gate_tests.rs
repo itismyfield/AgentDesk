@@ -1,5 +1,7 @@
 //! The Herdr input executor from its real entry points: a real socket transport against an
 //! in-process server that, like Herdr, answers the one request a connection carries and closes.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;

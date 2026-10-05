@@ -1,6 +1,5 @@
-//! This node's Herdr endpoints from the boot `session_hosts` section: one socket transport per
-//! local endpoint, the read-only host `host_for(Herdr)` returns, the launch host and gated input
-//! targets. Building dials nothing; an empty section or another node's endpoint builds nothing.
+//! This node's Herdr endpoints from the boot `session_hosts` section: socket transports, the
+//! read-only `host_for(Herdr)` host, the launch host and gated targets. Building dials nothing.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::PathBuf;

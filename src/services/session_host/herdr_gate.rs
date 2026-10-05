@@ -1,6 +1,5 @@
-//! Herdr input gate for one recorded pane. Before every input it checks admission (a cancel key
-//! is exempt), E7 restore-off and that the stored execution still runs there, all on the server E7
-//! named; the input then goes only to that server. Synchronous: callers keep their blocking thread.
+//! Herdr input gate for one recorded pane: admission (cancel keys exempt), E7 and the stored
+//! execution are checked on one server before every input, which goes only to that server.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,6 +79,7 @@ struct PaneGate {
 }
 
 /// A recorded Herdr pane on this node's registered endpoint; every input to it passes the gate.
+/// Its calls block on the socket, so callers stay off the async runtime.
 #[derive(Clone)]
 pub(crate) struct HerdrTarget(Arc<PaneGate>);
 
@@ -336,6 +336,6 @@ impl PaneGate {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "herdr_gate_tests.rs"]
 mod tests;
