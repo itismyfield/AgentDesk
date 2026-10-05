@@ -453,6 +453,10 @@ pub(crate) struct ChannelMailboxHandle {
 }
 
 impl ChannelMailboxHandle {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     async fn request<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> ChannelMailboxMsg,

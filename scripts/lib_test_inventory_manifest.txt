@@ -3398,6 +3398,7 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_s
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_force_kill_keeps_a_superseded_turn
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_lookup_stop_finishes_only_the_turn_it_judged
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_stop_leaves_a_turn_admitted_after_the_judged_one_ended
+services::discord::health::recovery::stop_judgement::judged_finish_tests::c1_lookup_stop_keeps_runtime_when_live_receiver_drops_judgement_reply
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
 services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant

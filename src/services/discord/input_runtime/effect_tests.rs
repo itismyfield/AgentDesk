@@ -137,7 +137,7 @@ async fn c1_worker_wake_and_outer_abort_cleanup_after_inflight_poll() {
 
 #[tokio::test]
 async fn c1_detached_worker_holds_effect_until_cleanup_after_caller_returns() {
-    let gate = Gate::protect(ProviderKind::Claude, 6_325_401).unwrap();
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_452).unwrap();
     let _health = super::super::test_health::Clear::new(&gate);
     let permit = gate.admit().unwrap();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -172,13 +172,13 @@ async fn c1_detached_worker_holds_effect_until_cleanup_after_caller_returns() {
 
 #[tokio::test]
 async fn c1_scope_rejects_cross_channel_and_cross_provider_without_new_admission() {
-    let gate = Gate::protect(ProviderKind::Codex, 6_325_402).unwrap();
+    let gate = Gate::protect(ProviderKind::Codex, 6_325_453).unwrap();
     let _health = super::super::test_health::Clear::new(&gate);
     scope(Some(gate.admit().unwrap()), async {
         let closing = gate.close().unwrap();
-        assert!(admit(&ProviderKind::Codex, 6_325_402).unwrap().is_some());
+        assert!(admit(&ProviderKind::Codex, 6_325_453).unwrap().is_some());
         assert!(matches!(
-            admit(&ProviderKind::Claude, 6_325_402),
+            admit(&ProviderKind::Claude, 6_325_453),
             Err(Failure::StalePermit)
         ));
         assert!(matches!(

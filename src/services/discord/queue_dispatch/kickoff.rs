@@ -15,7 +15,7 @@ pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
     };
     input_runtime::fence::effect::scope(
         permit,
-        kickoff_admitted_queue_channel(deps, provider, channel_id),
+        Box::pin(kickoff_admitted_queue_channel(deps, provider, channel_id)),
     )
     .await
 }
