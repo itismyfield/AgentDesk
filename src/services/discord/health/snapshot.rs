@@ -232,6 +232,8 @@ pub struct DiscordHealthSnapshot {
     expired_relay_ledgers: Vec<String>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_turns: Option<super::transcript_turn::TranscriptTurnsHealth>,
 }
 
 impl DiscordHealthSnapshot {
@@ -1065,9 +1067,12 @@ pub(super) async fn build_health_snapshot_with_options(
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
+    let (transcript_reasons, transcript_turns) =
+        super::transcript_turn::project_retired(&providers, include_mailbox_details).await;
     for reason in crate::services::tui_o::alarm::health_reasons()
         .into_iter()
         .chain(super::super::input_runtime::fence::health_reasons())
+        .chain(transcript_reasons)
     {
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
@@ -1089,6 +1094,7 @@ pub(super) async fn build_health_snapshot_with_options(
         expired_relay_ledgers,
         providers: provider_entries,
         mailboxes: mailbox_entries,
+        transcript_turns,
     }
 }
 
@@ -1489,6 +1495,54 @@ mod tests {
                     .expect("the O channel's verdict stays published");
                 assert!(!owned_entry.reachability.governs_health_polarity);
                 assert_ne!(owned_entry.reachability.verdict, "reachable");
+            });
+    }
+
+    /// A LedgerOpen-shaped channel (O owns its output, input is retired to the ledger, nothing
+    /// is left behind) raises no reason naming it on either build.
+    #[cfg(unix)]
+    #[test]
+    fn a_ledger_open_channel_raises_no_legacy_reason() {
+        use crate::services::discord::health::legacy_supervision::RetiredForTest;
+        use crate::services::tui_o::cutover::{boot_ownership, test_override};
+
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let _source_guard = set_relay_verdict_source_for_tests(RelayVerdictSource::Composite);
+        let owned = NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed);
+        let _boot = test_override::force_candidates(&[(owned, RuntimeHandoffKind::ClaudeTui)]);
+        for (channel, _, candidate) in boot_ownership() {
+            if channel == owned {
+                assert!(candidate.expect("selected channel").confirm_store());
+            }
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let registry = HealthRegistry::new();
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let provider = ProviderKind::Claude.as_str();
+                registry
+                    .register(provider.to_string(), shared.clone())
+                    .await;
+                shared.mailboxes.handle(ChannelId::new(owned));
+                let _retired = RetiredForTest::new(provider, owned);
+
+                let detail = build_health_snapshot(&registry).await;
+                let public = build_public_health_snapshot(&registry).await;
+                for reasons in [&detail.degraded_reasons, &public.degraded_reasons] {
+                    let names_owned = |r: &String| r.contains(&owned.to_string());
+                    assert!(!reasons.iter().any(names_owned), "{reasons:?}");
+                }
+                let json = serde_json::to_value(detail).expect("serialize detail snapshot");
+                let entry = &json["transcript_turns"]["channels"][0];
+                assert_eq!(entry["channel_id"], owned);
+                assert_eq!(entry["residue"], serde_json::json!({}));
             });
     }
 

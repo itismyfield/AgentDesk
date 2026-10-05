@@ -2,6 +2,7 @@
 //! one request a connection carries, registered on a thread with E7 off and a scripted process OS.
 #![cfg(unix)]
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixListener;
@@ -28,8 +29,8 @@ pub(crate) const PANE: &str = "w1-1";
 pub(crate) const NODE: &str = "mac-mini";
 pub(crate) const KEY: &str = "mini";
 pub(crate) const SESSION: &str = "agentdesk";
-const SHELL: u32 = 10;
-const PROVIDER: u32 = 20;
+pub(crate) const SHELL: u32 = 10;
+pub(crate) const PROVIDER: u32 = 20;
 
 /// The process reads the gate sees; empty until a test names the running provider.
 #[derive(Default)]
@@ -57,9 +58,15 @@ impl ProcessOs for LateOs {
     }
 }
 
+/// Results a test put in place of the default reply, by method.
+type Answers = Arc<Mutex<HashMap<String, Value>>>;
+
 pub(crate) struct HerdrRig {
     path: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
+    answers: Answers,
+    /// Server pids the next dials reach, the last one repeating.
+    servers: Arc<Mutex<VecDeque<u32>>>,
     unanswered_sends: Arc<AtomicBool>,
     os: Arc<LateOs>,
     stop: Arc<AtomicBool>,
@@ -73,8 +80,12 @@ fn start(seconds: u64) -> ProcessStart {
     }
 }
 
-fn reply(request: &Value) -> Value {
-    let result = match request["method"].as_str().unwrap_or("") {
+fn reply(request: &Value, answers: &Answers) -> Value {
+    let method = request["method"].as_str().unwrap_or("");
+    if let Some(result) = answers.lock().unwrap().get(method) {
+        return json!({"id": request["id"], "result": result});
+    }
+    let result = match method {
         "pane.process_info" => json!({"type": "pane_process_info", "process_info": {
             "pane_id": PANE, "shell_pid": SHELL, "foreground_process_group_id": PROVIDER,
             "foreground_processes": [{"pid": PROVIDER, "name": "claude"}]
@@ -106,6 +117,8 @@ impl HerdrRig {
             Arc::new(AtomicBool::new(false)),
         );
         let (log, unanswered, stopped) = (requests.clone(), unanswered_sends.clone(), stop.clone());
+        let answers = Answers::default();
+        let scripted = answers.clone();
         let thread = thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -126,7 +139,8 @@ impl HerdrRig {
                     .as_str()
                     .is_some_and(|m| m.starts_with("pane.send"));
                 if !(send && unanswered.load(Ordering::SeqCst)) {
-                    let _ = writer.write_all(format!("{}\n", reply(&request)).as_bytes());
+                    let _ =
+                        writer.write_all(format!("{}\n", reply(&request, &scripted)).as_bytes());
                 }
                 let _ = writer.shutdown(Shutdown::Write);
                 let _ = reader.read_to_end(&mut Vec::new());
@@ -135,6 +149,8 @@ impl HerdrRig {
         Self {
             path,
             requests,
+            answers,
+            servers: Arc::new(Mutex::new(VecDeque::from([7]))),
             unanswered_sends,
             os: Arc::default(),
             stop,
@@ -157,8 +173,16 @@ impl HerdrRig {
             retry_backoff: Duration::from_millis(50),
             max_frame_bytes: MAX_FRAME_BYTES,
         };
+        let servers = self.servers.clone();
         let socket = HerdrSocketTransport::new(&endpoint, config, LineJsonFraming)
-            .with_peer_reader(Box::new(|_| Ok((7, start(1_000)))));
+            .with_peer_reader(Box::new(move |_| {
+                let mut servers = servers.lock().unwrap();
+                let pid = match servers.len() {
+                    1 => servers[0],
+                    _ => servers.pop_front().unwrap(),
+                };
+                Ok((pid, start(1_000)))
+            }));
         let registry = HerdrRegistry::with_transport(endpoint, Arc::new(socket));
         let os: Arc<dyn ProcessOs> = self.os.clone();
         herdr_registry::force_for_test(registry.with_reads((off_where_dialled, os)))
@@ -179,6 +203,50 @@ impl HerdrRig {
             os
         };
         *self.os.0.lock().unwrap() = Some(Arc::new(os));
+    }
+
+    /// The pane's root shell was restarted after the launch recorded it; the provider is the same.
+    pub(crate) fn restart_shell(&self, context: &Path) {
+        let os = FakeOs::launched(env_naming(context)).starting(SHELL, &[start(1_009)]);
+        *self.os.0.lock().unwrap() = Some(Arc::new(os));
+    }
+
+    /// Replies with `result` to every later `method` request.
+    pub(crate) fn answer(&self, method: &str, result: Value) {
+        self.answers.lock().unwrap().insert(method.into(), result);
+    }
+
+    /// Every later snapshot is complete and lists exactly `panes`.
+    pub(crate) fn show_panes(&self, panes: &[&str]) {
+        let panes: Vec<Value> = panes
+            .iter()
+            .map(|pane| {
+                json!({"pane_id": pane, "terminal_id": "t1", "workspace_id": "w1",
+                "tab_id": "w1:1", "focused": false, "agent_status": "idle", "revision": 7})
+            })
+            .collect();
+        let snapshot = json!({"version": "0.9.3", "protocol": 22, "workspaces": [], "tabs": [],
+            "layouts": [], "agents": [], "panes": panes});
+        self.answer(
+            "session.snapshot",
+            json!({"type": "session_snapshot", "snapshot": snapshot}),
+        );
+    }
+
+    /// Every later process read of the pane names `foreground` under its root shell.
+    pub(crate) fn foreground(&self, foreground: &[u32]) {
+        let listed: Vec<Value> = foreground.iter().map(|pid| json!({"pid": pid})).collect();
+        let info = json!({"pane_id": PANE, "shell_pid": SHELL,
+            "foreground_process_group_id": foreground.first(), "foreground_processes": listed});
+        self.answer(
+            "pane.process_info",
+            json!({"type": "pane_process_info", "process_info": info}),
+        );
+    }
+
+    /// The server pid each later dial reaches, in order; the last one repeats.
+    pub(crate) fn serve_as(&self, pids: &[u32]) {
+        *self.servers.lock().unwrap() = pids.iter().copied().collect();
     }
 
     /// The launch evidence of the pane's root shell and provider, for `nonce`.

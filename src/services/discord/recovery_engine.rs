@@ -115,6 +115,9 @@ mod restore_inflight;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
 // Unix only, like the `tmux::execution_identity` comparison it calls.
 #[cfg(unix)]
+#[path = "recovery_engine/herdr_reader.rs"]
+pub(in crate::services::discord) mod herdr_reader;
+#[cfg(unix)]
 #[path = "recovery_engine/host_reconcile.rs"]
 pub(in crate::services::discord) mod host_reconcile;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome

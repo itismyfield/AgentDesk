@@ -14,18 +14,33 @@ mod supported {
         actor_started: usize,
         legacy: Vec<u64>,
         notices: usize,
+        population_root: Option<PathBuf>,
+    }
+    impl Fixture {
+        fn assert_unlocked(&self) {
+            if let Some(root) = &self.population_root {
+                let lock =
+                    fs::File::open(root.join("discord_inflight/claude/9.json.lock")).unwrap();
+                lock.try_lock()
+                    .expect("external effect must run outside canonical guard");
+            }
+        }
     }
     impl Effects for Fixture {
         fn intake_outbox_open(&mut self) -> io::Result<bool> {
+            self.assert_unlocked();
             Ok(self.outbox)
         }
         fn provider_alive(&mut self) -> io::Result<bool> {
+            self.assert_unlocked();
             Ok(!self.dead)
         }
         fn materialize_bundle(&mut self, _: &Value) -> io::Result<Vec<(String, Vec<u8>)>> {
+            self.assert_unlocked();
             Ok(vec![("bundle.txt".into(), b"bundle".to_vec())])
         }
         fn evidence(&mut self, _: u64, _: &Value) -> io::Result<MoveEvidence> {
+            self.assert_unlocked();
             Ok(MoveEvidence {
                 user_record: self.accepted,
                 turn_open: self.turn_open,
@@ -38,6 +53,7 @@ mod supported {
             })
         }
         fn enqueue(&mut self, key: u64, _: &Value) -> io::Result<EnqueueOutcome> {
+            self.assert_unlocked();
             if self.legacy.contains(&key) {
                 return Ok(EnqueueOutcome::AlreadyPreserved);
             }
@@ -45,10 +61,12 @@ mod supported {
             Ok(EnqueueOutcome::Persisted)
         }
         fn start_actor(&mut self) -> io::Result<()> {
+            self.assert_unlocked();
             self.actor_started += 1;
             Ok(())
         }
         fn notice(&mut self, _: Option<u64>, _: &'static str) -> io::Result<()> {
+            self.assert_unlocked();
             self.notices += 1;
             Ok(())
         }
@@ -66,7 +84,97 @@ mod supported {
         fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
     }
     fn files(root: &Path) -> Files<Fixture> {
-        Files::new(root, ProviderKind::Claude, 9, Fixture::default())
+        Files::frozen(
+            root,
+            ProviderKind::Claude,
+            9,
+            crate::services::discord::input_runtime::fence::Closing::frozen_for_test(
+                ProviderKind::Claude,
+                9,
+            ),
+            Fixture {
+                population_root: Some(root.to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn b2_all_token_capture_and_each_phase_preserves_changed_bytes() {
+        for phase in [
+            DeletePhase::Dispatch,
+            DeletePhase::Queue,
+            DeletePhase::Accessories,
+        ] {
+            let root = sandbox();
+            for token in ["one", "two"] {
+                let key = if token == "one" { 8 } else { 10 };
+                save(
+                    &root
+                        .path()
+                        .join(format!("discord_pending_queue/claude/{token}/9.json")),
+                    &json!([item(key)]),
+                );
+                for name in [
+                    "discord_queued_placeholders",
+                    "discord_queue_exit_placeholder_clears",
+                ] {
+                    save(
+                        &root.path().join(format!("{name}/claude/{token}/9.json")),
+                        &json!([{"user_message_id":key,"placeholder_message_id":key+100}]),
+                    );
+                }
+            }
+            let marker = root
+                .path()
+                .join("discord_pending_queue/claude/third/9.dispatch");
+            save(&marker, &item(12));
+            let busy = root
+                .path()
+                .join("discord_busy_followup_retries/claude/9/8.json");
+            save(
+                &busy,
+                &json!({"notice_message_id":108,"busy_retry_count":1,"first_busy_retry_at_ms":100}),
+            );
+            let mut host = files(root.path());
+            let ledger = Ledger::open(root.path(), 9).unwrap();
+            assert_eq!(host.collect(&ledger).unwrap().len(), 3);
+            assert_eq!(
+                host.captured.len(),
+                8,
+                "all token namespaces and busy retry must be captured"
+            );
+            let path = match phase {
+                DeletePhase::Dispatch => marker,
+                DeletePhase::Queue => root.path().join("discord_pending_queue/claude/one/9.json"),
+                _ => busy,
+            };
+            fs::write(&path, b"successor bytes").unwrap();
+            assert!(host.delete(phase).is_err());
+            assert_eq!(fs::read(path).unwrap(), b"successor bytes");
+        }
+    }
+
+    #[test]
+    fn b2_collect_requires_frozen_capability_and_contention_probes_no_effect() {
+        let root = sandbox();
+        let ledger = Ledger::open(root.path(), 9).unwrap();
+        let mut off = Files::new(root.path(), ProviderKind::Claude, 9, Fixture::default());
+        assert_eq!(
+            off.collect(&ledger).err().unwrap().to_string(),
+            "Frozen population capability required"
+        );
+        assert!(!root.path().join("discord_inflight").exists());
+        let mut host = files(root.path());
+        let guard = host.population().unwrap();
+        assert_eq!(
+            host.collect(&ledger).err().unwrap().to_string(),
+            "input fence: Busy"
+        );
+        assert!(host.captured.is_empty());
+        drop(guard);
+        assert!(host.collect(&ledger).unwrap().is_empty());
     }
 
     #[test]
@@ -305,6 +413,7 @@ mod supported {
                 self.files.delete(phase)
             }
             fn start_actor(&mut self) -> io::Result<()> {
+                self.files.effects.assert_unlocked();
                 self.files.start_actor()
             }
             fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<(bool, Composer)> {
@@ -431,12 +540,13 @@ mod supported {
         );
         let path = root.path().join("discord_inflight/claude/9.json");
         save(&path, &serde_json::to_value(row).unwrap());
-        let guard = inflight::lock_inflight_state_path(&path).unwrap();
         let root_path = root.path().to_owned();
+        let mut host = files(&root_path);
+        let mut movement = Move::prepare(&root_path, 9, &mut host).unwrap();
+        host.effects.population_root = None; // A different owner holds the sidecar in this contention fixture.
+        let guard = inflight::lock_inflight_state_path(&path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let mut host = files(&root_path);
-            let mut movement = Move::prepare(&root_path, 9, &mut host).unwrap();
             let first = movement.advance(&mut host);
             tx.send((movement, host, first)).unwrap();
         });
@@ -449,6 +559,7 @@ mod supported {
         assert_eq!(first, Outcome::Held);
         assert!(stayed, "contended row must not be deleted");
         assert!(host.effects.notices > 0);
+        host.effects.population_root = Some(root.path().to_owned());
         assert_eq!(movement.advance(&mut host), Outcome::Ledger);
         assert!(!path.exists());
     }

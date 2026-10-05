@@ -672,6 +672,154 @@ fn a_refused_restart_attach_withholds_hook_switches_until_a_match_pg() {
     }
 }
 
+/// Logs a SessionStart(`source`) Pending of `session` on the pane under `nonce`'s spawn marker.
+fn log_pending(herdr: &Herdr, nonce: &str, session: &str, source: &str) {
+    log_under(herdr, nonce, session, source, |proposal| {
+        binding_events::record_pending(proposal).unwrap();
+    });
+}
+
+/// Logs `session`'s file as a verified Source under `nonce`'s spawn marker.
+fn log_source(herdr: &Herdr, nonce: &str, session: &str) {
+    let path = herdr.ingress.transcript(session);
+    let source = SourceId {
+        session_id: session.into(),
+        path,
+        dev: 1,
+        ino: 1,
+    };
+    log_under(herdr, nonce, session, "startup", |proposal| {
+        binding_events::record_verified(proposal, &source).unwrap();
+    });
+}
+
+/// Records under `nonce`'s spawn marker, then puts back the marker the launch left.
+fn log_under(
+    herdr: &Herdr,
+    nonce: &str,
+    session: &str,
+    source: &str,
+    record: impl FnOnce(&binding_events::Proposal),
+) {
+    let marker = crate::services::tmux_common::session_temp_path(herdr.logical(), "spawn_nonce");
+    let launched = std::fs::read_to_string(&marker).unwrap();
+    std::fs::write(&marker, nonce).unwrap();
+    let hook =
+        binding_events::HookSignal::from_payload("session_start", &json!({"source": source}));
+    let path = herdr.ingress.path(session).display().to_string();
+    let proposal = binding_events::Proposal {
+        channel_id: herdr.channel,
+        provider: "claude",
+        tmux_session: herdr.logical(),
+        session_id: Some(session),
+        path: &path,
+        replaced: None,
+        cause: binding_events::CauseSource::Hook(hook.cause()),
+        hook: Some(&hook),
+    };
+    with_tmux_source_authority(herdr.logical(), |_| record(&proposal));
+    std::fs::write(&marker, launched).unwrap();
+}
+
+fn admitted(herdr: &Herdr) -> bool {
+    crate::services::tui_prompt_dedupe::herdr_claim_admission(herdr.logical(), true).is_ok()
+}
+
+/// The first prompt hook of `session`, naming its own new transcript.
+fn first_prompt(herdr: &Herdr, session: &str) -> u16 {
+    herdr.ingress.transcript(session);
+    let payload = herdr.ingress.payload(session, None);
+    herdr
+        .ingress
+        .claude_hook("UserPromptSubmit", session, &payload, Some(&uuid()))
+}
+
+// T-R4: a restart on the execution's own clear Pending, taken from its own source, admits input
+// and restores no source or cursor; another execution's, or one from another source, admits none.
+#[test]
+fn t_r4_a_restart_on_its_own_clear_pending_admits_input_without_a_source_pg() {
+    for case in ["own", "other nonce", "from another source"] {
+        let herdr = &mut Herdr::new(&format!("clear-{}", case.replace(' ', "-")));
+        let a = uuid();
+        let nonce = herdr.launch(&a);
+        herdr.ingress.transcript(&a);
+        let reader = herdr.pane(&nonce, |_| {});
+        assert!(matches!(
+            herdr.launched(&nonce, &a, &reader),
+            HerdrSourceAttach::Published { bound: true, .. }
+        ));
+        let other = "fedcba9876543210fedcba9876543210";
+        let y = uuid();
+        match case {
+            "own" => log_pending(herdr, &nonce, &y, "clear"),
+            "other nonce" => log_pending(herdr, other, &y, "clear"),
+            _ => {
+                log_source(herdr, other, &uuid());
+                log_pending(herdr, &nonce, &y, "clear");
+            }
+        }
+        let (lines, row) = (herdr.log().len(), herdr.row());
+        herdr.restart();
+        let attached = herdr.restarted(&reader);
+        assert_eq!((herdr.bound(), herdr.log().len()), (None, lines), "{case}");
+        assert_eq!(herdr.row(), row, "{case}");
+
+        // A watcher claim on the pane, which carries its input and relay, is admitted or withheld.
+        let admitted = admitted(herdr);
+        if case == "own" {
+            assert_eq!(
+                (attached, admitted),
+                (HerdrSourceAttach::AwaitingClear, true)
+            );
+        } else {
+            let refused = (HerdrSourceAttach::NoBaseline, false);
+            assert_eq!((attached, admitted), refused, "{case}");
+        }
+    }
+}
+
+// The restart pass leaves an execution this process launched: a re-attach would refuse its
+// waiting compact and withhold the pane, but it stays admitted and takes its next prompt.
+#[test]
+fn the_restart_pass_leaves_an_execution_this_process_launched_pg() {
+    use crate::services::discord::recovery_engine::herdr_reader::{
+        ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
+    };
+    let herdr = &mut Herdr::new("launched-here");
+    let a = uuid();
+    let nonce = herdr.launch(&a);
+    herdr.ingress.transcript(&a);
+    let reader = herdr.pane(&nonce, |_| {});
+    assert!(matches!(
+        herdr.launched(&nonce, &a, &reader),
+        HerdrSourceAttach::Published { bound: true, .. }
+    ));
+    let y = uuid();
+    log_pending(herdr, &nonce, &y, "compact");
+    let (pool, logical, log_root) = (
+        herdr.pool.clone(),
+        herdr.logical().to_owned(),
+        binding_events::test_root(),
+    );
+    let pass = async move {
+        tokio::task::spawn_blocking(move || {
+            binding_events::set_test_root(log_root.as_deref());
+            let rig = crate::services::session_host::herdr_socket_rig_tests::HerdrRig::start();
+            let _registry = rig.registry_on_this_thread();
+            let _hosts = crate::config::session_hosts::force_for_test(Some("test-node"), &[]);
+            // The listing a launch in this process leaves on the pane.
+            admit_herdr_execution(&logical, &nonce);
+            reconnect_restarted_herdr_panes(Some(&pool));
+            reconnect_counts()
+        })
+        .await
+    };
+    let counts = herdr.rt.block_on(pass).unwrap();
+    assert_eq!(counts, ReconnectCounts::default());
+    assert!(admitted(herdr));
+    assert_eq!(first_prompt(herdr, &y), 202);
+}
+
 // O begins a channel's era only on a binding baseline its log names: a Herdr launch's own source
 // is one, and a refused launch leaves none.
 #[test]

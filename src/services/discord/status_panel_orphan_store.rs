@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 
+use crate::services::discord::health::transcript_turn::Presence;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
@@ -576,6 +577,20 @@ pub(in crate::services::discord) fn is_queued(
         return false;
     };
     is_queued_in_root(&root, provider, token_hash, channel_id, panel_msg_id)
+}
+
+/// This bot's queued panel deletes for one channel; a corrupt file still counts as residue.
+pub(in crate::services::discord) fn channel_presence(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Presence {
+    let path = runtime_store::discord_status_panel_orphans_root()
+        .map(|root| channel_file_path_in_root(&root, provider, token_hash, channel_id));
+    Presence::of_file(path, |raw| {
+        serde_json::from_str::<StatusPanelOrphanChannelFile>(raw)
+            .map_or(1, |file| file.into_entries().len())
+    })
 }
 
 fn delete_error_is_permanent(err: &serenity::Error) -> bool {

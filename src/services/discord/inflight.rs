@@ -61,11 +61,11 @@ pub(in crate::services::discord) use episode_guard::{
 };
 pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
-pub(in crate::services::discord) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
 #[cfg(test)]
 use store::second_handle_try_lock;
 pub(crate) use store::try_lock_inflight_state_path;
+pub(in crate::services::discord) use store::{BorrowedInflightRow, inflight_state_path};
 
 // #3715 / #3835: the rebind-origin dead-watcher helpers, staleness predicates,
 // and stale data-row cleanup live in this capped sibling. Canonical lock sidecars
@@ -154,7 +154,9 @@ pub(in crate::services::discord) use self::orphan_relay_reclaim::{
 // widened. The shared persist/validate primitives moved to `store.rs`.
 mod clear_store;
 #[allow(unused_imports)]
-pub(in crate::services::discord) use clear_store::operator_disposition_remove_pinned;
+pub(in crate::services::discord) use clear_store::{
+    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
+};
 mod save_store;
 
 // Shared persist/validate primitives (moved to `store.rs`): re-imported at the

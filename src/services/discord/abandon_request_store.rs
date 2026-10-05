@@ -48,6 +48,7 @@ use super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
 };
 use super::placeholder_sweeper::{PlaceholderProbe, probe_placeholder_state};
+use crate::services::discord::health::transcript_turn::Presence;
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
@@ -369,6 +370,19 @@ fn remove_record(
         return;
     };
     remove_record_in_root(&root, provider, token_hash, channel_id, record);
+}
+
+/// This bot's queued abandon requests for one channel; a corrupt file still counts as residue.
+pub(in crate::services::discord) fn channel_presence(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Presence {
+    let path = runtime_store::discord_abandon_requests_root()
+        .map(|root| channel_file_path_in_root(&root, provider, token_hash, channel_id));
+    Presence::of_file(path, |raw| {
+        serde_json::from_str::<Vec<AbandonRecord>>(raw).map_or(1, |records| records.len())
+    })
 }
 
 /// Render the requested terminal card for a record (no inflight row).

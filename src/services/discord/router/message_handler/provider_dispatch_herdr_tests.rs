@@ -892,3 +892,6 @@ async fn an_unconfigured_channel_passes_both_entries_without_a_read() {
         assert!(!built.get(), "{on:?}");
     }
 }
+
+#[path = "provider_dispatch_herdr_reconnect_tests.rs"]
+mod reconnect;

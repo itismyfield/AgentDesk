@@ -60,6 +60,8 @@ fn actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_t
     run(async {
         let channel = ChannelId::new(6_325_201);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let handle = ChannelMailboxRegistry::default().handle(channel);
         assert!(handle.enqueue(item(10), context()).await.enqueued);
         let closing = Arc::new(gate.close().unwrap());
@@ -115,6 +117,8 @@ fn preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused() {
     run(async {
         let channel = ChannelId::new(6_325_202);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let enqueue = gate.admit().unwrap();
         let requeue = gate.admit().unwrap();
         let closing = gate.close().unwrap();
@@ -139,6 +143,8 @@ fn preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused() {
         assert_eq!(handle.snapshot().await.intervention_queue.len(), 2);
         let channel = ChannelId::new(6_325_207);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let handle = ChannelMailboxRegistry::default().handle(channel);
         let candidate = Arc::new(CancelToken::new());
         let kickoff = handle.recovery_kickoff(candidate, UserId::new(7), Some(MessageId::new(24)));
@@ -175,6 +181,8 @@ fn off_path_has_no_sidecar_and_registry_does_not_remint_on_fence() {
             "off must not acquire a new lock"
         );
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let _closing = gate.close().unwrap();
         let result = registry
             .enqueue_with_closed_retry(channel, item(32), context(), None)
@@ -192,6 +200,86 @@ fn off_path_has_no_sidecar_and_registry_does_not_remint_on_fence() {
                 .len(),
             1
         );
+    });
+}
+
+#[test]
+fn b2_late_protection_between_actor_selection_and_enter_has_no_scheduler_io() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        let channel = ChannelId::new(6_325_304);
+        assert!(fence::channel_gate(channel.get()).is_none());
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
+        let state = ChannelMailboxState::default();
+        let (reply, _) = tokio::sync::oneshot::channel();
+        let mut msg = ChannelMailboxMsg::RestartDrain {
+            persistence: context(),
+            reply,
+        };
+        assert!(matches!(
+            enter(channel, &state, &mut msg),
+            Err(Failure::Busy)
+        ));
+        assert!(!root.path().join("runtime").exists());
+        assert_eq!(
+            tokio::spawn(async {
+                tokio::task::yield_now().await;
+                1
+            })
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(gate.mode(), Mode::LegacyOpen);
+    });
+}
+
+#[test]
+fn b2_freeze_refuses_other_token_queue_or_marker_without_ack_or_mutation() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        for (index, extension) in ["json", "dispatch"].into_iter().enumerate() {
+            let channel = ChannelId::new(6_325_305 + index as u64);
+            let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+            let _health =
+                crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
+            let closing = Arc::new(gate.close().unwrap());
+            let handle = ChannelMailboxRegistry::default().handle(channel);
+            let path = fence::population_root().unwrap().join(format!(
+                "discord_pending_queue/claude/other/{}.{extension}",
+                channel.get()
+            ));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"other-token-population").unwrap();
+            assert!(matches!(
+                handle.freeze_input(closing.clone(), context()).await,
+                Err(Failure::Busy)
+            ));
+            assert_eq!(gate.mode(), Mode::Closing);
+            assert_eq!(std::fs::read(&path).unwrap(), b"other-token-population");
+            assert!(
+                !path
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!("fence-test/{}.json", channel.get()))
+                    .exists()
+            );
+            std::fs::remove_file(path).unwrap();
+            let ack = handle
+                .freeze_input(closing.clone(), context())
+                .await
+                .unwrap();
+            closing.freeze(ack).unwrap();
+            assert_eq!(gate.mode(), Mode::Frozen);
+        }
     });
 }
 
@@ -217,6 +305,8 @@ fn freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_popul
     run(async {
         let channel = ChannelId::new(6_325_204);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let permit = gate.admit().unwrap();
         let closing = Arc::new(gate.close().unwrap());
         let population = fence::population_root().unwrap();
@@ -302,6 +392,8 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
                 .await
         );
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let closing = Arc::new(gate.close().unwrap());
         assert!(matches!(
             handle.freeze_input(closing, context()).await,
@@ -321,6 +413,8 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
             .join("discord_pending_queue/claude/fence-test/6325208.dispatch");
         let bytes = std::fs::read(&marker).unwrap();
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let closing = Arc::new(gate.close().unwrap());
         assert!(matches!(
             handle.freeze_input(closing, context()).await,
@@ -343,6 +437,8 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
                 .await
         );
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let _closing = gate.close().unwrap();
         let finish = handle
             .finish_turn_if_matches_episode_started_before(
@@ -365,6 +461,8 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
         let channel = ChannelId::new(6_325_206);
         let handle = ChannelMailboxRegistry::default().handle(channel);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health =
+            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
         let closing = Arc::new(gate.close().unwrap());
         let queue = fence::population_root()
             .unwrap()
