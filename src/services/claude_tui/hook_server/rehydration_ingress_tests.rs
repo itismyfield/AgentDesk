@@ -854,6 +854,32 @@ fn a_live_pane_marked_for_another_host_is_not_adopted_by_name() {
     }
 }
 
+// After its tmux panes, the restart pass runs the Herdr reconnect pass on a node with a local
+// endpoint, and only there.
+#[test]
+fn the_restart_pass_runs_the_herdr_reconnect_pass_after_its_tmux_panes() {
+    use crate::services::discord::recovery_engine::herdr_reader::{HerdrRig, PASSES};
+    let (root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let _ingress = Ingress::new();
+    let _reset = Reset;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    VIEW.with_borrow_mut(|v| {
+        *v = Some(View {
+            tmux: format!("herdr-pass-{}", uuid()),
+            channel: 7_520,
+            home: root.path().join("claude-home"),
+            peers: Vec::new(),
+        })
+    });
+    let passes = || PASSES.with(std::cell::Cell::get);
+    rehydrate_existing_claude_tui_bindings(&shared);
+    assert_eq!(passes(), 0, "no local endpoint");
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    rehydrate_existing_claude_tui_bindings(&shared);
+    assert_eq!(passes(), 1);
+}
+
 #[test]
 fn a_rehydrated_replacement_execution_uses_its_matching_launch_context_once() {
     use crate::services::tmux_common as tc;

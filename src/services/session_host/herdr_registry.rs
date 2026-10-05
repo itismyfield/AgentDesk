@@ -12,7 +12,7 @@ use super::herdr::contract::{HerdrOutcome, HerdrTransport, ServerHello, ServerWi
 use super::herdr::launch_host::SocketHerdrLaunchHost;
 use super::herdr::model::{HerdrCall, HerdrEndpoint};
 use super::herdr::observe::RestoreUnverified;
-use super::herdr_gate::HerdrTarget;
+use super::herdr_gate::{HerdrPaneView, HerdrTarget};
 use super::herdr_host::HerdrHost;
 use super::model::{
     HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence, HostRefusal,
@@ -244,6 +244,21 @@ impl HerdrRegistry {
             None => target,
         };
         target
+    }
+
+    /// A read-only view of a stored execution located on a registered endpoint; unlike a target
+    /// it needs no launch evidence.
+    pub(crate) fn view(&self, stored: &HostedExecution) -> Option<HerdrPaneView> {
+        let view = self.endpoints.iter().find_map(|registered| {
+            let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
+            HerdrPaneView::new(&registered.endpoint, transport, stored)
+        });
+        #[cfg(test)]
+        let view = match &self.reads {
+            Some((_, os)) => view.map(|view| view.with_os(os.clone())),
+            None => view,
+        };
+        view
     }
 }
 

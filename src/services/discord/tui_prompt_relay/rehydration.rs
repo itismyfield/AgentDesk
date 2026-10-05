@@ -251,18 +251,21 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
     // even when the session is not present in `list_session_names()` at all.
     evict_dead_orphaned_claude_tui_mirrors(shared);
 
-    let sessions = match claude_session_names() {
-        Ok(sessions) => sessions,
+    match claude_session_names() {
+        Ok(sessions) => {
+            for tmux_session_name in sessions {
+                rehydrate_claude_tui_pane(shared, &tmux_session_name);
+            }
+            crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
+        }
         Err(error) => {
             tracing::debug!(error = %error, "Claude TUI binding rehydrate skipped; tmux sessions unavailable");
-            return;
         }
-    };
-
-    for tmux_session_name in sessions {
-        rehydrate_claude_tui_pane(shared, &tmux_session_name);
     }
-    crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
+    // Herdr panes are not tmux sessions; their rows name them. No local endpoint reads nothing.
+    super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
+        shared.pg_pool.as_ref(),
+    );
 }
 
 /// One pane of the rehydrate pass; a durable Pending is restored before the binding judgment.

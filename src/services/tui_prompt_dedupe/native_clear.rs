@@ -30,6 +30,17 @@ pub(crate) struct ClearTicket {
     pub context: BindingContext,
     pub old: SourceId,
     pub baseline: u64,
+    // Set only by a ledger-mode clear; its absence keeps the native ticket's bytes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputCutoff>,
+}
+
+/// The ledger inputs a clear cuts, named by their existing keys at the cutoff sequence.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct InputCutoff {
+    pub ledger_generation: u64,
+    pub ledger_seq: u64,
+    pub affected_keys: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,7 +111,9 @@ pub(crate) fn judge_native_clear_restart(
         .host
         .as_deref()
         .filter(|h| !h.trim().is_empty());
-    if host.is_none()
+    // Only the input runtime settles an input cutoff, after its ledger transitions are durable.
+    if ticket.input.is_some()
+        || host.is_none()
         || host != local_host.filter(|h| !h.trim().is_empty())
         || ticket.context.schema != 1
         || ticket.context.provider != "claude"
@@ -182,6 +195,7 @@ impl CanonicalClearWaiter {
             context,
             old,
             baseline: 0,
+            input: None,
         };
         let baseline = tmux_common::try_with_tmux_source_authority(
             &ticket.context.tmux_session,
@@ -842,6 +856,50 @@ mod tests {
                 NativeClearRestart::Hold
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_tickets_keep_their_bytes_and_an_input_cutoff_is_never_settled_natively() {
+        #[derive(serde::Serialize)]
+        struct Before<'a> {
+            context: &'a BindingContext,
+            old: &'a SourceId,
+            baseline: u64,
+        }
+        let fixture = CanonicalFixture::new();
+        let native = restart_ticket(&fixture);
+        let before = Before {
+            context: &native.context,
+            old: &native.old,
+            baseline: native.baseline,
+        };
+        let before = serde_json::to_vec(&before).unwrap();
+        assert_eq!(serde_json::to_vec(&native).unwrap(), before);
+        let decoded: ClearTicket = serde_json::from_slice(&before).unwrap();
+        assert_eq!((decoded.input.as_ref(), &decoded), (None, &native));
+        let tmux = Some(native.context.tmux_session.as_str());
+        let channel = native.context.channel_id.unwrap();
+        let judge = |ticket: &ClearTicket| {
+            let boundary = restart_boundary(ticket);
+            (
+                judge_native_clear_restart(&boundary, Some("test-node")),
+                judge_native_clear_admission(&boundary, Some("test-node"), channel, tmux),
+            )
+        };
+        let reset = NativeClearRestart::ResetUnresolved;
+        assert_eq!(judge(&decoded), (reset.clone(), reset));
+        let mut input = native.clone();
+        input.input = Some(InputCutoff {
+            ledger_generation: 2,
+            ledger_seq: 9,
+            affected_keys: vec![11, 12],
+        });
+        let restored: ClearTicket =
+            serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        assert_eq!(restored, input);
+        let hold = NativeClearRestart::Hold;
+        assert_eq!(judge(&restored), (hold.clone(), hold));
     }
 
     #[cfg(unix)]

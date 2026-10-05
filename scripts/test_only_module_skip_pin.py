@@ -37,6 +37,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_server/native_clear_fence_tests.rs",
         "src/services/discord/adk_session_selector_checked_tests.rs",
         "src/services/discord/commands/control/native_tests.rs",
+        "src/services/discord/commands/control/input_clear_tests.rs",
+        "src/services/discord/input_runtime/clear_tests.rs",
         "src/services/discord/input_transition_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
         "src/services/turn_orchestrator/input_fence_tests.rs",
@@ -345,6 +347,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/queue_io/ledger_settlement_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
+        "src/services/discord/health/transcript_turn_tests.rs",
+        "src/services/discord/placeholder_sweeper/tick_cleanup_tests.rs",
         "src/services/discord/health/recovery/stop_judgement/judged_finish_tests.rs",
         "src/services/discord/health/recovery/live_agent_recovery/judged_finish_fence_tests.rs",
         "src/server/routes/health_api/unread_tail_attribution_tests.rs",
@@ -376,6 +380,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/tmux_runtime/judged_stop_tests.rs",
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
+        "src/cli/herdr_tests.rs",
+        "src/services/discord/recovery_engine/herdr_reader_tests.rs",
+        "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
     }
 )
 

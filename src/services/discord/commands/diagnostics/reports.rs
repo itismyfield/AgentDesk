@@ -242,7 +242,7 @@ pub(in crate::services::discord) async fn build_health_report(
         })
         .unwrap_or_else(|| "no".to_string());
 
-    format!(
+    let mut report = format!(
         "\
 **AgentDesk Health**
 - provider: `{}`
@@ -285,7 +285,9 @@ pub(in crate::services::discord) async fn build_health_report(
         inflight_text,
         queued_count,
         pending_uploads
-    )
+    );
+    report.extend(transcript_turn_line(provider, channel_id));
+    report
 }
 
 pub(in crate::services::discord) async fn build_status_report(
@@ -361,7 +363,7 @@ pub(in crate::services::discord) async fn build_status_report(
         .map(inflight_runtime_label)
         .unwrap_or("none");
 
-    format!(
+    let mut report = format!(
         "\
 **Channel Status**
 - provider: `{}`
@@ -391,7 +393,9 @@ pub(in crate::services::discord) async fn build_status_report(
         pending_uploads,
         history_len,
         if cleared { "yes" } else { "no" }
-    )
+    );
+    report.extend(transcript_turn_line(provider, channel_id));
+    report
 }
 
 pub(in crate::services::discord) async fn build_inflight_report(
@@ -478,7 +482,7 @@ pub(in crate::services::discord) async fn build_inflight_report(
             .join("\n")
     };
 
-    format!(
+    let mut report = format!(
         "\
 **Inflight**
 - provider: `{}`
@@ -496,7 +500,13 @@ pub(in crate::services::discord) async fn build_inflight_report(
         channel_status,
         current_section,
         saved_channels
-    )
+    );
+    report.extend(transcript_turn_line(provider, channel_id));
+    report
+}
+
+fn transcript_turn_line(provider: &ProviderKind, channel_id: ChannelId) -> Option<String> {
+    crate::services::discord::health::transcript_turn::report_line(provider, channel_id.get())
 }
 
 #[cfg(test)]

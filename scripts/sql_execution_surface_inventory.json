@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "9abdaf73bfaef1f55bf6f67170c45302c8c49f42",
+  "measured_at_sha": "6bd1e56048a89d01b6ffcc9b3badc6ebb8bf4db7",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2539,6 +2539,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:f215ec8f3fb72d1ce1b7a1bfa0849999b0f5d44bb994ad91d7e1be21f1c36528"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/herdr_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:39f593884569ab29ee3b8205914b5eb53239012c28cebb5b2fb4f79494576436"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/herdr_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:32ec52aad4e45a1d9124e6e6f37367d6a39bff42f603a74340a03754364675b1"
     },
     {
       "root": "src",
@@ -7669,6 +7687,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:412ebc2bedbe330b0e4a79c2a47e6fc330c65a84e1baf49138ee119a29656a70"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions/hosted_execution.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aec5ea9c71ef9e582a25a859b83c56648d641f35b75ecb4b413b4fd1b70b4eb3"
     },
     {
       "root": "src",
@@ -25993,6 +26020,78 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:040f1f35d8482719595d610e4e11fb0b09190ddf724b22e7c40ec5e4f5ad3712"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3ba01eaa07f4b9a6cb09627a1506721310dc52a8437ba19c7b9e988a25f1d5bb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4dba72a22a1dfba43105c25fe2fa700f8252ed104dd11cce47c08e7e7677db48"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7740b8a55506c9cb8ec50d1038ce7127f553a2b4b8bdaf7df55f108813858910"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8d619c40498187fe4e596631dad8d467913d82f3efd55c30eba9d5915a3ce8ed"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:da43809a36a8bb6b6f16d181668a56ea67bb7f6839d10032bb775aa1156d1484"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bfd4fcbd28a06d8625f9aa0236b11068a69d0f326979d8ac714e1f863d9f0297"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:115f4fc566d493642c9caac19f40e452ee47d7538dad1a19b5aefa9bab6530de"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/input_effect_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:dda09f7471c6ee78781bb58dcbc21f4ae48710789d81d9d415c755827da74d5a"
     },
     {
       "root": "src",
