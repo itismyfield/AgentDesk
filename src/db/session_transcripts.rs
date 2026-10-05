@@ -299,22 +299,57 @@ pub(crate) async fn native_channel_clear_state(
     classify_native_clear_boundary(row)
 }
 
+/// The native correlation as stored, whatever its state, so a cutoff is never forgotten unread.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NativeClearRecord {
+    pub(crate) generation: NativeClearGeneration,
+    pub(crate) ticket: Option<serde_json::Value>,
+    pub(crate) resolved: bool,
+    /// A later boundary write replaced this generation.
+    pub(crate) superseded: bool,
+    pub(crate) after_frontier: bool,
+}
+
+pub(crate) async fn native_channel_clear_record(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<Option<NativeClearRecord>> {
+    let row = sqlx::query_as::<_, NativeClearStateRow>(NATIVE_CLEAR_STATE_SQL)
+        .bind(channel_id.trim())
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| anyhow!("native channel clear record lookup failed: {error}"))?;
+    Ok(native_clear_record(row))
+}
+
+fn native_clear_record(row: Option<NativeClearStateRow>) -> Option<NativeClearRecord> {
+    let (clear_generation, native_generation, ticket, resolved, after_frontier) = row?;
+    Some(NativeClearRecord {
+        generation: NativeClearGeneration(native_generation?),
+        ticket,
+        resolved,
+        superseded: clear_generation != native_generation?,
+        after_frontier,
+    })
+}
+
 // A generation mismatch means another writer (or an older binary) cleared after this ticket; the
 // frontier check is sound because, at an equal generation, the native write set the frontier.
 fn classify_native_clear_boundary(row: Option<NativeClearStateRow>) -> Result<NativeClearBoundary> {
-    let Some((clear_generation, Some(native_generation), ticket, resolved, after_frontier)) = row
-    else {
+    let Some(record) = native_clear_record(row) else {
         return Ok(NativeClearBoundary::Legacy);
     };
-    if resolved {
+    if record.resolved {
         return Ok(NativeClearBoundary::Resolved);
     }
-    if clear_generation != native_generation || after_frontier {
+    if record.superseded || record.after_frontier {
         return Ok(NativeClearBoundary::Superseded);
     }
-    let ticket = ticket.ok_or_else(|| anyhow!("native clear generation without a ticket"))?;
+    let ticket = record
+        .ticket
+        .ok_or_else(|| anyhow!("native clear generation without a ticket"))?;
     Ok(NativeClearBoundary::Unresolved {
-        generation: NativeClearGeneration(native_generation),
+        generation: record.generation,
         ticket,
     })
 }

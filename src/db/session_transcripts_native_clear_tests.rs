@@ -287,3 +287,90 @@ async fn existing_boundary_readers_treat_native_and_legacy_clears_alike_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// The raw record and the boundary classification read the same row; the classification of every
+/// row shape is unchanged by reading it through the record.
+#[test]
+fn record_and_classification_agree_on_every_row_shape() {
+    let t = || Some(json!({"context": {"execution_nonce": "n"}}));
+    let unresolved_t = NativeClearBoundary::Unresolved {
+        generation: NativeClearGeneration(3),
+        ticket: t().unwrap(),
+    };
+    let cases: Vec<(
+        Option<NativeClearStateRow>,
+        Option<NativeClearBoundary>,
+        Option<(bool, bool)>,
+    )> = vec![
+        (None, Some(NativeClearBoundary::Legacy), None),
+        (
+            Some((3, None, t(), false, false)),
+            Some(NativeClearBoundary::Legacy),
+            None,
+        ),
+        (
+            Some((3, Some(3), None, true, false)),
+            Some(NativeClearBoundary::Resolved),
+            Some((true, false)),
+        ),
+        (
+            Some((4, Some(3), None, false, false)),
+            Some(NativeClearBoundary::Superseded),
+            Some((false, true)),
+        ),
+        (
+            Some((3, Some(3), t(), false, true)),
+            Some(NativeClearBoundary::Superseded),
+            Some((false, false)),
+        ),
+        (
+            Some((3, Some(3), None, false, false)),
+            None,
+            Some((false, false)),
+        ),
+        (
+            Some((3, Some(3), t(), false, false)),
+            Some(unresolved_t),
+            Some((false, false)),
+        ),
+    ];
+    for (row, boundary, record) in cases {
+        let classified = classify_native_clear_boundary(row.clone()).ok();
+        assert_eq!(classified, boundary, "{row:?}");
+        let read = native_clear_record(row.clone()).map(|r| (r.resolved, r.superseded));
+        assert_eq!(read, record, "{row:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_keeps_the_ticket_after_resolve_and_supersession_pg() {
+    let (db, pool) = create_pool().await;
+    assert_eq!(native_channel_clear_record(&pool, "r").await.unwrap(), None);
+    let g1 = native_clear(&pool, "r", "n1").await;
+    let read = |pool: PgPool| async move {
+        native_channel_clear_record(&pool, "r")
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let first = read(pool.clone()).await;
+    assert_eq!(
+        (first.generation, first.ticket, first.resolved),
+        (g1, Some(ticket("n1")), false)
+    );
+    assert_eq!(resolve(&pool, "r", g1).await, NativeClearResolve::Resolved);
+    let resolved = read(pool.clone()).await;
+    assert_eq!(
+        (resolved.ticket, resolved.resolved),
+        (Some(ticket("n1")), true)
+    );
+    let g2 = native_clear(&pool, "r", "n2").await;
+    legacy_clear(&pool, "r").await;
+    let superseded = read(pool.clone()).await;
+    assert_eq!(superseded.generation, g2);
+    assert_eq!(superseded.ticket, Some(ticket("n2")));
+    assert!(superseded.superseded && !superseded.resolved);
+    assert_eq!(state(&pool, "r").await, NativeClearBoundary::Superseded);
+    pool.close().await;
+    db.drop().await;
+}

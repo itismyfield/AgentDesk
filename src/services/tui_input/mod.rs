@@ -14,7 +14,7 @@ mod actor_tests;
 #[cfg(test)]
 mod bounded_tmux_tests;
 #[cfg(test)]
-mod durability_tests;
+pub(crate) mod durability_tests;
 #[cfg(test)]
 mod rows_tests;
 #[cfg(test)]
