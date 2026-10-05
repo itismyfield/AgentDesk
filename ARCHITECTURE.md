@@ -592,6 +592,8 @@ src/
 │   │   │   └── warm_followup.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
+│   │   ├── busy_inject.rs
+│   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
