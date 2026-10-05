@@ -129,6 +129,16 @@ async fn heal_stale_busy_mailbox_with_probe(
     probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
     host_gate: &HostGate,
 ) -> bool {
+    // Both the intake heal and the periodic reaper enter here before any probe or finalize.
+    let site = if respect_watcher_authority {
+        "periodic_stale_busy_reaper"
+    } else {
+        "intake_stale_busy_heal"
+    };
+    if super::health::legacy_supervision::legacy_retired(provider.as_str(), channel_id.get(), site)
+    {
+        return false;
+    }
     let Ok(_recovery) = super::live_bridge::try_recovery(provider, channel_id.get()) else {
         return false;
     };
@@ -1568,6 +1578,109 @@ agents:
             Some(ProviderKind::Qwen)
         );
         assert_eq!(provider_for_managed_tmux_wrapper_subcommand("gemini"), None);
+    }
+
+    /// Seeds a busy Claude channel whose recorded tmux session the probe will call dead.
+    async fn seed_busy_channel(
+        shared: &Arc<crate::services::discord::SharedData>,
+        channel: u64,
+    ) -> Arc<CancelToken> {
+        let channel_id = ChannelId::new(channel);
+        let name = format!("n4a-reaper-{channel}");
+        shared.core.lock().await.sessions.insert(
+            channel_id,
+            crate::services::discord::DiscordSession {
+                session_id: Some("live".to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel),
+                channel_name: Some(name.clone()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: shared.restart.current_generation,
+            },
+        );
+        let token = Arc::new(CancelToken::new());
+        let msg = MessageId::new(channel * 10);
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                shared,
+                channel_id,
+                token.clone(),
+                UserId::new(11),
+                msg
+            )
+            .await
+        );
+        let session = ProviderKind::Claude.build_tmux_session_name(&name);
+        seed_recorded_inflight_tmux_session(
+            &ProviderKind::Claude,
+            channel_id,
+            &name,
+            msg,
+            &session,
+        );
+        token
+    }
+
+    async fn still_busy(shared: &Arc<crate::services::discord::SharedData>, channel: u64) -> bool {
+        crate::services::discord::mailbox_snapshot(shared, ChannelId::new(channel))
+            .await
+            .active_user_message_id
+            .is_some()
+    }
+
+    /// Both stale-busy entries (intake heal and periodic reaper) leave a retired channel's
+    /// busy turn alone while finalizing Legacy channels whose session is dead.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_busy_heal_and_reaper_skip_retired_channel() {
+        use crate::services::discord::health::legacy_supervision::RetiredForTest;
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = RuntimeRootGuard::set(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.settings.write().await.provider = ProviderKind::Claude;
+        let (retired, intake, periodic) = (6_325_402_001u64, 6_325_402_002u64, 6_325_402_003u64);
+        let retired_token = seed_busy_channel(&shared, retired).await;
+        seed_busy_channel(&shared, intake).await;
+        seed_busy_channel(&shared, periodic).await;
+        shared.restart.global_active.store(3, Ordering::Relaxed);
+        let _retired = RetiredForTest::new("claude", retired);
+        let probe = |_: String| -> BoxFuture<'static, bool> { Box::pin(async { false }) };
+        let heal = |channel: u64| {
+            super::heal_stale_busy_mailbox_with_probe(
+                &shared,
+                &ProviderKind::Claude,
+                ChannelId::new(channel),
+                "intake",
+                false,
+                &probe,
+                &admit_any_host,
+            )
+        };
+
+        assert!(
+            !heal(retired).await,
+            "intake heal skips the retired channel"
+        );
+        assert!(heal(intake).await, "intake heal finalizes a Legacy channel");
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe, &admit_any_host).await;
+
+        assert!(still_busy(&shared, retired).await);
+        assert!(!retired_token.cancelled.load(Ordering::Relaxed));
+        assert!(
+            !still_busy(&shared, periodic).await,
+            "periodic reaper finalizes Legacy"
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 }
 

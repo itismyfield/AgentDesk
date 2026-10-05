@@ -800,6 +800,8 @@ src/
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
+│   │   │   ├── legacy_supervision/
+│   │   │   │   └── test_support.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -839,6 +841,7 @@ src/
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   └── live_bridge_guard.rs
 │   │   │   ├── headless_turn.rs
+│   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs
@@ -1021,7 +1024,8 @@ src/
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
-│   │   │   └── panel_shape.rs
+│   │   │   ├── panel_shape.rs
+│   │   │   └── tick.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs

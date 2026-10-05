@@ -39,10 +39,12 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 mod panel_shape;
+mod tick;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
     finalize_owner_dead_cleanup_if_same_turn,
 };
+pub(super) use tick::spawn_placeholder_sweeper;
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
 /// stalled. Below this threshold the sweeper does nothing.
@@ -331,6 +333,13 @@ async fn run_placeholder_sweep_pass(
     report.scanned = states.len();
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
+        if super::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            state.channel_id,
+            "placeholder_row_pass",
+        ) {
+            continue;
+        }
         if state.rebind_origin {
             // #3581: a rebind-origin inflight has no placeholder to edit (skipped)
             // — but an abandoned, never-progressed orphan (STALL-WATCHDOG respawn)
@@ -465,6 +474,14 @@ async fn run_placeholder_sweep_pass(
         } else {
             PlaceholderProbe::StillPlaceholder
         };
+        // The probe awaited Discord; re-judge before any edit or cleanup.
+        if super::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            state.channel_id,
+            "placeholder_row_pass_after_probe",
+        ) {
+            continue;
+        }
         // Transient probe failure: leave everything for next sweep.
         // Applies to both stalled and abandoned classifications.
         if matches!(probe, PlaceholderProbe::ProbeFailed) {
@@ -902,90 +919,6 @@ pub(super) struct SweepPassReport {
     pub abandoned: usize,
     /// #3003: orphaned status-panel-v2 messages reclaimed this pass.
     pub reclaimed_panels: usize,
-}
-
-fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64) -> bool {
-    report.stalled > 0
-        || report.abandoned > 0
-        || report.reclaimed_panels > 0
-        || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
-}
-
-/// Spawn the long-lived background task that runs the stall sweeper at the
-/// configured interval until the runtime exits. Should be called once per
-/// provider during dcserver bootstrap.
-pub(super) fn spawn_placeholder_sweeper(
-    http: Arc<serenity::Http>,
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
-) {
-    tokio::spawn(async move {
-        let mut stalled_tracker = StalledEditTracker::default();
-        let mut sweeps_since_heartbeat = 0u64;
-        tokio::time::sleep(tokio::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
-        loop {
-            let report =
-                run_placeholder_sweep_pass(&http, &shared, &provider, &mut stalled_tracker).await;
-            // #3003: retry any durably-queued orphan status-panel deletes whose
-            // inline reclaim failed transiently (and whose inflight row is gone, so
-            // there is no per-turn handle left). Independent of inflight lifecycle.
-            let drained = super::status_panel_orphan_store::drain(
-                &http,
-                &shared,
-                &provider,
-                &shared.token_hash,
-            )
-            .await;
-            // #3296: reconcile durable aborted-anchor markers — retry the ✅ for
-            // markers a terminal commit already covered, and apply the TTL'd
-            // `⏳ → ⚠` fallback for anchors nothing ever covered (held while a
-            // live inflight for the session may still cover them). The sweeper
-            // owns this reclaim so an aborted anchor always converges (#3282).
-            let drained_abort_markers =
-                super::tui_direct_abort_marker::sweep_expired(&shared, &provider).await;
-            // #4278 orphan-`⏳` sweep (mechanism: turn_view_reconciler::orphan_sweep).
-            let swept_orphan_anchors =
-                super::turn_view_reconciler::sweep_orphan_tui_anchor_reactions(&shared, &provider)
-                    .await;
-            // #3859: finalize placeholders stranded by a failure-path inflight
-            // eviction (turn-task Drop / heartbeat-gap sweeper). Each durable
-            // abandon-request is edited to its terminal "중단됨" card BY MESSAGE
-            // ID — decoupled from the inflight lifecycle, so a re-adopt (new row
-            // + new placeholder) never collides with it.
-            let drained_abandon_requests =
-                super::abandon_request_store::drain(&http, &shared, &provider, &shared.token_hash)
-                    .await;
-            // #4888: cleanup guards and process crashes can leave a retry binding
-            // without a surviving turn to clear it. Bound those durable sidecars
-            // independently of the normal terminal clear path.
-            let swept_busy_retry_bindings = super::busy_followup_retry_store::sweep_expired();
-            sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
-            if should_log_sweep_report(report, sweeps_since_heartbeat)
-                || drained > 0
-                || drained_abort_markers > 0
-                || drained_abandon_requests > 0
-                || swept_busy_retry_bindings > 0
-                || swept_orphan_anchors > 0
-            {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={} swept_busy_retry_bindings={} swept_orphan_anchors={}",
-                    provider.as_str(),
-                    report.scanned,
-                    report.stalled,
-                    report.abandoned,
-                    report.reclaimed_panels,
-                    drained,
-                    drained_abort_markers,
-                    drained_abandon_requests,
-                    swept_busy_retry_bindings,
-                    swept_orphan_anchors
-                );
-                sweeps_since_heartbeat = 0;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(SWEEP_INTERVAL_SECS)).await;
-        }
-    });
 }
 
 #[cfg(test)]

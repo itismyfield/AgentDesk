@@ -728,6 +728,15 @@ pub(in crate::services::discord) async fn drain(
     };
     let mut cleared = 0usize;
     for (channel_id, entry) in pending {
+        // Ahead of the writing loader and pending-bind bookkeeping; nothing awaits
+        // between here and the delete.
+        if crate::services::discord::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id,
+            "status_panel_orphan_drain",
+        ) {
+            continue;
+        }
         let panel_msg_id = entry.id;
         // #3003 (codex P2 r26): re-validate against the live store immediately
         // before deleting. Between `load_pending` and here, the completion path may

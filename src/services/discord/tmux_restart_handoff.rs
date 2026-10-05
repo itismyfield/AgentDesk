@@ -478,6 +478,13 @@ pub(super) async fn resume_aborted_restart_turn(
         );
         return false;
     };
+    if super::health::legacy_supervision::legacy_retired(
+        provider_kind.as_str(),
+        channel_id.get(),
+        "watcher_death_handoff",
+    ) {
+        return false;
+    }
     let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         // #3014: there is no persisted inflight turn to hand off, but the pane
@@ -852,3 +859,89 @@ mod o_cut_tests {
 #[cfg(test)]
 #[path = "tmux_restart_handoff_mailbox_tests.rs"]
 mod mailbox_tests;
+
+#[cfg(test)]
+mod retired_channel_tests {
+    use poise::serenity_prelude::ChannelId;
+
+    use crate::config::TestEnvVarGuard;
+    use crate::services::discord::health::legacy_supervision::RetiredForTest;
+    use crate::services::discord::health::legacy_supervision::test_support::{
+        MockDiscord, fingerprint, seed_backfill_row,
+    };
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+
+    /// Watcher death on a retired channel hands nothing off: the row is not loaded or
+    /// cleared and Discord sees no notice, while a Legacy channel still hands off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retired_channel_skips_watcher_death_handoff() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let discord = MockDiscord::start().await;
+        let (retired, legacy) = (6_325_412_001u64, 6_325_412_002u64);
+        let session = |channel: u64| format!("AgentDesk-codex-n4a-handoff-{channel}");
+        let row = |channel: u64| {
+            InflightTurnState::new(
+                ProviderKind::Codex,
+                channel,
+                None,
+                1,
+                channel * 10,
+                channel * 10 + 1,
+                "restart me".into(),
+                None,
+                Some(session(channel)),
+                None,
+                None,
+                0,
+            )
+        };
+        // The retired row lacks its finalizer id, so any writing load would rewrite it.
+        let rows = [seed_backfill_row(&row(retired)), {
+            crate::services::discord::inflight::save_inflight_state(&row(legacy)).unwrap();
+            let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
+            crate::services::discord::inflight::inflight_state_path(
+                &root,
+                &ProviderKind::Codex,
+                legacy,
+            )
+        }];
+        let _retired = RetiredForTest::new("codex", retired);
+        let before = fingerprint(&rows[0]);
+
+        let handled = super::resume_aborted_restart_turn(
+            ChannelId::new(retired),
+            &discord.http,
+            &shared,
+            &session(retired),
+            "",
+        )
+        .await;
+        assert!(!handled);
+        assert!(before.is_some() && fingerprint(&rows[0]) == before);
+        assert!(discord.calls_for(retired).is_empty());
+
+        let handled = super::resume_aborted_restart_turn(
+            ChannelId::new(legacy),
+            &discord.http,
+            &shared,
+            &session(legacy),
+            "",
+        )
+        .await;
+        assert!(handled);
+        assert!(
+            fingerprint(&rows[1]).is_none(),
+            "legacy handoff clears its row"
+        );
+        assert!(
+            !discord.calls_for(legacy).is_empty(),
+            "legacy handoff posts its notice"
+        );
+    }
+}

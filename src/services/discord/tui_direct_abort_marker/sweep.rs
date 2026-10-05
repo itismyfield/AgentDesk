@@ -74,6 +74,14 @@ pub(in crate::services::discord) async fn sweep_expired_with_applier<P: Into<Liv
         if !marker.provider.eq_ignore_ascii_case(provider) {
             continue;
         }
+        // Ahead of the corrupt-record delete, covered stamp and reaction.
+        if super::super::health::legacy_supervision::legacy_retired(
+            provider,
+            marker.channel_id,
+            "abort_marker_sweep",
+        ) {
+            continue;
+        }
         if marker.anchor_message_id == 0 {
             delete(&marker); // I5: corrupt record — nothing could ever target it
             continue;

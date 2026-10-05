@@ -1686,6 +1686,14 @@ pub(crate) async fn run_stall_watchdog_pass(
         {
             continue;
         }
+        // Retired channels skip the writing row loader, liveness publish and reattach.
+        if super::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id.get(),
+            "stall_watchdog",
+        ) {
+            continue;
+        }
         let now_mono_secs = super::liveness_authority::monotonic_now_secs();
         let tick_inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
         let capture_assessment = super::liveness_authority::observe_and_publish_from_tick(
@@ -6864,6 +6872,88 @@ mod o_stale_leak_cut_tests {
         assert!(
             discord_connections("pending-resend") > 0,
             "a pending adoption ends before Legacy tries its continuation resend"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retired_channel_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
+
+    use poise::serenity_prelude::ChannelId;
+
+    use super::super::HealthRegistry;
+    use crate::config::TestEnvVarGuard;
+    use crate::services::discord::health::legacy_supervision::RetiredForTest;
+    use crate::services::discord::health::legacy_supervision::test_support::{
+        fingerprint, seed_backfill_row,
+    };
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+
+    /// The stall watchdog never opens a retired channel's row with the writing loader;
+    /// a Legacy channel watched in the same pass still has its row loaded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stall_watchdog_skips_retired_channel_before_row_load() {
+        let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
+        let provider = ProviderKind::Codex;
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let (retired, legacy) = (6_325_401_001u64, 6_325_401_002u64);
+        let mut rows = Vec::new();
+        for channel in [retired, legacy] {
+            let session = format!("AgentDesk-codex-n4a-stall-{channel}");
+            let output = temp.path().join(format!("{channel}.jsonl"));
+            std::fs::write(&output, "").unwrap();
+            let output = output.to_string_lossy().to_string();
+            rows.push(seed_backfill_row(&InflightTurnState::new(
+                provider.clone(),
+                channel,
+                None,
+                1,
+                channel * 10,
+                channel * 10 + 1,
+                "prompt".into(),
+                None,
+                Some(session.clone()),
+                Some(output.clone()),
+                None,
+                0,
+            )));
+            shared.tmux_watchers.insert(
+                ChannelId::new(channel),
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session,
+                    output_path: output,
+                    paused: Arc::new(AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    pause_epoch: Arc::new(AtomicU64::new(0)),
+                    turn_delivered: Arc::new(AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                        chrono::Utc::now().timestamp_millis(),
+                    )),
+                },
+            );
+        }
+        let before: Vec<_> = rows.iter().map(|row| fingerprint(row)).collect();
+        let _retired = RetiredForTest::new(provider.as_str(), retired);
+
+        super::run_stall_watchdog_pass(&registry, &provider).await;
+
+        assert!(before[0].is_some() && fingerprint(&rows[0]) == before[0]);
+        assert_ne!(
+            fingerprint(&rows[1]),
+            before[1],
+            "the Legacy row is loaded and backfilled"
         );
     }
 }

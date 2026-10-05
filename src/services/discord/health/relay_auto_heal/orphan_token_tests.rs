@@ -180,3 +180,55 @@ async fn confirmed_dead_rowless_orphan_token_still_needs_a_warrant() {
     )
     .await;
 }
+
+/// The orphan-token sweep does not enter cleanup or grading for a retired channel;
+/// a Legacy channel in the same runtime is still graded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_channel_orphan_token_is_not_cleaned_or_graded() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env =
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    let provider = ProviderKind::Codex;
+    let (retired, legacy) = (ChannelId::new(6_325_410_001), ChannelId::new(6_325_410_002));
+    let (registry, shared, retired_token) =
+        seed_orphan_with_queue(&provider, retired, MessageId::new(retired.get() + 9), None).await;
+    let legacy_token = Arc::new(CancelToken::new());
+    assert!(
+        crate::services::discord::mailbox_try_start_turn(
+            &shared,
+            legacy,
+            legacy_token,
+            UserId::new(7),
+            MessageId::new(legacy.get() + 9),
+        )
+        .await
+    );
+    shared
+        .mailbox(legacy)
+        .age_active_turn_for_test(PAST_ADMISSION_GRACE)
+        .await;
+    let _retired = crate::services::discord::health::legacy_supervision::RetiredForTest::new(
+        provider.as_str(),
+        retired.get(),
+    );
+
+    super::run_orphan_token_auto_heal_pass(&registry, &provider, &[shared.clone()]).await;
+
+    assert_anchor_and_queue_kept(
+        &shared,
+        retired,
+        MessageId::new(retired.get() + 9),
+        &retired_token,
+    )
+    .await;
+    assert!(
+        i20_refusals(retired).is_empty(),
+        "a retired channel is never graded"
+    );
+    assert_eq!(
+        i20_refusals(legacy).len(),
+        1,
+        "the Legacy orphan is still graded"
+    );
+}
