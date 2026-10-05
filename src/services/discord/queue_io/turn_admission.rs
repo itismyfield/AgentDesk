@@ -262,7 +262,7 @@ async fn input_refusal_notice(
         .is_err()
         {
             tracing::warn!(
-                channel = channel.get(),
+                channel_id = channel.get(),
                 source,
                 ?failure,
                 "input refusal notice failed; responsibility retained"

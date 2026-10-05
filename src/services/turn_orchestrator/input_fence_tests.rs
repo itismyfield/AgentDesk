@@ -54,7 +54,7 @@ fn run(work: impl std::future::Future<Output = ()>) {
 
 #[test]
 fn actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_take() {
-    let _lock = test_support::lock_test_env();
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = Env::set(root.path());
     run(async {
@@ -109,7 +109,7 @@ fn actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_t
 
 #[test]
 fn preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused() {
-    let _lock = test_support::lock_test_env();
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = Env::set(root.path());
     run(async {
@@ -157,7 +157,7 @@ fn preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused() {
 
 #[test]
 fn off_path_has_no_sidecar_and_registry_does_not_remint_on_fence() {
-    let _lock = test_support::lock_test_env();
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = Env::set(root.path());
     run(async {
@@ -211,7 +211,7 @@ fn ownership_transferred_consumers_surface_fence_as_failure() {
 
 #[test]
 fn freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_population() {
-    let _lock = test_support::lock_test_env();
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = Env::set(root.path());
     run(async {
@@ -286,7 +286,7 @@ fn freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_popul
 
 #[test]
 fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mutation() {
-    let _lock = test_support::lock_test_env();
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = Env::set(root.path());
     run(async {

@@ -162,6 +162,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "placeholder_controller.rs": {".edit_message": 1},
     "placeholder_controller/queued_card_gate.rs": {"edit_channel_message*": 1},
     "placeholder_sweeper.rs": {"edit_outbound_message": 1},
+    "queue_io/turn_admission.rs": {"send_channel_message*": 1},
     "recovery_engine/completion_delivery.rs": {"relay_recovered_body_to_placeholder": 3},
     "recovery_engine/restore_inflight.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/terminal_text_idempotency.rs": {"replace_long_message*": 2, "send_long_message*": 2},
@@ -272,6 +273,8 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "placeholder_controller.rs": ("1-B-panel", "KEEP_NONBODY"),
     "placeholder_controller/queued_card_gate.rs": ("1-B-panel", "KEEP_NONBODY"),
     "placeholder_sweeper.rs": ("1-D-notice", "KEEP_NONBODY"),
+    # Control Notice via the reference helper; no O body authority or original/body text.
+    "queue_io/turn_admission.rs": ("INPUT-FENCE-notice", "KEEP_NONBODY"),
     "recovery_engine/completion_delivery.rs": ("W30,W31", "CUT_D"),
     "recovery_engine/restore_inflight.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/terminal_text_idempotency.rs": ("W32", "COV:W32"),
