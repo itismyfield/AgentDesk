@@ -369,7 +369,13 @@ pub(super) async fn run_orphan_token_auto_heal_pass(
         let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
         for (channel_id, mailbox) in mailbox_snapshots {
             redrive_channels.insert(channel_id);
-            if mailbox.cancel_token.is_some() {
+            if mailbox.cancel_token.is_some()
+                && !super::legacy_supervision::legacy_retired(
+                    provider.as_str(),
+                    channel_id.get(),
+                    "orphan_token_auto_heal",
+                )
+            {
                 match apply_orphan_pending_token_cleanup(
                     registry,
                     provider,

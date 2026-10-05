@@ -491,6 +491,14 @@ pub(in crate::services::discord) async fn drain(
     let pending = load_pending(provider, token_hash);
     let mut cleared = 0usize;
     for (channel_id, record) in pending {
+        // Ahead of the writing ownership loader and any record consumption.
+        if super::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id,
+            "abandon_request_drain",
+        ) {
+            continue;
+        }
         // Re-validate the exact episode record: a same-message replacement must
         // not let this stale snapshot pass the queue fence.
         if !is_record_queued(provider, token_hash, channel_id, &record) {
@@ -510,6 +518,14 @@ pub(in crate::services::discord) async fn drain(
             }
         }
         let probe = probe_placeholder_state(http, channel_id, record.msg_id).await;
+        // The probe awaited Discord; re-judge before consuming or editing.
+        if super::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id,
+            "abandon_request_drain_after_probe",
+        ) {
+            continue;
+        }
         match probe {
             PlaceholderProbe::StillPlaceholder => {
                 // Close the probe→edit ownership window. The probe establishes

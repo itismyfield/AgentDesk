@@ -59,7 +59,13 @@ pub(in crate::services::discord) async fn sweep_leaked_inflight_rows(
     let mut seen = HashSet::new();
     let mut applied = 0;
     for (state, _) in states {
-        if !seen.insert(state.channel_id) {
+        if !seen.insert(state.channel_id)
+            || super::super::health::legacy_supervision::legacy_retired(
+                provider.as_str(),
+                state.channel_id,
+                "leaked_row_sweep",
+            )
+        {
             continue;
         }
         if recover_candidate(registry, provider, &state).await {
@@ -106,5 +112,41 @@ mod tests {
         assert!(leaked_row_sweep_candidate(&state(0, Some("tmux"))).is_none());
         assert!(leaked_row_sweep_candidate(&state(4_042_002, None)).is_none());
         assert!(leaked_row_sweep_candidate(&state(4_042_003, Some("  "))).is_none());
+    }
+
+    /// The leaked-row sweep never opens a retired channel's row with the writing loader;
+    /// a Legacy channel's leaked row is still taken into recovery.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retired_channel_leaked_row_is_not_recovered() {
+        use crate::config::TestEnvVarGuard;
+        use crate::services::discord::health::legacy_supervision::RetiredForTest;
+        use crate::services::discord::health::legacy_supervision::test_support::{
+            fingerprint, seed_backfill_row,
+        };
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
+        let registry = super::HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register("claude".to_string(), shared.clone())
+            .await;
+        let (retired, legacy) = (6_325_411_001u64, 6_325_411_002u64);
+        let rows: Vec<_> = [retired, legacy]
+            .into_iter()
+            .map(|channel| seed_backfill_row(&state(channel, Some("AgentDesk-claude-n4a-leak"))))
+            .collect();
+        let before: Vec<_> = rows.iter().map(|row| fingerprint(row)).collect();
+        let _retired = RetiredForTest::new("claude", retired);
+
+        super::sweep_leaked_inflight_rows(&registry, &ProviderKind::Claude).await;
+
+        assert!(before[0].is_some() && fingerprint(&rows[0]) == before[0]);
+        assert_ne!(
+            fingerprint(&rows[1]),
+            before[1],
+            "the Legacy row is loaded for recovery"
+        );
     }
 }
