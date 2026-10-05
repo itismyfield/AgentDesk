@@ -11,7 +11,7 @@ use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
-use crate::services::turn_host::{HerdrRefusal, TurnHost};
+use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
 pub(super) struct StreamingTurn<'a> {
@@ -48,12 +48,8 @@ pub(super) fn execute(
     match turn.host {
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
-        // No Herdr executor is wired yet, and a Herdr turn never falls back to another driver.
-        TurnHost::Herdr(plan) => {
-            let refusal = HerdrRefusal::ExecutorNotWired;
-            tracing::warn!(endpoint = %plan.endpoint.config_key, "{refusal}");
-            return Err(refusal.to_string());
-        }
+        // A Herdr turn never falls back to another driver.
+        TurnHost::Herdr(plan) => return herdr_turn(&turn, plan, sender),
     }
     let _execution_guard = crate::services::cluster::execution_capacity::acquire(
         turn.pool,
@@ -168,6 +164,200 @@ pub(super) fn execute(
                 exit_code: None,
             });
             Ok(())
+        }
+    }
+}
+
+/// The switch is read first; off, the turn is refused before any I/O.
+fn herdr_turn(
+    turn: &StreamingTurn<'_>,
+    plan: &HerdrTurnPlan,
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    if claude::herdr_turn::switched_on() {
+        return herdr::execute(turn, plan, sender);
+    }
+    let refusal = HerdrRefusal::ExecutorNotWired;
+    tracing::warn!(endpoint = %plan.endpoint.config_key, "{refusal}");
+    Err(refusal.to_string())
+}
+
+#[cfg(unix)]
+mod herdr {
+    use std::sync::{Arc, mpsc::Sender};
+
+    use sqlx::PgPool;
+    use tokio::runtime::Handle;
+
+    use super::StreamingTurn;
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedExecution, HostedLookupKey, HostedOwner,
+    };
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
+    use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
+    use crate::services::discord::recovery_engine::host_reconcile::{
+        HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
+        reconcile_hosted_session_pg,
+    };
+    use crate::services::discord::tui_prompt_relay::herdr_source::{
+        HerdrSourceAttach, attach_launched_herdr_source,
+    };
+    use crate::services::herdr_launch::HerdrLaunchHost;
+    use crate::services::session_host::HerdrTarget;
+    use crate::services::turn_host::HerdrTurnPlan;
+
+    pub(super) fn execute(
+        turn: &StreamingTurn<'_>,
+        plan: &HerdrTurnPlan,
+        sender: Sender<StreamMessage>,
+    ) -> Result<(), String> {
+        let pool = turn.pool.ok_or("herdr turn: no database")?;
+        let _execution_guard = crate::services::cluster::execution_capacity::acquire(
+            turn.pool,
+            turn.provider.as_str(),
+            turn.channel_id,
+            Arc::clone(&turn.cancel),
+        )?;
+        let herdr = HerdrTurn {
+            pool,
+            owner: owner(turn.channel_id)?,
+            channel_id: turn.channel_id,
+            endpoint: plan.endpoint.clone(),
+            row: plan.row.as_ref().map(|observed| &observed.record),
+            prompt: turn.prompt,
+            working_dir: turn.working_dir,
+            system_prompt: turn.system_prompt.filter(|prompt| !prompt.is_empty()),
+            model: turn.model,
+            cancel: Some(Arc::clone(&turn.cancel)),
+        };
+        let ports = BootPorts {
+            pool,
+            channel_id: turn.channel_id,
+        };
+        herdr_turn::execute(herdr, &ports, sender)
+    }
+
+    /// The channel's canonical row owner, named by the session key the turn runs under.
+    fn owner(channel_id: u64) -> Result<HostedOwner, String> {
+        let context = crate::services::platform::active_provider_context("claude");
+        let key = context.and_then(|context| context.session_key);
+        let identity = key
+            .as_deref()
+            .and_then(crate::services::discord::session_identity::SessionIdentity::parse);
+        let Some((token_hash, logical_key)) =
+            identity.and_then(|identity| Some((identity.token_hash?, identity.tmux_name)))
+        else {
+            return Err(format!("herdr turn: no namespaced session key ({key:?})"));
+        };
+        let node = crate::config::session_hosts::local_node();
+        let root = crate::config::runtime_root().map(|root| root.display().to_string());
+        Ok(HostedOwner {
+            provider: "claude".into(),
+            discord_token_hash: token_hash,
+            channel_id: channel_id.to_string(),
+            logical_key,
+            owner_node: node.ok_or("herdr turn: no cluster.instance_id")?,
+            runtime_root: root.ok_or("herdr turn: no runtime root")?,
+        })
+    }
+
+    pub(super) struct BootPorts<'a> {
+        pub(super) pool: &'a PgPool,
+        pub(super) channel_id: u64,
+    }
+
+    impl HerdrTurnPorts for BootPorts<'_> {
+        fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
+            herdr_turn::boot_launch_host()
+        }
+
+        fn hook_events(&self) -> tokio::sync::broadcast::Receiver<HookEvent> {
+            subscribe_hook_events()
+        }
+
+        fn attach(&self, request: &AttachRequest<'_>) -> Result<bool, String> {
+            let reader = GateReader::of(request.record, request.target)?;
+            let attached = Handle::current().block_on(attach_launched_herdr_source(
+                self.pool,
+                request.owner,
+                self.channel_id,
+                &request.record.execution_nonce,
+                request.session_id,
+                request.transcript,
+                &reader,
+            ));
+            match attached {
+                HerdrSourceAttach::Published { bound, .. } => Ok(bound),
+                other => Err(format!("herdr turn: source not attached: {other:?}")),
+            }
+        }
+
+        fn confirm_bound(
+            &self,
+            owner: &HostedOwner,
+            record: &HostedExecution,
+            target: &HerdrTarget,
+        ) -> Result<(), String> {
+            let reader = GateReader::of(record, target)?;
+            let identity = crate::db::dispatched_session_canonical_identity::CanonicalSessionIdentity {
+                kind: crate::db::dispatched_session_canonical_identity::SessionIdentityKind::DiscordChannel,
+                discord_token_hash: &owner.discord_token_hash,
+                channel_id: &owner.channel_id,
+            };
+            let provider = &owner.provider;
+            let key = HostedLookupKey::Canonical { provider, identity };
+            let verdict =
+                Handle::current().block_on(reconcile_hosted_session_pg(self.pool, key, &reader));
+            if verdict.admits_reconnect() {
+                return Ok(());
+            }
+            Err(format!(
+                "herdr turn: bound execution not confirmed: {verdict:?}"
+            ))
+        }
+    }
+
+    /// The pane as its own gate reads it: the stored execution only when the gate's probe confirms
+    /// root, provider and nonce on one server; never a guess.
+    struct GateReader<'a> {
+        endpoint: HerdrEndpointId,
+        pane: &'a str,
+        evidence: HerdrPaneEvidence,
+        target: &'a HerdrTarget,
+    }
+
+    impl<'a> GateReader<'a> {
+        fn of(record: &'a HostedExecution, target: &'a HerdrTarget) -> Result<Self, String> {
+            let (Some(location), Some(expected)) = (&record.location, &record.expected) else {
+                return Err("herdr turn: the execution has no launch evidence".into());
+            };
+            let evidence = HerdrPaneEvidence {
+                binding_nonce: Some(expected.binding_nonce.clone()),
+                root: Some(expected.root.clone()),
+                provider_process: Some(expected.provider_process.clone()),
+                agent_session_id: None,
+            };
+            Ok(Self {
+                endpoint: HerdrEndpointId::of(location),
+                pane: &location.pane_id,
+                evidence,
+                target,
+            })
+        }
+    }
+
+    impl HerdrExecutionReader for GateReader<'_> {
+        fn endpoint(&self) -> Option<&HerdrEndpointId> {
+            Some(&self.endpoint)
+        }
+
+        fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
+            if pane_id == self.pane && self.target.execution_alive() {
+                return HerdrPaneReading::Present(self.evidence.clone());
+            }
+            HerdrPaneReading::Unreadable("the pane gate did not confirm the execution".into())
         }
     }
 }

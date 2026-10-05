@@ -180,6 +180,12 @@ impl HerdrTarget {
         }
     }
 
+    /// Drops a judgment no send will use, so a later send without its own judgment writes nothing.
+    pub(crate) fn discard_pin(&self) {
+        let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
+        *pinned = None;
+    }
+
     pub(crate) fn send_text(&self, text: &str) -> Result<HostMutation, HostError> {
         let pane_id = self.0.pane.clone();
         let text = text.to_string();
@@ -190,6 +196,7 @@ impl HerdrTarget {
     /// marker would close the paste early, so it is refused unsent.
     pub(crate) fn send_paste(&self, text: &str) -> Result<HostMutation, HostError> {
         if text.contains(PASTE_END) {
+            self.discard_pin();
             return Ok(refused("paste_end_marker_in_text"));
         }
         self.send_text(&format!("{PASTE_START}{text}{PASTE_END}"))
