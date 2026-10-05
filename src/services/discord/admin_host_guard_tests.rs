@@ -1079,3 +1079,56 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg()
     assert!(error.to_string().contains("Herdr"), "{error}");
     db.drop().await;
 }
+
+// A clear's target is main's managed-reset verdict for every stored case of a channel without a
+// Herdr endpoint, whatever the Herdr turn switch says, and for a configured channel while it is
+// off; switched on, a configured channel that cannot be judged is refused before any tmux call.
+#[tokio::test]
+async fn the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg() {
+    use super::{ResetTarget, clear_reset_target, managed_reset_refusal};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::install();
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let same = |main: Option<String>, target: ResetTarget| match (main, target) {
+        (Some(main), ResetTarget::Refused(reason)) => main == reason,
+        (None, ResetTarget::LegacyTmux) => true,
+        _ => false,
+    };
+    for (s, switch) in [None, Some(false), Some(true)].into_iter().enumerate() {
+        let _switch = crate::services::turn_host::force_switch_for_test(switch);
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let channel = ChannelId::new(1_479_671_302_387_091_000 + (s * 100 + n) as u64);
+            let channel_name = format!("p9b4-target-{s}-{n}");
+            let name = provider.build_tmux_session_name(&channel_name);
+            map_channel(&shared, channel, &channel_name).await;
+            case.seed(&pool, &channel_key(&shared, &name), &name, channel.get())
+                .await;
+            let main = managed_reset_refusal(&shared, &provider, channel, true, false, None).await;
+            let target = clear_reset_target(&shared, &provider, channel, None, None).await;
+            assert!(same(main, target), "{switch:?} {case:?}");
+        }
+    }
+    let channel = ChannelId::new(1_479_671_302_387_092_000);
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("mac-mini"),
+        &[(channel.get(), "mac-mini")],
+    );
+    map_channel(&shared, channel, "p9b4-configured").await;
+    tmux.take_calls();
+    for switch in [None, Some(false), Some(true)] {
+        let _switch = crate::services::turn_host::force_switch_for_test(switch);
+        let main = managed_reset_refusal(&shared, &provider, channel, true, false, None).await;
+        let target = clear_reset_target(&shared, &provider, channel, None, None).await;
+        match switch {
+            Some(true) => assert!(
+                matches!(&target, ResetTarget::Refused(reason) if reason.contains("herdr turn refused")),
+                "switched on, a configured channel without its row is refused"
+            ),
+            _ => assert!(same(main, target), "{switch:?}"),
+        }
+    }
+    assert_eq!(tmux.take_calls(), Vec::<String>::new(), "no tmux call");
+    db.drop().await;
+}

@@ -178,7 +178,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// Sources rotated away from whose cursor is not retired yet: O still reads each of them.
-    fn unsettled(&self) -> Option<usize> {
+    fn unsettled(&mut self) -> Option<usize> {
         let store = self.writer.store();
         let rotation = store.rotation().ok()?;
         let retired = store.cursors().filter(|cursor| cursor.retired);

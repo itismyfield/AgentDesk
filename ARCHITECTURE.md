@@ -2095,6 +2095,7 @@ src/
 │   │   │   ├── transport_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── consumer_guard.rs
+│   │   ├── herdr_clear_adapter.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs

@@ -202,3 +202,7 @@ impl<S: ClearSession> NativeClearHost for HerdrClear<S> {
         Box::pin(async { false })
     }
 }
+
+#[cfg(test)]
+#[path = "herdr_clear_adapter_tests.rs"]
+mod tests;
