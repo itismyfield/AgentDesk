@@ -53,6 +53,38 @@ fn sync_existing(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn enqueue(destination: &Destination<'_>, input: &Value) -> io::Result<EnqueueOutcome> {
+    if crate::services::discord::input_runtime::fence::lookup(
+        destination.provider,
+        destination.channel,
+    )
+    .is_some()
+    {
+        return Err(io::Error::other(
+            "protected handback requires borrowed population guard",
+        ));
+    }
+    enqueue_locked(destination, input)
+}
+
+pub(crate) fn enqueue_borrowed(
+    destination: &Destination<'_>,
+    input: &Value,
+    guard: &crate::services::discord::input_runtime::fence::PopulationGuard,
+) -> io::Result<EnqueueOutcome> {
+    if input.get("blob_pins").is_some() {
+        return Err(io::Error::other(
+            "handback must materialize before population lock",
+        ));
+    }
+    guard.borrowed(
+        destination.root,
+        destination.provider,
+        destination.channel,
+        || enqueue_locked(destination, input),
+    )
+}
+
+fn enqueue_locked(destination: &Destination<'_>, input: &Value) -> io::Result<EnqueueOutcome> {
     if !destination.authorized
         || destination.channel == 0
         || !runtime_store::PARENT_DIR_FSYNC_FLUSHES
