@@ -32,7 +32,7 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
-// Dormant: the Herdr turn executor builds targets from the boot registry.
+// The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{HerdrGateRefusal, HerdrTarget, Mutation as HerdrMutation};
 #[cfg_attr(not(test), allow(unused_imports))]
