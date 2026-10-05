@@ -120,12 +120,13 @@ pub(in crate::services::discord) struct RetiredForTest(String, u64);
 impl RetiredForTest {
     pub(in crate::services::discord) fn new(provider: &str, channel_id: u64) -> Self {
         let key = (provider.to_ascii_lowercase(), channel_id);
+        // Owned before it is visible and released after it is gone, so no other thread sees it.
+        test_owner::claim(&key);
         RETIRED
             .get_or_init(RwLock::default)
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.clone());
-        test_owner::claim(&key);
         Self(key.0, key.1)
     }
 }
@@ -133,13 +134,14 @@ impl RetiredForTest {
 #[cfg(test)]
 impl Drop for RetiredForTest {
     fn drop(&mut self) {
-        test_owner::release(&(self.0.clone(), self.1));
+        let key = (std::mem::take(&mut self.0), self.1);
         RETIRED
             .get()
             .unwrap()
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&(std::mem::take(&mut self.0), self.1));
+            .remove(&key);
+        test_owner::release(&key);
     }
 }
 
