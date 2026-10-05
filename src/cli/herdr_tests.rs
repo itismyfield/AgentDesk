@@ -10,9 +10,10 @@ use sqlx::PgPool;
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedExecution, HostedLocation, HostedOwner, HostedRecord, HostedState, SourceRef,
+    HostedExecution, HostedLocation, HostedOwner, HostedRecord, HostedState, LIVE, SourceRef,
     list_local_herdr_rows_pg, retire_pg,
 };
+use crate::services::claude::herdr_turn::HoldRelease;
 use crate::services::session_host::PaneReading;
 use crate::services::session_host::herdr_socket_rig_tests::{
     HerdrRig, KEY, NODE, PANE, SESSION, SHELL,
@@ -36,6 +37,11 @@ struct Node {
 
 impl Node {
     fn new(tag: &str) -> Self {
+        Self::with(tag, bound)
+    }
+
+    /// The execution `record` builds on the rig, in place of the Bound one.
+    fn with(tag: &str, record: fn(&HerdrRig, &str) -> HostedExecution) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -49,7 +55,7 @@ impl Node {
                 &[],
             )),
         ];
-        let record = bound(&rig, tag);
+        let record = record(&rig, tag);
         let (db, pool) = rt.block_on(async {
             let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
             let pool = db.connect_and_migrate().await;
@@ -160,6 +166,23 @@ fn bound(rig: &HerdrRig, tag: &str) -> HostedExecution {
     }
 }
 
+/// A Pending execution whose pane is recorded but whose launch evidence never came.
+fn unproven(rig: &HerdrRig, tag: &str) -> HostedExecution {
+    HostedExecution {
+        state: HostedState::Pending,
+        expected: None,
+        ..bound(rig, tag)
+    }
+}
+
+fn retired(now: bool) -> Result<Retired, RetireRefusal> {
+    Ok(Retired {
+        nonce: NONCE.into(),
+        now,
+        hold: HoldRelease::Released,
+    })
+}
+
 fn hold_of(nonce: &str) -> PathBuf {
     let root = crate::config::runtime_root().unwrap();
     root.join("runtime/herdr_input_holds").join(nonce)
@@ -210,8 +233,7 @@ fn t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg() {
     unchanged("root shell replaced");
 
     node.rig.show_panes(&["w1-9"]);
-    let retired = node.retire().unwrap();
-    assert_eq!((retired.nonce.as_str(), retired.hold), (NONCE, Ok(())));
+    assert_eq!(node.retire(), retired(true));
     assert_eq!(node.state(), Some(HostedState::Retired));
     assert!(!hold_of(NONCE).exists(), "the retired execution's hold");
     assert!(hold_of(OTHER).exists(), "another execution's hold");
@@ -229,8 +251,7 @@ fn a_lone_recorded_root_shell_retires_its_execution_pg() {
     let node = Node::new("exited");
     hold(NONCE);
     node.rig.foreground(&[SHELL]);
-    let retired = node.retire().unwrap();
-    assert_eq!((retired.nonce.as_str(), retired.hold), (NONCE, Ok(())));
+    assert_eq!(node.retire(), retired(true));
     assert_eq!(node.state(), Some(HostedState::Retired));
     assert!(!hold_of(NONCE).exists());
     assert!(node.wrote_nothing());
@@ -243,7 +264,7 @@ fn a_retire_whose_cas_fails_keeps_the_hold_pg() {
     hold(NONCE);
     let rows = node
         .rt
-        .block_on(list_local_herdr_rows_pg(&node.pool, NODE))
+        .block_on(list_local_herdr_rows_pg(&node.pool, NODE, LIVE))
         .unwrap();
     let HostedRecord::Known(record) = &rows[0].record else {
         panic!("{rows:?}");
@@ -278,7 +299,8 @@ fn status_shows_rows_panes_and_holds_without_paths_pg() {
     let status = node.rt.block_on(status(&node.pool)).unwrap();
     let expected = json!({
         "executions": [{"channel": CHANNEL, "provider": "claude", "state": "bound",
-            "nonce": NONCE, "pane": "provider_running", "input_hold": {"recorded_at": at}}],
+            "nonce": NONCE, "launch_evidence": "recorded", "pane": "provider_running",
+            "input_hold": {"recorded_at": at}}],
         "other_input_holds": [{"nonce": OTHER, "recorded_at": other_at}],
     });
     assert_eq!(status, expected);
@@ -289,4 +311,77 @@ fn status_shows_rows_panes_and_holds_without_paths_pg() {
     assert_eq!(node.row(), row);
     assert!(hold_of(NONCE).exists() && hold_of(OTHER).exists());
     assert!(node.wrote_nothing());
+}
+
+// A launch that recorded its pane but no evidence is still read: a complete snapshot without the
+// pane retires it and releases its own hold only.
+#[test]
+fn an_execution_without_launch_evidence_retires_once_a_snapshot_lacks_its_pane_pg() {
+    let node = Node::with("unproven-gone", unproven);
+    hold(NONCE);
+    hold(OTHER);
+    node.rig.show_panes(&["w1-9"]);
+    let result = node.retire();
+    assert_eq!(node.state(), Some(HostedState::Retired), "{result:?}");
+    assert!(!hold_of(NONCE).exists(), "the retired execution's hold");
+    assert!(hold_of(OTHER).exists(), "another execution's hold");
+    assert_eq!(result, retired(true));
+    assert!(node.wrote_nothing());
+}
+
+// Without launch evidence nothing proves a lone shell is the launch's own, so only a missing pane
+// retires: a running provider, a lone shell, an unreadable or incomplete snapshot keep everything.
+#[test]
+fn an_execution_without_launch_evidence_keeps_its_row_while_its_pane_may_run_pg() {
+    let node = Node::with("unproven-present", unproven);
+    hold(NONCE);
+    hold(OTHER);
+    let row = node.row();
+    let refused = |label: &str| {
+        let refused = node.retire();
+        assert_eq!(node.row(), row, "{label}: row {refused:?}");
+        let holds = hold_of(NONCE).exists() && hold_of(OTHER).exists();
+        assert!(holds, "{label}: holds");
+        refused
+    };
+    assert_eq!(refused("running"), Err(RetireRefusal::ProviderRunning));
+    node.rig.foreground(&[SHELL]);
+    let lone = Err(RetireRefusal::Unproven("no recorded root shell"));
+    assert_eq!(refused("lone shell"), lone);
+    node.rig.answer("session.snapshot", json!({"type": "ok"}));
+    let unproven = refused("off-contract snapshot");
+    assert!(matches!(unproven, Err(RetireRefusal::Unproven(_))));
+    node.rig.show_panes(&["w1-9"]);
+    node.rig.serve_as(&[7, 8, 7]);
+    let unproven = refused("another server's snapshot");
+    assert!(matches!(unproven, Err(RetireRefusal::Unproven(_))));
+    assert!(node.wrote_nothing());
+}
+
+// A hold the retire could not remove is reported as left, shown under its retired row, and
+// removed by the next retire, which changes nothing else.
+#[test]
+fn a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg() {
+    let node = Node::new("left");
+    std::fs::create_dir_all(hold_of(NONCE).join("stuck")).unwrap();
+    node.rig.show_panes(&["w1-9"]);
+    let first = node.retire().unwrap();
+    assert_eq!(node.state(), Some(HostedState::Retired));
+    assert!(hold_of(NONCE).exists());
+    assert!(matches!(first.hold, HoldRelease::Kept(_)), "{first:?}");
+    let shown = node.rt.block_on(status(&node.pool)).unwrap();
+    let left = json!([{"channel": CHANNEL, "provider": "claude", "state": "retired",
+        "nonce": NONCE, "input_hold": {"recorded_at": null}}]);
+    assert_eq!(shown["executions"], left);
+
+    std::fs::remove_dir_all(hold_of(NONCE)).unwrap();
+    hold(NONCE);
+    hold(OTHER);
+    let row = node.row();
+    let again = node.retire();
+    assert!(!hold_of(NONCE).exists(), "the hold left behind");
+    assert!(hold_of(OTHER).exists());
+    assert_eq!(node.row(), row);
+    assert_eq!(again, retired(false));
+    assert!(matches!(node.retire(), Err(RetireRefusal::NoRow(_))));
 }

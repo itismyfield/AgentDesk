@@ -222,16 +222,31 @@ fn holds_dir() -> Result<PathBuf, String> {
     Ok(root.join("runtime/herdr_input_holds"))
 }
 
+/// What releasing an input hold left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HoldRelease {
+    /// Removed and synced, or there was none.
+    Released,
+    /// Removed, but the directory sync failed, so the removal may not survive a crash.
+    NotDurable(String),
+    /// The hold is still there.
+    Kept(String),
+}
+
 /// Ends execution `nonce`'s hold; an absent hold is already ended. Only a confirmed retire calls it.
-pub(crate) fn release_hold(nonce: &str) -> Result<(), String> {
-    let path = hold_path(nonce)?;
-    let removed = match std::fs::remove_file(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        removed => {
-            removed.and_then(|()| crate::services::discord::runtime_store::fsync_parent_dir(&path))
-        }
+pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
+    let path = match hold_path(nonce) {
+        Ok(path) => path,
+        Err(error) => return HoldRelease::Kept(error),
     };
-    removed.map_err(|error| format!("herdr turn: input hold of {nonce} not removed: {error}"))
+    match std::fs::remove_file(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HoldRelease::Released,
+        Err(error) => HoldRelease::Kept(error.to_string()),
+        Ok(()) => match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
+            Ok(()) => HoldRelease::Released,
+            Err(error) => HoldRelease::NotDurable(error.to_string()),
+        },
+    }
 }
 
 /// Each held nonce and when its hold was recorded; the file holds only that time.

@@ -402,8 +402,11 @@ services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
 voice::turn_link::tests
 [tests]
+cli::herdr::tests::a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg
 cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
 cli::herdr::tests::a_retire_whose_cas_fails_keeps_the_hold_pg
+cli::herdr::tests::an_execution_without_launch_evidence_keeps_its_row_while_its_pane_may_run_pg
+cli::herdr::tests::an_execution_without_launch_evidence_retires_once_a_snapshot_lacks_its_pane_pg
 cli::herdr::tests::status_shows_rows_panes_and_holds_without_paths_pg
 cli::herdr::tests::t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg
 db::auto_queue::entries::dispatch_failure::tests::concurrent_failure_has_one_cas_winner_pg

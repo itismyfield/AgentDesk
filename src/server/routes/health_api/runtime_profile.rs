@@ -44,13 +44,17 @@ fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
     })
 }
 
-/// The restart reconnect's latest counts and the held inputs, only on a node with a local
-/// endpoint; without one nothing is read.
+/// The restart reconnect's latest counts and the held inputs it counted, only on a node with a
+/// local endpoint; nothing is read here.
 fn attach_local_herdr(view: &mut serde_json::Value) {
     #[cfg(unix)]
     if let Some((counts, holds)) = crate::services::discord::herdr_reconnect_health() {
         view["reconnect"] = serde_json::json!(counts);
-        view["input_holds"] = holds.map_or_else(|_| "unreadable".into(), serde_json::Value::from);
+        view["input_holds"] = match holds {
+            Some(Ok(held)) => held.into(),
+            Some(Err(_)) => "unreadable".into(),
+            None => "not_counted_yet".into(),
+        };
     }
     #[cfg(not(unix))]
     let _ = view;
@@ -133,8 +137,8 @@ mod tests {
         );
     }
 
-    // A local endpoint adds the latest restart reconnect counts and the held inputs; without one the
-    // projection above stays as it was.
+    // A local endpoint adds the latest restart reconnect counts and the held inputs that pass
+    // counted, never read here; without one the projection above stays as it was.
     #[cfg(unix)]
     #[test]
     fn health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint() {
@@ -154,9 +158,10 @@ mod tests {
         let health = herdr(&live);
         let none = json!({"channels": 0, "published": 0, "withheld": 0, "unknown": 0,
             "pending": 0});
+        let uncounted = json!("not_counted_yet");
         assert_eq!(
             (&health["reconnect"], &health["input_holds"]),
-            (&none, &json!(1))
+            (&none, &uncounted)
         );
     }
 }

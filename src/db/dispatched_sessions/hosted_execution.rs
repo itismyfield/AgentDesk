@@ -298,22 +298,27 @@ pub(crate) async fn load_hosted_execution_pg(
     })
 }
 
-/// Every row whose record places a live Herdr execution on `node`; a record that does not decode,
-/// or names another owner than its row, comes back Unknown.
+/// The record states of a live execution.
+pub(crate) const LIVE: &[&str] = &["pending", "bound"];
+
+/// Every row whose record places a Herdr execution in one of `states` on `node`; a record that does
+/// not decode, or names another owner than its row, comes back Unknown.
 pub(crate) async fn list_local_herdr_rows_pg(
     pool: &PgPool,
     node: &str,
+    states: &[&str],
 ) -> Result<Vec<HostedObservation>, String> {
     let rows = sqlx::query(
         "SELECT id, provider, identity_kind, discord_token_hash, channel_id, hosted_execution
          FROM sessions
          WHERE hosted_execution->'location'->>'host' = $1
            AND hosted_execution->'location'->>'execution_node' = $2
-           AND hosted_execution->>'state' IN ('pending', 'bound')
+           AND hosted_execution->>'state' = ANY($3)
          ORDER BY id",
     )
     .bind(HERDR_HOST)
     .bind(node)
+    .bind(states)
     .fetch_all(pool)
     .await
     .map_err(|error| format!("list herdr rows: {error}"))?;

@@ -39,10 +39,10 @@ mod node {
 
     use super::HerdrCommand;
     use crate::db::dispatched_sessions::hosted_execution::{
-        HostedCasOutcome, HostedExecution, HostedObservation, HostedRecord, ProcessStamp,
-        list_local_herdr_rows_pg, retire_pg,
+        HostedCasOutcome, HostedExecution, HostedObservation, HostedRecord, HostedState, LIVE,
+        ProcessStamp, list_local_herdr_rows_pg, retire_pg,
     };
-    use crate::services::claude::herdr_turn::{input_holds, release_hold};
+    use crate::services::claude::herdr_turn::{HoldRelease, input_holds, release_hold};
     use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
 
     /// Why a retire changed nothing: the row and every hold are as they were.
@@ -62,7 +62,9 @@ mod node {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct Retired {
         pub nonce: String,
-        pub hold: Result<(), String>,
+        /// This run retired the row; otherwise an earlier one did and only its hold was left.
+        pub now: bool,
+        pub hold: HoldRelease,
     }
 
     pub(super) fn run(command: HerdrCommand) -> Result<(), String> {
@@ -89,31 +91,41 @@ mod node {
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
     }
 
+    /// The row's retirement and the hold's removal, reported apart.
     fn retired_text(channel: u64, retired: &Retired) -> String {
-        match &retired.hold {
-            Ok(()) => format!("channel {channel}: execution {} retired", retired.nonce),
-            Err(error) => format!(
-                "channel {channel}: execution {} retired; its input hold stays: {error}",
-                retired.nonce
-            ),
-        }
-    }
-
-    /// This node's live Herdr rows, read once.
-    async fn local_rows(pool: &PgPool) -> Result<Vec<HostedObservation>, RetireRefusal> {
-        let node = crate::config::session_hosts::local_node();
-        let Some(node) = node.filter(|_| !herdr_endpoints().is_empty()) else {
-            return Err(RetireRefusal::NoLocalEndpoint);
+        let row = if retired.now {
+            "retired"
+        } else {
+            "was already retired"
         };
-        list_local_herdr_rows_pg(pool, &node)
-            .await
-            .map_err(RetireRefusal::Changed)
+        let hold = match &retired.hold {
+            HoldRelease::Released => "no input hold is left".to_string(),
+            HoldRelease::NotDurable(error) => {
+                format!(
+                    "its input hold was removed, but the removal is not confirmed durable: {error}"
+                )
+            }
+            HoldRelease::Kept(error) => {
+                format!("its input hold remains; running retire again removes it: {error}")
+            }
+        };
+        format!(
+            "channel {channel}: execution {} {row}\nchannel {channel}: {hold}",
+            retired.nonce
+        )
     }
 
-    /// The pane of `record` read on its registered endpoint, off the async runtime.
+    fn local_node() -> Result<String, RetireRefusal> {
+        let node = crate::config::session_hosts::local_node();
+        node.filter(|_| !herdr_endpoints().is_empty())
+            .ok_or(RetireRefusal::NoLocalEndpoint)
+    }
+
+    /// The pane of `record` read on its registered endpoint, off the async runtime; launch evidence
+    /// is not needed to read it. `None` without a recorded pane on a registered endpoint.
     async fn read_pane(record: &HostedExecution) -> Option<PaneReading> {
-        let target = herdr_endpoints().target(record)?;
-        let read = tokio::task::spawn_blocking(move || target.read_execution()).await;
+        let view = herdr_endpoints().view(record)?;
+        let read = tokio::task::spawn_blocking(move || view.read_execution()).await;
         Some(read.unwrap_or_else(|error| PaneReading::Unreadable(error.to_string())))
     }
 
@@ -127,21 +139,60 @@ mod node {
     /// Retires `channel`'s execution only when its pane reads as gone, or as the recorded root shell
     /// with no provider; then that execution's hold, and only that one, is released.
     pub(crate) async fn retire(pool: &PgPool, channel: u64) -> Result<Retired, RetireRefusal> {
-        let rows = local_rows(pool).await?;
+        let node = local_node()?;
+        let rows = list_local_herdr_rows_pg(pool, &node, LIVE)
+            .await
+            .map_err(RetireRefusal::Changed)?;
         let channel = channel.to_string();
         let mut matching = rows
             .iter()
             .filter(|row| known(row).is_some_and(|record| record.owner.channel_id == channel));
-        let (Some(row), None) = (matching.next(), matching.next()) else {
+        let row = match (matching.next(), matching.next()) {
+            (Some(row), None) => row,
+            (None, None) => return release_left_hold(pool, &node, &channel).await,
+            _ => {
+                return Err(RetireRefusal::NoRow(
+                    "more than one live herdr row of the channel",
+                ));
+            }
+        };
+        let record = known(row).ok_or(RetireRefusal::NoRow("unreadable record"))?;
+        let Some(reading) = read_pane(record).await else {
+            return Err(match record.location {
+                None => RetireRefusal::Unproven("no recorded pane"),
+                Some(_) => RetireRefusal::NoLocalEndpoint,
+            });
+        };
+        retire_on_reading(pool, row, record, &reading).await
+    }
+
+    /// The channel's execution an earlier retire already wrote Retired, whose hold that retire
+    /// could not remove: only that hold is removed now.
+    async fn release_left_hold(
+        pool: &PgPool,
+        node: &str,
+        channel: &str,
+    ) -> Result<Retired, RetireRefusal> {
+        let retired = list_local_herdr_rows_pg(pool, node, &["retired"])
+            .await
+            .map_err(RetireRefusal::Changed)?;
+        let holds = input_holds().unwrap_or_default();
+        let mut left = retired.iter().filter_map(known).filter(|record| {
+            record.owner.channel_id == channel
+                && holds
+                    .iter()
+                    .any(|(held, _)| *held == record.execution_nonce)
+        });
+        let (Some(record), None) = (left.next(), left.next()) else {
             return Err(RetireRefusal::NoRow(
                 "no single live herdr row of the channel",
             ));
         };
-        let record = known(row).ok_or(RetireRefusal::NoRow("unreadable record"))?;
-        let reading = read_pane(record)
-            .await
-            .ok_or(RetireRefusal::NoLocalEndpoint)?;
-        retire_on_reading(pool, row, record, &reading).await
+        Ok(Retired {
+            nonce: record.execution_nonce.clone(),
+            now: false,
+            hold: release_hold(&record.execution_nonce),
+        })
     }
 
     /// The retire decision on one reading; the hold goes only after the row's CAS wrote Retired.
@@ -171,6 +222,10 @@ mod node {
                 PaneReading::Present {
                     provider: PaneProvider::Exited,
                     ..
+                } if record.expected.is_none() => RetireRefusal::Unproven("no recorded root shell"),
+                PaneReading::Present {
+                    provider: PaneProvider::Exited,
+                    ..
                 } => RetireRefusal::Unproven("root shell replaced"),
                 PaneReading::Present { .. } => RetireRefusal::Unproven("provider unverified"),
                 _ => RetireRefusal::Unproven("pane unreadable or snapshot incomplete"),
@@ -180,6 +235,7 @@ mod node {
         match retire_pg(pool, row, &record.owner, nonce).await {
             Ok(HostedCasOutcome::Written) => Ok(Retired {
                 nonce: nonce.clone(),
+                now: true,
                 hold: release_hold(nonce),
             }),
             Ok(HostedCasOutcome::Stale) => {
@@ -193,11 +249,13 @@ mod node {
         let root_kept =
             |root: &ProcessStamp| record.expected.as_ref().is_some_and(|e| e.root == *root);
         match reading {
+            None if record.location.is_none() => "no_location",
             None => "no_local_endpoint",
             Some(PaneReading::Missing) => "missing",
             Some(PaneReading::Unreadable(_)) => "unreadable",
             Some(PaneReading::Present { provider, root }) => match provider {
                 PaneProvider::Execution(_) => "provider_running",
+                PaneProvider::Exited if record.expected.is_none() => "root_shell_unrecorded",
                 PaneProvider::Exited if root_kept(root) => "provider_exited",
                 PaneProvider::Exited => "root_replaced",
                 PaneProvider::Unverified(_) => "provider_unverified",
@@ -205,31 +263,42 @@ mod node {
         }
     }
 
-    /// Every local row with its pane as read now, and every hold by nonce and recorded time; no path
-    /// or input text is shown.
+    /// Every local row with its pane as read now, retired rows whose hold is left, and every
+    /// other hold by nonce and recorded time; no path or input text is shown.
     pub(crate) async fn status(pool: &PgPool) -> Result<Value, String> {
-        let rows = local_rows(pool)
-            .await
-            .map_err(|error| format!("{error:?}"))?;
+        let node = local_node().map_err(|error| format!("{error:?}"))?;
+        let rows = list_local_herdr_rows_pg(pool, &node, LIVE).await?;
+        let retired = list_local_herdr_rows_pg(pool, &node, &["retired"]).await?;
         let mut holds = input_holds()?;
+        let mut take_hold = |nonce: &str| {
+            let held = holds.iter().position(|(held, _)| held == nonce);
+            held.map(|at| json!({"recorded_at": holds.remove(at).1}))
+        };
         let mut shown = Vec::new();
-        for row in &rows {
+        for row in rows.iter().chain(&retired) {
             let Some(record) = known(row) else {
                 shown.push(json!({"session_row": row.session_id(), "record": "unreadable"}));
                 continue;
             };
-            let reading = read_pane(record).await;
-            let nonce = &record.execution_nonce;
-            let held = holds.iter().position(|(held, _)| held == nonce);
-            let hold = held.map(|at| json!({"recorded_at": holds.remove(at).1}));
-            shown.push(json!({
+            let hold = take_hold(&record.execution_nonce);
+            let mut execution = json!({
                 "channel": record.owner.channel_id,
                 "provider": record.owner.provider,
                 "state": record.state,
-                "nonce": nonce,
-                "pane": pane_text(reading.as_ref(), record),
+                "nonce": record.execution_nonce,
                 "input_hold": hold,
-            }));
+            });
+            // A retired row is shown only for the hold its retire left; its pane is not read.
+            if record.state == HostedState::Retired {
+                if !execution["input_hold"].is_null() {
+                    shown.push(execution);
+                }
+                continue;
+            }
+            let evidence = record.expected.as_ref().map_or("none", |_| "recorded");
+            execution["launch_evidence"] = evidence.into();
+            execution["pane"] = pane_text(read_pane(record).await.as_ref(), record).into();
+            shown.push(execution);
         }
         let other: Vec<Value> = holds
             .into_iter()

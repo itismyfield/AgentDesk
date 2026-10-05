@@ -26,10 +26,17 @@ pane kill·close 는 P11 범위다.
     - `unknown`: 읽지 못한 row. 다음 패스에서 다시 읽는다.
     - `pending`: 아직 Bound 가 아닌 row. 재접속 패스는 손대지 않고 다음 턴에 맡긴다.
   - `input_holds`: 불명확한 prompt 뒤 입력을 막고 있는 실행 수.
+    - 가장 최근 재접속 패스가 센 값이다. health 요청은 파일을 읽지 않는다.
+    - 첫 패스 전에는 `"not_counted_yet"` 이다.
 - `agentdesk herdr status`: 이 노드의 Herdr row 를 읽기 전용으로 보여 준다.
-  - row 마다 채널·provider·state·nonce·pane 상태를 보여 준다.
-  - pane 상태 값: `provider_running`, `provider_exited`, `root_replaced`, `provider_unverified`, `missing`, `unreadable`, `no_local_endpoint`.
+  - row 마다 채널·provider·state·nonce·launch 증거(`recorded`/`none`)·pane 상태를 보여 준다.
+  - pane 상태 값:
+    - `provider_running`, `provider_exited`, `root_replaced`, `provider_unverified`, `missing`, `unreadable`.
+    - `root_shell_unrecorded`: launch 증거가 없는 실행의 pane 에 shell 만 있다.
+    - `no_location`: 아직 pane 이 기록되지 않은 Pending 이다.
+    - `no_local_endpoint`: 기록된 endpoint 가 이 노드에 등록되어 있지 않다.
   - 그 실행의 input hold 가 있으면 기록 시각을 함께 보여 준다.
+  - Retired row 인데 그 nonce 의 hold 가 남아 있으면 그 row 도 `state: retired` 로 나온다.
   - 어느 row 에도 속하지 않는 hold 는 `other_input_holds` 에 nonce·기록 시각으로 나온다.
   - 경로와 입력 원문은 출력하지 않는다.
 
@@ -59,15 +66,20 @@ pane kill·close 는 P11 범위다.
   - herdr 에서 pane 을 직접 닫는다(사람 조작), 또는
   - provider 를 `/exit` 로 끝낸다.
 - retire 가 허용되는 경우:
-  - 완전한 snapshot 에 저장된 pane 이 없다.
-  - root shell 만 foreground 에 있고, 그 root shell 이 기록된 것(pid·시작 시각)과 같다.
+  - 완전한 snapshot 에 저장된 pane 이 없다. launch 증거가 없는 Pending 도 pane 이 기록되어 있으면 이 조건으로 은퇴한다.
+  - root shell 만 foreground 에 있고, 그 root shell 이 기록된 것(pid·시작 시각)과 같다. launch 증거가 없으면 비교할 기록이 없어 이 조건으로는 은퇴하지 않는다. pane 을 닫은 뒤 다시 실행한다.
 - 그때만 row 를 nonce CAS 로 Retired 로 바꾼다. CAS 가 성공한 뒤에만 그 nonce 의 input hold 를 지운다.
   다른 nonce 의 hold 는 건드리지 않는다.
+- 출력은 row 결과와 hold 결과를 따로 적는다:
+  - `retired` / `was already retired`: row 결과.
+  - `no input hold is left`: hold 가 없거나 지워졌다.
+  - `removed, but the removal is not confirmed durable`: 파일은 지웠으나 디렉터리 동기화가 실패했다. 장애 뒤 다시 보일 수 있다.
+  - `remains`: hold 가 남았다. status 에 그 Retired row 가 hold 와 함께 나온다. 원인을 고친 뒤 같은 retire 를 다시 실행하면 그 nonce 의 hold 만 지운다(row 는 이미 Retired 이고 바꾸지 않는다).
 - 거절 이유(row·hold 는 그대로):
   - `ProviderRunning`: provider 가 아직 돈다.
-  - `Unproven(..)`: 읽기 실패, 불완전 snapshot, 바뀐 root shell, 확인되지 않은 provider.
+  - `Unproven(..)`: 읽기 실패, 불완전 snapshot, 바뀐 root shell, 기록 없는 root shell(`no recorded root shell`), 확인되지 않은 provider, 기록된 pane 없음(`no recorded pane`).
   - `Changed(..)`: 읽은 뒤 row 가 바뀌었거나 전이가 거절됐다. hold 는 남는다.
-  - `NoRow(..)`: 이 노드에 그 채널의 살아 있는 Herdr row 가 하나가 아니다. 이미 Retired 인 row 에 다시 실행해도 이 거절로 끝나고 아무것도 바꾸지 않는다.
+  - `NoRow(..)`: 이 노드에 그 채널의 살아 있는 Herdr row 가 하나가 아니고, 지울 hold 가 남은 Retired row 도 하나가 아니다. 아무것도 바꾸지 않는다.
   - `NoLocalEndpoint`: 이 노드에 등록된 endpoint 가 없다.
 - 일시적인 읽기 실패는 retire 근거가 아니다. 증명하지 못하면 row 는 그대로(Hold)이고, 이 상태를 "tmux 원복 완료" 로 보지 않는다.
 - input hold 만 따로 지우는 명령은 없다.

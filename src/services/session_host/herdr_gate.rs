@@ -269,24 +269,126 @@ impl HerdrTarget {
             == HostPresence::Present
     }
 
+    /// Whether the stored execution still runs in the pane, read on one server.
+    pub(crate) fn execution_alive(&self) -> bool {
+        self.0
+            .transport
+            .server_witness()
+            .is_ok_and(|witness| self.0.verify_pane(&witness).is_ok())
+    }
+}
+
+fn next_call(next_id: &AtomicU64, request: HerdrRequest) -> HerdrCall {
+    let id = next_id.fetch_add(1, Ordering::Relaxed);
+    HerdrCall {
+        id: format!("adk-input-{id}"),
+        request,
+    }
+}
+
+/// The reads of one pane on one transport, shared by the input gate and the read-only view.
+struct Reads<'a> {
+    transport: &'a dyn HerdrTransport,
+    next_id: &'a AtomicU64,
+    pane: &'a str,
+}
+
+impl Reads<'_> {
+    fn processes(&self) -> PaneProcesses {
+        let call = next_call(
+            self.next_id,
+            HerdrRequest::PaneProcessInfo {
+                pane_id: self.pane.to_string(),
+            },
+        );
+        let (outcome, witness) = self.transport.call(&call);
+        let read = contract::foreground_result(&call, outcome, self.pane);
+        (read.map_err(|error| format!("{error:?}")), witness)
+    }
+
+    fn provider_on(
+        &self,
+        provider: &str,
+        nonce: &str,
+        os: &dyn ProcessOs,
+        witness: &ServerWitness,
+    ) -> Result<ExpectedExecution, EvidenceGap> {
+        let request = ProbeRequest {
+            provider,
+            nonce,
+            launched_at: UNIX_EPOCH,
+            witness,
+            window: Duration::ZERO,
+        };
+        pane_probe::probe(&|| self.processes(), os, &request)
+    }
+}
+
+/// A recorded pane read, never written, on this node's registered endpoint. Unlike a target it
+/// needs only the stored location, so an execution without launch evidence can still be read.
+pub(crate) struct HerdrPaneView {
+    transport: Arc<dyn HerdrTransport>,
+    pane: String,
+    nonce: String,
+    provider: String,
+    os: Arc<dyn ProcessOs>,
+    next_id: AtomicU64,
+}
+
+impl HerdrPaneView {
+    /// A Pending or Bound execution whose stored location names exactly `endpoint`; no I/O.
+    pub(crate) fn new(
+        endpoint: &HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+    ) -> Option<Self> {
+        let live = matches!(stored.state, HostedState::Pending | HostedState::Bound);
+        let location = stored.location.as_ref()?;
+        if !live || !on_endpoint(location, endpoint) {
+            return None;
+        }
+        Some(Self {
+            transport,
+            pane: location.pane_id.clone(),
+            nonce: stored.execution_nonce.clone(),
+            provider: stored.owner.provider.clone(),
+            os: Arc::new(HostOs),
+            next_id: AtomicU64::new(1),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_os(self, os: Arc<dyn ProcessOs>) -> Self {
+        Self { os, ..self }
+    }
+
+    pub(crate) fn pane_id(&self) -> &str {
+        &self.pane
+    }
+
     /// The pane's presence, root shell and provider, every answer from one server; no input.
     pub(crate) fn read_execution(&self) -> PaneReading {
         let unreadable = |why: &dyn std::fmt::Debug| PaneReading::Unreadable(format!("{why:?}"));
-        let witness = match self.0.transport.server_witness() {
+        let reads = Reads {
+            transport: self.transport.as_ref(),
+            next_id: &self.next_id,
+            pane: &self.pane,
+        };
+        let witness = match self.transport.server_witness() {
             Ok(witness) => witness,
             Err(why) => return unreadable(&why),
         };
-        let call = self.0.call(HerdrRequest::SessionSnapshot {});
-        let (outcome, answered) = self.0.transport.call(&call);
+        let call = next_call(&self.next_id, HerdrRequest::SessionSnapshot {});
+        let (outcome, answered) = self.transport.call(&call);
         if answered.as_ref() != Ok(&witness) {
             return unreadable(&"snapshot from another server");
         }
-        match contract::snapshot_observation(&call, outcome, &self.0.pane).presence() {
+        match contract::snapshot_observation(&call, outcome, &self.pane).presence() {
             HostPresence::Present => {}
             HostPresence::Missing => return PaneReading::Missing,
             other => return unreadable(&other),
         }
-        let (read, answered) = self.0.read_processes();
+        let (read, answered) = reads.processes();
         if answered.as_ref() != Ok(&witness) {
             return unreadable(&"processes from another server");
         }
@@ -294,7 +396,7 @@ impl HerdrTarget {
             Ok((Some(root), ForegroundProcesses::Listed(foreground))) => (root, foreground),
             other => return unreadable(&other),
         };
-        let root = match self.0.os.start(root) {
+        let root = match self.os.start(root) {
             Ok(start) => ProcessStamp {
                 pid: root,
                 start: pane_probe::start_text(start.identity),
@@ -304,21 +406,13 @@ impl HerdrTarget {
         let provider = if foreground == [root.pid] {
             PaneProvider::Exited
         } else {
-            match self.0.provider_on(&witness) {
+            match reads.provider_on(&self.provider, &self.nonce, self.os.as_ref(), &witness) {
                 Ok(now) if now.root == root => PaneProvider::Execution(now.provider_process),
                 Ok(_) => PaneProvider::Unverified("root shell changed between readings".into()),
                 Err(gap) => PaneProvider::Unverified(format!("{gap:?}")),
             }
         };
         PaneReading::Present { root, provider }
-    }
-
-    /// Whether the stored execution still runs in the pane, read on one server.
-    pub(crate) fn execution_alive(&self) -> bool {
-        self.0
-            .transport
-            .server_witness()
-            .is_ok_and(|witness| self.0.verify_pane(&witness).is_ok())
     }
 }
 
@@ -342,11 +436,7 @@ fn cancel_only(request: &HerdrRequest) -> bool {
 
 impl PaneGate {
     fn call(&self, request: HerdrRequest) -> HerdrCall {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        HerdrCall {
-            id: format!("adk-input-{id}"),
-            request,
-        }
+        next_call(&self.next_id, request)
     }
 
     /// Admission first (no I/O), the `.host_kind` marker, then E7, then the pane on the server
@@ -369,25 +459,19 @@ impl PaneGate {
         Ok(Judged { witness, mutation })
     }
 
-    fn read_processes(&self) -> PaneProcesses {
-        let call = self.call(HerdrRequest::PaneProcessInfo {
-            pane_id: self.pane.clone(),
-        });
-        let (outcome, witness) = self.transport.call(&call);
-        let read = contract::foreground_result(&call, outcome, &self.pane);
-        (read.map_err(|error| format!("{error:?}")), witness)
-    }
-
     /// The launch's provenance rule read once more on `witness`'s server.
     fn provider_on(&self, witness: &ServerWitness) -> Result<ExpectedExecution, EvidenceGap> {
-        let request = ProbeRequest {
-            provider: &self.expected.binding_provider,
-            nonce: &self.nonce,
-            launched_at: UNIX_EPOCH,
-            witness,
-            window: Duration::ZERO,
+        let reads = Reads {
+            transport: self.transport.as_ref(),
+            next_id: &self.next_id,
+            pane: &self.pane,
         };
-        pane_probe::probe(&|| self.read_processes(), self.os.as_ref(), &request)
+        reads.provider_on(
+            &self.expected.binding_provider,
+            &self.nonce,
+            self.os.as_ref(),
+            witness,
+        )
     }
 
     /// The provenance rule on `witness`'s server must name the recorded root shell and provider
