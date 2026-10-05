@@ -137,6 +137,21 @@ fn preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused() {
             Some(EnqueueRefusalReason::InputModeFenced(Mode::Closing))
         );
         assert_eq!(handle.snapshot().await.intervention_queue.len(), 2);
+        let channel = ChannelId::new(6_325_207);
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let candidate = Arc::new(CancelToken::new());
+        let kickoff = handle.recovery_kickoff(candidate, UserId::new(7), Some(MessageId::new(24)));
+        tokio::pin!(kickoff);
+        // Enqueue the actual request before close without yielding to the actor.
+        assert!(futures::poll!(kickoff.as_mut()).is_pending());
+        let closing = gate.close().unwrap();
+        assert_eq!(
+            kickoff.await,
+            RecoveryKickoffResult::InputModeFenced(Mode::Closing)
+        );
+        assert!(handle.snapshot().await.cancel_token.is_none());
+        closing.drain().await;
     });
 }
 
@@ -293,6 +308,30 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
             Err(Failure::Busy)
         ));
         assert!(handle.snapshot().await.cancel_token.is_some());
+        let channel = ChannelId::new(6_325_208);
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        assert!(handle.enqueue(item(52), context()).await.enqueued);
+        let taken = handle.take_next_soft(context()).await;
+        assert!(taken.dispatch_lease.is_some());
+        let before = handle.snapshot().await;
+        assert_eq!(before.pending_user_dispatch, Some(MessageId::new(52)));
+        assert!(before.pending_user_dispatch_lease_held_by_caller);
+        let marker = fence::population_root()
+            .unwrap()
+            .join("discord_pending_queue/claude/fence-test/6325208.dispatch");
+        let bytes = std::fs::read(&marker).unwrap();
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let closing = Arc::new(gate.close().unwrap());
+        assert!(matches!(
+            handle.freeze_input(closing, context()).await,
+            Err(Failure::Busy)
+        ));
+        assert_eq!(
+            handle.snapshot().await.pending_user_dispatch,
+            before.pending_user_dispatch
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), bytes);
+        drop(taken);
         let channel = ChannelId::new(6_325_206);
         let handle = ChannelMailboxRegistry::default().handle(channel);
         let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
