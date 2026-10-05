@@ -116,6 +116,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_router_hook::pg_tests
   --skip services::cluster::intake_worker::dispatch_stamp_tests
   --skip services::cluster::intake_worker::home_route_tests
+  --skip services::cluster::intake_worker::input_effect_tests
   --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
@@ -820,6 +821,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_router_hook::pg_tests
   services::cluster::intake_worker::dispatch_stamp_tests
   services::cluster::intake_worker::home_route_tests
+  services::cluster::intake_worker::input_effect_tests
   services::cluster::intake_worker::o_route_tests
   services::cluster::machine_resources::store::tests
   services::discord::admin_host_guard::tests
