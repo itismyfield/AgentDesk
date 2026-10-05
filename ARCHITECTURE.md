@@ -2091,6 +2091,7 @@ src/
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
+│   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs
