@@ -80,9 +80,9 @@ impl TmuxPane {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.program);
+        let mut command =
+            crate::services::platform::binary_resolver::runtime_command(&self.program);
         command.arg("-u").args(args);
-        crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
         command
     }
 

@@ -9165,6 +9165,7 @@ services::pipeline_routes::tests::stage_json_absent_backoff_is_null
 services::pipeline_routes::tests::stage_json_emits_backoff_field
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::platform::binary_resolver::runtime_path::tests::command_with_path_resolves_bare_names_and_falls_back_keeping_path
 services::platform::binary_resolver::tests::codex_app_bundle_candidate_gets_codex_only_priority
 services::platform::binary_resolver::tests::codex_fallback_dirs_include_app_bundle_resources_on_macos
 services::platform::binary_resolver::tests::codex_probe_selects_newest_successful_candidate_not_first_path_hit
@@ -9203,6 +9204,7 @@ services::platform::tmux::timeout_tests::probe_failure_widens_to_live_or_ambiguo
 services::platform::tmux::timeout_tests::send_keys_timeout_preserves_tmux_stderr_on_fast_failure
 services::platform::tmux::timeout_tests::send_keys_timeout_reports_hung_tmux
 services::platform::tmux::timeout_tests::session_presence_distinguishes_missing_from_probe_failure
+services::platform::tmux::timeout_tests::tmux_command_names_runtime_path_tmux_by_absolute_path
 services::platform::windows_job::tests::forced_runtime_exit_terminates_grandchildren_and_releases_ports
 services::platform::windows_job::tests::runtime_job_descendant_fixture
 services::pr_summary::tests::cache_hit_on_repeated_lookup

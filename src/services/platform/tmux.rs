@@ -31,10 +31,9 @@ fn is_blank_session_name(session_name: &str) -> bool {
 }
 
 fn tmux_command() -> Command {
-    let mut cmd = Command::new("tmux");
+    let mut cmd = binary_resolver::runtime_command("tmux");
     // -u forces UTF-8 mode so non-ASCII session names are not masked in output.
     cmd.arg("-u");
-    binary_resolver::apply_runtime_path(&mut cmd);
     cmd
 }
 
@@ -1402,6 +1401,22 @@ mod timeout_tests {
             probe_failed,
             IndependentTmuxReadiness::ReadyForInput,
             "probe failure must not authorize zombie mailbox release"
+        );
+    }
+
+    #[test]
+    fn tmux_command_names_runtime_path_tmux_by_absolute_path() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        write_fake_tmux(temp.path(), "exit 0");
+        let _path = PathOverride::prepend(temp.path());
+
+        let command = tmux_command();
+        assert_eq!(command.get_program(), temp.path().join("tmux").as_os_str());
+        assert!(std::path::Path::new(command.get_program()).is_absolute());
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "PATH" && value.is_some())
         );
     }
 

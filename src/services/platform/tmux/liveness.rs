@@ -21,8 +21,8 @@ pub(super) fn pane_liveness_using(
 
 pub(super) fn prepared_tmux_command() -> Option<Command> {
     let path = binary_resolver::prepared_runtime_path()?;
-    let mut command = Command::new("tmux");
-    command.arg("-u").env("PATH", path);
+    let mut command = binary_resolver::command_with_path("tmux".as_ref(), Some(path));
+    command.arg("-u");
     Some(command)
 }
 
