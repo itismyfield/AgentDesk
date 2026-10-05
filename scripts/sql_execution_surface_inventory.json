@@ -34889,6 +34889,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/session_host/herdr_clear_adapter_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:52b1efa6b9e2eb90854a9717c6207b2ee4ea03e68a8d7a4721b3af02ec996478"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/session_host/session_record.rs",
       "api": "sqlx::query",
       "symbol": "query",

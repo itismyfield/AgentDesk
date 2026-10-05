@@ -398,6 +398,7 @@ jobs:
               - 'src/services/scheduled_messages/context_snapshot.rs'
               - 'src/services/scheduled_messages/postgres_tests.rs'
               - 'src/services/session_forwarding.rs'
+              - 'src/services/session_host/herdr_clear_adapter_tests.rs'
               - 'src/services/session_host/session_record.rs'
               - 'src/services/session_resume.rs'
               - 'src/services/settings.rs'
