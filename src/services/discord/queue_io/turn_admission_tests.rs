@@ -117,3 +117,138 @@ async fn an_adopting_claim_is_fenced_on_the_named_episode() {
     assert!(exact(latest, "fresh2").await.removed_token.is_some());
     assert!(adopt("fresh3", latest, "e2").await.refused_released_episode);
 }
+
+#[test]
+fn input_fence_wrapper_posts_source_notices_and_health_even_when_http_fails() {
+    use crate::services::discord::input_runtime::fence::{self, Gate, Mode};
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let registry = crate::services::discord::health::HealthRegistry::new();
+            let baseline = crate::services::discord::health::build_health_snapshot(&registry).await;
+            let baseline = serde_json::to_value(baseline).unwrap();
+            let channel = ChannelId::new(6_325_301);
+            let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+            struct ClearHealth(Arc<Gate>);
+            impl Drop for ClearHealth {
+                fn drop(&mut self) {
+                    self.0.clear_failure_for_test();
+                }
+            }
+            let _health = ClearHealth(gate.clone());
+            let empty = crate::services::discord::health::build_health_snapshot(&registry).await;
+            let empty = serde_json::to_value(empty).unwrap();
+            assert_eq!(baseline["degraded_reasons"], empty["degraded_reasons"]);
+            assert_eq!(baseline["status"], empty["status"]);
+            let _closing = gate.close().unwrap();
+            let item = || Intervention {
+                author_id: UserId::new(7),
+                author_is_bot: false,
+                message_id: MessageId::new(61),
+                source_message_ids: vec![MessageId::new(61), MessageId::new(62)],
+                queued_generation: 1,
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: "private-body-must-not-leak".into(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            };
+            let (log, _http) =
+                super::super::super::shared_state::test_rest::recording_mock(900, channel.get())
+                    .await;
+            let result = mailbox_enqueue_observed_intervention(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+                item(),
+                None,
+            )
+            .await;
+            assert_eq!(
+                result.refusal_reason,
+                Some(EnqueueRefusalReason::InputModeFenced(Mode::Closing))
+            );
+            assert!(!result.enqueued);
+            assert_eq!(
+                log.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(method, _)| method == "POST")
+                    .count(),
+                2
+            );
+            assert!(
+                shared.mailboxes.peek(channel).is_none(),
+                "no actor minted for a refusal"
+            );
+            let snapshot = crate::services::discord::health::build_health_snapshot(&registry).await;
+            let snapshot = serde_json::to_value(snapshot).unwrap();
+            assert!(
+                snapshot["degraded_reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r
+                        .as_str()
+                        .unwrap()
+                        .contains("channel=6325301 sources=[61, 62] reason=Mode(Closing)"))
+            );
+            assert!(
+                snapshot["degraded_reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| !r.as_str().unwrap().contains("private-body"))
+            );
+            // Real failing HTTP response: Notice failure must not turn refusal into success.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let http = Arc::new(
+                poise::serenity_prelude::HttpBuilder::new("test-token")
+                    .proxy(format!("http://{}", listener.local_addr().unwrap()))
+                    .ratelimiter_disabled(true)
+                    .build(),
+            );
+            let _failing = super::super::super::shared_state::test_rest::install(http);
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    axum::Router::new().fallback(|| async {
+                        (
+                            axum::http::StatusCode::FORBIDDEN,
+                            axum::Json(
+                                serde_json::json!({"code":50013,"message":"Missing Permissions"}),
+                            ),
+                        )
+                    }),
+                )
+                .await
+                .unwrap()
+            });
+            let failed = mailbox_enqueue_observed_intervention(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+                item(),
+                None,
+            )
+            .await;
+            assert_eq!(failed.refusal_reason, result.refusal_reason);
+            assert!(!failed.enqueued);
+            assert!(
+                fence::health_reasons()
+                    .iter()
+                    .any(|r| r.contains("channel=6325301"))
+            );
+            server.abort();
+        });
+}

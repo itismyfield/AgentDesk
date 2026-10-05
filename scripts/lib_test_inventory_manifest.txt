@@ -4071,12 +4071,15 @@ services::discord::inflight_heartbeat_sweeper::retired_channel_tests::retired_ch
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_delay_below_placeholder_abandon
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
+services::discord::input_runtime::fence::tests::admitted_writer_scope_finishes_after_close_without_new_admission
 services::discord::input_runtime::fence::tests::borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
 services::discord::input_runtime::fence::tests::canonical_borrowing_and_supervisor_contention_never_prepare
 services::discord::input_runtime::fence::tests::closing_drains_only_existing_permits_and_rejects_redirect
+services::discord::input_runtime::fence::tests::off_failure_health_does_not_change_actual_snapshot
 services::discord::input_runtime::fence::tests::off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore
 services::discord::input_runtime::fence::tests::ordinary_writer_waits_for_release_and_timeout_is_typed
 services::discord::input_runtime::fence::tests::queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_stall
+services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
 services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
 services::discord::input_transition::tests::supported::contended_row_lock_holds_without_waiting_and_resumes_after_release
@@ -4115,6 +4118,7 @@ services::discord::mailbox_finish::closed_actor_tests::refused_wrapper_request_r
 services::discord::mailbox_finish::closed_actor_tests::restitution_preserves_typed_refusals_and_legacy_results
 services::discord::mailbox_finish::closed_actor_tests::unreadable_disk_queue_stops_whole_queue_writes
 services::discord::mailbox_finish::closed_actor_tests::whole_queue_writes_keep_a_disk_only_queue
+services::discord::mailbox_finish::input_fence_contract_tests::input_fence_restitution_is_observable_failure
 services::discord::mailbox_finish::relay_state_contract_refs::contract_symbols_exist
 services::discord::mailbox_probe::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait
 services::discord::mailbox_probe::mailbox_unreachable_tests::watcher_direct_idle_commit_blocks_on_turn_quietly_and_on_unreachable_loudly
@@ -4884,6 +4888,7 @@ services::discord::queue_io::transport::tests::rest_queue_rejected_by_changed_po
 services::discord::queue_io::transport::tests::rest_queue_routing_preserves_thread_parent_and_dm_policy
 services::discord::queue_io::transport::tests::rest_worker_queue_transport_requires_credentials_but_not_gateway
 services::discord::queue_io::turn_admission::tests::an_adopting_claim_is_fenced_on_the_named_episode
+services::discord::queue_io::turn_admission::tests::input_fence_wrapper_posts_source_notices_and_health_even_when_http_fails
 services::discord::queue_io::turn_admission::tests::only_an_activated_kickoff_resets_the_recovery_done_latch
 services::discord::queue_marker::tests::dispatch_drain_mailbox_marker_discards_persisted_queued_state
 services::discord::queue_marker::tests::merged_and_reconcile_markers_add_and_remove_through_reconciler
@@ -5623,6 +5628,7 @@ services::discord::router::message_handler::session_strategy_lifecycle_tests::se
 services::discord::router::message_handler::session_strategy_lifecycle_tests::successful_busy_wait_recaptures_offset_past_previous_turn_bytes
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_restores_dequeued_head_without_reversing_fifo_4795
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_treats_pending_or_active_source_as_already_processing_4797
+services::discord::router::message_handler::tui_followup::input_fence_contract_tests::input_fence_notice_is_pending_not_duplicate_or_success
 services::discord::router::message_handler::turn_lifecycle::tests::text_intake_turn_start_waits_behind_queued_inbound
 services::discord::router::message_handler::typing_indicator::tests::broadcast_failure_stops_refresh_loop
 services::discord::router::message_handler::typing_indicator::tests::max_lifetime_stops_typing_without_terminal_signal
@@ -6021,6 +6027,8 @@ services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reco
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::restart_restore_cwd_does_not_cross_channels
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::restart_restore_cwd_legacy_null_single_row_is_reused
 services::discord::session_status_hook::tests::post_status_span_carries_channel_and_session_identity
+services::discord::session_transition::input_fence_contract_tests::input_fence_session_guard_timeout_never_prepares
+services::discord::session_transition::input_fence_contract_tests::input_fence_session_helper_drains_before_lock_and_holds_lock_through_ack
 services::discord::session_transition::tests::inactive_channel_locks_are_pruned_only_on_vacant_insertion
 services::discord::session_transition::tests::transition_acquisition_times_out_after_contract_window
 services::discord::settings::content::role_prompt_cache_tests::role_prompt_cache_invalidates_when_file_changes
@@ -10712,6 +10720,12 @@ services::turn_orchestrator::inbound_order::tests::an_aged_queue_item_does_not_r
 services::turn_orchestrator::inbound_order::tests::an_immediate_turn_cycle_never_refreshes_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::nothing_ahead_of_the_claim_clears_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_three_idle_queue_backstop_rounds
+services::turn_orchestrator::input_fence::tests::actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_take
+services::turn_orchestrator::input_fence::tests::freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_population
+services::turn_orchestrator::input_fence::tests::freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mutation
+services::turn_orchestrator::input_fence::tests::off_path_has_no_sidecar_and_registry_does_not_remint_on_fence
+services::turn_orchestrator::input_fence::tests::ownership_transferred_consumers_surface_fence_as_failure
+services::turn_orchestrator::input_fence::tests::preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused
 services::turn_orchestrator::input_handback::tests::distinct_same_author_text_clean_wire_and_durable_upload_copy
 services::turn_orchestrator::input_handback::tests::supported::durable_handback_appends_and_recognizes_queue_marker_and_active_sources
 services::turn_orchestrator::lease_release::lease_release_identity_tests::a_provider_named_like_the_sentinel_stays_distinguishable_from_unmeasured

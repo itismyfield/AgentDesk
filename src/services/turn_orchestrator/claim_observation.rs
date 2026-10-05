@@ -189,7 +189,19 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         observed: Option<ClaimObservation>,
     ) -> EnqueueInterventionResult {
+        self.enqueue_observed_with_permit(intervention, persistence, observed, None)
+            .await
+    }
+
+    pub(crate) async fn enqueue_observed_with_permit(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        observed: Option<ClaimObservation>,
+        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
+    ) -> EnqueueInterventionResult {
         self.request(|reply| ChannelMailboxMsg::Enqueue {
+            input_permit,
             intervention,
             persistence,
             observed,

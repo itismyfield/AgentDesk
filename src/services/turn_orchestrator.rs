@@ -22,6 +22,8 @@ mod front_requeue;
 mod inbound_order;
 mod incarnation;
 #[allow(dead_code)]
+pub(crate) mod input_fence;
+#[allow(dead_code)]
 pub(crate) mod input_handback;
 mod intervention;
 mod lease_release;
@@ -374,6 +376,9 @@ pub(crate) enum EnqueueRefusalReason {
     /// #3297 r3 — the resolved actor is purge-tombstoned (`closed`). The
     /// registry's `enqueue_with_closed_retry` re-resolves a fresh actor.
     MailboxClosed,
+    InputModeFenced(crate::services::discord::input_runtime::fence::Mode),
+    LockTimeout,
+    InputPersistence,
 }
 
 impl EnqueueRefusalReason {
@@ -387,6 +392,9 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
+            EnqueueRefusalReason::InputModeFenced(_) => "input_mode_fenced",
+            EnqueueRefusalReason::LockTimeout => "lock_timeout",
+            EnqueueRefusalReason::InputPersistence => "input_persistence",
         }
     }
 }
@@ -838,7 +846,19 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
     ) -> RequeueInterventionResult {
+        self.requeue_front_with_permit(intervention, persistence, dispatch_lease, None)
+            .await
+    }
+
+    pub(crate) async fn requeue_front_with_permit(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Option<Arc<DispatchLease>>,
+        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
+    ) -> RequeueInterventionResult {
         self.request(|reply| ChannelMailboxMsg::RequeueFront {
+            input_permit,
             intervention,
             persistence,
             dispatch_lease,
@@ -1202,6 +1222,13 @@ impl ChannelMailboxRegistry {
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 enum ChannelMailboxMsg {
+    FreezeInput {
+        closing: Arc<crate::services::discord::input_runtime::fence::Closing>,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<
+            Result<input_fence::FreezeAck, crate::services::discord::input_runtime::fence::Failure>,
+        >,
+    },
     CommitCapturedReadyDelivery {
         commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
         reply: oneshot::Sender<Option<Box<crate::services::discord::CapturedReadyDeliveryCommit>>>,
@@ -1297,6 +1324,7 @@ enum ChannelMailboxMsg {
         reply: closed_verdict::VerdictReply<()>,
     },
     Enqueue {
+        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         observed: Option<ClaimObservation>,
@@ -1312,6 +1340,7 @@ enum ChannelMailboxMsg {
         reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
+        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
@@ -1689,1003 +1718,17 @@ fn spawn_channel_mailbox(
             ..Default::default()
         };
         while let Some(msg) = rx.recv().await {
-            // A tombstoned actor serves only reads (enum docs).
-            let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
-                continue;
-            };
-            match msg {
-                ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
-                    let committed = (!state.closed)
-                        .then(|| commit.commit(state.cancel_token.as_ref()))
-                        .flatten();
-                    let _ = reply.send(committed.map(Box::new));
-                }
-                ChannelMailboxMsg::Snapshot { reply } => {
-                    let _ = reply.send(state.snapshot());
-                }
-                ChannelMailboxMsg::HasActiveTurn { reply } => {
-                    let _ = reply.send(state.cancel_token.is_some());
-                }
-                ChannelMailboxMsg::HasBlockingActiveTurn { reply } => {
-                    // #3167 — a background turn (monitor relay / TUI loop)
-                    // does not block dequeuing a queued user intervention.
-                    let _ = reply.send(
-                        state.cancel_token.is_some() && !state.active_turn_kind.is_background(),
-                    );
-                }
-                ChannelMailboxMsg::ActiveTurnKind { reply } => {
-                    // #3167 — `None` when idle; otherwise the slot's kind.
-                    let kind = state.cancel_token.as_ref().map(|_| state.active_turn_kind);
-                    let _ = reply.send(kind);
-                }
-                ChannelMailboxMsg::CancelToken { reply } => {
-                    let _ = reply.send(state.cancel_token.clone());
-                }
-                ChannelMailboxMsg::CancelActiveTurnWithReason { reason, reply } => {
-                    // #2374 — atomic, actor-serialized "reason then flip"
-                    // (full race rationale on the
-                    // `cancel_active_turn_with_reason` handle doc). Guard
-                    // mirrors #2373: never overwrite a reason once
-                    // `cancelled` is set — earlier attribution wins.
-                    let token = state.cancel_token.clone();
-                    let already_stopping = token.as_ref().is_some_and(|token| {
-                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                    if let Some(token) = token.as_ref()
-                        && !already_stopping
-                    {
-                        token.publish_cancel(reason.clone());
-                    }
-                    let _ = reply.send(CancelActiveTurnResult {
-                        token,
-                        already_stopping,
-                    });
-                }
-                ChannelMailboxMsg::CancelActiveTurnIfCurrent {
-                    expected_token,
-                    reply,
-                } => {
-                    let token = matching_cancel_token(&state, &expected_token);
-                    let already_stopping = token.as_ref().is_some_and(|token| {
-                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                    if let Some(token) = token.as_ref()
-                        && !already_stopping
-                    {
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    let _ = reply.send(CancelActiveTurnResult {
-                        token,
-                        already_stopping,
-                    });
-                }
-                ChannelMailboxMsg::CancelActiveTurnIfCurrentWithReason {
-                    expected_token,
-                    reason,
-                    reply,
-                } => {
-                    // #2374 — atomic reason-then-flip with the
-                    // `if_current` guard preserved. See the unguarded
-                    // variant above for the broader rationale.
-                    let token = matching_cancel_token(&state, &expected_token);
-                    let already_stopping = token.as_ref().is_some_and(|token| {
-                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                    if let Some(token) = token.as_ref()
-                        && !already_stopping
-                    {
-                        token.publish_cancel(reason.clone());
-                    }
-                    let _ = reply.send(CancelActiveTurnResult {
-                        token,
-                        already_stopping,
-                    });
-                }
-                ChannelMailboxMsg::CancelActiveTurnIfUserMessageWithReason {
-                    expected_user_message_id,
-                    reason,
-                    reply,
-                } => {
-                    // #2374 Codex round-1 fix (HIGH-1): identity check +
-                    // cancel as one serialized step, keyed by
-                    // `user_message_id` (full rationale on the
-                    // `cancel_active_turn_if_user_message_with_reason`
-                    // handle doc).
-                    let identity_matches = state
-                        .active_user_message_id
-                        .is_some_and(|id| id == expected_user_message_id);
-                    let token = if identity_matches {
-                        state.cancel_token.clone()
-                    } else {
-                        None
-                    };
-                    let already_stopping = token.as_ref().is_some_and(|token| {
-                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                    if let Some(token) = token.as_ref()
-                        && !already_stopping
-                    {
-                        token.publish_cancel(reason.clone());
-                    }
-                    let _ = reply.send(CancelActiveTurnResult {
-                        token,
-                        already_stopping,
-                    });
-                }
-                ChannelMailboxMsg::CancelActiveBackgroundTurnIfCurrent { reply } => {
-                    // #3167 — atomic kind-guarded supersede: cancel ONLY a
-                    // background-held slot (reason+flip mirror
-                    // `CancelActiveTurnWithReason`; slot release stays with the
-                    // turn's own finalizer). #3167 BLOCKER-1: reply `true` only
-                    // for a NEW cancel — `true` on an already-cancelling slot
-                    // would hot-loop the caller's immediate re-kick. Full
-                    // rationale on the handle + enum variant docs.
-                    let is_background_active =
-                        state.cancel_token.is_some() && state.active_turn_kind.is_background();
-                    let newly_cancelled = if is_background_active {
-                        match state.cancel_token.as_ref() {
-                            Some(token)
-                                if !token.cancelled.load(std::sync::atomic::Ordering::Relaxed) =>
-                            {
-                                token.publish_cancel(
-                                    "idle_queue_user_supersede_background".to_string(),
-                                );
-                                true
-                            }
-                            // Already cancelling (or, defensively, no token): no-op.
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    };
-                    let _ = reply.send(newly_cancelled);
-                }
-                ChannelMailboxMsg::TryStartTurn {
-                    cancel_token,
-                    request_owner,
-                    user_message_id,
-                    turn_kind,
-                    admission_order,
-                    fence_episode,
-                    persistence,
-                    reply,
-                } => {
-                    // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
-                    // queued or reserved before it; see `inbound_order`. A
-                    // claim that cannot start must disturb neither gate.
-                    let fence = &state.remint_fence;
-                    let refused_released_episode = fence_episode
-                        .is_some_and(|episode| fence.refuses(user_message_id, episode.as_deref()));
-                    let idle = state.cancel_token.is_none() && !refused_released_episode;
-                    let yields = idle
-                        && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
-                    let mut queue_exit_events = Vec::new();
-                    let mut persistence_error = None;
-                    let can_start = idle && !yields;
-                    if can_start && turn_kind == ActiveTurnKind::UserOrAgent {
-                        let previous_queue = state.intervention_queue.clone();
-                        queue_exit_events = purge_active_source_from_queue(
-                            &mut state.intervention_queue,
-                            user_message_id,
-                        );
-                        if !queue_exit_events.is_empty()
-                            && let Some(persistence) = persistence.as_ref()
-                            && let Err(error) = persist_queue_or_restore(
-                                &mut state,
-                                channel_id,
-                                persistence,
-                                previous_queue,
-                                "try_start_turn_active_source_purge",
-                            )
-                        {
-                            queue_exit_events.clear();
-                            persistence_error = Some(error);
-                        }
-                    }
-                    let _ = reply.send(TryStartTurnResult {
-                        refused_released_episode,
-                        started: if !can_start || persistence_error.is_some() {
-                            false
-                        } else {
-                            reset_turn_finished_signal(channel_id);
-                            state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-                            state
-                                .remint_fence
-                                .note_started(Some(user_message_id), cancel_token.turn_nonce());
-                            state.cancel_token = Some(cancel_token);
-                            state.active_request_owner = Some(request_owner);
-                            state.active_user_message_id = Some(user_message_id);
-                            // #3167 — record the slot's priority class so the
-                            // dequeue gates can treat a background turn as
-                            // non-blocking.
-                            state.active_turn_kind = turn_kind;
-                            // Retire only this claim's reservation; a claim is not drain progress.
-                            if turn_kind == ActiveTurnKind::UserOrAgent {
-                                settle_pending_dispatch_on_claim(
-                                    &mut state,
-                                    channel_id,
-                                    user_message_id,
-                                );
-                            }
-                            state.record_claim();
-                            state.recovery_started_at = None;
-                            state.turn_started_at = Some(Utc::now());
-                            state.turn_started_instant = Some(Instant::now());
-                            true
-                        },
-                        absorbed_source_ids: state.active_absorbed_source_ids.clone(),
-                        queue_exit_events,
-                        persistence_error,
-                    });
-                }
-                ChannelMailboxMsg::RestoreActiveTurn {
-                    cancel_token,
-                    request_owner,
-                    user_message_id,
-                    turn_kind,
-                    reply,
-                } => {
-                    reset_turn_finished_signal(channel_id);
-                    let was_idle = state.cancel_token.is_none();
-                    state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-                    state
-                        .remint_fence
-                        .note_started(Some(user_message_id), cancel_token.turn_nonce());
-                    state.cancel_token = Some(cancel_token);
-                    state.active_request_owner = Some(request_owner);
-                    state.active_user_message_id = Some(user_message_id);
-                    // #3167 — preserve the priority class across the re-bind.
-                    state.active_turn_kind = turn_kind;
-                    state.record_claim();
-                    if was_idle || state.turn_started_at.is_none() {
-                        state.turn_started_at = Some(Utc::now());
-                    }
-                    if was_idle || state.turn_started_instant.is_none() {
-                        state.turn_started_instant = Some(Instant::now());
-                    }
-                    let _ = reply.send(());
-                }
-                ChannelMailboxMsg::RecoveryKickoff {
-                    cancel_token,
-                    request_owner,
-                    user_message_id,
-                    reply,
-                } => {
-                    // CAS: a refused kickoff leaves the slot, its signals and the fence untouched.
-                    if let Some(refusal) = kickoff_refusal(&state, &cancel_token, user_message_id) {
-                        let _ = reply.send(refusal);
-                        continue;
-                    }
-                    // #5951 — the watcher resolves the signal by channel: publish the recovering actor's own.
-                    GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, own_recovery_done.clone());
-                    reset_activation_signals(channel_id);
-                    let activated_turn = state.cancel_token.is_none();
-                    state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-                    state
-                        .remint_fence
-                        .note_kickoff(activated_turn, user_message_id, &cancel_token);
-                    state.cancel_token = Some(cancel_token);
-                    state.active_request_owner = Some(request_owner);
-                    state.active_user_message_id = user_message_id;
-                    // #3167 — a recovery turn is a real (non-background) turn.
-                    state.active_turn_kind = ActiveTurnKind::default();
-                    state.record_claim();
-                    let recovery_started_at = Instant::now();
-                    state.recovery_started_at = Some(recovery_started_at);
-                    state.turn_started_at = Some(Utc::now());
-                    state.turn_started_instant = Some(recovery_started_at);
-                    let _ = reply.send(RecoveryKickoffResult::Activated);
-                }
-                ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
-                    state.recovery_started_at = None;
-                    let _ = reply.send(());
-                }
-                ChannelMailboxMsg::Enqueue {
-                    mut intervention,
-                    persistence,
-                    observed,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    ensure_source_message_ids(&mut intervention);
-                    // Intentional pre-hydrate guard: a pure self-requeue of the
-                    // active message is never durable work, so it must not prune,
-                    // hydrate, or otherwise mutate queue state before refusal.
-                    if let Some(reason) = state.enqueue_refusal(&intervention, observed) {
-                        let _ = reply.send(EnqueueInterventionResult::refused(reason, Vec::new()));
-                        continue;
-                    }
-                    let hydrate_result = hydrate_pending_queue_from_disk_if_present(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                    );
-                    if let Some(error) = hydrate_result.persistence_error {
-                        let _ = reply.send(EnqueueInterventionResult {
-                            enqueued: false,
-                            merged: false,
-                            refusal_reason: None,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        });
-                        continue;
-                    }
-                    let previous_queue = state.intervention_queue.clone();
-                    let mut enqueue_result = enqueue_with_settlement(
-                        &mut state.intervention_queue,
-                        intervention,
-                        state.active_user_message_id,
-                        Some((&persistence.provider, channel_id)),
-                    );
-                    if enqueue_result.enqueued
-                        && let Err(error) = persist_queue_or_restore(
-                            &mut state,
-                            channel_id,
-                            &persistence,
-                            previous_queue,
-                            "enqueue",
-                        )
-                    {
-                        enqueue_result = EnqueueInterventionResult {
-                            enqueued: false,
-                            merged: false,
-                            refusal_reason: None,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        };
-                    }
-                    let _ = reply.send(enqueue_result);
-                }
-                ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let previous_len = state.intervention_queue.len();
-                    let previous_queue = state.intervention_queue.clone();
-                    let mut pending_result = has_soft_intervention(&mut state.intervention_queue);
-                    if state.intervention_queue.len() != previous_len
-                        && let Err(error) = persist_queue_or_restore(
-                            &mut state,
-                            channel_id,
-                            &persistence,
-                            previous_queue,
-                            "has_pending_soft_queue",
-                        )
-                    {
-                        pending_result = HasPendingSoftQueueResult {
-                            has_pending: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        };
-                    }
-                    let _ = reply.send(pending_result);
-                }
-                ChannelMailboxMsg::TakeNextSoft {
-                    persistence,
-                    primary_message_id,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
-                    if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                    ) {
-                        let _ = reply.send(result);
-                        continue;
-                    }
-                    let previous_queue = state.intervention_queue.clone();
-                    let next_result = take_unsettled(&mut state, channel_id, primary_message_id);
-                    let queue_len_after = state.intervention_queue.len();
-                    // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the
-                    // intervention is moved into the reply, so we can reserve the
-                    // dequeue→claim window against a racing Background start.
-                    let dispatched_head = next_result.intervention.as_ref().map(|i| i.message_id);
-                    // #5191: the merged head answers for every absorbed id too;
-                    // capture them alongside the primary for the same reason.
-                    let dispatched_head_sources = next_result
-                        .intervention
-                        .as_ref()
-                        .map(|i| i.source_message_ids.clone())
-                        .unwrap_or_default();
-                    let marker_error = if let Some(intervention) = next_result.intervention.as_ref()
-                    {
-                        save_channel_pending_dispatch_marker(
-                            &persistence.provider,
-                            &persistence.token_hash,
-                            channel_id,
-                            intervention,
-                            persistence.dispatch_role_override,
-                        )
-                        .err()
-                    } else {
-                        None
-                    };
-                    let result = if let Some(error) = marker_error {
-                        state.intervention_queue = previous_queue;
-                        log_queue_persistence_rollback(
-                            "take_next_soft_marker",
-                            channel_id,
-                            &persistence,
-                            &error,
-                        );
-                        TakeNextSoftResult {
-                            intervention: None,
-                            dispatch_lease: None,
-                            has_more: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            queue_len_after: state.intervention_queue.len(),
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        }
-                    } else if let Err(error) = persist_queue_or_restore(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                        previous_queue,
-                        "take_next_soft",
-                    ) {
-                        // Persistence failed → `persist_queue_or_restore` rolled
-                        // the dequeue back (head re-inserted); no dispatch happens,
-                        // so do NOT set the reservation. The marker remains the
-                        // durable backstop for this head until the queue-without-head
-                        // write succeeds.
-                        TakeNextSoftResult {
-                            intervention: None,
-                            dispatch_lease: None,
-                            has_more: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            queue_len_after: state.intervention_queue.len(),
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        }
-                    } else {
-                        // #3167 BLOCKER-2 — a head was handed out for dispatch but
-                        // the slot is not claimed until `intake_turn` runs. Reserve
-                        // the window so a Background start cannot slip in ahead.
-                        if let Some(head) = dispatched_head {
-                            let dispatch_lease = set_pending_user_dispatch(
-                                &mut state,
-                                head,
-                                &dispatched_head_sources,
-                            );
-                            TakeNextSoftResult {
-                                intervention: next_result.intervention,
-                                dispatch_lease: Some(dispatch_lease),
-                                has_more: next_result.has_more,
-                                queue_len_after,
-                                queue_exit_events: next_result.queue_exit_events,
-                                persistence_error: None,
-                            }
-                        } else {
-                            TakeNextSoftResult {
-                                intervention: next_result.intervention,
-                                dispatch_lease: None,
-                                has_more: next_result.has_more,
-                                queue_len_after,
-                                queue_exit_events: next_result.queue_exit_events,
-                                persistence_error: None,
-                            }
-                        }
-                    };
-                    let _ = reply.send(result);
-                }
-                ChannelMailboxMsg::RequeueFront {
-                    intervention,
-                    persistence,
-                    dispatch_lease,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    if let Some(error) =
-                        absorb_disk_queue_error(&mut state, channel_id, &persistence)
-                    {
-                        let _ = reply.send(RequeueInterventionResult::absorb_failed(error));
-                        continue;
-                    }
-                    let identity_ids = front_requeue::intervention_identity_ids(&intervention);
-                    let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
-                        let pending = state.pending_user_dispatch?;
-                        let stored = state.pending_user_dispatch_lease.as_ref()?;
-                        (identity_ids.contains(&pending) && Arc::ptr_eq(lease, stored))
-                            .then_some(pending)
-                    });
-                    let previous_queue = state.intervention_queue.clone();
-                    let requeue_result = requeue_intervention_front(
-                        &mut state.intervention_queue,
-                        intervention,
-                        state.pending_user_dispatch,
-                        state.active_user_message_id,
-                        authorized_pending_restore,
-                    );
-                    let result = if !requeue_result.enqueued {
-                        RequeueInterventionResult {
-                            enqueued: false,
-                            refusal_reason: requeue_result.refusal_reason,
-                            queue_exit_events: requeue_result.queue_exit_events,
-                            persistence_error: None,
-                        }
-                    } else if let Err(error) = persist_queue_or_restore(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                        previous_queue,
-                        "requeue_front",
-                    ) {
-                        RequeueInterventionResult {
-                            enqueued: false,
-                            refusal_reason: None,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        }
-                    } else {
-                        if let Some(pending) = authorized_pending_restore {
-                            consume_pending_dispatch_marker_if_matches(
-                                &mut state,
-                                channel_id,
-                                pending,
-                                "restore_dequeued_head",
-                            );
-                            clear_pending_user_dispatch(&mut state);
-                        }
-                        // #5937 — the head is back at the queue front, so the
-                        // drain is between rounds, not wedged: the clock starts
-                        // over. Here rather than in the hosted-TUI defer (#4270)
-                        // that motivated it — this arm covers every caller.
-                        state.inbound_stall_since = None;
-                        RequeueInterventionResult {
-                            enqueued: true,
-                            refusal_reason: None,
-                            queue_exit_events: requeue_result.queue_exit_events,
-                            persistence_error: None,
-                        }
-                    };
-                    let _ = reply.send(result);
-                }
-                ChannelMailboxMsg::AbandonPendingDispatch {
-                    user_message_id,
-                    dispatch_lease,
-                    persistence,
-                    consume_marker,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence);
-                    let authorized = dispatch_lease.as_ref().is_none_or(|lease| {
-                        state.pending_user_dispatch == Some(user_message_id)
-                            && state
-                                .pending_user_dispatch_lease
-                                .as_ref()
-                                .is_some_and(|stored| Arc::ptr_eq(lease, stored))
-                    });
-                    if authorized {
-                        abandon_pending_dispatch_reservation(
-                            &mut state,
-                            channel_id,
-                            user_message_id,
-                            consume_marker,
-                            if dispatch_lease.is_some() {
-                                "abandon_pending_dispatch_if_lease_matches"
-                            } else if consume_marker {
-                                "abandon_pending_dispatch"
-                            } else {
-                                "clear_pending_dispatch_reservation"
-                            },
-                        );
-                    }
-                    let _ = reply.send(authorized);
-                }
-                ChannelMailboxMsg::CancelQueuedPrimaryMessage {
-                    message_id,
-                    persistence,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let previous_queue = state.intervention_queue.clone();
-                    let mut cancel_result = cancel_soft_intervention_by_primary_message_id(
-                        &mut state.intervention_queue,
-                        message_id,
-                    );
-                    if cancel_result.removed.is_some()
-                        || !cancel_result.queue_exit_events.is_empty()
-                    {
-                        if let Err(error) = persist_queue_or_restore(
-                            &mut state,
-                            channel_id,
-                            &persistence,
-                            previous_queue,
-                            "cancel_queued_primary_message",
-                        ) {
-                            cancel_result = CancelQueuedMessageResult {
-                                removed: None,
-                                queue_exit_events: Vec::new(),
-                                persistence_error: Some(error),
-                            };
-                        }
-                    }
-                    let _ = reply.send(cancel_result);
-                }
-                ChannelMailboxMsg::FinishTurn { persistence, reply } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let finished_user_message_id = state.active_user_message_id;
-                    let _ = reply.send(finalize_turn_state(
-                        &mut state,
-                        channel_id,
-                        Some(&persistence),
-                        false,
-                    ));
-                    if let Some(user_message_id) = finished_user_message_id {
-                        consume_pending_dispatch_marker_if_matches(
-                            &mut state,
-                            channel_id,
-                            user_message_id,
-                            "finish_turn",
-                        );
-                    }
-                    mark_turn_finished_signal_done(channel_id);
-                }
-                ChannelMailboxMsg::FinishTurnIfToken {
-                    expected,
-                    persistence,
-                    reply,
-                } => {
-                    let finish = episode_identity::finish_turn_if_token;
-                    finish(&mut state, channel_id, expected, persistence, reply);
-                }
-                ChannelMailboxMsg::FinishTurnIfMatches {
-                    expected_actor,
-                    preserve_queue,
-                    expected_user_message_id,
-                    active_started_before,
-                    turn_nonce_guard,
-                    persistence,
-                    reply,
-                } => {
-                    // #3016 — identity guard. Finalize ONLY when the active
-                    // turn's user_message_id still matches the terminal's
-                    // identity. A mismatch (or no active turn) means the turn
-                    // this terminal belonged to already finalized and a newer
-                    // turn may now own the mailbox — so we must NOT take its
-                    // token. Return a no-op result (removed_token = None) that
-                    // mirrors `mailbox_finish_turn`'s idempotent second-call
-                    // shape, so the finalizer's `removed_token.is_some()` gate
-                    // skips the counter decrement and trailing release.
-                    let matches = episode_identity::finish_turn_identity_matches(
-                        &state,
-                        expected_user_message_id,
-                        &expected_actor,
-                        active_started_before,
-                        &turn_nonce_guard,
-                    );
-                    if matches {
-                        state.last_persistence = Some(persistence.clone());
-                        let finished_user_message_id = state.active_user_message_id;
-                        let finished = finalize_turn_state(
-                            &mut state,
-                            channel_id,
-                            Some(&persistence),
-                            preserve_queue,
-                        );
-                        if finished.removed_token.is_some()
-                            && let Some(nonce) = turn_nonce_guard.named_nonce()
-                        {
-                            state
-                                .remint_fence
-                                .note_exact_release(expected_user_message_id, nonce);
-                        }
-                        let _ = reply.send(finished);
-                        if !preserve_queue && let Some(user_message_id) = finished_user_message_id {
-                            consume_pending_dispatch_marker_if_matches(
-                                &mut state,
-                                channel_id,
-                                user_message_id,
-                                "finish_turn_if_matches",
-                            );
-                        }
-                        mark_turn_finished_signal_done(channel_id);
-                    } else {
-                        // No-op: do not touch the active token. Surface the
-                        // current pending state so a caller that schedules a
-                        // queue kickoff still sees an accurate backlog flag,
-                        // but never release the (possibly newer) live turn.
-                        let _ = reply.send(FinishTurnResult {
-                            removed_token: None,
-                            has_pending: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            mailbox_online: true,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: None,
-                        });
-                    }
-                }
-                ChannelMailboxMsg::HardStop { reply } => {
-                    let persistence = state.last_persistence.clone();
-                    let _ = reply.send(finalize_turn_state(
-                        &mut state,
-                        channel_id,
-                        persistence.as_ref(),
-                        false,
-                    ));
-                    mark_turn_finished_signal_done(channel_id);
-                }
-                ChannelMailboxMsg::FinishCancelledTurn { reply } => {
-                    let should_finish = state.cancel_token.as_ref().is_some_and(|token| {
-                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                    });
-                    if should_finish {
-                        let persistence = state.last_persistence.clone();
-                        let _ = reply.send(finalize_turn_state(
-                            &mut state,
-                            channel_id,
-                            persistence.as_ref(),
-                            false,
-                        ));
-                        mark_turn_finished_signal_done(channel_id);
-                    } else {
-                        let _ = reply.send(FinishTurnResult {
-                            removed_token: None,
-                            has_pending: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            mailbox_online: true,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: None,
-                        });
-                    }
-                }
-                ChannelMailboxMsg::Clear { persistence, reply } => {
-                    let _ = reply.send(clear_channel_state(&mut state, channel_id, persistence));
-                    mark_turn_finished_signal_done(channel_id);
-                }
-                ChannelMailboxMsg::PurgeQueue {
-                    persistence,
-                    clear_cancelled_active_anchor,
-                    reply,
-                } => {
-                    // #2706: queue-only purge. Leaves `cancel_token`,
-                    // `active_request_owner`, `active_user_message_id`
-                    // untouched so a turn that entered the actor in
-                    // between force-kill and purge is not collaterally
-                    // cancelled.
-                    //
-                    // #3029(D): a force purge additionally releases the
-                    // active-turn anchor, but ONLY when the anchored token is
-                    // already `cancelled`. The force path flips that flag via
-                    // `cancel_active_token` before purging, so this clears the
-                    // just-killed turn's anchor while still leaving a fresh,
-                    // uncancelled turn (which raced in after the force-kill)
-                    // fully intact — keeping the #2706 guarantee.
-                    let cleared_active_anchor = if clear_cancelled_active_anchor
-                        && state.cancel_token.as_ref().is_some_and(|token| {
-                            token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
-                        }) {
-                        release_active_turn_anchor(
-                            &mut state,
-                            channel_id,
-                            Some(&persistence.provider),
-                        );
-                        true
-                    } else {
-                        false
-                    };
-                    state.last_persistence = Some(persistence.clone());
-                    let disk_files_removed = remove_channel_pending_queue_files_all_tokens(
-                        &persistence.provider,
-                        channel_id,
-                    );
-                    let own_files_present = channel_queue_files_present(
-                        &persistence.provider,
-                        &persistence.token_hash,
-                        channel_id,
-                    );
-                    let previous_queue = state.intervention_queue.clone();
-                    let drained = state.intervention_queue.drain(..).count();
-                    let purge_persisted = persist_queue_or_restore(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                        previous_queue,
-                        "purge_queue",
-                    )
-                    .is_ok();
-                    let drained = if purge_persisted { drained } else { 0 };
-                    if purge_persisted {
-                        clear_pending_user_dispatch(&mut state);
-                        state.recently_valve_cleared_dispatch = None;
-                        delete_pending_dispatch_marker_with_persistence(
-                            &persistence,
-                            channel_id,
-                            "purge_queue",
-                        );
-                    }
-                    if cleared_active_anchor {
-                        mark_turn_finished_signal_done(channel_id);
-                    }
-                    let _ = reply.send(PurgeQueueResult {
-                        drained,
-                        disk_files_removed,
-                        cleared_active_anchor,
-                        own_files_removed: if purge_persisted {
-                            own_files_present
-                        } else {
-                            Some(0)
-                        },
-                        queue_len_after: state.intervention_queue.len(),
-                    });
-                }
-                #[cfg(test)]
-                ChannelMailboxMsg::ReplaceQueue {
-                    queue,
-                    persistence,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let previous_queue = state.intervention_queue.clone();
-                    state.intervention_queue = queue;
-                    let _ = persist_queue_or_restore(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                        previous_queue,
-                        "replace_queue",
-                    );
-                    let _ = reply.send(());
-                }
-                ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply } => {
-                    // #1683: read the disk queue inside the mailbox actor so
-                    // a dequeue that removes the file cannot race with a stale
-                    // out-of-actor disk snapshot and reinsert an already
-                    // processed item.
-                    let result = hydrate_pending_queue_from_disk_if_present(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                    );
-                    let _ = reply.send(result);
-                }
-                ChannelMailboxMsg::MergeRestoredQueueItems {
-                    items,
-                    persistence,
-                    reply,
-                } => {
-                    // #3864: merge SIGTERM-restored disk items into the live
-                    // queue in ONE serialized actor step (read + dedup-merge +
-                    // persist). Immune to the lost-enqueue race the old
-                    // out-of-actor snapshot→build→`ReplaceQueue` RMW suffered:
-                    // a live reconcile-window `Enqueue` is serialized before
-                    // or after this merge, never overwritten by it. override =
-                    // None — dispatch_role_overrides are restored separately,
-                    // before the restore loop (see recovery_flush).
-                    let result = hydrate_pending_queue_into_state(
-                        &mut state,
-                        channel_id,
-                        items,
-                        persistence,
-                        None,
-                    );
-                    let _ = reply.send(result);
-                }
-                ChannelMailboxMsg::MergeRestoredDispatchMarker {
-                    mut marker,
-                    mut restored_override,
-                    persistence,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let Some((current_marker, current_override)) =
-                        load_channel_pending_dispatch_marker(
-                            &persistence.provider,
-                            &persistence.token_hash,
-                            channel_id,
-                        )
-                    else {
-                        let _ = reply.send(HydratePendingQueueResult {
-                            absorbed: 0,
-                            queue_len_after: state.intervention_queue.len(),
-                            restored_override,
-                            persistence_error: None,
-                        });
-                        continue;
-                    };
-                    if current_marker.message_id != marker.message_id {
-                        let _ = reply.send(HydratePendingQueueResult {
-                            absorbed: 0,
-                            queue_len_after: state.intervention_queue.len(),
-                            restored_override,
-                            persistence_error: None,
-                        });
-                        continue;
-                    }
-                    marker = current_marker;
-                    restored_override = current_override.or(restored_override);
-                    if state.pending_user_dispatch.is_some() {
-                        let _ = reply.send(HydratePendingQueueResult {
-                            absorbed: 0,
-                            queue_len_after: state.intervention_queue.len(),
-                            restored_override,
-                            persistence_error: None,
-                        });
-                        continue;
-                    }
-                    let absorbed = absorb_disk_queue(&mut state, channel_id, &persistence);
-                    if absorbed.persistence_error.is_some() {
-                        let _ = reply.send(absorbed);
-                        continue;
-                    }
-                    let mut effective_persistence = persistence.clone();
-                    if effective_persistence.dispatch_role_override.is_none() {
-                        effective_persistence.dispatch_role_override =
-                            restored_override.map(|channel| channel.get());
-                    }
-                    let result = merge_pending_dispatch_marker_into_state(
-                        &mut state,
-                        channel_id,
-                        marker,
-                        effective_persistence,
-                        restored_override,
-                        "merge_restored_dispatch_marker",
-                    );
-                    let _ = reply.send(result);
-                }
-                ChannelMailboxMsg::RestartDrain { persistence, reply } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let persistence_error =
-                        absorb_disk_queue_error(&mut state, channel_id, &persistence).or_else(
-                            || {
-                                persist_queue(channel_id, &state.intervention_queue, &persistence)
-                                    .err()
-                            },
-                        );
-                    let _ = reply.send(RestartDrainResult {
-                        queued_count: if persistence_error.is_some() {
-                            0
-                        } else {
-                            state.intervention_queue.len()
-                        },
-                        persistence_error,
-                    });
-                }
-                #[cfg(test)]
-                ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {
-                    if state.cancel_token.is_some() {
-                        let wall_age = chrono::Duration::from_std(age)
-                            .expect("active-turn test age must fit chrono duration");
-                        state.turn_started_at = Some(Utc::now() - wall_age);
-                        state.turn_started_instant = Some(Instant::now() - age);
-                    }
-                    let _ = reply.send(());
-                }
-                #[cfg(test)]
-                ChannelMailboxMsg::AgeInboundWaitsForTest { age, reply } => {
-                    if state.pending_user_dispatch.is_some() {
-                        state.pending_user_dispatch_since = Some(Instant::now() - age);
-                    }
-                    if state.inbound_stall_since.is_some() {
-                        state.inbound_stall_since = Some(Instant::now() - age);
-                    }
-                    let _ = reply.send(());
-                }
-                #[cfg(test)]
-                ChannelMailboxMsg::AgeValveClearedDispatchForTest { age, reply } => {
-                    if let Some((message_id, _)) = state.recently_valve_cleared_dispatch {
-                        state.recently_valve_cleared_dispatch =
-                            Some((message_id, Instant::now() - age));
-                    }
-                    let _ = reply.send(());
-                }
-                ChannelMailboxMsg::CloseIfIdle { reply } => {
-                    let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
-                }
+            if crate::services::discord::input_runtime::fence::channel_gate(channel_id.get())
+                .is_some()
+            {
+                let signal = own_recovery_done.clone();
+                state = tokio::task::spawn_blocking(move || {
+                    input_mailbox_step(state, channel_id, msg, &signal)
+                })
+                .await
+                .expect("input mailbox step panicked");
+            } else {
+                state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
             }
         }
     });
@@ -2693,6 +1736,992 @@ fn spawn_channel_mailbox(
         sender: tx,
         recovery_done,
     }
+}
+
+fn input_mailbox_step(
+    mut state: ChannelMailboxState,
+    channel_id: ChannelId,
+    msg: ChannelMailboxMsg,
+    own_recovery_done: &Arc<RecoveryDoneSignal>,
+) -> ChannelMailboxState {
+    // A tombstoned actor serves only reads (enum docs).
+    let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
+        return state;
+    };
+    let mut msg = msg;
+    let _step = match input_fence::enter(channel_id, &state, &mut msg) {
+        Ok(guard) => guard,
+        Err(failure) => {
+            input_fence::refuse(&state, msg, failure);
+            return state;
+        }
+    };
+    match msg {
+        ChannelMailboxMsg::FreezeInput {
+            closing,
+            persistence,
+            reply,
+        } => {
+            let _ = reply.send(input_fence::freeze(
+                &mut state,
+                channel_id,
+                &closing,
+                &persistence,
+            ));
+        }
+        ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
+            let committed = (!state.closed)
+                .then(|| commit.commit(state.cancel_token.as_ref()))
+                .flatten();
+            let _ = reply.send(committed.map(Box::new));
+        }
+        ChannelMailboxMsg::Snapshot { reply } => {
+            let _ = reply.send(state.snapshot());
+        }
+        ChannelMailboxMsg::HasActiveTurn { reply } => {
+            let _ = reply.send(state.cancel_token.is_some());
+        }
+        ChannelMailboxMsg::HasBlockingActiveTurn { reply } => {
+            // #3167 — a background turn (monitor relay / TUI loop)
+            // does not block dequeuing a queued user intervention.
+            let _ =
+                reply.send(state.cancel_token.is_some() && !state.active_turn_kind.is_background());
+        }
+        ChannelMailboxMsg::ActiveTurnKind { reply } => {
+            // #3167 — `None` when idle; otherwise the slot's kind.
+            let kind = state.cancel_token.as_ref().map(|_| state.active_turn_kind);
+            let _ = reply.send(kind);
+        }
+        ChannelMailboxMsg::CancelToken { reply } => {
+            let _ = reply.send(state.cancel_token.clone());
+        }
+        ChannelMailboxMsg::CancelActiveTurnWithReason { reason, reply } => {
+            // #2374 — atomic, actor-serialized "reason then flip"
+            // (full race rationale on the
+            // `cancel_active_turn_with_reason` handle doc). Guard
+            // mirrors #2373: never overwrite a reason once
+            // `cancelled` is set — earlier attribution wins.
+            let token = state.cancel_token.clone();
+            let already_stopping = token
+                .as_ref()
+                .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            if let Some(token) = token.as_ref()
+                && !already_stopping
+            {
+                token.publish_cancel(reason.clone());
+            }
+            let _ = reply.send(CancelActiveTurnResult {
+                token,
+                already_stopping,
+            });
+        }
+        ChannelMailboxMsg::CancelActiveTurnIfCurrent {
+            expected_token,
+            reply,
+        } => {
+            let token = matching_cancel_token(&state, &expected_token);
+            let already_stopping = token
+                .as_ref()
+                .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            if let Some(token) = token.as_ref()
+                && !already_stopping
+            {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _ = reply.send(CancelActiveTurnResult {
+                token,
+                already_stopping,
+            });
+        }
+        ChannelMailboxMsg::CancelActiveTurnIfCurrentWithReason {
+            expected_token,
+            reason,
+            reply,
+        } => {
+            // #2374 — atomic reason-then-flip with the
+            // `if_current` guard preserved. See the unguarded
+            // variant above for the broader rationale.
+            let token = matching_cancel_token(&state, &expected_token);
+            let already_stopping = token
+                .as_ref()
+                .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            if let Some(token) = token.as_ref()
+                && !already_stopping
+            {
+                token.publish_cancel(reason.clone());
+            }
+            let _ = reply.send(CancelActiveTurnResult {
+                token,
+                already_stopping,
+            });
+        }
+        ChannelMailboxMsg::CancelActiveTurnIfUserMessageWithReason {
+            expected_user_message_id,
+            reason,
+            reply,
+        } => {
+            // #2374 Codex round-1 fix (HIGH-1): identity check +
+            // cancel as one serialized step, keyed by
+            // `user_message_id` (full rationale on the
+            // `cancel_active_turn_if_user_message_with_reason`
+            // handle doc).
+            let identity_matches = state
+                .active_user_message_id
+                .is_some_and(|id| id == expected_user_message_id);
+            let token = if identity_matches {
+                state.cancel_token.clone()
+            } else {
+                None
+            };
+            let already_stopping = token
+                .as_ref()
+                .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            if let Some(token) = token.as_ref()
+                && !already_stopping
+            {
+                token.publish_cancel(reason.clone());
+            }
+            let _ = reply.send(CancelActiveTurnResult {
+                token,
+                already_stopping,
+            });
+        }
+        ChannelMailboxMsg::CancelActiveBackgroundTurnIfCurrent { reply } => {
+            // #3167 — atomic kind-guarded supersede: cancel ONLY a
+            // background-held slot (reason+flip mirror
+            // `CancelActiveTurnWithReason`; slot release stays with the
+            // turn's own finalizer). #3167 BLOCKER-1: reply `true` only
+            // for a NEW cancel — `true` on an already-cancelling slot
+            // would hot-loop the caller's immediate re-kick. Full
+            // rationale on the handle + enum variant docs.
+            let is_background_active =
+                state.cancel_token.is_some() && state.active_turn_kind.is_background();
+            let newly_cancelled = if is_background_active {
+                match state.cancel_token.as_ref() {
+                    Some(token) if !token.cancelled.load(std::sync::atomic::Ordering::Relaxed) => {
+                        token.publish_cancel("idle_queue_user_supersede_background".to_string());
+                        true
+                    }
+                    // Already cancelling (or, defensively, no token): no-op.
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            let _ = reply.send(newly_cancelled);
+        }
+        ChannelMailboxMsg::TryStartTurn {
+            cancel_token,
+            request_owner,
+            user_message_id,
+            turn_kind,
+            admission_order,
+            fence_episode,
+            persistence,
+            reply,
+        } => {
+            // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
+            // queued or reserved before it; see `inbound_order`. A
+            // claim that cannot start must disturb neither gate.
+            let fence = &state.remint_fence;
+            let refused_released_episode = fence_episode
+                .is_some_and(|episode| fence.refuses(user_message_id, episode.as_deref()));
+            let idle = state.cancel_token.is_none() && !refused_released_episode;
+            let yields =
+                idle && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
+            let mut queue_exit_events = Vec::new();
+            let mut persistence_error = None;
+            let can_start = idle && !yields;
+            if can_start && turn_kind == ActiveTurnKind::UserOrAgent {
+                let previous_queue = state.intervention_queue.clone();
+                queue_exit_events =
+                    purge_active_source_from_queue(&mut state.intervention_queue, user_message_id);
+                if !queue_exit_events.is_empty()
+                    && let Some(persistence) = persistence.as_ref()
+                    && let Err(error) = persist_queue_or_restore(
+                        &mut state,
+                        channel_id,
+                        persistence,
+                        previous_queue,
+                        "try_start_turn_active_source_purge",
+                    )
+                {
+                    queue_exit_events.clear();
+                    persistence_error = Some(error);
+                }
+            }
+            let _ = reply.send(TryStartTurnResult {
+                refused_released_episode,
+                started: if !can_start || persistence_error.is_some() {
+                    false
+                } else {
+                    reset_turn_finished_signal(channel_id);
+                    state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+                    state
+                        .remint_fence
+                        .note_started(Some(user_message_id), cancel_token.turn_nonce());
+                    state.cancel_token = Some(cancel_token);
+                    state.active_request_owner = Some(request_owner);
+                    state.active_user_message_id = Some(user_message_id);
+                    // #3167 — record the slot's priority class so the
+                    // dequeue gates can treat a background turn as
+                    // non-blocking.
+                    state.active_turn_kind = turn_kind;
+                    // Retire only this claim's reservation; a claim is not drain progress.
+                    if turn_kind == ActiveTurnKind::UserOrAgent {
+                        settle_pending_dispatch_on_claim(&mut state, channel_id, user_message_id);
+                    }
+                    state.record_claim();
+                    state.recovery_started_at = None;
+                    state.turn_started_at = Some(Utc::now());
+                    state.turn_started_instant = Some(Instant::now());
+                    true
+                },
+                absorbed_source_ids: state.active_absorbed_source_ids.clone(),
+                queue_exit_events,
+                persistence_error,
+            });
+        }
+        ChannelMailboxMsg::RestoreActiveTurn {
+            cancel_token,
+            request_owner,
+            user_message_id,
+            turn_kind,
+            reply,
+        } => {
+            reset_turn_finished_signal(channel_id);
+            let was_idle = state.cancel_token.is_none();
+            state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+            state
+                .remint_fence
+                .note_started(Some(user_message_id), cancel_token.turn_nonce());
+            state.cancel_token = Some(cancel_token);
+            state.active_request_owner = Some(request_owner);
+            state.active_user_message_id = Some(user_message_id);
+            // #3167 — preserve the priority class across the re-bind.
+            state.active_turn_kind = turn_kind;
+            state.record_claim();
+            if was_idle || state.turn_started_at.is_none() {
+                state.turn_started_at = Some(Utc::now());
+            }
+            if was_idle || state.turn_started_instant.is_none() {
+                state.turn_started_instant = Some(Instant::now());
+            }
+            let _ = reply.send(());
+        }
+        ChannelMailboxMsg::RecoveryKickoff {
+            cancel_token,
+            request_owner,
+            user_message_id,
+            reply,
+        } => {
+            // CAS: a refused kickoff leaves the slot, its signals and the fence untouched.
+            if let Some(refusal) = kickoff_refusal(&state, &cancel_token, user_message_id) {
+                let _ = reply.send(refusal);
+                return state;
+            }
+            // #5951 — the watcher resolves the signal by channel: publish the recovering actor's own.
+            GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, own_recovery_done.clone());
+            reset_activation_signals(channel_id);
+            let activated_turn = state.cancel_token.is_none();
+            state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+            state
+                .remint_fence
+                .note_kickoff(activated_turn, user_message_id, &cancel_token);
+            state.cancel_token = Some(cancel_token);
+            state.active_request_owner = Some(request_owner);
+            state.active_user_message_id = user_message_id;
+            // #3167 — a recovery turn is a real (non-background) turn.
+            state.active_turn_kind = ActiveTurnKind::default();
+            state.record_claim();
+            let recovery_started_at = Instant::now();
+            state.recovery_started_at = Some(recovery_started_at);
+            state.turn_started_at = Some(Utc::now());
+            state.turn_started_instant = Some(recovery_started_at);
+            let _ = reply.send(RecoveryKickoffResult::Activated);
+        }
+        ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
+            state.recovery_started_at = None;
+            let _ = reply.send(());
+        }
+        ChannelMailboxMsg::Enqueue {
+            input_permit: _,
+            mut intervention,
+            persistence,
+            observed,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence.clone());
+            ensure_source_message_ids(&mut intervention);
+            // Intentional pre-hydrate guard: a pure self-requeue of the
+            // active message is never durable work, so it must not prune,
+            // hydrate, or otherwise mutate queue state before refusal.
+            if let Some(reason) = state.enqueue_refusal(&intervention, observed) {
+                let _ = reply.send(EnqueueInterventionResult::refused(reason, Vec::new()));
+                return state;
+            }
+            let hydrate_result =
+                hydrate_pending_queue_from_disk_if_present(&mut state, channel_id, &persistence);
+            if let Some(error) = hydrate_result.persistence_error {
+                let _ = reply.send(EnqueueInterventionResult {
+                    enqueued: false,
+                    merged: false,
+                    refusal_reason: None,
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                });
+                return state;
+            }
+            let previous_queue = state.intervention_queue.clone();
+            let mut enqueue_result = enqueue_with_settlement(
+                &mut state.intervention_queue,
+                intervention,
+                state.active_user_message_id,
+                Some((&persistence.provider, channel_id)),
+            );
+            if enqueue_result.enqueued
+                && let Err(error) = persist_queue_or_restore(
+                    &mut state,
+                    channel_id,
+                    &persistence,
+                    previous_queue,
+                    "enqueue",
+                )
+            {
+                enqueue_result = EnqueueInterventionResult {
+                    enqueued: false,
+                    merged: false,
+                    refusal_reason: None,
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                };
+            }
+            let _ = reply.send(enqueue_result);
+        }
+        ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
+            state.last_persistence = Some(persistence.clone());
+            let previous_len = state.intervention_queue.len();
+            let previous_queue = state.intervention_queue.clone();
+            let mut pending_result = has_soft_intervention(&mut state.intervention_queue);
+            if state.intervention_queue.len() != previous_len
+                && let Err(error) = persist_queue_or_restore(
+                    &mut state,
+                    channel_id,
+                    &persistence,
+                    previous_queue,
+                    "has_pending_soft_queue",
+                )
+            {
+                pending_result = HasPendingSoftQueueResult {
+                    has_pending: state
+                        .intervention_queue
+                        .iter()
+                        .any(|item| item.mode == InterventionMode::Soft),
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                };
+            }
+            let _ = reply.send(pending_result);
+        }
+        ChannelMailboxMsg::TakeNextSoft {
+            persistence,
+            primary_message_id,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence.clone());
+            let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
+            if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
+                &mut state,
+                channel_id,
+                &persistence,
+            ) {
+                let _ = reply.send(result);
+                return state;
+            }
+            let previous_queue = state.intervention_queue.clone();
+            let next_result = take_unsettled(&mut state, channel_id, primary_message_id);
+            let queue_len_after = state.intervention_queue.len();
+            // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the
+            // intervention is moved into the reply, so we can reserve the
+            // dequeue→claim window against a racing Background start.
+            let dispatched_head = next_result.intervention.as_ref().map(|i| i.message_id);
+            // #5191: the merged head answers for every absorbed id too;
+            // capture them alongside the primary for the same reason.
+            let dispatched_head_sources = next_result
+                .intervention
+                .as_ref()
+                .map(|i| i.source_message_ids.clone())
+                .unwrap_or_default();
+            let marker_error = if let Some(intervention) = next_result.intervention.as_ref() {
+                save_channel_pending_dispatch_marker(
+                    &persistence.provider,
+                    &persistence.token_hash,
+                    channel_id,
+                    intervention,
+                    persistence.dispatch_role_override,
+                )
+                .err()
+            } else {
+                None
+            };
+            let result = if let Some(error) = marker_error {
+                state.intervention_queue = previous_queue;
+                log_queue_persistence_rollback(
+                    "take_next_soft_marker",
+                    channel_id,
+                    &persistence,
+                    &error,
+                );
+                TakeNextSoftResult {
+                    intervention: None,
+                    dispatch_lease: None,
+                    has_more: state
+                        .intervention_queue
+                        .iter()
+                        .any(|item| item.mode == InterventionMode::Soft),
+                    queue_len_after: state.intervention_queue.len(),
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                }
+            } else if let Err(error) = persist_queue_or_restore(
+                &mut state,
+                channel_id,
+                &persistence,
+                previous_queue,
+                "take_next_soft",
+            ) {
+                // Persistence failed → `persist_queue_or_restore` rolled
+                // the dequeue back (head re-inserted); no dispatch happens,
+                // so do NOT set the reservation. The marker remains the
+                // durable backstop for this head until the queue-without-head
+                // write succeeds.
+                TakeNextSoftResult {
+                    intervention: None,
+                    dispatch_lease: None,
+                    has_more: state
+                        .intervention_queue
+                        .iter()
+                        .any(|item| item.mode == InterventionMode::Soft),
+                    queue_len_after: state.intervention_queue.len(),
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                }
+            } else {
+                // #3167 BLOCKER-2 — a head was handed out for dispatch but
+                // the slot is not claimed until `intake_turn` runs. Reserve
+                // the window so a Background start cannot slip in ahead.
+                if let Some(head) = dispatched_head {
+                    let dispatch_lease =
+                        set_pending_user_dispatch(&mut state, head, &dispatched_head_sources);
+                    TakeNextSoftResult {
+                        intervention: next_result.intervention,
+                        dispatch_lease: Some(dispatch_lease),
+                        has_more: next_result.has_more,
+                        queue_len_after,
+                        queue_exit_events: next_result.queue_exit_events,
+                        persistence_error: None,
+                    }
+                } else {
+                    TakeNextSoftResult {
+                        intervention: next_result.intervention,
+                        dispatch_lease: None,
+                        has_more: next_result.has_more,
+                        queue_len_after,
+                        queue_exit_events: next_result.queue_exit_events,
+                        persistence_error: None,
+                    }
+                }
+            };
+            let _ = reply.send(result);
+        }
+        ChannelMailboxMsg::RequeueFront {
+            input_permit: _,
+            intervention,
+            persistence,
+            dispatch_lease,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence.clone());
+            if let Some(error) = absorb_disk_queue_error(&mut state, channel_id, &persistence) {
+                let _ = reply.send(RequeueInterventionResult::absorb_failed(error));
+                return state;
+            }
+            let identity_ids = front_requeue::intervention_identity_ids(&intervention);
+            let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
+                let pending = state.pending_user_dispatch?;
+                let stored = state.pending_user_dispatch_lease.as_ref()?;
+                (identity_ids.contains(&pending) && Arc::ptr_eq(lease, stored)).then_some(pending)
+            });
+            let previous_queue = state.intervention_queue.clone();
+            let requeue_result = requeue_intervention_front(
+                &mut state.intervention_queue,
+                intervention,
+                state.pending_user_dispatch,
+                state.active_user_message_id,
+                authorized_pending_restore,
+            );
+            let result = if !requeue_result.enqueued {
+                RequeueInterventionResult {
+                    enqueued: false,
+                    refusal_reason: requeue_result.refusal_reason,
+                    queue_exit_events: requeue_result.queue_exit_events,
+                    persistence_error: None,
+                }
+            } else if let Err(error) = persist_queue_or_restore(
+                &mut state,
+                channel_id,
+                &persistence,
+                previous_queue,
+                "requeue_front",
+            ) {
+                RequeueInterventionResult {
+                    enqueued: false,
+                    refusal_reason: None,
+                    queue_exit_events: Vec::new(),
+                    persistence_error: Some(error),
+                }
+            } else {
+                if let Some(pending) = authorized_pending_restore {
+                    consume_pending_dispatch_marker_if_matches(
+                        &mut state,
+                        channel_id,
+                        pending,
+                        "restore_dequeued_head",
+                    );
+                    clear_pending_user_dispatch(&mut state);
+                }
+                // #5937 — the head is back at the queue front, so the
+                // drain is between rounds, not wedged: the clock starts
+                // over. Here rather than in the hosted-TUI defer (#4270)
+                // that motivated it — this arm covers every caller.
+                state.inbound_stall_since = None;
+                RequeueInterventionResult {
+                    enqueued: true,
+                    refusal_reason: None,
+                    queue_exit_events: requeue_result.queue_exit_events,
+                    persistence_error: None,
+                }
+            };
+            let _ = reply.send(result);
+        }
+        ChannelMailboxMsg::AbandonPendingDispatch {
+            user_message_id,
+            dispatch_lease,
+            persistence,
+            consume_marker,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence);
+            let authorized = dispatch_lease.as_ref().is_none_or(|lease| {
+                state.pending_user_dispatch == Some(user_message_id)
+                    && state
+                        .pending_user_dispatch_lease
+                        .as_ref()
+                        .is_some_and(|stored| Arc::ptr_eq(lease, stored))
+            });
+            if authorized {
+                abandon_pending_dispatch_reservation(
+                    &mut state,
+                    channel_id,
+                    user_message_id,
+                    consume_marker,
+                    if dispatch_lease.is_some() {
+                        "abandon_pending_dispatch_if_lease_matches"
+                    } else if consume_marker {
+                        "abandon_pending_dispatch"
+                    } else {
+                        "clear_pending_dispatch_reservation"
+                    },
+                );
+            }
+            let _ = reply.send(authorized);
+        }
+        ChannelMailboxMsg::CancelQueuedPrimaryMessage {
+            message_id,
+            persistence,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence.clone());
+            let previous_queue = state.intervention_queue.clone();
+            let mut cancel_result = cancel_soft_intervention_by_primary_message_id(
+                &mut state.intervention_queue,
+                message_id,
+            );
+            if cancel_result.removed.is_some() || !cancel_result.queue_exit_events.is_empty() {
+                if let Err(error) = persist_queue_or_restore(
+                    &mut state,
+                    channel_id,
+                    &persistence,
+                    previous_queue,
+                    "cancel_queued_primary_message",
+                ) {
+                    cancel_result = CancelQueuedMessageResult {
+                        removed: None,
+                        queue_exit_events: Vec::new(),
+                        persistence_error: Some(error),
+                    };
+                }
+            }
+            let _ = reply.send(cancel_result);
+        }
+        ChannelMailboxMsg::FinishTurn { persistence, reply } => {
+            state.last_persistence = Some(persistence.clone());
+            let finished_user_message_id = state.active_user_message_id;
+            let _ = reply.send(finalize_turn_state(
+                &mut state,
+                channel_id,
+                Some(&persistence),
+                false,
+            ));
+            if let Some(user_message_id) = finished_user_message_id {
+                consume_pending_dispatch_marker_if_matches(
+                    &mut state,
+                    channel_id,
+                    user_message_id,
+                    "finish_turn",
+                );
+            }
+            mark_turn_finished_signal_done(channel_id);
+        }
+        ChannelMailboxMsg::FinishTurnIfToken {
+            expected,
+            persistence,
+            reply,
+        } => {
+            let finish = episode_identity::finish_turn_if_token;
+            finish(&mut state, channel_id, expected, persistence, reply);
+        }
+        ChannelMailboxMsg::FinishTurnIfMatches {
+            expected_actor,
+            preserve_queue,
+            expected_user_message_id,
+            active_started_before,
+            turn_nonce_guard,
+            persistence,
+            reply,
+        } => {
+            // #3016 — identity guard. Finalize ONLY when the active
+            // turn's user_message_id still matches the terminal's
+            // identity. A mismatch (or no active turn) means the turn
+            // this terminal belonged to already finalized and a newer
+            // turn may now own the mailbox — so we must NOT take its
+            // token. Return a no-op result (removed_token = None) that
+            // mirrors `mailbox_finish_turn`'s idempotent second-call
+            // shape, so the finalizer's `removed_token.is_some()` gate
+            // skips the counter decrement and trailing release.
+            let matches = episode_identity::finish_turn_identity_matches(
+                &state,
+                expected_user_message_id,
+                &expected_actor,
+                active_started_before,
+                &turn_nonce_guard,
+            );
+            if matches {
+                state.last_persistence = Some(persistence.clone());
+                let finished_user_message_id = state.active_user_message_id;
+                let finished =
+                    finalize_turn_state(&mut state, channel_id, Some(&persistence), preserve_queue);
+                if finished.removed_token.is_some()
+                    && let Some(nonce) = turn_nonce_guard.named_nonce()
+                {
+                    state
+                        .remint_fence
+                        .note_exact_release(expected_user_message_id, nonce);
+                }
+                let _ = reply.send(finished);
+                if !preserve_queue && let Some(user_message_id) = finished_user_message_id {
+                    consume_pending_dispatch_marker_if_matches(
+                        &mut state,
+                        channel_id,
+                        user_message_id,
+                        "finish_turn_if_matches",
+                    );
+                }
+                mark_turn_finished_signal_done(channel_id);
+            } else {
+                // No-op: do not touch the active token. Surface the
+                // current pending state so a caller that schedules a
+                // queue kickoff still sees an accurate backlog flag,
+                // but never release the (possibly newer) live turn.
+                let _ = reply.send(FinishTurnResult {
+                    removed_token: None,
+                    has_pending: state
+                        .intervention_queue
+                        .iter()
+                        .any(|item| item.mode == InterventionMode::Soft),
+                    mailbox_online: true,
+                    queue_exit_events: Vec::new(),
+                    persistence_error: None,
+                });
+            }
+        }
+        ChannelMailboxMsg::HardStop { reply } => {
+            let persistence = state.last_persistence.clone();
+            let _ = reply.send(finalize_turn_state(
+                &mut state,
+                channel_id,
+                persistence.as_ref(),
+                false,
+            ));
+            mark_turn_finished_signal_done(channel_id);
+        }
+        ChannelMailboxMsg::FinishCancelledTurn { reply } => {
+            let should_finish = state
+                .cancel_token
+                .as_ref()
+                .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            if should_finish {
+                let persistence = state.last_persistence.clone();
+                let _ = reply.send(finalize_turn_state(
+                    &mut state,
+                    channel_id,
+                    persistence.as_ref(),
+                    false,
+                ));
+                mark_turn_finished_signal_done(channel_id);
+            } else {
+                let _ = reply.send(FinishTurnResult {
+                    removed_token: None,
+                    has_pending: state
+                        .intervention_queue
+                        .iter()
+                        .any(|item| item.mode == InterventionMode::Soft),
+                    mailbox_online: true,
+                    queue_exit_events: Vec::new(),
+                    persistence_error: None,
+                });
+            }
+        }
+        ChannelMailboxMsg::Clear { persistence, reply } => {
+            let _ = reply.send(clear_channel_state(&mut state, channel_id, persistence));
+            mark_turn_finished_signal_done(channel_id);
+        }
+        ChannelMailboxMsg::PurgeQueue {
+            persistence,
+            clear_cancelled_active_anchor,
+            reply,
+        } => {
+            // #2706: queue-only purge. Leaves `cancel_token`,
+            // `active_request_owner`, `active_user_message_id`
+            // untouched so a turn that entered the actor in
+            // between force-kill and purge is not collaterally
+            // cancelled.
+            //
+            // #3029(D): a force purge additionally releases the
+            // active-turn anchor, but ONLY when the anchored token is
+            // already `cancelled`. The force path flips that flag via
+            // `cancel_active_token` before purging, so this clears the
+            // just-killed turn's anchor while still leaving a fresh,
+            // uncancelled turn (which raced in after the force-kill)
+            // fully intact — keeping the #2706 guarantee.
+            let cleared_active_anchor = if clear_cancelled_active_anchor
+                && state
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                release_active_turn_anchor(&mut state, channel_id, Some(&persistence.provider));
+                true
+            } else {
+                false
+            };
+            state.last_persistence = Some(persistence.clone());
+            let disk_files_removed =
+                remove_channel_pending_queue_files_all_tokens(&persistence.provider, channel_id);
+            let own_files_present = channel_queue_files_present(
+                &persistence.provider,
+                &persistence.token_hash,
+                channel_id,
+            );
+            let previous_queue = state.intervention_queue.clone();
+            let drained = state.intervention_queue.drain(..).count();
+            let purge_persisted = persist_queue_or_restore(
+                &mut state,
+                channel_id,
+                &persistence,
+                previous_queue,
+                "purge_queue",
+            )
+            .is_ok();
+            let drained = if purge_persisted { drained } else { 0 };
+            if purge_persisted {
+                clear_pending_user_dispatch(&mut state);
+                state.recently_valve_cleared_dispatch = None;
+                delete_pending_dispatch_marker_with_persistence(
+                    &persistence,
+                    channel_id,
+                    "purge_queue",
+                );
+            }
+            if cleared_active_anchor {
+                mark_turn_finished_signal_done(channel_id);
+            }
+            let _ = reply.send(PurgeQueueResult {
+                drained,
+                disk_files_removed,
+                cleared_active_anchor,
+                own_files_removed: if purge_persisted {
+                    own_files_present
+                } else {
+                    Some(0)
+                },
+                queue_len_after: state.intervention_queue.len(),
+                input_refusal: None,
+            });
+        }
+        #[cfg(test)]
+        ChannelMailboxMsg::ReplaceQueue {
+            queue,
+            persistence,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence.clone());
+            let previous_queue = state.intervention_queue.clone();
+            state.intervention_queue = queue;
+            let _ = persist_queue_or_restore(
+                &mut state,
+                channel_id,
+                &persistence,
+                previous_queue,
+                "replace_queue",
+            );
+            let _ = reply.send(());
+        }
+        ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply } => {
+            // #1683: read the disk queue inside the mailbox actor so
+            // a dequeue that removes the file cannot race with a stale
+            // out-of-actor disk snapshot and reinsert an already
+            // processed item.
+            let result =
+                hydrate_pending_queue_from_disk_if_present(&mut state, channel_id, &persistence);
+            let _ = reply.send(result);
+        }
+        ChannelMailboxMsg::MergeRestoredQueueItems {
+            items,
+            persistence,
+            reply,
+        } => {
+            // #3864: merge SIGTERM-restored disk items into the live
+            // queue in ONE serialized actor step (read + dedup-merge +
+            // persist). Immune to the lost-enqueue race the old
+            // out-of-actor snapshot→build→`ReplaceQueue` RMW suffered:
+            // a live reconcile-window `Enqueue` is serialized before
+            // or after this merge, never overwritten by it. override =
+            // None — dispatch_role_overrides are restored separately,
+            // before the restore loop (see recovery_flush).
+            let result =
+                hydrate_pending_queue_into_state(&mut state, channel_id, items, persistence, None);
+            let _ = reply.send(result);
+        }
+        ChannelMailboxMsg::MergeRestoredDispatchMarker {
+            mut marker,
+            mut restored_override,
+            persistence,
+            reply,
+        } => {
+            state.last_persistence = Some(persistence.clone());
+            let Some((current_marker, current_override)) = load_channel_pending_dispatch_marker(
+                &persistence.provider,
+                &persistence.token_hash,
+                channel_id,
+            ) else {
+                let _ = reply.send(HydratePendingQueueResult {
+                    absorbed: 0,
+                    queue_len_after: state.intervention_queue.len(),
+                    restored_override,
+                    persistence_error: None,
+                });
+                return state;
+            };
+            if current_marker.message_id != marker.message_id {
+                let _ = reply.send(HydratePendingQueueResult {
+                    absorbed: 0,
+                    queue_len_after: state.intervention_queue.len(),
+                    restored_override,
+                    persistence_error: None,
+                });
+                return state;
+            }
+            marker = current_marker;
+            restored_override = current_override.or(restored_override);
+            if state.pending_user_dispatch.is_some() {
+                let _ = reply.send(HydratePendingQueueResult {
+                    absorbed: 0,
+                    queue_len_after: state.intervention_queue.len(),
+                    restored_override,
+                    persistence_error: None,
+                });
+                return state;
+            }
+            let absorbed = absorb_disk_queue(&mut state, channel_id, &persistence);
+            if absorbed.persistence_error.is_some() {
+                let _ = reply.send(absorbed);
+                return state;
+            }
+            let mut effective_persistence = persistence.clone();
+            if effective_persistence.dispatch_role_override.is_none() {
+                effective_persistence.dispatch_role_override =
+                    restored_override.map(|channel| channel.get());
+            }
+            let result = merge_pending_dispatch_marker_into_state(
+                &mut state,
+                channel_id,
+                marker,
+                effective_persistence,
+                restored_override,
+                "merge_restored_dispatch_marker",
+            );
+            let _ = reply.send(result);
+        }
+        ChannelMailboxMsg::RestartDrain { persistence, reply } => {
+            state.last_persistence = Some(persistence.clone());
+            let persistence_error = absorb_disk_queue_error(&mut state, channel_id, &persistence)
+                .or_else(|| {
+                    persist_queue(channel_id, &state.intervention_queue, &persistence).err()
+                });
+            let _ = reply.send(RestartDrainResult {
+                queued_count: if persistence_error.is_some() {
+                    0
+                } else {
+                    state.intervention_queue.len()
+                },
+                persistence_error,
+            });
+        }
+        #[cfg(test)]
+        ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {
+            if state.cancel_token.is_some() {
+                let wall_age = chrono::Duration::from_std(age)
+                    .expect("active-turn test age must fit chrono duration");
+                state.turn_started_at = Some(Utc::now() - wall_age);
+                state.turn_started_instant = Some(Instant::now() - age);
+            }
+            let _ = reply.send(());
+        }
+        #[cfg(test)]
+        ChannelMailboxMsg::AgeInboundWaitsForTest { age, reply } => {
+            if state.pending_user_dispatch.is_some() {
+                state.pending_user_dispatch_since = Some(Instant::now() - age);
+            }
+            if state.inbound_stall_since.is_some() {
+                state.inbound_stall_since = Some(Instant::now() - age);
+            }
+            let _ = reply.send(());
+        }
+        #[cfg(test)]
+        ChannelMailboxMsg::AgeValveClearedDispatchForTest { age, reply } => {
+            if let Some((message_id, _)) = state.recently_valve_cleared_dispatch {
+                state.recently_valve_cleared_dispatch = Some((message_id, Instant::now() - age));
+            }
+            let _ = reply.send(());
+        }
+        ChannelMailboxMsg::CloseIfIdle { reply } => {
+            let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
+        }
+    }
+    state
 }
 
 // #3167 BLOCKER-3 — a SINGLE process-wide lock shared by EVERY test in this

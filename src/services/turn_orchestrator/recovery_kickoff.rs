@@ -22,6 +22,8 @@ pub(crate) enum RecoveryKickoffResult {
     RefusedClosed,
     /// Recovery admission refused or the actor was unreachable.
     Unavailable,
+    InputModeFenced(crate::services::discord::input_runtime::fence::Mode),
+    InputFailure(crate::services::discord::input_runtime::fence::Failure),
 }
 
 impl RecoveryKickoffResult {
