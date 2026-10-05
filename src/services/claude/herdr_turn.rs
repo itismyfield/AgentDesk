@@ -18,7 +18,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedOwner, HostedRecord, HostedState, bind_pg, load_hosted_execution_pg,
 };
 use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
-use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind, current_hook_endpoint};
+use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::claude_tui::host_input::run_herdr;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
@@ -31,42 +31,11 @@ use crate::services::session_backend::read_output_file_until_result_with_harvest
 use crate::services::session_host::{
     EvidenceGap, HerdrTarget, RestoreResume, SocketHerdrLaunchHost, herdr_endpoints,
 };
+use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 use crate::services::tui_prompt_dedupe::binding_context::{PreparedIncarnation, execution_context};
 use crate::services::tui_prompt_dedupe::binding_events::{BindingTarget, binding_events_since};
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
-
-#[cfg(test)]
-thread_local! {
-    static FORCED_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Whether a configured channel's Claude turn runs on Herdr; unset or false keeps it refused.
-pub(crate) fn switched_on() -> bool {
-    #[cfg(test)]
-    if let Some(forced) = FORCED_SWITCH.with(std::cell::Cell::get) {
-        return forced;
-    }
-    crate::config_live_reload::current()
-        .and_then(|config| config.runtime.herdr_turn_enabled)
-        .unwrap_or(false)
-}
-
-/// Stands in for the live switch on this thread until dropped.
-#[cfg(test)]
-pub(crate) struct ForcedSwitch(Option<bool>);
-
-#[cfg(test)]
-pub(crate) fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
-    ForcedSwitch(FORCED_SWITCH.with(|cell| cell.replace(on)))
-}
-
-#[cfg(test)]
-impl Drop for ForcedSwitch {
-    fn drop(&mut self) {
-        FORCED_SWITCH.with(|cell| cell.set(self.0));
-    }
-}
 
 /// The boot registry's launch host, on its endpoints only.
 pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
@@ -97,6 +66,8 @@ pub(crate) struct HerdrTurn<'a> {
     pub working_dir: &'a str,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
+    /// The hook receiver a launch reports to; only a launch needs it.
+    pub hook_endpoint: Option<String>,
     pub cancel: Option<Arc<CancelToken>>,
 }
 
@@ -212,7 +183,10 @@ fn launched_source(
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let working_dir = Path::new(turn.working_dir);
     let fresh = super::fresh_claude_tui_session_resolution(working_dir, None)?;
-    let hook_endpoint = current_hook_endpoint().ok_or("herdr turn: no hook endpoint")?;
+    let hook_endpoint = turn
+        .hook_endpoint
+        .clone()
+        .ok_or("herdr turn: no hook endpoint")?;
     let logical = &turn.owner.logical_key;
     let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
         ProviderKind::Claude,
@@ -405,6 +379,18 @@ fn prompt_and_read(
         )
         .map_err(|failure| failure.error)?;
     }
+    // The tmux handoff's launch registration; with the transcript now written it resolves a cold
+    // start's Pending source.
+    let binding = TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        output_path: transcript.clone(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(attached.session_id.clone()),
+        last_offset: length(),
+        relay_last_offset: None,
+    };
+    crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(logical, binding);
     if !attached.bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
@@ -445,7 +431,3 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "herdr_turn_tests.rs"]
-mod tests;

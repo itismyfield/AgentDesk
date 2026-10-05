@@ -23,8 +23,7 @@ pub(crate) enum TurnHost {
 #[derive(Debug)]
 pub(crate) struct HerdrTurnPlan {
     pub endpoint: HerdrLaunchEndpoint,
-    /// `None` while the channel has no sessions row yet; read by the executor once one is wired.
-    #[allow(dead_code)]
+    /// `None` while the channel has no sessions row yet.
     pub row: Option<HostedObservation>,
 }
 
@@ -121,7 +120,7 @@ pub(crate) async fn for_turn(
 }
 
 /// The turn's first judgement, before it resets, reconciles or clears anything. An unconfigured
-/// channel passes without I/O; a configured one is refused until a Herdr executor is wired.
+/// channel passes without I/O; a configured one is refused: headless turns run no Herdr executor.
 pub(crate) async fn refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -137,6 +136,56 @@ where
         TurnHost::Tmux => None,
         TurnHost::Refused(refusal) => Some(refusal),
         TurnHost::Herdr(_) => Some(HerdrRefusal::ExecutorNotWired),
+    }
+}
+
+/// The intake's first judgement: a configured turn only the missing executor refused passes while
+/// `runtime.herdr_turn_enabled` is on.
+pub(crate) async fn intake_refusal_before_turn<F>(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: impl FnOnce() -> F,
+) -> Option<HerdrRefusal>
+where
+    F: std::future::Future<Output = Option<String>>,
+{
+    match refusal_before_turn(pool, provider, channel_id, session_key).await {
+        Some(HerdrRefusal::ExecutorNotWired) if herdr_turn_switched_on() => None,
+        judged => judged,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether a configured channel's Claude turn runs on Herdr; unset or false keeps it refused.
+pub(crate) fn herdr_turn_switched_on() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = FORCED_SWITCH.with(std::cell::Cell::get) {
+        return forced;
+    }
+    cfg!(unix)
+        && crate::config_live_reload::current()
+            .and_then(|config| config.runtime.herdr_turn_enabled)
+            .unwrap_or(false)
+}
+
+/// Stands in for the live switch on this thread until dropped.
+#[cfg(test)]
+pub(crate) struct ForcedSwitch(Option<bool>);
+
+#[cfg(test)]
+pub(crate) fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
+    ForcedSwitch(FORCED_SWITCH.with(|cell| cell.replace(on)))
+}
+
+#[cfg(test)]
+impl Drop for ForcedSwitch {
+    fn drop(&mut self) {
+        FORCED_SWITCH.with(|cell| cell.set(self.0));
     }
 }
 

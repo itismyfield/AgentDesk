@@ -175,7 +175,7 @@ fn herdr_turn(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    if claude::herdr_turn::switched_on() {
+    if crate::services::turn_host::herdr_turn_switched_on() {
         return herdr::execute(turn, plan, sender);
     }
     let refusal = HerdrRefusal::ExecutorNotWired;
@@ -230,6 +230,7 @@ mod herdr {
             working_dir: turn.working_dir,
             system_prompt: turn.system_prompt.filter(|prompt| !prompt.is_empty()),
             model: turn.model,
+            hook_endpoint: crate::services::claude_tui::hook_server::current_hook_endpoint(),
             cancel: Some(Arc::clone(&turn.cancel)),
         };
         let ports = BootPorts {
@@ -379,6 +380,10 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, 
         Some(turn.channel_id),
     )
 }
+
+#[cfg(test)]
+#[path = "provider_dispatch_herdr_tests.rs"]
+mod herdr_tests;
 
 #[cfg(test)]
 mod tests {
@@ -531,6 +536,32 @@ mod tests {
             run().await.unwrap_err(),
             "herdr turn refused: executor_not_wired"
         );
+        // The intake and headless entries' first judgements: only the intake one follows the switch.
+        let judge = |intake: bool, on: Option<bool>| {
+            let (pool, provider) = (&pool, &provider);
+            async move {
+                let _switch = crate::services::turn_host::force_switch_for_test(on);
+                let key = || async { Some(session_key.to_owned()) };
+                let pool = Some(pool);
+                match intake {
+                    true => {
+                        use crate::services::turn_host::intake_refusal_before_turn as entry;
+                        entry(pool, provider, CHANNEL, key).await
+                    }
+                    false => {
+                        use crate::services::turn_host::refusal_before_turn as entry;
+                        entry(pool, provider, CHANNEL, key).await
+                    }
+                }
+            }
+        };
+        let not_wired = Some(HerdrRefusal::ExecutorNotWired);
+        for off in [None, Some(false)] {
+            assert_eq!(judge(true, off).await, not_wired, "intake {off:?}");
+            assert_eq!(judge(false, off).await, not_wired, "headless {off:?}");
+        }
+        assert_eq!(judge(true, Some(true)).await, None, "intake on");
+        assert_eq!(judge(false, Some(true)).await, not_wired, "headless on");
         for driver in ["tmux.calls", "claude.calls"] {
             assert!(!root.path().join(driver).exists(), "{driver} ran");
         }
