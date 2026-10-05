@@ -673,6 +673,50 @@ fn a_frame_someone_else_delivered_requires_no_record_5941() {
 }
 
 #[test]
+fn frames_outside_the_i17_denial_scope_do_not_increment_the_cause_counter_5988() {
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = serenity::ChannelId::new(1_479_671_298_497_183_838);
+    for (boundary, facts) in [
+        (
+            "authorized",
+            OrphanTerminalFrameFacts {
+                watcher_direct_fallback_authorized: true,
+                ..orphan_facts()
+            },
+        ),
+        (
+            "not requested",
+            OrphanTerminalFrameFacts {
+                watcher_direct_fallback_requested: false,
+                ..orphan_facts()
+            },
+        ),
+    ] {
+        let (healthy, events) =
+            crate::services::observability::events::test_capture::capture_sync(|| {
+                observe_orphan_terminal_frame(&shared, channel, &ProviderKind::Claude, &facts)
+            });
+        assert!(healthy, "{boundary} is outside the I17 denial scope");
+        let denial_counter_delta: u64 = events
+            .iter()
+            .filter(|event| {
+                event.event_type == "relay_root_cause_counter"
+                    && event.channel_id == Some(channel.get())
+                    && event.payload["counter"]
+                        == SoftTerminalAuthorityDenial::TurnStartOutsideFrame.metric_name()
+            })
+            .filter_map(|event| event.payload["delta"].as_u64())
+            .sum();
+        assert_eq!(
+            denial_counter_delta, 0,
+            "{boundary} must not count as denial"
+        );
+    }
+}
+
+#[test]
 fn record_decision_is_pinned_across_every_kind_and_denial_pair_5941() {
     // The admission must agree with the AUTHORITY rule for every combination. A
     // hard result keeps its recovery fallback even under a soft denial.
