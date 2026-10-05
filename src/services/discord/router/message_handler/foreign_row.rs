@@ -94,6 +94,8 @@ mod tests {
         shared: &Arc<SharedData>,
         channel: ChannelId,
         message: MessageId,
+        sources: &[MessageId],
+        retry: MessageId,
     ) -> (Arc<CancelToken>, Result<bool, String>) {
         let provider = shared.provider.clone();
         let taken = idle_queue_take_next_soft_if_ready(shared, &provider, channel).await;
@@ -118,10 +120,37 @@ mod tests {
             0,
         );
         state.turn_nonce = token.turn_nonce().map(str::to_owned);
+        state.source_message_ids = sources.iter().map(|id| id.get()).collect();
+        state.busy_followup_retry_user_msg_id = retry.get();
         state.set_followup_requeue_context(None, false, false, Vec::new(), None, true);
         let created = inflight::save_inflight_state_create_new(&state);
         let verdict = admit(shared, &provider, &state, &token, created).await;
         (token, verdict)
+    }
+
+    /// The intervention deliver queues, or a merged head carrying every absorbed id.
+    fn queued(message: MessageId, sources: &[MessageId]) -> Intervention {
+        let generation = crate::services::discord::runtime_store::process_generation();
+        Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: message,
+            queued_generation: generation,
+            source_message_ids: sources.to_vec(),
+            source_message_queued_generations: sources
+                .iter()
+                .map(|id| SourceMessageQueuedGeneration::user_instruction(*id, generation))
+                .collect(),
+            source_text_segments: Vec::new(),
+            text: PROMPT.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
     }
 
     fn queued_ids(queue: &[Intervention]) -> Vec<u64> {
@@ -140,36 +169,14 @@ mod tests {
             channel.get(),
         );
         // deliver answered `queued external_turn_active` with this intervention.
-        let generation = crate::services::discord::runtime_store::process_generation();
-        let enqueued = mailbox_enqueue_intervention(
-            &shared,
-            &provider,
-            channel,
-            Intervention {
-                author_id: UserId::new(7),
-                author_is_bot: false,
-                message_id: message,
-                queued_generation: generation,
-                source_message_ids: vec![message],
-                source_message_queued_generations: vec![
-                    SourceMessageQueuedGeneration::user_instruction(message, generation),
-                ],
-                source_text_segments: Vec::new(),
-                text: PROMPT.to_string(),
-                mode: InterventionMode::Soft,
-                created_at: std::time::Instant::now(),
-                reply_context: None,
-                has_reply_boundary: false,
-                merge_consecutive: false,
-                pending_uploads: Vec::new(),
-                voice_announcement: None,
-            },
-        )
-        .await;
+        let enqueued =
+            mailbox_enqueue_intervention(&shared, &provider, channel, queued(message, &[message]))
+                .await;
         assert!(enqueued.enqueued);
 
         // The kickoff promotes it while the external row is still on disk.
-        let (token, verdict) = promote_and_admit(&shared, channel, message).await;
+        let (token, verdict) =
+            promote_and_admit(&shared, channel, message, &[message], message).await;
         let snapshot = mailbox_snapshot(&shared, channel).await;
         let row = inflight::load_inflight_state_read_only(&provider, channel.get());
         assert_eq!(
@@ -197,12 +204,64 @@ mod tests {
 
         // After the external row clears, the same prompt starts exactly once.
         inflight::clear_inflight_state(&provider, channel.get());
-        let (_token, verdict) = promote_and_admit(&shared, channel, message).await;
+        let (_token, verdict) =
+            promote_and_admit(&shared, channel, message, &[message], message).await;
         let snapshot = mailbox_snapshot(&shared, channel).await;
         assert_eq!(
             (verdict, queued_ids(&snapshot.intervention_queue)),
             (Ok(true), Vec::new())
         );
+    }
+
+    #[tokio::test]
+    async fn a_merged_head_keeps_every_source_id_through_the_requeue_and_settles_them_all() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let ids = [6_245_401, 6_245_402, 6_245_403];
+        let [a, b, c] = ids.map(MessageId::new);
+        let mut missing = Vec::new();
+        // Without a busy retry binding the retry id is the primary; with one it is the head.
+        for (variant, retry) in [(0, c), (1, a)] {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let provider = shared.provider.clone();
+            let channel = ChannelId::new(6_245_410 + variant);
+            crate::services::discord::health::seed_external_turn_row_for_tests(
+                &provider,
+                channel.get(),
+            );
+            let merged = queued(c, &[a, b, c]);
+            assert!(
+                mailbox_enqueue_intervention(&shared, &provider, channel, merged)
+                    .await
+                    .enqueued
+            );
+            let (_token, verdict) = promote_and_admit(&shared, channel, c, &[a, b, c], retry).await;
+            let snapshot = mailbox_snapshot(&shared, channel).await;
+            let known =
+                crate::services::discord::recovery_known_ids::recovery_known_message_ids(&snapshot);
+            assert_eq!(verdict, Ok(false));
+            let unknown: Vec<u64> = ids.into_iter().filter(|id| !known.contains(id)).collect();
+
+            // The retry claims the merged head again and its delivery settles A, B and C.
+            inflight::clear_inflight_state(&provider, channel.get());
+            let (token, verdict) = promote_and_admit(&shared, channel, c, &[a, b, c], retry).await;
+            assert_eq!(verdict, Ok(true));
+            crate::services::discord::outbound::completed_turn_ledger::append_completed_episode(
+                &provider,
+                channel.get(),
+                c.get(),
+                token.turn_nonce(),
+            );
+            let settled = crate::services::discord::outbound::completed_turn_ledger::read_ledger(
+                &provider,
+                channel.get(),
+            )
+            .map(|ledger| ledger.settled_ids())
+            .unwrap_or_default();
+            let unsettled: Vec<u64> = ids.into_iter().filter(|id| !settled.contains(id)).collect();
+            missing.push((variant, unknown, unsettled));
+        }
+        // Neither catch-up's known set nor the settled ledger may lose an absorbed id.
+        assert_eq!(missing, [(0, vec![], vec![]), (1, vec![], vec![])]);
     }
 
     #[test]
