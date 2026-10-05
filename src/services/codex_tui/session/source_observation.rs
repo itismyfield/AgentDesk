@@ -379,6 +379,135 @@ fn verify_rollout(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexSourceMode {
+    Legacy,
+    Shadow,
+    Verified,
+    Invalid,
+}
+impl CodexSourceMode {
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("legacy") => Self::Legacy,
+            Some("shadow") => Self::Shadow,
+            Some("verified") => Self::Verified,
+            _ => Self::Invalid,
+        }
+    }
+    pub(crate) fn launch_policy(self) -> Result<&'static str, &'static str> {
+        match self {
+            Self::Legacy => Ok("legacy"),
+            Self::Shadow => Ok("shadow"),
+            Self::Verified => Err("SourceModeVerifiedNotLanded"),
+            Self::Invalid => Err("SourceModeInvalid"),
+        }
+    }
+}
+
+/// Validated once at startup; no active nonce or new launch reparses mutable env.
+pub(crate) fn codex_source_mode_snapshot() -> CodexSourceMode {
+    #[cfg(test)]
+    if let Some(mode) = SOURCE_MODE_TEST.with(|mode| mode.get()) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<CodexSourceMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let value = std::env::var_os("AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE");
+        let mode = CodexSourceMode::parse(value.as_ref().map(|v| v.to_str().unwrap_or("invalid")));
+        tracing::info!(
+            ?mode,
+            eligible = mode.launch_policy().is_ok(),
+            "Codex source-mode startup snapshot"
+        );
+        mode
+    })
+}
+#[cfg(test)]
+thread_local! { pub(crate) static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
+
+/// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.
+pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bool {
+    use sha2::{Digest, Sha256};
+    let (Some(hex), Some(prompt)) = (
+        expected.and_then(|s| s.strip_prefix("sha256:")),
+        prompt.as_str(),
+    ) else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && hex == format!("{:x}", Sha256::digest(prompt.as_bytes()))
+}
+
+pub(crate) struct CodexFirstProof<'a> {
+    pub captured: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    pub prepared: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    pub current_nonce: Option<&'a str>,
+    pub verified_fresh_spawn: bool,
+    pub no_prior_claim_or_transition: bool,
+    pub event: &'a str,
+    pub source: Option<&'a str>,
+    pub prompt: &'a Value,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CodexFirstProofRejection {
+    Context,
+    Ineligible,
+    Native(CodexHookSourceRejection),
+}
+impl CodexFirstProofRejection {
+    pub(crate) fn verdict(&self) -> &'static str {
+        match self {
+            Self::Ineligible => "ineligible",
+            Self::Native(error) if error.may_resolve_later() => "pending",
+            _ => "rejected",
+        }
+    }
+}
+
+/// Read-only initial-parent qualification, not publication or delivery authority.
+pub(crate) fn codex_first_proof_candidate(
+    launch: &CodexFirstProof<'_>,
+    claim: &CodexHookSourceClaim<'_>,
+) -> Result<VerifiedCodexHookSource, CodexFirstProofRejection> {
+    crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
+        launch.captured,
+        launch.prepared,
+        launch.current_nonce,
+    )
+    .map_err(|_| CodexFirstProofRejection::Context)?;
+    if !launch.verified_fresh_spawn
+        || !launch.no_prior_claim_or_transition
+        || launch.prepared.launch_mode != "fresh"
+        || launch.prepared.expected_native_session_id.is_some()
+        || !matches!(
+            launch.prepared.source_policy.as_deref(),
+            Some("shadow" | "verified")
+        )
+        || claim.expected_source != CodexRolloutSource::Cli
+        || !match launch.event {
+            "SessionStart" => launch.source == Some("startup"),
+            "UserPromptSubmit" => first_prompt_matches(
+                launch.prepared.first_prompt_digest.as_deref(),
+                launch.prompt,
+            ),
+            _ => false,
+        }
+    {
+        return Err(CodexFirstProofRejection::Ineligible);
+    }
+    let root = launch
+        .prepared
+        .provider_root
+        .as_deref()
+        .ok_or(CodexFirstProofRejection::Context)?;
+    verify_codex_hook_source(root, claim).map_err(CodexFirstProofRejection::Native)
+}
+
 #[cfg(test)]
 #[path = "source_observation_tests.rs"]
 mod source_observation_tests;

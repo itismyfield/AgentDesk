@@ -27,6 +27,10 @@ pub(crate) struct BindingContext {
     pub expected_native_session_id: Option<String>,
     pub launch_mode: String,
     pub provider_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_policy: Option<String>,
 }
 
 #[derive(Debug)]
@@ -223,6 +227,25 @@ pub(crate) fn context_names_execution(
     execution_context(provider, nonce)
 }
 
+/// A candidate must retain both the canonical launch snapshot and its current nonce.
+#[allow(dead_code)]
+pub(crate) fn codex_context_candidate(
+    captured: &BindingContext,
+    prepared: &BindingContext,
+    current_nonce: Option<&str>,
+) -> Result<(), String> {
+    let canonical = execution_context("codex", &prepared.execution_nonce)?;
+    if captured != prepared
+        || canonical != *prepared
+        || current_nonce != Some(prepared.execution_nonce.as_str())
+        || prepared.channel_id.is_none()
+        || prepared.provider_root.is_none()
+    {
+        return Err("Codex launch context does not name the current execution".into());
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub(crate) fn decode_binding_header(header: &str) -> Result<HookBindingEnvelope, String> {
     if header.len() > HEADER_LIMIT {
@@ -273,6 +296,27 @@ impl PreparedIncarnation {
         resume: bool,
         provider_root: Option<PathBuf>,
     ) -> Result<Self, String> {
+        Self::prepare_pinned(
+            provider,
+            tmux,
+            channel_id,
+            expected,
+            resume,
+            provider_root,
+            (None, None),
+        )
+    }
+
+    /// Pins the exact argv digest and source policy before immutable publication.
+    pub(crate) fn prepare_pinned(
+        provider: &str,
+        tmux: &str,
+        channel_id: Option<u64>,
+        expected: Option<&str>,
+        resume: bool,
+        provider_root: Option<PathBuf>,
+        pinned: (Option<String>, Option<String>),
+    ) -> Result<Self, String> {
         let context = BindingContext {
             schema: 1,
             provider: provider.to_owned(),
@@ -285,6 +329,8 @@ impl PreparedIncarnation {
             expected_native_session_id: expected.map(str::to_owned),
             launch_mode: if resume { "resume" } else { "fresh" }.to_owned(),
             provider_root,
+            first_prompt_digest: pinned.0,
+            source_policy: pinned.1,
         };
         sweep(
             provider,

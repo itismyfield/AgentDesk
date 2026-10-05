@@ -48,6 +48,89 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     CapturedContext, HookBindingEnvelope, SpawnNonceMarker, observe_spawn_nonce_marker,
 };
 
+#[cfg(test)]
+thread_local! { pub(crate) static SHADOW_IO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// ObservationOnly uses the existing tracing sink; never installs or publishes a source.
+pub(crate) fn observe_codex_shadow(
+    command: Option<&str>,
+    payload_session: Option<&str>,
+    payload: &serde_json::Value,
+    hook: &HookSignal,
+    envelope: Option<&HookBindingEnvelope>,
+) {
+    if !matches!(hook.event.as_str(), "session_start" | "user_prompt_submit") {
+        return;
+    }
+    use crate::services::codex_tui::session::source_observation::{
+        CodexFirstProof, CodexFirstProofRejection, codex_first_proof_candidate,
+    };
+    use crate::services::tui_prompt_dedupe::binding_context::execution_context;
+    let context = envelope.and_then(|e| match &e.context {
+        CapturedContext::Captured(c) => Some(c),
+        _ => None,
+    });
+    let result = context.zip(payload_session).and_then(|(captured, id)| {
+        #[cfg(test)]
+        SHADOW_IO_CALLS.with(|calls| calls.set(calls.get() + 1));
+        let prepared = match execution_context("codex", &captured.execution_nonce) {
+            Ok(c) => c,
+            Err(_) => return Some(Err(CodexFirstProofRejection::Context)),
+        };
+        let nonce = match observe_spawn_nonce_marker(&prepared.tmux_session) {
+            SpawnNonceMarker::Known(n) => Some(n),
+            _ => None,
+        };
+        let pristine = prepared
+            .channel_id
+            .and_then(|channel| binding_events::records_strict(channel).ok()?.ok())
+            .is_some_and(|history| {
+                !history.iter().any(|e| {
+                    e.provider == "codex"
+                        && e.tmux_session == prepared.tmux_session
+                        && e.execution_nonce.as_deref() == Some(&prepared.execution_nonce)
+                        && (e.evidence.hook_event.is_some()
+                            || e.cause != binding_events::BindingCause::Startup)
+                })
+            });
+        Some(codex_first_proof_candidate(
+            &CodexFirstProof {
+                captured,
+                prepared: &prepared,
+                current_nonce: nonce.as_deref(),
+                verified_fresh_spawn: nonce.as_deref() == Some(&prepared.execution_nonce),
+                no_prior_claim_or_transition: pristine,
+                event: match hook.event.as_str() {
+                    "session_start" => "SessionStart",
+                    "user_prompt_submit" => "UserPromptSubmit",
+                    _ => "other",
+                },
+                source: payload["source"].as_str(),
+                prompt: &payload["prompt"],
+            },
+            &CodexHookSourceClaim {
+                session_id: id,
+                transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
+                expected_source: CodexRolloutSource::Cli,
+            },
+        ))
+    });
+    let verdict = match &result {
+        Some(Ok(_)) => "candidate",
+        Some(Err(error)) => error.verdict(),
+        None => "ineligible",
+    };
+    let legacy = context.and_then(|c| super::super::peek_tmux_runtime_binding(&c.tmux_session));
+    let verified = result.as_ref().and_then(|r| r.as_ref().ok());
+    tracing::info!(scope = "ObservationOnly", verdict, reason = ?result.as_ref().and_then(|r| r.as_ref().err()),
+        channel = ?context.and_then(|c| c.channel_id), tmux = ?context.map(|c| &c.tmux_session),
+        nonce = ?context.map(|c| &c.execution_nonce), root = ?context.and_then(|c| c.provider_root.as_ref()),
+        native_uuid = ?payload_session, path = ?verified.map(|v| &v.rollout_path), identity = ?verified.map(|v| &v.identity),
+        event = ?hook.event, legacy_selected_id = ?legacy.as_ref().and_then(|b| b.session_id.as_deref()),
+        source_less = legacy.is_none(), command_present = command.is_some(), ownership_promoted = false,
+        "Codex local first-proof shadow observation");
+}
+
 fn reject(reason: NotApplicableReason, session: &str) -> IngressOutcome {
     tracing::warn!(
         session,

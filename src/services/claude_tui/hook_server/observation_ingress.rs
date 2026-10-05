@@ -137,9 +137,6 @@ pub(crate) fn observe_binding_hook(
     payload: &Value,
     headers: &HeaderMap,
 ) -> IngressOutcome {
-    let (Some(command), Some(payload_session)) = (command_session_id, payload_session_id) else {
-        return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
-    };
     let published_at = headers
         .get(RELAY_PUBLISHED_AT_HEADER)
         .and_then(|h| h.to_str().ok());
@@ -152,6 +149,21 @@ pub(crate) fn observe_binding_hook(
         .get(BINDING_HEADER)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| decode_binding_header(h).ok());
+    if provider == "codex"
+        && crate::services::codex::codex_source_mode_snapshot()
+            == crate::services::codex::CodexSourceMode::Shadow
+    {
+        crate::services::tui_prompt_dedupe::observe_codex_shadow(
+            command_session_id,
+            payload_session_id,
+            payload,
+            &hook,
+            envelope.as_ref(),
+        );
+    }
+    let (Some(command), Some(payload_session)) = (command_session_id, payload_session_id) else {
+        return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
+    };
     if command == payload_session
         && !(provider == "codex"
             && HookEventKind::from_path(event) == HookEventKind::SessionStart

@@ -645,6 +645,8 @@ mod tests {
                 expected_native_session_id: Some("old".into()),
                 launch_mode: "fresh".into(),
                 provider_root: None,
+                first_prompt_digest: None,
+                source_policy: None,
             };
             let marker = tmux_common::session_temp_path(&tmux, "spawn_nonce");
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();

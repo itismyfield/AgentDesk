@@ -128,6 +128,9 @@ pub(super) fn committed_nonce() -> Option<String> {
 
 /// Entry point: start the Discord bot
 pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
+    if let Err(reason) = crate::services::codex::codex_source_mode_snapshot().launch_policy() {
+        tracing::error!(reason, "verified/invalid: new Codex launches fail until L2");
+    }
     let RunBotContext {
         global_active,
         global_finalizing,

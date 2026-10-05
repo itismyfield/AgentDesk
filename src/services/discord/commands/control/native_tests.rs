@@ -153,6 +153,8 @@ impl Fixture {
             expected_native_session_id: Some("old".into()),
             launch_mode: "fresh".into(),
             provider_root: None,
+            first_prompt_digest: None,
+            source_policy: None,
         };
         let contexts = root_dir.path().join("runtime/binding_contexts/claude");
         std::fs::create_dir_all(&contexts).unwrap();
