@@ -268,7 +268,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         session_key = tracing::field::debug(bridge.adk_session_key.as_deref()),
         turn_id = %bridge_turn_id,
     );
-    super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
+    super::task_supervisor::spawn_observed("discord_turn_bridge", super::input_runtime::fence::effect::detached(super::input_runtime::fence::effect::current(), async move {
         let _original_registration = original_registration;
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
@@ -974,7 +974,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         .await;
 
         // completion_tx is sent automatically by CompletionGuard on drop
-    }.instrument(bridge_span));
+    }.instrument(bridge_span)));
 }
 
 #[cfg(all(test, unix))]

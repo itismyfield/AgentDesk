@@ -684,9 +684,11 @@ async fn reuse_merged_queued_placeholder(
     // placeholder_controller entry is keyed by the *placeholder* Discord
     // message id, which is unchanged, so no controller re-keying is needed.
     data.shared
-        .remove_queued_placeholder_locked(channel_id, prior_source_id);
+        .remove_queued_placeholder_on_worker_locked(channel_id, prior_source_id)
+        .await;
     data.shared
-        .insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+        .insert_queued_placeholder_on_worker_locked(channel_id, user_msg_id, placeholder_msg_id)
+        .await;
 
     // Refresh the card body with merged request text; unchanged renders
     // coalesce, changed ones edit.
@@ -728,12 +730,12 @@ async fn reuse_merged_queued_placeholder(
             | crate::services::discord::placeholder_controller::PlaceholderControllerOutcome::Coalesced
     ) {
         data.shared
-            .remove_queued_placeholder_locked(channel_id, user_msg_id);
-        data.shared.insert_queued_placeholder_locked(
+            .remove_queued_placeholder_on_worker_locked(channel_id, user_msg_id).await;
+        data.shared.insert_queued_placeholder_on_worker_locked(
             channel_id,
             prior_source_id,
             placeholder_msg_id,
-        );
+        ).await;
         drop(persist_guard);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
@@ -788,7 +790,7 @@ fn pick_channel_queued_placeholder(
 
 // The mailbox actor can advance while this persist guard is held; the snapshot
 // is not an atomic queue/map transaction. Later consumers re-evaluate ownership.
-fn rekey_channel_card_locked(
+async fn rekey_channel_card_locked(
     shared: &SharedData,
     channel_id: serenity::ChannelId,
     user_msg_id: serenity::MessageId,
@@ -840,8 +842,12 @@ fn rekey_channel_card_locked(
     };
 
     // Move this mapping so hand-off / queue-exit consumers can find the card.
-    shared.remove_queued_placeholder_locked(channel_id, prior_owner);
-    shared.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+    shared
+        .remove_queued_placeholder_on_worker_locked(channel_id, prior_owner)
+        .await;
+    shared
+        .insert_queued_placeholder_on_worker_locked(channel_id, user_msg_id, placeholder_msg_id)
+        .await;
 
     Some((prior_owner, placeholder_msg_id))
 }
@@ -885,7 +891,8 @@ async fn reuse_any_queued_placeholder_for_channel(
         user_msg_id,
         &snapshot,
         &persist_guard,
-    )?;
+    )
+    .await?;
 
     let gateway = crate::services::discord::gateway::DiscordGateway::new(
         ctx.http.clone(),
@@ -923,9 +930,9 @@ async fn reuse_any_queued_placeholder_for_channel(
         // Render failed — roll back the re-key so the prior owner keeps the card,
         // and let the caller post a fresh one (which handles deletion/cleanup).
         data.shared
-            .remove_queued_placeholder_locked(channel_id, user_msg_id);
+            .remove_queued_placeholder_on_worker_locked(channel_id, user_msg_id).await;
         data.shared
-            .insert_queued_placeholder_locked(channel_id, prior_owner, placeholder_msg_id);
+            .insert_queued_placeholder_on_worker_locked(channel_id, prior_owner, placeholder_msg_id).await;
         drop(persist_guard);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
@@ -1089,7 +1096,8 @@ pub(super) async fn render_visible_queued_ack(
     }
 
     data.shared
-        .insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+        .insert_queued_placeholder_on_worker_locked(channel_id, user_msg_id, placeholder_msg_id)
+        .await;
     let gateway = crate::services::discord::gateway::DiscordGateway::new(
         ctx.http.clone(),
         data.shared.clone(),
@@ -1133,7 +1141,8 @@ pub(super) async fn render_visible_queued_ack(
     }
 
     data.shared
-        .remove_queued_placeholder_locked(channel_id, user_msg_id);
+        .remove_queued_placeholder_on_worker_locked(channel_id, user_msg_id)
+        .await;
     drop(persist_guard);
     // #2044 F13: same deferred-cleanup fallback as the early-return
     // branch above — a delete_message error here is logged + enqueued
@@ -1459,7 +1468,7 @@ mod rekey_window_tests {
                 );
             }
             assert_eq!(
-                rekey_channel_card_locked(&shared, c, arrival, &stale, &guard),
+                rekey_channel_card_locked(&shared, c, arrival, &stale, &guard).await,
                 Some((prior, card))
             );
             assert_eq!(shared.remove_queued_placeholder_locked(c, prior), None);

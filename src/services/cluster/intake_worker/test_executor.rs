@@ -4,6 +4,39 @@ use std::cell::RefCell;
 
 thread_local! {
     static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
+    static FAIL: RefCell<bool> = const { RefCell::new(false) };
+    static CHECKPOINT: RefCell<Option<CheckpointHook>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Checkpoint {
+    AfterClaim,
+    PreAccept,
+    FinalDb,
+    FinalDbDone,
+}
+type CheckpointHook = Box<dyn FnMut(Checkpoint) -> futures::future::BoxFuture<'static, ()>>;
+pub(super) struct Hook;
+pub(super) fn hook(callback: CheckpointHook) -> Hook {
+    CHECKPOINT.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(callback);
+    });
+    Hook
+}
+impl Drop for Hook {
+    fn drop(&mut self) {
+        CHECKPOINT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+pub(super) async fn checkpoint(point: Checkpoint) {
+    let pending = CHECKPOINT.with(|slot| slot.borrow_mut().as_mut().map(|hook| hook(point)));
+    if let Some(pending) = pending {
+        pending.await;
+    }
+}
+pub(super) fn fail_execution() {
+    FAIL.with(|fail| *fail.borrow_mut() = true);
 }
 
 /// While alive, each executed turn records its channel instead of starting a TUI turn.
@@ -23,6 +56,7 @@ impl Recorder {
 impl Drop for Recorder {
     fn drop(&mut self) {
         RUNS.with(|runs| *runs.borrow_mut() = None);
+        FAIL.with(|fail| *fail.borrow_mut() = false);
     }
 }
 
@@ -40,6 +74,9 @@ pub(crate) async fn execute_intake_turn_core(
             .map(|runs| runs.push(request.channel_id.get()))
     });
     if recorded.is_some() {
+        if FAIL.with(|fail| *fail.borrow()) {
+            return Err(std::io::Error::other("C1 executor fixture failure").into());
+        }
         return Ok(());
     }
     crate::services::discord::execute_intake_turn_core(http, shared, token, request, uploads).await

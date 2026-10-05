@@ -6,6 +6,25 @@ pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> IdleQueueKickoffChannelOutcome {
+    let permit = match input_runtime::fence::lookup(provider, channel_id.get())
+        .map(|gate| gate.admit())
+        .transpose()
+    {
+        Ok(permit) => permit,
+        Err(_) => return IdleQueueKickoffChannelOutcome::default(),
+    };
+    input_runtime::fence::effect::scope(
+        permit,
+        kickoff_admitted_queue_channel(deps, provider, channel_id),
+    )
+    .await
+}
+
+async fn kickoff_admitted_queue_channel(
+    deps: &router::IntakeDeps<'_>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> IdleQueueKickoffChannelOutcome {
     let shared = deps.shared;
     let settings_snapshot = shared.settings.read().await.clone();
     if let Err(reason) = session_runtime::validate_rest_channel_routing(

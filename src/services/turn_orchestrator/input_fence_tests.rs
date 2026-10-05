@@ -53,6 +53,182 @@ fn run(work: impl std::future::Future<Output = ()>) {
 }
 
 #[test]
+fn c1_closed_retry_preserves_admission_when_closing_lands_between_actors() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        let channel = ChannelId::new(6_325_430);
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let registry = Arc::new(ChannelMailboxRegistry::default());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stale = ChannelMailboxHandle {
+            sender,
+            recovery_done: Arc::new(RecoveryDoneSignal::new()),
+        };
+        registry.handles.insert(channel, stale.clone());
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel, stale);
+        let (closing_tx, closing_rx) = tokio::sync::oneshot::channel();
+        let actor_registry = registry.clone();
+        let actor_gate = gate.clone();
+        let fixture = tokio::spawn(async move {
+            let (msg, _) = receiver.recv().await.unwrap();
+            let ChannelMailboxMsg::Enqueue {
+                reply,
+                input_permit,
+                ..
+            } = msg
+            else {
+                panic!("enqueue expected")
+            };
+            input_permit
+                .as_ref()
+                .unwrap()
+                .validate(&ProviderKind::Claude, channel.get())
+                .unwrap();
+            let closing = actor_gate.close().unwrap();
+            actor_registry.remove_fixture_for_test(channel);
+            closing_tx
+                .send(closing)
+                .unwrap_or_else(|_| panic!("closing receiver lost"));
+            let _ = reply.send(EnqueueInterventionResult::refused(
+                EnqueueRefusalReason::MailboxClosed,
+                Vec::new(),
+            ));
+        });
+        let result = registry
+            .enqueue_with_closed_retry(channel, item(91), context(), None)
+            .await;
+        assert!(
+            result.enqueued,
+            "retry uses preclose permit on the fresh actor: {:?}",
+            result.refusal_reason
+        );
+        assert!(result.persistence_error.is_none());
+        let closing = closing_rx.await.unwrap();
+        closing.drain().await;
+        assert!(matches!(
+            gate.admit(),
+            Err(fence::Failure::Mode(Mode::Closing))
+        ));
+        let snapshot = registry.handle(channel).snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(
+            snapshot.intervention_queue[0].message_id,
+            MessageId::new(91)
+        );
+        let disk = root
+            .path()
+            .join("runtime/discord_pending_queue/claude/fence-test/6325430.json");
+        assert!(
+            std::fs::read(disk)
+                .unwrap()
+                .windows(2)
+                .any(|bytes| bytes == b"91")
+        );
+        fixture.await.unwrap();
+        registry.remove_fixture_for_test(channel);
+    });
+}
+
+#[test]
+fn c1_inherited_effect_restores_and_finishes_durably_during_closing() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        let channel = ChannelId::new(6_325_406);
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        fence::effect::scope(Some(gate.admit().unwrap()), async {
+            assert!(handle.enqueue(item(61), context()).await.enqueued);
+            let taken = handle.take_next_soft(context()).await;
+            let closing = gate.close().unwrap();
+            assert!(
+                handle
+                    .restore_dequeued_head(
+                        taken.intervention.unwrap(),
+                        context(),
+                        taken.dispatch_lease.unwrap()
+                    )
+                    .await
+                    .enqueued
+            );
+            assert!(
+                handle
+                    .finish_turn(context())
+                    .await
+                    .persistence_error
+                    .is_none()
+            );
+            let disk = root
+                .path()
+                .join("runtime/discord_pending_queue/claude/fence-test/6325406.json");
+            assert!(
+                std::fs::read(disk)
+                    .unwrap()
+                    .windows(2)
+                    .any(|part| part == b"61")
+            );
+            let drain = closing.drain();
+            tokio::pin!(drain);
+            assert!(futures::poll!(drain.as_mut()).is_pending());
+        })
+        .await;
+        assert_eq!(
+            handle.enqueue(item(62), context()).await.refusal_reason,
+            Some(EnqueueRefusalReason::InputModeFenced(Mode::Closing))
+        );
+    });
+}
+
+#[test]
+fn c1_cancelled_mailbox_release_does_not_end_residual_bridge_effect() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        let channel = ChannelId::new(6_325_412);
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let token = Arc::new(CancelToken::new());
+        handle
+            .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(70))
+            .await;
+        assert!(handle.has_active_turn().await.unwrap());
+        let permit = gate.admit().unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let bridge = tokio::spawn(fence::effect::detached(Some(permit.clone()), async move {
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            assert!(fence::effect::current().is_some());
+        }));
+        entered_rx.await.unwrap();
+        fence::effect::scope(Some(permit.clone()), async {
+            token.publish_cancel("c1 residual bridge fixture".to_owned());
+            assert!(handle.finish_cancelled_turn().await.removed_token.is_some());
+        })
+        .await;
+        assert!(!handle.has_active_turn().await.unwrap());
+        drop(permit);
+        let closing = gate.close().unwrap();
+        let drain = closing.drain();
+        tokio::pin!(drain);
+        assert!(
+            futures::poll!(drain.as_mut()).is_pending(),
+            "slot release is not bridge IO completion"
+        );
+        release_tx.send(()).unwrap();
+        bridge.await.unwrap();
+        drain.await;
+    });
+}
+
+#[test]
 fn actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_take() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();

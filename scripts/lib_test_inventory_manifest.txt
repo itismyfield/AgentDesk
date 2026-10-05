@@ -2242,6 +2242,13 @@ services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
 services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_afterclaim_closing_returns_only_own_claim_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_beforeclaim_excludes_closing_population_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_cas_miss_retains_effect_through_classification_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_db_error_releases_effect_after_error_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_done_waits_for_real_db_disposition_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_failure_waits_for_real_db_disposition_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_preaccept_closing_releases_admitted_claim_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
@@ -4073,6 +4080,16 @@ services::discord::inflight_heartbeat_sweeper::retired_channel_tests::retired_ch
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_delay_below_placeholder_abandon
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
+services::discord::input_runtime::fence::effect::tests::c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop
+services::discord::input_runtime::fence::effect::tests::c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected
+services::discord::input_runtime::fence::effect::tests::c1_detached_worker_holds_effect_until_cleanup_after_caller_returns
+services::discord::input_runtime::fence::effect::tests::c1_outer_abort_before_first_poll_disposes_capture_on_worker
+services::discord::input_runtime::fence::effect::tests::c1_scope_rejects_cross_channel_and_cross_provider_without_new_admission
+services::discord::input_runtime::fence::effect::tests::c1_shutdown_disposes_queued_and_rejected_cleanup_with_preclose_effect
+services::discord::input_runtime::fence::effect::tests::c1_worker_panic_restores_capability_and_blocking_backstop
+services::discord::input_runtime::fence::effect::tests::c1_worker_wake_after_pending_returns_pool_thread
+services::discord::input_runtime::fence::effect::tests::c1_worker_wake_and_outer_abort_cleanup_after_inflight_poll
+services::discord::input_runtime::fence::effect::tests::c1_worker_wake_before_pending_is_not_lost
 services::discord::input_runtime::fence::tests::admitted_writer_scope_finishes_after_close_without_new_admission
 services::discord::input_runtime::fence::tests::b2_borrowed_row_keeps_episode_cas_and_never_reacquires_sidecar
 services::discord::input_runtime::fence::tests::b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io
@@ -4846,6 +4863,8 @@ services::discord::prompt_builder::section_dedupe::tests::large_section_still_re
 services::discord::prompt_builder::section_dedupe::tests::would_be_duplicate_does_not_mutate
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_claude_system_prompt_on_launch_and_resume
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
+services::discord::queue_dispatch::input_effect_tests::c1_automatic_dequeue_restores_capped_head_with_original_effect_after_closing
+services::discord::queue_dispatch::input_effect_tests::c1_closing_refuses_kickoff_before_settings_and_dequeue_without_spending_marker
 services::discord::queue_exit_feedback_reconciler_tests::apply_queue_exit_feedback_adds_feedback_reaction_through_reconciler
 services::discord::queue_io::ledger_settlement_tests::a_delivered_absorbed_copy_is_settled_before_a_new_input_merges
 services::discord::queue_io::ledger_settlement_tests::a_late_published_completion_settles_each_sources_original_enqueue
@@ -4920,6 +4939,7 @@ services::discord::queued_placeholder_cluster_characterization_tests::queue_exit
 services::discord::queued_placeholder_cluster_characterization_tests::queued_placeholder_still_owned_branches
 services::discord::queued_placeholder_cluster_characterization_tests::queued_placeholders_persist_lock_identity
 services::discord::queued_placeholders_store::tests::b2_placeholder_off_delta_zero_and_protected_failures_are_observable
+services::discord::queued_placeholders_store::tests::c1_shared_async_accessory_writes_existing_effect_after_closing
 services::discord::reaction_cleanup::tests::recovered_catch_up_message_removes_stale_hourglass
 services::discord::reaction_lifecycle::tests::dispatch_thread_reaction_targets_parent_channel
 services::discord::reaction_lifecycle::tests::real_discord_message_id_guard_rejects_synthetic_ranges
@@ -5554,6 +5574,7 @@ services::discord::router::message_handler::intake_turn::race_loss::mailbox_reac
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::stale_start_attempt_repairs_mailbox_from_live_queue_truth
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::standalone_without_start_attempt_adds_mailbox_once
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::busy_transition_is_durable_before_the_guard_is_released
+services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::c1_fenced_race_loss_preserves_dispatch_reservation_and_surfaces_failure
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::persistence_failure_rolls_back_queue_and_clears_dispatch_reservation
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_still_takes_the_immediate_idle_recheck_5170
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active
@@ -7887,6 +7908,7 @@ services::discord::turn_bridge::stale_resume::tests::terminal_reset_matchers_cov
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::alias_skipped_old_turn_does_not_remove_newer_owners_inflight_row
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::bridge_status_panel_completion_emits_background_agent_pending_payload
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::bridge_status_panel_completion_producer_threads_sniffed_background_agent_pending
+services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_completion
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::cleanup_guard_drop_routing_is_identity_aware
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::completion_action_does_not_fallback_when_panel_text_already_committed
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::completion_action_edits_real_status_panel_message_id
@@ -8159,10 +8181,12 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_preserve_sto
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_keeps_a_turn_it_could_not_read
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_unreachable_mailbox_keeps_confirmed_session_without_fallback_or_interrupt
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_observes_child_termination
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_times_out_when_child_keeps_running
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::c1_stop_some_none_and_unreachable_preserve_exact_authority
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::codex_parent_without_session_meta_refuses_stop_and_replies
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn
@@ -10745,6 +10769,9 @@ services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_th
 services::turn_orchestrator::input_fence::tests::actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_take
 services::turn_orchestrator::input_fence::tests::b2_freeze_refuses_other_token_queue_or_marker_without_ack_or_mutation
 services::turn_orchestrator::input_fence::tests::b2_late_protection_between_actor_selection_and_enter_has_no_scheduler_io
+services::turn_orchestrator::input_fence::tests::c1_cancelled_mailbox_release_does_not_end_residual_bridge_effect
+services::turn_orchestrator::input_fence::tests::c1_closed_retry_preserves_admission_when_closing_lands_between_actors
+services::turn_orchestrator::input_fence::tests::c1_inherited_effect_restores_and_finishes_durably_during_closing
 services::turn_orchestrator::input_fence::tests::freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_population
 services::turn_orchestrator::input_fence::tests::freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mutation
 services::turn_orchestrator::input_fence::tests::off_path_has_no_sidecar_and_registry_does_not_remint_on_fence
