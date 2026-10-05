@@ -639,3 +639,90 @@ fn a_configured_clear_without_its_database_or_switch_changes_nothing_pg() {
         assert!(error.contains("Herdr 설정 채널"), "main's refusal: {error}");
     });
 }
+
+// A `!clear` planned while an earlier one ran plans again under the guard: the earlier Pending is
+// not its commit, so it sends its own line and commits on its own hook; the next turn takes it.
+#[test]
+fn a_clear_waiting_on_the_guard_commits_only_on_its_own_pending_pg() {
+    let fixture = Fixture::new(6);
+    fixture.rt.block_on(async {
+        let mut first = Box::pin(fixture.clear());
+        while fixture.rig.sends().is_empty() {
+            tokio::select! {
+                result = &mut first => panic!("the first clear ended before `/clear`: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        let pins = || {
+            let requests = fixture.rig.requests();
+            let pins = requests
+                .iter()
+                .filter(|r| r["method"] == "pane.process_info");
+            pins.count()
+        };
+        let before = pins();
+        let mut second = Box::pin(fixture.clear());
+        while pins() == before {
+            tokio::select! {
+                result = &mut second => panic!("ended before its plan: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        let waiting = tokio::time::timeout(Duration::from_millis(300), &mut second).await;
+        assert!(
+            waiting.is_err(),
+            "the second clear waits on the guard: {waiting:?}"
+        );
+
+        fixture.record("y", BindingCause::Clear, true);
+        first
+            .await
+            .expect("the first clear commits on its own Pending");
+        while fixture.rig.sends().len() < 2 {
+            tokio::select! {
+                result = &mut second => panic!("ended before its line: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        let early = tokio::time::timeout(Duration::from_millis(500), &mut second).await;
+        assert!(
+            early.is_err(),
+            "the first clear's Pending is not its commit: {early:?}"
+        );
+        let key = &fixture.session_key;
+        let (clear, save) = (format!("clear:{key}"), |s: &str| format!("save:{s}"));
+        assert_eq!(
+            fixture.fake.calls(),
+            [clear.clone(), save("y"), clear.clone()],
+            "nothing saved for the second clear yet"
+        );
+        assert!(
+            matches!(
+                fixture.state().await,
+                NativeClearBoundary::Unresolved { .. }
+            ),
+            "its boundary waits"
+        );
+
+        fixture.record("z", BindingCause::Clear, true);
+        second
+            .await
+            .expect("the second clear commits on its own Pending");
+        let lines = [clear_line(), clear_line()].concat();
+        assert_eq!(fixture.rig.sends(), lines, "one line each, never again");
+        assert_eq!(
+            fixture.fake.calls(),
+            [clear.clone(), save("y"), clear, save("z")]
+        );
+        assert_eq!(fixture.state().await, NativeClearBoundary::Resolved);
+        assert_eq!(fixture.session().await, (Some("z".into()), true));
+        let channel = fixture.channel_id.get();
+        let next = crate::services::claude::herdr_turn::awaited_clear;
+        let next = next(channel, &fixture.logical, &fixture.nonce).map(|a| a.session_id);
+        assert_eq!(
+            next.as_deref(),
+            Some("z"),
+            "the next turn takes the latest clear"
+        );
+    });
+}

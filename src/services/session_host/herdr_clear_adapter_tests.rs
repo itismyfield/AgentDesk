@@ -534,3 +534,35 @@ fn a_draft_in_the_composer_sends_nothing_and_holds_pg() {
     assert!(fx.marker_names_execution(), "no reset or kill");
     assert_eq!(outcome, ClearOutcome::Hold(None));
 }
+
+// An unclear `/clear` (reply lost after the server took it, or composer not seen cleared) is never
+// sent again: it holds at its deadline, pane kept, and a later Pending settles it at restart.
+#[test]
+fn an_unclear_clear_line_holds_without_a_second_and_its_late_pending_settles_pg() {
+    for (tag, reply_lost) in [("lost-reply", true), ("composer-unseen", false)] {
+        let fx = Fixture::new(tag);
+        match reply_lost {
+            true => fx.rig.leave_sends_unanswered(true),
+            false => fx.rig.answer_after_send("pane.read", screen(DRAFT)),
+        }
+        let session = Session::default();
+        let plan = fx.plan(Some(0)).unwrap();
+        let ticket = serde_json::to_value(&plan.waiter().ticket).unwrap();
+        let outcome = fx.run(plan, &session, || {});
+        assert_eq!(fx.rig.sends(), clear_line(), "{tag}: one line, never again");
+        assert!(
+            session.saved.lock().unwrap().is_empty(),
+            "{tag}: nothing saved"
+        );
+        assert!(fx.marker_names_execution(), "{tag}: no reset or kill");
+        assert_eq!(outcome, ClearOutcome::Hold(None), "{tag}");
+
+        fx.record("late", BindingCause::Clear, true);
+        let restarted = judge_native_clear_restart(&restart_boundary(&ticket), Some(HOST));
+        assert!(
+            matches!(&restarted, NativeClearRestart::CompleteDurable(c) if c.session == "late"),
+            "{tag}: the late Pending settles the clear: {restarted:?}"
+        );
+        assert_eq!(fx.rig.sends(), clear_line(), "{tag}: still one line");
+    }
+}

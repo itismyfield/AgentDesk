@@ -152,8 +152,8 @@ impl NativeSelection {
     }
 }
 
-/// A clear's target, judged before it changes anything: a host's planned clear, `None` for main's
-/// tmux path, or main's refusal message.
+/// A clear's target, judged before it changes anything: a host's planned clear (a pre-check that
+/// [`replan`] takes again), `None` for main's tmux path, or main's refusal message.
 pub(super) async fn target(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -161,11 +161,21 @@ pub(super) async fn target(
     channel_id: serenity::ChannelId,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<Option<NativeSelection>> {
-    use super::super::super::admin_host_guard::{HostAdapter, ResetTarget, clear_reset_target};
     let key = || async {
         let resolved = super::resolve_session_key_for_clear(http, shared, channel_id, provider);
         super::choose_clear_session_key(explicit_session_key, resolved.await)
     };
+    judged(shared, provider, channel_id, explicit_session_key, key).await
+}
+
+async fn judged<F: std::future::Future<Output = Option<String>>>(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    explicit_session_key: Option<&str>,
+    key: impl FnOnce() -> F,
+) -> anyhow::Result<Option<NativeSelection>> {
+    use super::super::super::admin_host_guard::{HostAdapter, ResetTarget, clear_reset_target};
     let judged = clear_reset_target(shared, provider, channel_id, explicit_session_key, key);
     match judged.await {
         ResetTarget::Refused(reason) => anyhow::bail!("세션을 초기화하지 못했어요: {reason}"),
@@ -177,24 +187,29 @@ pub(super) async fn target(
     }
 }
 
-/// A host clear cannot stop a running turn, so it is refused under the transition guard before
-/// the queue is touched; an unreadable mailbox counts as busy.
-pub(super) async fn refuse_a_running_turn(
+/// Under the guard, before the queue: a host clear refuses a running turn (an unreadable mailbox is
+/// busy) and plans again, so its baseline follows any clear that held the guard meanwhile.
+pub(super) async fn replan(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: serenity::ChannelId,
-    hosted: Option<&NativeSelection>,
-) -> anyhow::Result<()> {
+    explicit_session_key: Option<&str>,
+    hosted: Option<NativeSelection>,
+) -> anyhow::Result<Option<NativeSelection>> {
     #[cfg(unix)]
-    if let Some(NativeSelection::Herdr(..)) = hosted {
+    if let Some(NativeSelection::Herdr(_, key)) = &hosted {
         let probe = super::super::super::mailbox_probe::mailbox_has_active_turn_or_unreachable;
         if probe(shared, channel_id).await {
             let refusal = crate::services::session_host::HerdrClearRefusal::TurnInProgress;
             anyhow::bail!("세션을 초기화하지 못했어요: {refusal}");
         }
+        let key = Some(key.clone());
+        let key = || async { key };
+        return judged(shared, provider, channel_id, explicit_session_key, key).await;
     }
     #[cfg(not(unix))]
-    let _ = (shared, channel_id, hosted);
-    Ok(())
+    let _ = (shared, provider, channel_id, explicit_session_key);
+    Ok(hosted)
 }
 
 pub(super) struct TmuxSelection {

@@ -34,7 +34,7 @@ use crate::services::session_host::{
 use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 use crate::services::tui_prompt_dedupe::binding_context::{PreparedIncarnation, execution_context};
 use crate::services::tui_prompt_dedupe::binding_events::{
-    BindingCause, BindingEvent, BindingTarget, binding_events_since,
+    BindingCause, BindingEvent, BindingTarget, binding_events_since, claude_history,
 };
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
@@ -138,8 +138,8 @@ fn bound_source(
     let target = gate(record)?;
     ports.confirm_bound(&turn.owner, record, &target)?;
     let logical = &turn.owner.logical_key;
-    if let Some(session_id) = awaited_clear(turn.channel_id, logical, &record.execution_nonce) {
-        return cleared_source(turn, record, target, session_id);
+    if let Some(awaited) = awaited_clear(turn.channel_id, logical, &record.execution_nonce) {
+        return cleared_source(turn, record, target, awaited);
     }
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
         .ok_or_else(|| format!("herdr turn: {logical} has no attached source"))?;
@@ -155,33 +155,56 @@ fn bound_source(
     })
 }
 
-/// The session execution `nonce`'s own SessionStart(clear) Pending awaits, while that Pending is
-/// the pane's latest record and was taken from the source that execution logged just before it.
-fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<String> {
+/// The clear Pending a Bound execution's next prompt goes to.
+pub(crate) struct AwaitedClear {
+    pub session_id: String,
+    /// The transcript path the Pending's hook named.
+    pub transcript: Option<String>,
+}
+
+/// Execution `nonce`'s latest own SessionStart(clear) Pending, when every record after the source
+/// it logged last is such a Pending taken from that source and the canonical fold awaits it.
+pub(crate) fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<AwaitedClear> {
     let events = binding_events_since(channel, 0).unwrap_or_default();
     let moved = |event: &BindingEvent| !matches!(event.new, BindingTarget::Rejected { .. });
     let pane = events
         .into_iter()
         .filter(|event| event.tmux_session == logical);
     let records: Vec<BindingEvent> = pane.filter(moved).collect();
-    let (pending, earlier) = records.split_last()?;
-    let BindingTarget::Pending {
-        payload_session_id, ..
-    } = &pending.new
-    else {
-        return None;
-    };
     let own = |event: &BindingEvent| event.execution_nonce.as_deref() == Some(nonce);
+    let clear = |event: &&BindingEvent| {
+        own(event)
+            && matches!(event.new, BindingTarget::Pending { .. })
+            && event.cause == BindingCause::Clear
+            && event.evidence.hook_event.as_deref() == Some("session_start")
+    };
+    let waiting = records.iter().rev().take_while(clear).count();
+    let (earlier, chain) = records.split_at(records.len() - waiting);
     let from = earlier.last().filter(|event| own(event));
     let from = from.and_then(|event| match &event.new {
         BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => Some(source),
         _ => None,
-    });
-    let canonical = own(pending)
-        && pending.cause == BindingCause::Clear
-        && pending.evidence.hook_event.as_deref() == Some("session_start");
-    (canonical && from.is_some_and(|source| pending.old.as_ref() == Some(source)))
-        .then(|| payload_session_id.clone())
+    })?;
+    if chain
+        .iter()
+        .any(|pending| pending.old.as_ref() != Some(from))
+    {
+        return None;
+    }
+    let BindingTarget::Pending {
+        payload_session_id,
+        payload_transcript_path,
+    } = &chain.last()?.new
+    else {
+        return None;
+    };
+    // The helper commits a clear only on this same fold's awaited session.
+    let (_, history) = claude_history(channel, logical, Some(nonce)).ok()?;
+    let awaited = history.awaiting.filter(|_| history.complete)?;
+    (awaited.session == *payload_session_id).then(|| AwaitedClear {
+        session_id: payload_session_id.clone(),
+        transcript: payload_transcript_path.clone(),
+    })
 }
 
 /// The cleared session of a Bound execution: nothing is attached until its first prompt writes
@@ -190,9 +213,16 @@ fn cleared_source(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
     target: HerdrTarget,
-    session_id: String,
+    awaited: AwaitedClear,
 ) -> Result<Attached, String> {
+    let session_id = awaited.session_id;
     let transcript = claude_transcript_path(Path::new(turn.working_dir), &session_id, None)?;
+    if awaited.transcript.as_deref().map(Path::new) != Some(transcript.as_path()) {
+        return Err(format!(
+            "herdr turn: the clear Pending of {session_id} names another transcript than {}",
+            transcript.display()
+        ));
+    }
     let logical = &turn.owner.logical_key;
     crate::services::tui_prompt_dedupe::register_tmux_channel(logical, turn.channel_id);
     Ok(Attached {

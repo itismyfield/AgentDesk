@@ -170,3 +170,56 @@ async fn the_readiness_map_reports_a_running_actors_projection_only() {
     polls(3).await;
     assert_eq!(ready.rotation_unsettled(CHANNEL), None, "an ended actor");
 }
+
+// Two clears with no prompt between them rotate no source, so the actor admits the second; the
+// latest Pending's resolution leaves the old source unsettled until retired; its row posts once.
+#[tokio::test(start_paused = true)]
+async fn consecutive_pending_clears_stay_settled_until_the_latest_resolves() {
+    let (harness, a_path, a) = switched_over(&row("m0", "before the clears"));
+    let _hosts = herdr_configured();
+    let bindings = Arc::new(FakeBindings::new());
+    let startup = BindingTarget::Source(a.clone());
+    bindings.commit(bound(1, None, startup, BindingCause::Startup, None));
+    harness.gate.acquired();
+    let (projected, projection) = watch::channel(None);
+    let (stop, stopped) = watch::channel(false);
+    let resumed = watch::channel(false).0;
+    let writer = harness.writer();
+    let actor = run_projecting(
+        writer,
+        ShadowProvider::Claude,
+        bindings.clone(),
+        stopped,
+        resumed,
+        projected,
+    );
+    let task = tokio::spawn(actor);
+    append(&a_path, &row("m1", "first"));
+    polls(3).await;
+    for (seq, session) in [(2, "y"), (3, "z")] {
+        let pending = BindingTarget::Pending {
+            payload_session_id: session.into(),
+            payload_transcript_path: a_path.with_file_name(format!("{session}.jsonl")),
+        };
+        bindings.commit(bound(seq, Some(&a), pending, BindingCause::Clear, None));
+        polls(3).await;
+        assert_eq!(
+            unsettled(&projection),
+            Some(0),
+            "{session}: nothing rotated"
+        );
+    }
+    let (_, z) = beside(&a_path, "z.jsonl", "z", &row("n1", "after the clears"));
+    let resolved = BindingRecord::Resolved {
+        resolves_seq: 3,
+        source: z,
+    };
+    bindings.commit(event(4, resolved, Utc::now()));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first", "after the clears"]);
+    assert_eq!(unsettled(&projection), Some(1), "bound but not retired");
+    polls(12).await;
+    assert_eq!(unsettled(&projection), Some(0), "retired once quiet");
+    assert_eq!(harness.port.posts(), ["first", "after the clears"]);
+    halt(stop, task).await;
+}

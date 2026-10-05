@@ -246,3 +246,133 @@ fn the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg() {
     );
     assert_eq!(result, Ok(()));
 }
+
+/// Two clears with no prompt between them; returns the second's session and transcript.
+fn two_clears(fx: &Fixture) -> (String, std::path::PathBuf) {
+    clear_pending(fx, &uuid());
+    let latest = uuid();
+    let path = clear_pending(fx, &latest);
+    (latest, path)
+}
+
+/// The next turn prompts `cleared` once, reads its transcript and resolves its Pending.
+fn assert_prompts_once(fx: &Fixture, launcher: &Arc<Launcher>, cleared: &str, path: &Path) {
+    let result = cleared_turn(fx, launcher, cleared, path);
+    let sends = fx.rig.sends();
+    assert_eq!(sends.len(), 4, "{sends:?} {result:?}");
+    assert_eq!(sends[2..], prompt_sends()[..], "one paste and Enter");
+    assert!(
+        resolved_to(cleared, fx.logical()),
+        "the latest Pending resolved: {result:?}"
+    );
+    assert_eq!(result, Ok(()));
+}
+
+/// Rewrites the pane's logged record `back` lines from the end, as a hand other than the writer.
+fn forge(back: usize, edit: impl Fn(&mut Value)) {
+    use crate::services::tui_prompt_dedupe::binding_events::{self, BINDING_EVENTS_DIR};
+    let log = (binding_events::test_root().unwrap())
+        .join(BINDING_EVENTS_DIR)
+        .join(format!("{CHANNEL}.log"));
+    let text = std::fs::read_to_string(&log).unwrap();
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let at = lines.len() - 1 - back;
+    edit(&mut lines[at]);
+    let lines: Vec<String> = lines.iter().map(Value::to_string).collect();
+    std::fs::write(&log, lines.join("\n") + "\n").unwrap();
+    binding_events::forget_channel_for_tests(CHANNEL);
+}
+
+// Two clears with no prompt between them: the next turn prompts the latest cleared session once,
+// alone, and reads that session's transcript.
+#[test]
+fn the_turn_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg() {
+    let fx = Fixture::new("clear-twice-live", None);
+    let launcher = Arc::new(Launcher::default());
+    let _ = launch(&fx, &launcher);
+    let (cleared, path) = two_clears(&fx);
+    assert_prompts_once(&fx, &launcher, &cleared, &path);
+}
+
+// A restart while the second of two clears waits admits the execution without a restored source;
+// the next turn prompts the latest cleared session once.
+#[test]
+fn a_restart_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg() {
+    let fx = Fixture::new("clear-twice-restart", None);
+    let launcher = Arc::new(Launcher::default());
+    let _ = launch(&fx, &launcher);
+    let (cleared, path) = two_clears(&fx);
+    let counts = restart_and_reconnect(&fx);
+    let admitted = ReconnectCounts {
+        channels: 1,
+        published: 1,
+        ..ReconnectCounts::default()
+    };
+    assert_eq!(counts, admitted);
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
+    assert_eq!(binding, None, "no source is restored for a waiting clear");
+    assert_prompts_once(&fx, &launcher, &cleared, &path);
+}
+
+/// Two clears, then `edit` on the record `back` lines from the end: a restart restores and admits
+/// nothing, and the next turn takes no prompt.
+fn assert_forged_chain_refused(tag: &str, back: usize, edit: impl Fn(&mut Value)) {
+    let fx = Fixture::new(tag, None);
+    let launcher = Arc::new(Launcher::default());
+    let _ = launch(&fx, &launcher);
+    let (cleared, path) = two_clears(&fx);
+    forge(back, edit);
+    let counts = restart_and_reconnect(&fx);
+    let withheld = ReconnectCounts {
+        channels: 1,
+        withheld: 1,
+        ..ReconnectCounts::default()
+    };
+    assert_eq!(counts, withheld);
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
+    assert_eq!(binding, None);
+    let result = cleared_turn(&fx, &launcher, &cleared, &path);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(fx.rig.sends().len(), 2, "no prompt after the launch's");
+    assert!(!resolved_to(&cleared, fx.logical()));
+}
+
+// Another execution's Pending inside a clear chain breaks it: it is not this execution's clear.
+#[test]
+fn a_clear_chain_through_another_executions_pending_is_not_restored_pg() {
+    assert_forged_chain_refused("chain-foreign", 1, |line| {
+        line["execution_nonce"] = json!("f".repeat(32))
+    });
+}
+
+// A clear Pending taken from another source than the one its execution logged is not its clear.
+#[test]
+fn a_clear_pending_taken_from_another_source_is_not_restored_pg() {
+    assert_forged_chain_refused("chain-old", 0, |line| {
+        line["old"]["session_id"] = json!("elsewhere")
+    });
+}
+
+// A clear Pending whose hook named another transcript than the cleared session's own is refused
+// before any prompt, so the turn never waits on a file nothing writes.
+#[test]
+fn a_clear_pending_naming_another_transcript_takes_no_prompt_pg() {
+    let fx = Fixture::new("clear-elsewhere", None);
+    let launcher = Arc::new(Launcher::default());
+    let _ = launch(&fx, &launcher);
+    let cleared = uuid();
+    let path = clear_pending(&fx, &cleared);
+    forge(0, |line| {
+        line["new"]["pending"]["payload_transcript_path"] = json!("/tmp/elsewhere.jsonl")
+    });
+    let result = cleared_turn(&fx, &launcher, &cleared, &path);
+    let sends = fx.rig.sends().len();
+    assert_eq!(sends, 2, "no prompt after the launch's: {result:?}");
+    let error = result.unwrap_err();
+    assert!(error.contains("names another transcript"), "{error}");
+}

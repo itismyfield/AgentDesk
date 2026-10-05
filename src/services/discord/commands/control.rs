@@ -434,7 +434,7 @@ async fn clear_channel_session_state_fenced(
         .acquire_session_transition(channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
-    native::refuse_a_running_turn(shared, channel_id, hosted.as_ref()).await?;
+    let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
