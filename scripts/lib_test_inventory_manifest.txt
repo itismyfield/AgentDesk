@@ -2948,6 +2948,11 @@ services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_th
 services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
 services::discord::commands::control::input_clear::tests::the_production_adapter_cuts_resets_and_resolves_for_both_providers_pg
 services::discord::commands::control::input_clear::tests::without_postgres_the_adapter_refuses_with_the_retry_notice
+services::discord::commands::control::native::herdr_tests::a_configured_channel_clears_its_pane_with_one_line_and_saves_the_pending_session_pg
+services::discord::commands::control::native::herdr_tests::a_configured_clear_without_its_database_or_switch_changes_nothing_pg
+services::discord::commands::control::native::herdr_tests::a_held_herdr_clear_completes_at_admission_without_a_second_line_pg
+services::discord::commands::control::native::herdr_tests::a_running_turn_refuses_the_herdr_clear_before_any_change_pg
+services::discord::commands::control::native::herdr_tests::the_herdr_clear_holds_the_channel_until_its_commit_is_settled_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
 services::discord::commands::control::native::tests::native_clear_marks_completion_before_the_worker_releases_admission_pg

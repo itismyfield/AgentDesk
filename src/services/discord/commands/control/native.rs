@@ -91,6 +91,34 @@ pub(super) fn switch_on_for_tests(effects: Arc<dyn NativeClearEffects>) -> impl 
     Off
 }
 
+/// A host clear's selector effects; it runs whatever the native clear switch says.
+fn host_effects() -> Arc<dyn NativeClearEffects> {
+    #[cfg(test)]
+    if let Some(effects) = HOST_EFFECTS.with(|cell| cell.borrow().clone()) {
+        return effects;
+    }
+    Arc::new(Production)
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_EFFECTS: std::cell::RefCell<Option<Arc<dyn NativeClearEffects>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs `effects` as this thread's host clear effects, the native switch left off.
+#[cfg(test)]
+pub(super) fn host_effects_for_tests(effects: Arc<dyn NativeClearEffects>) -> impl Drop {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            HOST_EFFECTS.with(|cell| cell.borrow_mut().take());
+        }
+    }
+    HOST_EFFECTS.with(|cell| *cell.borrow_mut() = Some(effects));
+    Restore
+}
+
 /// The switch, read before any other native-clear work; `None` keeps main's behavior.
 fn switched_on() -> Option<Arc<dyn NativeClearEffects>> {
     #[cfg(test)]
@@ -301,7 +329,7 @@ pub(super) async fn complete(
         #[cfg(unix)]
         NativeSelection::Herdr(plan, session_key) => {
             let session = HerdrSession {
-                effects: switched_on().unwrap_or_else(|| Arc::new(Production)),
+                effects: host_effects(),
                 shared: shared.clone(),
                 pool,
                 channel_id,
@@ -470,8 +498,7 @@ pub(in crate::services::discord) async fn native_clear_admits(
 ) -> bool {
     // A Herdr channel's clear is native whatever the switch says, so its boundary settles here too.
     let herdr = || crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some();
-    let production = || Arc::new(Production) as Arc<dyn NativeClearEffects>;
-    let Some(effects) = switched_on().or_else(|| herdr().then(production)) else {
+    let Some(effects) = switched_on().or_else(|| herdr().then(host_effects)) else {
         return true;
     };
     let Some(pool) = shared
@@ -561,3 +588,7 @@ pub(in crate::services::discord) async fn native_clear_admits(
 #[cfg(test)]
 #[path = "native_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_herdr_tests.rs"]
+mod herdr_tests;

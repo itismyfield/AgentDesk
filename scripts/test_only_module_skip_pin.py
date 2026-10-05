@@ -385,6 +385,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
         "src/services/session_host/herdr_clear_adapter_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_tests.rs",
+        "src/services/discord/commands/control/native_herdr_tests.rs",
     }
 )
 
