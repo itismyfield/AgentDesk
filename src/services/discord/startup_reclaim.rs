@@ -964,13 +964,13 @@ mod tests {
             .await;
         }
 
-        assert!(discord.calls_for(retired).is_empty());
         for pass in [ReclaimPass::FrozenPanels, ReclaimPass::OrphanPlaceholders] {
             assert!(
                 !claimed(pass, retired),
                 "a retired channel is never claimed"
             );
         }
+        assert!(discord.calls_for(retired).is_empty());
         let read = |c: u64| format!("GET /api/v10/channels/{c}/messages");
         assert_eq!(discord.calls_for(race_frozen), vec![read(race_frozen)]);
         assert_eq!(discord.calls_for(race_orphan), vec![read(race_orphan)]);
