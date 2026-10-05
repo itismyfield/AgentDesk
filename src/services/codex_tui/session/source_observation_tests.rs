@@ -1820,8 +1820,28 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     if let events::BindingTarget::Source(s) = &first.new {
         second.old = Some(s.clone());
     }
-    std::fs::write(&log, encode(&[first, second.clone()])).unwrap();
+    std::fs::write(&log, encode(&[first.clone(), second.clone()])).unwrap();
     run(&payload, &envelope, "session_start", true);
+    for rejected in [false, true] {
+        let mut tail = first.clone();
+        tail.seq = 2;
+        tail.new = if rejected {
+            events::BindingTarget::Rejected {
+                payload_session_id: uuid::Uuid::new_v4().to_string(),
+                payload_transcript_path: None,
+                reason: "synthetic prior rejection".into(),
+            }
+        } else {
+            events::BindingTarget::Pending {
+                payload_session_id: uuid::Uuid::new_v4().to_string(),
+                payload_transcript_path: None,
+            }
+        };
+        let mut next = second.clone();
+        next.seq = 3;
+        std::fs::write(&log, encode(&[first.clone(), tail, next])).unwrap();
+        run(&payload, &envelope, "session_start", true);
+    }
     let mut conflict = original.clone();
     conflict.seq = 2;
     if let events::BindingTarget::Source(s) = &mut conflict.new {

@@ -273,7 +273,9 @@ fn shadow_generic_precedents(
             {
                 return None;
             }
-            previous = source;
+            if let Some(source) = source {
+                previous = Some(source);
+            }
             continue;
         }
         let Target::Source(source) = &record.new else {
