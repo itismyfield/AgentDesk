@@ -567,20 +567,19 @@ fn host_for_herdr_reads_the_registry_endpoint_and_never_writes() {
     let host = host_for(HostKind::Herdr);
     let pane = HostSessionRef::herdr_pane(PANE);
     assert_eq!(host.presence(pane), HostPresence::Present);
-    for written in [
-        host.send_text(pane, "x"),
-        host.send_keys(pane, &["Enter"]),
-        host.interrupt(pane),
-    ] {
-        assert!(
-            matches!(
-                written,
-                Ok(HostMutation::Refused(HostRefusal::Precondition(_)))
-            ),
-            "{written:?}"
-        );
-    }
-    assert!(rig.server.sends().is_empty());
+    let gated = Ok(HostMutation::Refused(HostRefusal::Precondition(
+        "herdr_input_goes_through_its_mutation_gate".into(),
+    )));
+    assert_eq!(host.send_text(pane, "x"), gated);
+    assert_eq!(host.send_keys(pane, &["Enter"]), gated);
+    assert_eq!(host.interrupt(pane), gated);
+    let methods: Vec<Value> = rig
+        .server
+        .conns()
+        .into_iter()
+        .map(|seen| seen.request.unwrap()["method"].clone())
+        .collect();
+    assert_eq!(methods, [json!("session.snapshot")], "no E7, no write");
 }
 
 // Only this node's endpoints register; no node id, no section or another node's registers none.
