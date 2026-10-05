@@ -12,7 +12,9 @@
 
 mod abandon;
 mod identity;
-pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
+pub(in crate::services::discord) use identity::{
+    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
+};
 mod reconcile_gate;
 pub(in crate::services::discord) use identity::clear_inflight_state_for_captured_episode;
 

@@ -1146,7 +1146,9 @@ fn save_inflight_state_create_new_in_root_with_io(
         )));
     };
     let path = inflight_state_path(root, &provider, state.channel_id);
-    if let Some(parent) = path.parent() {
+    if crate::services::discord::input_runtime::fence::lookup(&provider, state.channel_id).is_none()
+        && let Some(parent) = path.parent()
+    {
         fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
     }
     // This stable sidecar lock is the create-new CAS authority. Every
@@ -1208,7 +1210,9 @@ pub(super) fn save_inflight_state_in_root(
         return Err(format!("Unknown provider '{}'", state.provider));
     };
     let path = inflight_state_path(root, &provider, state.channel_id);
-    if let Some(parent) = path.parent() {
+    if crate::services::discord::input_runtime::fence::lookup(&provider, state.channel_id).is_none()
+        && let Some(parent) = path.parent()
+    {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let _lock = lock_inflight_state_path(&path)?;
@@ -1268,7 +1272,9 @@ fn save_inflight_state_if_absent_in_root_with_io(
         return Err(format!("Unknown provider '{}'", state.provider));
     };
     let path = inflight_state_path(root, &provider, state.channel_id);
-    if let Some(parent) = path.parent() {
+    if crate::services::discord::input_runtime::fence::lookup(&provider, state.channel_id).is_none()
+        && let Some(parent) = path.parent()
+    {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     // Hold the sidecar lock across the namespace occupancy check AND the

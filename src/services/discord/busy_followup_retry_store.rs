@@ -1,4 +1,5 @@
 //! Durable per-input busy-notice binding and aggregate retry budget.
+use super::input_runtime::fence;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,41 +103,85 @@ fn sweep_expired_in_root_at(root: &Path, now_ms: u64) -> usize {
             continue;
         };
         for channel in channels.flatten() {
-            let Ok(entries) = fs::read_dir(channel.path()) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-                    continue;
-                }
-                let timestamp_ms = fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<BusyFollowupRetryState>(&raw).ok())
-                    .map(|state| state.first_busy_retry_at_ms)
-                    .filter(|timestamp| *timestamp != 0)
-                    .or_else(|| {
-                        fs::metadata(&path)
-                            .ok()?
-                            .modified()
-                            .ok()?
-                            .duration_since(UNIX_EPOCH)
-                            .ok()?
-                            .as_millis()
-                            .try_into()
-                            .ok()
-                    });
-                if timestamp_ms.is_some_and(|timestamp| {
-                    now_ms.saturating_sub(timestamp) >= BUSY_RETRY_STORE_TTL.as_millis() as u64
-                }) && fs::remove_file(&path).is_ok()
-                {
-                    removed = removed.saturating_add(1);
-                    remove_empty_ancestors(&path, root);
-                }
-            }
+            removed += sweep_channel(&channel.path(), root, now_ms);
         }
     }
     removed
+}
+
+fn sweep_channel(channel: &Path, root: &Path, now_ms: u64) -> usize {
+    let mut removed = 0usize;
+    let Ok(entries) = fs::read_dir(channel) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let timestamp_ms = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<BusyFollowupRetryState>(&raw).ok())
+            .map(|state| state.first_busy_retry_at_ms)
+            .filter(|timestamp| *timestamp != 0)
+            .or_else(|| {
+                fs::metadata(&path)
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .duration_since(UNIX_EPOCH)
+                    .ok()?
+                    .as_millis()
+                    .try_into()
+                    .ok()
+            });
+        if timestamp_ms.is_some_and(|timestamp| {
+            now_ms.saturating_sub(timestamp) >= BUSY_RETRY_STORE_TTL.as_millis() as u64
+        }) && fs::remove_file(&path).is_ok()
+        {
+            removed = removed.saturating_add(1);
+            remove_empty_ancestors(&path, root);
+        }
+    }
+    removed
+}
+
+fn sweep_channel_checked(channel: &Path, root: &Path, now_ms: u64) -> Result<usize, String> {
+    let entries = match fs::read_dir(channel) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        let timestamp = serde_json::from_slice::<BusyFollowupRetryState>(&bytes)
+            .ok()
+            .map(|state| state.first_busy_retry_at_ms)
+            .filter(|timestamp| *timestamp != 0);
+        let timestamp = match timestamp {
+            Some(timestamp) => timestamp,
+            None => fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .map_err(|error| error.to_string())?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_millis()
+                .try_into()
+                .map_err(|_| "busy retry mtime exceeds u64".to_owned())?,
+        };
+        if now_ms.saturating_sub(timestamp) >= BUSY_RETRY_STORE_TTL.as_millis() as u64 {
+            fs::remove_file(&path).map_err(|error| error.to_string())?;
+            runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
+            removed += 1;
+            remove_empty_ancestors(&path, root);
+        }
+    }
+    Ok(removed)
 }
 
 fn save_in_root(
@@ -284,6 +329,25 @@ pub(in crate::services::discord) fn bind_notice_if_absent(
     user_msg_id: u64,
     notice_message_id: u64,
 ) -> Result<BusyFollowupRetryState, String> {
+    if fence::lookup(provider, channel_id).is_none() {
+        return bind_notice_if_absent_unfenced(
+            provider,
+            channel_id,
+            user_msg_id,
+            notice_message_id,
+        );
+    }
+    fence::write(provider, channel_id, || {
+        bind_notice_if_absent_unfenced(provider, channel_id, user_msg_id, notice_message_id)
+    })
+}
+
+fn bind_notice_if_absent_unfenced(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    notice_message_id: u64,
+) -> Result<BusyFollowupRetryState, String> {
     let root = runtime_store::discord_busy_followup_retries_root()
         .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
     let _guard = STORE_WRITE_LOCK
@@ -323,6 +387,27 @@ fn record_busy_retry_at(
     notice_message_id: u64,
     now_ms: u64,
 ) -> Result<BusyRetryDecision, String> {
+    if fence::lookup(provider, channel_id).is_none() {
+        return record_busy_retry_at_unfenced(
+            provider,
+            channel_id,
+            user_msg_id,
+            notice_message_id,
+            now_ms,
+        );
+    }
+    fence::write(provider, channel_id, || {
+        record_busy_retry_at_unfenced(provider, channel_id, user_msg_id, notice_message_id, now_ms)
+    })
+}
+
+fn record_busy_retry_at_unfenced(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    notice_message_id: u64,
+    now_ms: u64,
+) -> Result<BusyRetryDecision, String> {
     let root = runtime_store::discord_busy_followup_retries_root()
         .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
     let _guard = STORE_WRITE_LOCK
@@ -355,10 +440,53 @@ pub(in crate::services::discord) fn sweep_expired() -> usize {
     let Some(root) = runtime_store::discord_busy_followup_retries_root() else {
         return 0;
     };
-    let _guard = STORE_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    sweep_expired_in_root_at(&root, now_ms())
+    if !fence::any_protected() {
+        let _guard = STORE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        return sweep_expired_in_root_at(&root, now_ms());
+    }
+    let mut removed = 0;
+    let mut protected = Vec::new();
+    let now;
+    {
+        let _guard = STORE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        now = now_ms();
+        let Ok(providers) = fs::read_dir(&root) else {
+            return 0;
+        };
+        for provider in providers.flatten() {
+            let kind =
+                ProviderKind::from_str_or_unsupported(&provider.file_name().to_string_lossy());
+            let Ok(channels) = fs::read_dir(provider.path()) else {
+                continue;
+            };
+            for channel in channels.flatten() {
+                let id = channel
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<u64>().ok());
+                if let Some(id) = id.filter(|id| fence::lookup(&kind, *id).is_some()) {
+                    protected.push((kind.clone(), id, channel.path()));
+                } else {
+                    removed += sweep_channel(&channel.path(), &root, now);
+                }
+            }
+        }
+    }
+    // Never wait for canonical admission while holding the global store lock.
+    for (kind, id, path) in protected {
+        removed += fence::write(&kind, id, || {
+            let _guard = STORE_WRITE_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            sweep_channel_checked(&path, &root, now)
+        })
+        .unwrap_or(0);
+    }
+    removed
 }
 
 pub(in crate::services::discord) fn clear_for_input(
@@ -373,6 +501,39 @@ pub(in crate::services::discord) fn clear_for_input(
 }
 
 pub(in crate::services::discord) fn clear_if_current(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    notice_message_id: u64,
+) -> bool {
+    if fence::lookup(provider, channel_id).is_none() {
+        return clear_if_current_unfenced(provider, channel_id, user_msg_id, notice_message_id);
+    }
+    fence::write(provider, channel_id, || {
+        let root = runtime_store::discord_busy_followup_retries_root()
+            .ok_or_else(|| "AgentDesk runtime root unavailable".to_owned())?;
+        let _guard = STORE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let path = input_file_path_in_root(&root, provider, channel_id, user_msg_id);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        };
+        let current: BusyFollowupRetryState =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if current.notice_message_id != notice_message_id {
+            return Ok(false);
+        }
+        fs::remove_file(&path).map_err(|error| error.to_string())?;
+        runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
+fn clear_if_current_unfenced(
     provider: &ProviderKind,
     channel_id: u64,
     user_msg_id: u64,
@@ -413,6 +574,83 @@ mod tests {
             root.path(),
         );
         test();
+    }
+
+    #[test]
+    fn b2_busy_off_delta_zero_and_frozen_sweep_preserves_population() {
+        with_root(|| {
+            let provider = ProviderKind::Claude;
+            let channel = 6_325_309;
+            let root = runtime_store::discord_busy_followup_retries_root().unwrap();
+            let path = input_file_path_in_root(&root, &provider, channel, 8);
+            let first = bind_notice_if_absent(&provider, channel, 8, 108).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert_eq!(
+                bind_notice_if_absent_unfenced(&provider, channel, 8, 108).unwrap(),
+                first
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let result = record_busy_retry_at(&provider, channel, 8, 108, 100).unwrap();
+            let after = fs::read(&path).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let baseline = record_busy_retry_at_unfenced(&provider, channel, 8, 108, 100).unwrap();
+            assert_eq!(result.state, baseline.state);
+            assert_eq!(result.capped, baseline.capped);
+            assert_eq!(fs::read(&path).unwrap(), after);
+            assert!(!clear_if_current(&provider, channel, 8, 999));
+            assert!(!clear_if_current_unfenced(&provider, channel, 8, 999));
+            assert_eq!(fs::read(&path).unwrap(), after);
+            assert!(clear_if_current(&provider, channel, 8, 108));
+            fs::write(&path, &after).unwrap();
+            assert!(clear_if_current_unfenced(&provider, channel, 8, 108));
+            assert_eq!(
+                bind_notice_if_absent(&provider, channel, 0, 0).unwrap_err(),
+                bind_notice_if_absent_unfenced(&provider, channel, 0, 0).unwrap_err()
+            );
+            assert!(
+                !runtime_store::runtime_root()
+                    .unwrap()
+                    .join("discord_inflight")
+                    .exists()
+            );
+            let protected = 6_325_310;
+            let gate = fence::Gate::protect(provider.clone(), protected).unwrap();
+            let protected_path = input_file_path_in_root(&root, &provider, protected, 8);
+            bind_notice_if_absent(&provider, protected, 8, 108).unwrap();
+            assert!(!clear_if_current(&provider, protected, 8, 999));
+            assert!(clear_if_current(&provider, protected, 8, 108));
+            fs::create_dir(&protected_path).unwrap();
+            assert!(!clear_if_current(&provider, protected, 8, 108));
+            assert!(
+                fence::health_reasons()
+                    .iter()
+                    .any(|reason| reason.contains("channel=6325310")
+                        && reason.contains("Persistence"))
+            );
+            fs::remove_dir(&protected_path).unwrap();
+            gate.clear_failure_for_test();
+            let _closing = gate.close().unwrap();
+            let state = BusyFollowupRetryState {
+                notice_message_id: 108,
+                busy_retry_count: 1,
+                first_busy_retry_at_ms: 1,
+            };
+            save_in_root(&root, &provider, protected, 8, state).unwrap();
+            save_in_root(&root, &provider, channel, 8, state).unwrap();
+            let invalid = root.join("claude/non-numeric/8.json");
+            fs::create_dir_all(invalid.parent().unwrap()).unwrap();
+            fs::write(&invalid, serde_json::to_vec(&state).unwrap()).unwrap();
+            assert_eq!(
+                sweep_expired(),
+                2,
+                "unrelated off and invalid-name legacy entries keep original cleanup"
+            );
+            assert!(load_in_root(&root, &provider, protected, 8).is_some());
+            assert!(record_busy_retry_at(&provider, protected, 8, 108, 200).is_err());
+            assert!(!clear_if_current(&provider, protected, 8, 108));
+            gate.clear_failure_for_test();
+        });
     }
 
     #[test]

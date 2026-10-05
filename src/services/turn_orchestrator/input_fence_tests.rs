@@ -196,6 +196,82 @@ fn off_path_has_no_sidecar_and_registry_does_not_remint_on_fence() {
 }
 
 #[test]
+fn b2_late_protection_between_actor_selection_and_enter_has_no_scheduler_io() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        let channel = ChannelId::new(6_325_304);
+        assert!(fence::channel_gate(channel.get()).is_none());
+        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+        let state = ChannelMailboxState::default();
+        let (reply, _) = tokio::sync::oneshot::channel();
+        let mut msg = ChannelMailboxMsg::RestartDrain {
+            persistence: context(),
+            reply,
+        };
+        assert!(matches!(
+            enter(channel, &state, &mut msg),
+            Err(Failure::Busy)
+        ));
+        assert!(!root.path().join("runtime").exists());
+        assert_eq!(
+            tokio::spawn(async {
+                tokio::task::yield_now().await;
+                1
+            })
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(gate.mode(), Mode::LegacyOpen);
+    });
+}
+
+#[test]
+fn b2_freeze_refuses_other_token_queue_or_marker_without_ack_or_mutation() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        for (index, extension) in ["json", "dispatch"].into_iter().enumerate() {
+            let channel = ChannelId::new(6_325_305 + index as u64);
+            let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
+            let closing = Arc::new(gate.close().unwrap());
+            let handle = ChannelMailboxRegistry::default().handle(channel);
+            let path = fence::population_root().unwrap().join(format!(
+                "discord_pending_queue/claude/other/{}.{extension}",
+                channel.get()
+            ));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"other-token-population").unwrap();
+            assert!(matches!(
+                handle.freeze_input(closing.clone(), context()).await,
+                Err(Failure::Busy)
+            ));
+            assert_eq!(gate.mode(), Mode::Closing);
+            assert_eq!(std::fs::read(&path).unwrap(), b"other-token-population");
+            assert!(
+                !path
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!("fence-test/{}.json", channel.get()))
+                    .exists()
+            );
+            std::fs::remove_file(path).unwrap();
+            let ack = handle
+                .freeze_input(closing.clone(), context())
+                .await
+                .unwrap();
+            closing.freeze(ack).unwrap();
+            assert_eq!(gate.mode(), Mode::Frozen);
+        }
+    });
+}
+
+#[test]
 fn ownership_transferred_consumers_surface_fence_as_failure() {
     for failure in [
         Failure::ActorUnreachable,

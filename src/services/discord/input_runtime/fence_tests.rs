@@ -215,6 +215,211 @@ fn borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
     assert_eq!(std::fs::read(queue).unwrap(), bytes);
 }
 
+#[test]
+fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
+    use crate::services::discord::inflight::{
+        lock_inflight_state_path, try_lock_inflight_state_path,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let channel = 6_325_301;
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let permit = gate.admit().unwrap();
+    let scope =
+        PopulationScope::writer(root.path(), &ProviderKind::Claude, channel, &permit).unwrap();
+    let path = root
+        .path()
+        .join(format!("discord_inflight/claude/{channel}.json"));
+    for result in [
+        lock_inflight_state_path(&path),
+        try_lock_inflight_state_path(&path),
+    ] {
+        assert_eq!(
+            result.err().as_deref(),
+            Some("input fence: Busy"),
+            "scope reentry must refuse rather than flock a second fd"
+        );
+    }
+    assert!(matches!(
+        PopulationScope::writer(root.path(), &ProviderKind::Claude, channel, &permit),
+        Err(Failure::Busy)
+    ));
+    assert!(!path.exists());
+    drop(scope);
+    let owned = lock_inflight_state_path(&path).unwrap();
+    assert_eq!(
+        try_lock_inflight_state_path(&path).err().as_deref(),
+        Some("input fence: Busy")
+    );
+    assert_eq!(
+        lock_inflight_state_path(&path).err().as_deref(),
+        Some("input fence: Busy")
+    );
+    std::thread::spawn(move || drop(owned)).join().unwrap();
+    assert!(
+        lock_inflight_state_path(&path).is_ok(),
+        "cross-thread drop expires origin marker"
+    );
+    gate.clear_failure_for_test();
+}
+
+#[test]
+fn b2_borrowed_row_keeps_episode_cas_and_never_reacquires_sidecar() {
+    use crate::services::discord::inflight::{
+        BorrowedInflightRow, GuardedClearOutcome, InflightEpisodePin, InflightTurnState,
+        operator_disposition_remove_borrowed,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let channel = 6_325_302;
+    let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
+    let guard = closing.frozen_population(root.path()).unwrap();
+    let borrowed =
+        BorrowedInflightRow::new(&guard, root.path(), &ProviderKind::Claude, channel).unwrap();
+    assert!(BorrowedInflightRow::new(&guard, root.path(), &ProviderKind::Codex, channel).is_err());
+    let path = root
+        .path()
+        .join(format!("discord_inflight/claude/{channel}.json"));
+    let row = InflightTurnState::new(
+        ProviderKind::Claude,
+        channel,
+        None,
+        7,
+        8,
+        0,
+        "input".into(),
+        None,
+        Some("b2-cas".into()),
+        None,
+        None,
+        0,
+    );
+    let pin = InflightEpisodePin::from_state(&row);
+    let mut successor = row.clone();
+    successor.turn_nonce = Some("successor".into());
+    let bytes = serde_json::to_vec(&successor).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        operator_disposition_remove_borrowed(&borrowed, &pin).0,
+        GuardedClearOutcome::UserMsgMismatch
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    std::fs::write(&path, serde_json::to_vec(&row).unwrap()).unwrap();
+    assert_eq!(
+        operator_disposition_remove_borrowed(&borrowed, &pin).0,
+        GuardedClearOutcome::Cleared
+    );
+    assert!(!path.exists());
+    let second = std::fs::File::open(path.with_extension("json.lock")).unwrap();
+    assert!(matches!(
+        second.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+}
+
+#[test]
+fn b2_scheduler_late_protection_refuses_inflight_before_any_io() {
+    use crate::services::discord::inflight::lock_inflight_state_path;
+    let root = tempfile::tempdir().unwrap();
+    let channel = 6_325_303;
+    assert!(lookup(&ProviderKind::Claude, channel).is_none());
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let path = root
+        .path()
+        .join(format!("discord_inflight/claude/{channel}.json"));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            assert_eq!(
+                lock_inflight_state_path(&path).err().as_deref(),
+                Some("input fence: Busy")
+            );
+            assert!(
+                !root.path().join("discord_inflight").exists(),
+                "late protection must not do scheduler IO"
+            );
+            assert_eq!(
+                tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                    1
+                })
+                .await
+                .unwrap(),
+                1
+            );
+            tokio::task::spawn_blocking(move || {
+                blocking(|| lock_inflight_state_path(&path).map(drop))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        });
+    gate.clear_failure_for_test();
+}
+
+#[test]
+fn b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io() {
+    use crate::services::discord::inflight::{
+        InflightTurnState, save_inflight_state_create_new, save_inflight_state_if_absent,
+    };
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = Env::set(temp.path());
+    let channel = 6_325_312;
+    let root = population_root().unwrap();
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let held = PopulationGuard::try_acquire(&root, &ProviderKind::Claude, channel).unwrap();
+    let state = InflightTurnState::new(
+        ProviderKind::Claude,
+        channel,
+        None,
+        7,
+        8,
+        0,
+        "input".into(),
+        None,
+        Some("b2-writer".into()),
+        None,
+        None,
+        0,
+    );
+    let path = root.join(format!("discord_inflight/claude/{channel}.json"));
+    let (waiting, receive) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let writer_state = state.clone();
+    let worker = std::thread::spawn(move || {
+        WAIT_OBSERVER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                waiting.send(()).unwrap();
+                released.recv().unwrap();
+            }))
+        });
+        save_inflight_state_create_new(&writer_state)
+    });
+    receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        !path.exists(),
+        "contention cannot publish or report a duplicate"
+    );
+    drop(held);
+    release.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<InflightTurnState>(&bytes)
+            .unwrap()
+            .user_msg_id,
+        8
+    );
+    assert!(!save_inflight_state_if_absent(&state).unwrap());
+    let closing = gate.close().unwrap();
+    assert!(save_inflight_state_create_new(&state).is_err());
+    assert!(save_inflight_state_if_absent(&state).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    gate.clear_failure_for_test();
+    drop(closing);
+}
+
 struct Env(Option<std::ffi::OsString>);
 impl Env {
     fn set(path: &Path) -> Self {
@@ -280,6 +485,13 @@ fn queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_st
         .build()
         .unwrap();
     runtime.block_on(async {
+        let path = root.join("discord_pending_queue/claude/primitive/6325109.json");
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            save_channel_queue(&ProviderKind::Claude, "primitive", channel, &[], None).is_err(),
+            "protected scheduler writer must refuse before changing latest population"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
         let (send, receive) = tokio::sync::oneshot::channel();
         let work = tokio::task::spawn_blocking(move || {
             WAIT_OBSERVER.with(|hook| {
@@ -287,7 +499,9 @@ fn queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_st
                     let _ = send.send(());
                 }))
             });
-            save_channel_queue(&ProviderKind::Claude, "primitive", channel, &[item], None)
+            blocking(|| {
+                save_channel_queue(&ProviderKind::Claude, "primitive", channel, &[item], None)
+            })
         });
         tokio::time::timeout(Duration::from_secs(1), receive)
             .await

@@ -7,7 +7,18 @@ pub(in crate::services::discord) fn operator_disposition_remove_pinned(
     guard: &super::super::super::store::InflightStateFileLock,
     expected: &InflightEpisodePin,
 ) -> (GuardedClearOutcome, Option<InflightTurnState>) {
-    let path = guard.state_path();
+    remove_pinned_under_lock(guard.state_path(), expected)
+}
+pub(in crate::services::discord) fn operator_disposition_remove_borrowed(
+    guard: &crate::services::discord::inflight::BorrowedInflightRow<'_>,
+    expected: &InflightEpisodePin,
+) -> (GuardedClearOutcome, Option<InflightTurnState>) {
+    remove_pinned_under_lock(guard.state_path(), expected)
+}
+fn remove_pinned_under_lock(
+    path: &std::path::Path,
+    expected: &InflightEpisodePin,
+) -> (GuardedClearOutcome, Option<InflightTurnState>) {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

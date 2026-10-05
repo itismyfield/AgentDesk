@@ -145,7 +145,8 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     patch: WatcherStreamProgressPatch,
 ) -> WatcherProgressOutcome {
     let path = inflight_state_path(root, provider, channel_id);
-    if let Some(parent) = path.parent()
+    if crate::services::discord::input_runtime::fence::lookup(provider, channel_id).is_none()
+        && let Some(parent) = path.parent()
         && fs::create_dir_all(parent).is_err()
     {
         return WatcherProgressOutcome::IoError;
