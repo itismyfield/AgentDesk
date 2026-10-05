@@ -114,6 +114,7 @@ pub(crate) struct VerifiedCodexHookSource {
     pub rollout_path: PathBuf,
     pub identity: SourceFileIdentity,
     pub route: CodexHookSourceRoute,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,8 +251,13 @@ const FIRST_RECORD_BYTES: u64 = 1024 * 1024;
 /// Judges only the first record: unfinished is retryable, a finished non-header is final.
 fn first_record_session_meta(
     file: &std::fs::File,
-) -> Result<crate::services::codex_tui::rollout_index::RolloutSessionMeta, CodexHookSourceRejection>
-{
+) -> Result<
+    (
+        crate::services::codex_tui::rollout_index::RolloutSessionMeta,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
+    CodexHookSourceRejection,
+> {
     use CodexHookSourceRejection as Reject;
     let mut line = Vec::new();
     BufReader::new(file.take(FIRST_RECORD_BYTES))
@@ -275,7 +281,7 @@ fn first_record_session_meta(
             .map(ToString::to_string)
     };
     match (record["type"].as_str(), text("cwd")) {
-        (Some("session_meta"), Some(cwd)) => Ok(
+        (Some("session_meta"), Some(cwd)) => Ok((
             crate::services::codex_tui::rollout_index::RolloutSessionMeta {
                 id: text("id"),
                 cwd: PathBuf::from(cwd),
@@ -283,7 +289,11 @@ fn first_record_session_meta(
                 parent_thread_id: text("parent_thread_id"),
                 originator: payload["originator"].as_str().map(ToString::to_string),
             },
-        ),
+            payload["timestamp"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|time| time.with_timezone(&chrono::Utc)),
+        )),
         _ => Err(Reject::FirstRecordNotSessionMeta),
     }
 }
@@ -348,7 +358,7 @@ fn verify_rollout(
     if identity == SourceFileIdentity::Unavailable {
         return Err(Reject::RolloutUnavailable);
     }
-    let meta = first_record_session_meta(&file)?;
+    let (meta, created_at) = first_record_session_meta(&file)?;
     run_verify_step(VerifyStep::AfterHeader);
     let meta_id = meta
         .id
@@ -376,6 +386,7 @@ fn verify_rollout(
         rollout_path: canonical,
         identity,
         route: CodexHookSourceRoute::PayloadPath,
+        created_at,
     })
 }
 

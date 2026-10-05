@@ -70,50 +70,52 @@ pub(crate) fn observe_codex_shadow(
         CapturedContext::Captured(c) => Some(c),
         _ => None,
     });
+    let mut generic_precedent_seqs = Vec::new();
     let result = context.zip(payload_session).and_then(|(captured, id)| {
-        #[cfg(test)]
-        SHADOW_IO_CALLS.with(|calls| calls.set(calls.get() + 1));
-        let prepared = match execution_context("codex", &captured.execution_nonce) {
-            Ok(c) => c,
-            Err(_) => return Some(Err(CodexFirstProofRejection::Context)),
-        };
-        let nonce = match observe_spawn_nonce_marker(&prepared.tmux_session) {
-            SpawnNonceMarker::Known(n) => Some(n),
-            _ => None,
-        };
-        let pristine = prepared
-            .channel_id
-            .and_then(|channel| binding_events::records_strict(channel).ok()?.ok())
-            .is_some_and(|history| {
-                !history.iter().any(|e| {
-                    e.provider == "codex"
-                        && e.tmux_session == prepared.tmux_session
-                        && e.execution_nonce.as_deref() == Some(&prepared.execution_nonce)
-                        && (e.evidence.hook_event.is_some()
-                            || e.cause != binding_events::BindingCause::Startup)
-                })
-            });
-        Some(codex_first_proof_candidate(
-            &CodexFirstProof {
-                captured,
-                prepared: &prepared,
-                current_nonce: nonce.as_deref(),
-                verified_fresh_spawn: nonce.as_deref() == Some(&prepared.execution_nonce),
-                no_prior_claim_or_transition: pristine,
-                event: match hook.event.as_str() {
-                    "session_start" => "SessionStart",
-                    "user_prompt_submit" => "UserPromptSubmit",
-                    _ => "other",
+        crate::services::tmux_common::with_tmux_source_authority(&captured.tmux_session, |_| {
+            #[cfg(test)]
+            SHADOW_IO_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let prepared = match execution_context("codex", &captured.execution_nonce) {
+                Ok(c) => c,
+                Err(_) => return Some(Err(CodexFirstProofRejection::Context)),
+            };
+            let nonce = match observe_spawn_nonce_marker(&prepared.tmux_session) {
+                SpawnNonceMarker::Known(n) => Some(n),
+                _ => None,
+            };
+            let history = prepared
+                .channel_id
+                .and_then(|channel| binding_events::records_strict(channel).ok()?.ok());
+            let verified = codex_first_proof_candidate(
+                &CodexFirstProof {
+                    captured,
+                    prepared: &prepared,
+                    current_nonce: nonce.as_deref(),
+                    verified_fresh_spawn: nonce.as_deref() == Some(&prepared.execution_nonce),
+                    no_prior_claim_or_transition: true,
+                    event: match hook.event.as_str() {
+                        "session_start" => "SessionStart",
+                        "user_prompt_submit" => "UserPromptSubmit",
+                        _ => "other",
+                    },
+                    source: payload["source"].as_str(),
+                    prompt: &payload["prompt"],
                 },
-                source: payload["source"].as_str(),
-                prompt: &payload["prompt"],
-            },
-            &CodexHookSourceClaim {
-                session_id: id,
-                transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
-                expected_source: CodexRolloutSource::Cli,
-            },
-        ))
+                &CodexHookSourceClaim {
+                    session_id: id,
+                    transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
+                    expected_source: CodexRolloutSource::Cli,
+                },
+            );
+            Some(verified.and_then(|source| {
+                let seqs = history
+                    .as_deref()
+                    .and_then(|history| shadow_generic_precedents(&prepared, &source, history))
+                    .ok_or(CodexFirstProofRejection::Ineligible)?;
+                generic_precedent_seqs = seqs;
+                Ok(source)
+            }))
+        })
     });
     let verdict = match &result {
         Some(Ok(_)) => "candidate",
@@ -128,7 +130,92 @@ pub(crate) fn observe_codex_shadow(
         native_uuid = ?payload_session, path = ?verified.map(|v| &v.rollout_path), identity = ?verified.map(|v| &v.identity),
         event = ?hook.event, legacy_selected_id = ?legacy.as_ref().and_then(|b| b.session_id.as_deref()),
         source_less = legacy.is_none(), command_present = command.is_some(), ownership_promoted = false,
+        generic_precedent_neutralized = !generic_precedent_seqs.is_empty(), generic_precedent_seqs = ?generic_precedent_seqs,
         "Codex local first-proof shadow observation");
+}
+
+fn shadow_generic_precedents(
+    prepared: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    verified: &session::source_observation::VerifiedCodexHookSource,
+    history: &[binding_events::BindingEvent],
+) -> Option<Vec<u64>> {
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    use binding_events::{BindingCause as Cause, BindingTarget as Target};
+    let matches = |source: &binding_events::SourceId| {
+        source.session_id == verified.session_id
+            && source.path.canonicalize().ok().as_ref() == Some(&verified.rollout_path)
+            && verified.identity
+                == SourceFileIdentity::Unix {
+                    dev: source.dev,
+                    ino: source.ino,
+                }
+    };
+    let mut seqs = Vec::new();
+    let mut previous = None;
+    let mut current_seen = false;
+    for record in history {
+        if Some(record.channel_id) != prepared.channel_id {
+            return None;
+        }
+        if record.provider != "codex" || record.tmux_session != prepared.tmux_session {
+            continue;
+        }
+        let current = record.execution_nonce.as_deref() == Some(&prepared.execution_nonce);
+        let source = match &record.new {
+            Target::Source(source) | Target::Resolved { source, .. } => Some(source),
+            _ => None,
+        };
+        if !current {
+            if current_seen {
+                return None;
+            }
+            let named = match &record.new {
+                Target::Pending {
+                    payload_session_id, ..
+                }
+                | Target::Rejected {
+                    payload_session_id, ..
+                } => payload_session_id == &verified.session_id,
+                _ => false,
+            };
+            if named
+                || source
+                    .into_iter()
+                    .chain(record.old.as_ref())
+                    .chain(record.parent_hint.as_ref())
+                    .any(|source| source.session_id == verified.session_id || matches(source))
+            {
+                return None;
+            }
+            previous = source;
+            continue;
+        }
+        let Target::Source(source) = &record.new else {
+            return None;
+        };
+        if record.evidence.hook_event.is_some()
+            || record.parent_hint.is_some()
+            || !matches!(record.cause, Cause::Unknown | Cause::Startup)
+            || !matches(source)
+            || (current_seen && record.old.as_ref() != previous)
+            || (!current_seen && record.old.is_some() && record.old.as_ref() != previous)
+        {
+            return None;
+        }
+        current_seen = true;
+        previous = Some(source);
+        seqs.push(record.seq);
+    }
+    // Creation time only excludes old native reuse; it never establishes ownership.
+    if !seqs.is_empty()
+        && (prepared.source_policy.as_deref() != Some("shadow")
+            || !verified
+                .created_at
+                .is_some_and(|time| time >= prepared.created_at))
+    {
+        return None;
+    }
+    Some(seqs)
 }
 
 fn reject(reason: NotApplicableReason, session: &str) -> IngressOutcome {
