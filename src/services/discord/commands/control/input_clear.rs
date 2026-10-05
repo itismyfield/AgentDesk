@@ -49,13 +49,13 @@ impl ClearEffects for Production {
     }
 }
 
-pub(super) struct LedgerClear {
+pub(in crate::services::discord) struct LedgerClear {
     shared: Arc<SharedData>,
     provider: ProviderKind,
     channel_id: serenity::ChannelId,
     tmux: String,
     session_key: String,
-    cleared: ClearedHostSession,
+    cleared: Option<ClearedHostSession>,
     effects: Arc<dyn ClearEffects>,
 }
 
@@ -88,14 +88,34 @@ impl LedgerClear {
         explicit_session_key: Option<&str>,
         effects: Arc<dyn ClearEffects>,
     ) -> Result<Self, String> {
+        let target = explicit_session_key;
+        let mut host = Self::locate(http, shared, provider, channel_id, target, effects).await?;
+        host.cleared = Some(host.admitted(target).await?);
+        Ok(host)
+    }
+
+    /// A host for a boot replay: it names the execution but admits no reset until one is due.
+    pub(in crate::services::discord) async fn for_resume(
+        http: &Arc<serenity::Http>,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: serenity::ChannelId,
+    ) -> Result<Self, String> {
+        let effects = Arc::new(Production(http.clone()));
+        Self::locate(http, shared, provider, channel_id, None, effects).await
+    }
+
+    async fn locate(
+        http: &Arc<serenity::Http>,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: serenity::ChannelId,
+        explicit_session_key: Option<&str>,
+        effects: Arc<dyn ClearEffects>,
+    ) -> Result<Self, String> {
         // The ticket lives in Postgres; without it nothing may be cut or reset.
         if shared.pg_pool.is_none() {
             return Err(super::super::super::input_runtime::clear::PG_RETRY_NOTICE.to_owned());
-        }
-        let refusal = super::super::super::admin_host_guard::managed_reset_refusal;
-        let target = explicit_session_key;
-        if let Some(reason) = refusal(shared, provider, channel_id, true, false, target).await {
-            return Err(reason);
         }
         let tmux = {
             let data = shared.core.lock().await;
@@ -105,30 +125,32 @@ impl LedgerClear {
         }
         .ok_or("채널 세션을 찾지 못했어요")?;
         let resolved = super::resolve_session_key_for_clear(http, shared, channel_id, provider);
-        let session_key = super::choose_clear_session_key(target, resolved.await)
+        let session_key = super::choose_clear_session_key(explicit_session_key, resolved.await)
             .ok_or("세션 키를 찾지 못했어요")?;
-        let clear = super::super::super::inflight::clear_channel_session;
-        let pool = shared.pg_pool.as_ref();
-        let id = channel_id.get();
-        let cleared = clear(
-            pool,
-            provider,
-            id,
-            Some(&session_key),
-            &tmux,
-            "ledger clear",
-        )
-        .await
-        .ok_or("호스트 가드가 세션 초기화를 허용하지 않았어요")?;
         Ok(Self {
             shared: shared.clone(),
             provider: provider.clone(),
             channel_id,
             tmux,
             session_key,
-            cleared,
+            cleared: None,
             effects,
         })
+    }
+
+    // The managed-reset refusal, then the keyed clearance of the session row.
+    async fn admitted(&self, target: Option<&str>) -> Result<ClearedHostSession, String> {
+        let refusal = super::super::super::admin_host_guard::managed_reset_refusal;
+        let (shared, provider, channel_id) = (&self.shared, &self.provider, self.channel_id);
+        if let Some(reason) = refusal(shared, provider, channel_id, true, false, target).await {
+            return Err(reason);
+        }
+        let clear = super::super::super::inflight::clear_channel_session;
+        let pool = shared.pg_pool.as_ref();
+        let (id, key) = (channel_id.get(), Some(self.session_key.as_str()));
+        clear(pool, provider, id, key, &self.tmux, "ledger clear")
+            .await
+            .ok_or_else(|| "호스트 가드가 세션 초기화를 허용하지 않았어요".to_owned())
     }
 
     fn pool(&self) -> anyhow::Result<&sqlx::PgPool> {
@@ -200,6 +222,18 @@ impl ClearHost for LedgerClear {
     // The selector goes first so a crash before the kill retries a still-current execution.
     fn reset<'a>(&'a mut self, ticket: &'a ClearTicket) -> Step<'a, bool> {
         Box::pin(async move {
+            // A resumed clear asks the host guard only once its ticket needs this reset.
+            if self.cleared.is_none() {
+                let admitted = self.admitted(None).await;
+                let channel_id = self.channel_id.get();
+                let admitted = admitted.inspect_err(|reason| {
+                    tracing::warn!(channel_id, %reason, "ledger clear reset refused");
+                });
+                self.cleared = admitted.ok();
+            }
+            let Some(cleared) = self.cleared.as_ref() else {
+                return false;
+            };
             if !self.effects.clear_selector(&self.session_key).await {
                 return false;
             }
@@ -208,14 +242,13 @@ impl ClearHost for LedgerClear {
                 let marker = binding_context::observe_spawn_nonce_marker(&self.tmux);
                 matches!(marker, SpawnNonceMarker::Known(n) if n == nonce)
                     && tmux_common::cleanup_native_clear_fallback_under_source_authority(
-                        authority,
-                        &self.cleared,
+                        authority, cleared,
                     )
             });
             if cut != Some(true) {
                 return false;
             }
-            self.effects.reset_process(self.cleared.name());
+            self.effects.reset_process(cleared.name());
             super::native::clear_session_memory(&self.shared, self.channel_id).await;
             super::native::clear_process_reset_pending(&self.shared, self.channel_id).await;
             true

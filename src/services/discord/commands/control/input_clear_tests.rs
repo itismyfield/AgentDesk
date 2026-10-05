@@ -507,6 +507,51 @@ fn a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg() {
     });
 }
 
+// A boot replay builds its host with no host-guard clearance; a reset asks for it only when due.
+#[test]
+fn a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg() {
+    runtime().block_on(async {
+        for (n, current) in [(8, false), (9, true)] {
+            let fixture = Fixture::new(n, ProviderKind::Claude).await;
+            let fake = Arc::new(Fake::default());
+            let mut ledger = fixture.ledger(&[11, 12]);
+            // A clear that stopped right after its ticket committed.
+            let mut ticket = fixture.host(&fake).await.capture().unwrap();
+            ticket.input = Some(InputCutoff {
+                ledger_generation: 0,
+                ledger_seq: 2,
+                affected_keys: vec![11, 12],
+            });
+            let value = serde_json::to_value(&ticket).unwrap();
+            fixture.host(&fake).await.commit(&value).await.unwrap();
+            let for_resume = LedgerClear::for_resume;
+            let (http, shared) = (&fixture.http, &fixture.shared);
+            let mut host = for_resume(http, shared, &fixture.provider, fixture.channel_id)
+                .await
+                .unwrap();
+            assert!(host.cleared.is_none() && fake.calls().is_empty());
+            assert!(fixture.marker_present() && !fixture.record().await.resolved);
+            host.effects = fake.clone();
+            if !current {
+                let marker = tmux_common::session_temp_path(&fixture.tmux, "spawn_nonce");
+                std::fs::write(marker, "a-later-execution").unwrap();
+            }
+            let outcome = clear::resume(&mut ledger, &mut host, fixture.guard().await).await;
+            assert_eq!(outcome, Outcome::Cleared, "current={current}");
+            assert_eq!(host.cleared.is_some(), current);
+            let resets = fake
+                .calls()
+                .iter()
+                .filter(|c| c.starts_with("reset:"))
+                .count();
+            assert_eq!(resets, usize::from(current));
+            assert_eq!(fixture.states(), BTreeMap::from([(11, CUT), (12, CUT)]));
+            assert!(fixture.record().await.resolved);
+            fixture.drop_db().await;
+        }
+    });
+}
+
 // A protected, closed gate refuses every Legacy population writer and records it as health.
 #[test]
 fn a_fenced_channel_clears_without_a_legacy_population_write_pg() {

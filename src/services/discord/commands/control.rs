@@ -14,7 +14,7 @@ use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::{CommandStop, stop_active_turn};
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
 #[allow(dead_code)]
-mod input_clear;
+pub(in crate::services::discord) mod input_clear;
 mod native;
 pub(in crate::services::discord) use native::native_clear_admits;
 

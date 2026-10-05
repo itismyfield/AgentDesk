@@ -396,6 +396,35 @@ async fn a_dropped_receiver_neither_cancels_the_clear_nor_frees_its_guard_early(
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocking_resume_cuts_only_the_ticket_inputs_and_keeps_the_guard_until_done() {
+    let (root, channel) = (sandbox(), 6_325_420);
+    let ledger = open(root.path(), channel, &[11, 12]);
+    let host = Fake::new("codex", channel);
+    host.durable_ticket(&ledger, &[11]);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    drop(resume_blocking(
+        ledger,
+        host.clone(),
+        lock.clone().lock_owned().await,
+    ));
+    let _released = lock.lock().await;
+    assert!(host.db().record.as_ref().unwrap().resolved);
+    assert_eq!((host.db().commits, host.resets()), (0, 1));
+    assert_eq!(
+        states(root.path(), channel),
+        BTreeMap::from([(11, CUT), (12, RowState::Received)])
+    );
+}
+
+// The input runtime names the production host and its boot constructor without control's help.
+#[test]
+fn the_production_resume_host_is_reachable_from_the_input_runtime() {
+    use crate::services::discord::commands::control::input_clear::LedgerClear;
+    let _constructor = LedgerClear::for_resume;
+    let _replay = resume_blocking::<LedgerClear>;
+}
+
 #[tokio::test]
 async fn postgres_outage_holds_without_reset_or_cut_and_reports_it() {
     let (root, channel) = (sandbox(), 6_325_408);

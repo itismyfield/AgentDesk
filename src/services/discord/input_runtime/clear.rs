@@ -148,14 +148,37 @@ pub(crate) async fn resume<H: ClearHost>(
 /// Runs [`run`] on a blocking worker; a dropped receiver neither cancels it nor frees `guard`
 /// before the outcome is durable.
 pub(crate) fn start<H: ClearHost>(
+    ledger: Ledger,
+    host: H,
+    guard: OwnedMutexGuard<()>,
+) -> oneshot::Receiver<(Ledger, Outcome)> {
+    on_worker(ledger, host, guard, false)
+}
+
+/// Runs [`resume`] behind the same blocking boundary as [`start`].
+pub(crate) fn resume_blocking<H: ClearHost>(
+    ledger: Ledger,
+    host: H,
+    guard: OwnedMutexGuard<()>,
+) -> oneshot::Receiver<(Ledger, Outcome)> {
+    on_worker(ledger, host, guard, true)
+}
+
+fn on_worker<H: ClearHost>(
     mut ledger: Ledger,
     mut host: H,
     guard: OwnedMutexGuard<()>,
+    replay: bool,
 ) -> oneshot::Receiver<(Ledger, Outcome)> {
     let (send, recv) = oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        let outcome = runtime.block_on(run(&mut ledger, &mut host, guard));
+        let outcome = runtime.block_on(async {
+            match replay {
+                true => resume(&mut ledger, &mut host, guard).await,
+                false => run(&mut ledger, &mut host, guard).await,
+            }
+        });
         let _ = send.send((ledger, outcome));
     });
     recv
