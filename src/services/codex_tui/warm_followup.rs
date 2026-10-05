@@ -303,10 +303,10 @@ fn warm_followup_on(
         cancel_token,
         report_channel_id,
     } = request;
-    let tmux_session_name = match target {
-        InputTarget::Tmux(session) => session.as_str(),
-        InputTarget::Refused(refusal) => {
-            let run = host_input::InputRun::Refused(*refusal);
+    let tmux_session_name = match target.tmux_session() {
+        Ok(session) => session,
+        Err(refusal) => {
+            let run = host_input::InputRun::Refused(refusal);
             return CodexWarmFollowupOutcome::Terminal(Err(host_input::refusal_error(&run)));
         }
     };

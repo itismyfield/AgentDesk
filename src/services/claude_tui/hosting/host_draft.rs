@@ -15,7 +15,7 @@ use crate::services::claude_tui::input::{
     prompt_readiness_snapshot,
 };
 use crate::services::provider::CancelToken;
-use crate::services::session_host::HostKey;
+use crate::services::session_host::{HerdrTarget, HostKey};
 
 const DRAFT_CLEAR_ATTEMPTS: usize = 2;
 const DRAFT_KEY_SETTLE: Duration = Duration::from_millis(120);
@@ -37,12 +37,21 @@ impl FollowupHost<'static> {
     }
 }
 
+impl<'a> FollowupHost<'a> {
+    /// A recorded Herdr pane, admitted by its own gate. The warm follow-up still drives
+    /// tmux only, so it takes no input here and retire kills nothing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn herdr(target: &'a HerdrTarget) -> Self {
+        Self {
+            target: InputTarget::Herdr(target.clone()),
+            gate: target,
+        }
+    }
+}
+
 impl FollowupHost<'_> {
     pub(crate) fn session(&self) -> Result<&str, InputRefusal> {
-        match &self.target {
-            InputTarget::Tmux(session) => Ok(session),
-            InputTarget::Refused(refusal) => Err(*refusal),
-        }
+        self.target.tmux_session()
     }
 
     /// Retires a confirmed tmux session the gate still admits; the result is

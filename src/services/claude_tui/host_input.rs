@@ -1,5 +1,6 @@
 //! Host executor for Claude TUI input: the target, a gate checked before every
-//! pane mutation, and typed outcomes. Only a confirmed tmux session takes keys.
+//! pane mutation, and typed outcomes. A confirmed tmux session takes keys; a recorded
+//! Herdr pane takes them only through its own gate.
 
 use std::process::Output;
 
@@ -94,18 +95,22 @@ use super::input::{
     prompt_marker_confirms_prompt_ready, prompt_readiness_snapshot_from_capture,
 };
 use super::startup_dialog::detect_claude_startup_dialog;
+use crate::db::dispatched_sessions::hosted_execution::HostedExecution;
 use crate::services::platform::tmux;
 use crate::services::provider::session_probe::SessionLiveness;
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::session_host::{
-    HostKey, HostKind, ResolvedSessionTarget, TargetHost, TmuxHost,
+    HerdrGateRefusal, HerdrMutation, HerdrTarget, HostError, HostKey, HostKind, HostMutation,
+    ResolvedSessionTarget, TargetHost, TmuxHost, herdr_endpoints,
 };
 use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputTarget {
-    /// A confirmed tmux session, the only target that takes keys.
+    /// A confirmed tmux session.
     Tmux(String),
+    /// A recorded Herdr pane; it takes keys only through its own gate.
+    Herdr(HerdrTarget),
     Refused(InputRefusal),
 }
 
@@ -115,6 +120,7 @@ pub(crate) enum InputRefusal {
     Unknown,
     Conflict,
     IdentityMismatch,
+    Herdr(HerdrGateRefusal),
 }
 
 impl InputTarget {
@@ -124,18 +130,55 @@ impl InputTarget {
         Self::Tmux(session_name.to_string())
     }
 
-    /// Resolved host evidence; Unknown and Conflict never become tmux.
+    /// Resolved host evidence; Unknown and Conflict never become tmux. Without its stored
+    /// execution a Herdr pane has no gate, so it is refused.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_session_target(target: &ResolvedSessionTarget) -> Self {
-        match &target.host {
+        Self::from_host(&target.host, |_| {
+            Self::Refused(InputRefusal::Unsupported(HostKind::Herdr))
+        })
+    }
+
+    /// Resolved evidence with the row's stored execution: a Herdr pane becomes a target only
+    /// on a registered local endpoint that holds that execution, before any IO.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_hosted_target(
+        target: &ResolvedSessionTarget,
+        stored: &HostedExecution,
+    ) -> Self {
+        Self::from_host(&target.host, |pane| {
+            match herdr_endpoints().target(stored) {
+                Some(herdr) if herdr.pane_id() == pane => Self::Herdr(herdr),
+                Some(_) => Self::Refused(InputRefusal::Conflict),
+                None => Self::Refused(InputRefusal::Unsupported(HostKind::Herdr)),
+            }
+        })
+    }
+
+    fn from_host(host: &TargetHost, herdr: impl FnOnce(&str) -> Self) -> Self {
+        match host {
             TargetHost::Known {
                 kind: HostKind::Tmux,
                 name,
                 ..
             } => Self::Tmux(name.clone()),
+            TargetHost::Known {
+                kind: HostKind::Herdr,
+                name,
+                ..
+            } => herdr(name),
             TargetHost::Known { kind, .. } => Self::Refused(InputRefusal::Unsupported(*kind)),
             TargetHost::Unknown(_) => Self::Refused(InputRefusal::Unknown),
             TargetHost::Conflict { .. } => Self::Refused(InputRefusal::Conflict),
+        }
+    }
+
+    /// The session a tmux-only path may drive; a Herdr pane is not one.
+    pub(crate) fn tmux_session(&self) -> Result<&str, InputRefusal> {
+        match self {
+            Self::Tmux(session) => Ok(session),
+            Self::Herdr(_) => Err(InputRefusal::Unsupported(HostKind::Herdr)),
+            Self::Refused(refusal) => Err(*refusal),
         }
     }
 
@@ -157,6 +200,30 @@ impl InputTarget {
 /// Checked before every pane mutation; the execution validator implements it.
 pub(crate) trait MutationGate {
     fn admit(&self, session: &str) -> Result<(), InputRefusal>;
+    /// A cancel key only stops work; a gate may admit it where it admits no other input.
+    fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
+        self.admit(session)
+    }
+}
+
+/// Herdr's gate judges each write and pins the judgment for the send right after it.
+impl MutationGate for HerdrTarget {
+    fn admit(&self, session: &str) -> Result<(), InputRefusal> {
+        self.admit_as(session, HerdrMutation::Input)
+    }
+
+    fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
+        self.admit_as(session, HerdrMutation::Cancel)
+    }
+}
+
+impl HerdrTarget {
+    fn admit_as(&self, session: &str, mutation: HerdrMutation) -> Result<(), InputRefusal> {
+        if session != self.pane_id() {
+            return Err(InputRefusal::Conflict);
+        }
+        self.pin(mutation).map_err(InputRefusal::Herdr)
+    }
 }
 
 /// Legacy tmux keeps no stored execution evidence to re-check, so it admits.
@@ -232,6 +299,77 @@ impl InputTransport for TmuxInput {
     }
 }
 
+/// Input to a Herdr pane: each write goes out under the judgment its gate pinned just
+/// before it, and retire kills nothing.
+pub(crate) struct HerdrInput<'a> {
+    target: &'a HerdrTarget,
+    buffers: std::collections::HashMap<String, String>,
+}
+
+impl<'a> HerdrInput<'a> {
+    pub(crate) fn new(target: &'a HerdrTarget) -> Self {
+        Self {
+            target,
+            buffers: Default::default(),
+        }
+    }
+}
+
+/// A Herdr write as the executor's process-shaped result: only a confirmed write succeeds.
+fn herdr_written(result: Result<HostMutation, HostError>) -> Result<Output, String> {
+    match result {
+        Ok(HostMutation::Confirmed) => Ok(Output {
+            status: Default::default(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }),
+        Ok(HostMutation::Refused(refusal)) => Err(format!("herdr input refused: {refusal:?}")),
+        Ok(HostMutation::Indeterminate(detail)) => {
+            Err(format!("herdr input may have landed: {detail}"))
+        }
+        Err(error) => Err(format!("herdr input not sent: {error:?}")),
+    }
+}
+
+impl InputTransport for HerdrInput<'_> {
+    fn send_literal(&mut self, _session: &str, text: &str) -> Result<Output, String> {
+        herdr_written(self.target.send_text(text))
+    }
+
+    /// Kept here until its paste; nothing reaches the pane.
+    fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
+        self.buffers.insert(buffer.to_string(), text.to_string());
+        herdr_written(Ok(HostMutation::Confirmed))
+    }
+
+    fn paste_buffer(&mut self, _s: &str, buffer: &str, _delete: bool) -> Result<Output, String> {
+        let text = self.buffers.remove(buffer);
+        let text = text.ok_or_else(|| format!("herdr paste of unknown buffer {buffer}"))?;
+        herdr_written(self.target.send_paste(&text))
+    }
+
+    fn send_keys(&mut self, _session: &str, keys: &[HostKey]) -> Result<Output, String> {
+        herdr_written(self.target.send_keys(keys))
+    }
+
+    fn capture(&mut self, _session: &str, scroll_back: i32) -> Option<String> {
+        self.target.capture(scroll_back)
+    }
+
+    fn pane_alive(&mut self, _session: &str) -> bool {
+        self.target.execution_alive()
+    }
+
+    fn present(&mut self, _session: &str) -> bool {
+        self.target.present()
+    }
+
+    /// Herdr has no kill here; the pane and its execution stay as they are.
+    fn retire(&mut self, session: &str, reason_code: &str, _reason: &str) {
+        tracing::warn!(pane = session, reason_code, "herdr pane retire refused");
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static INJECTED: std::cell::RefCell<Option<Box<dyn InputTransport>>> =
@@ -302,6 +440,7 @@ pub(crate) fn run_plan(
 ) -> InputRun {
     let session = match target {
         InputTarget::Tmux(session) => session.as_str(),
+        InputTarget::Herdr(herdr) => herdr.pane_id(),
         InputTarget::Refused(refusal) => return InputRun::Refused(*refusal),
     };
     let mut plan = Plan {
@@ -344,7 +483,7 @@ impl Plan<'_> {
             }
             TuiInputAction::PasteBuffer(text) => {
                 let buffer = format!("agentdesk-tui-input-{}", uuid::Uuid::new_v4());
-                self.admit()?;
+                self.admit(false)?;
                 self.send(action, Box::new(|t| t.load_buffer(&buffer, text)))?;
                 self.check_cancel()?;
                 self.mutate(action, Box::new(|t| t.paste_buffer(session, &buffer, true)))?;
@@ -381,8 +520,8 @@ impl Plan<'_> {
         Ok(())
     }
 
-    fn admit(&self) -> Result<(), InputRun> {
-        admit_after(self.gate, self.session, self.confirmed)
+    fn admit(&self, cancel: bool) -> Result<(), InputRun> {
+        admit_after(self.gate, self.session, self.confirmed, cancel)
     }
 
     fn send(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
@@ -395,15 +534,25 @@ impl Plan<'_> {
     }
 
     fn mutate(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
-        self.admit()?;
+        self.admit(matches!(action, TuiInputAction::Escape))?;
         self.send(action, send)?;
         self.confirmed += 1;
         Ok(())
     }
 }
 
-fn admit_after(gate: &dyn MutationGate, session: &str, confirmed: usize) -> Result<(), InputRun> {
-    gate.admit(session).map_err(|refusal| match confirmed {
+fn admit_after(
+    gate: &dyn MutationGate,
+    session: &str,
+    confirmed: usize,
+    cancel: bool,
+) -> Result<(), InputRun> {
+    let admitted = if cancel {
+        gate.admit_cancel(session)
+    } else {
+        gate.admit(session)
+    };
+    admitted.map_err(|refusal| match confirmed {
         0 => InputRun::Refused(refusal),
         confirmed => InputRun::Indeterminate {
             confirmed,
@@ -446,7 +595,8 @@ impl<'a> KeyGroups<'a> {
     }
 
     pub(crate) fn send(&mut self, keys: &[HostKey], name: &str) -> Result<(), InputRun> {
-        admit_after(self.gate, self.session, self.confirmed)?;
+        let cancel = !keys.is_empty() && keys.iter().all(|key| *key == HostKey::Escape);
+        admit_after(self.gate, self.session, self.confirmed, cancel)?;
         let session = self.session;
         with_transport(|transport| transport.send_keys(session, keys))
             .and_then(|output| ensure_named_success(output, name))
@@ -470,6 +620,18 @@ fn ensure_named_success(output: Output, name: &str) -> Result<(), String> {
     } else {
         Err(format!("tmux send {name} failed: {stderr}"))
     }
+}
+
+/// A plan on a Herdr pane: its own gate admits each write and pins the server for it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn run_herdr(
+    target: &HerdrTarget,
+    actions: &[TuiInputAction],
+    cancel_token: Option<&CancelToken>,
+) -> InputRun {
+    let mut input = HerdrInput::new(target);
+    let plan_target = InputTarget::Herdr(target.clone());
+    run_plan(&plan_target, target, &mut input, actions, cancel_token)
 }
 
 /// A plan on the legacy tmux session of `session_name`.
@@ -589,7 +751,14 @@ pub(crate) fn classify(
     }
     match liveness {
         SessionLiveness::Alive => {}
-        SessionLiveness::Missing => return HostInputOutcome::LegacyRecreateEligible,
+        SessionLiveness::Missing if matches!(target, InputTarget::Tmux(_)) => {
+            return HostInputOutcome::LegacyRecreateEligible;
+        }
+        SessionLiveness::Missing => {
+            return HostInputOutcome::Refused(InputRefusal::Herdr(
+                HerdrGateRefusal::PaneUnverified,
+            ));
+        }
         SessionLiveness::Unknown | SessionLiveness::ProbeFailed => {
             return HostInputOutcome::Refused(InputRefusal::Unknown);
         }
