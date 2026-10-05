@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::binding::BindingEvents;
-use super::deliver::{ChannelWriter, Step};
+use super::deliver::{ChannelWriter, Step, StopCause};
 use super::pieces::{Derived, UnitDeriver};
 use super::rotation::Sources;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
@@ -25,7 +25,7 @@ pub fn spawn_if_enabled<P, L, A, B>(
     bindings: Arc<B>,
     stop: watch::Receiver<bool>,
     resumed: watch::Sender<bool>,
-) -> Option<JoinHandle<()>>
+) -> Option<JoinHandle<Option<StopCause>>>
 where
     P: DiscordPort,
     L: DeliveryLease + 'static,
@@ -43,15 +43,16 @@ struct Actor<P, L, A, B> {
     sources: Sources<B>,
 }
 
-/// Returns when the channel stops or `stop` turns true or closes. `resumed` turns true once the
-/// spool and sources are recovered, and closes when the actor returns.
+/// Returns when the channel stops, with why, or when `stop` turns true or closes. `resumed` turns
+/// true once the spool and sources are recovered, and closes when the actor returns.
 pub async fn run_channel<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
     mut stop: watch::Receiver<bool>,
     resumed: watch::Sender<bool>,
-) where
+) -> Option<StopCause>
+where
     P: DiscordPort,
     L: DeliveryLease,
     A: AlarmSink,
@@ -79,13 +80,14 @@ pub async fn run_channel<P, L, A, B>(
         actor.read_sources();
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
-            return;
+            break;
         }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
-            changed = stop.changed() => if changed.is_err() { return },
+            changed = stop.changed() => if changed.is_err() { break },
         }
     }
+    actor.writer.stop_cause().cloned()
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {

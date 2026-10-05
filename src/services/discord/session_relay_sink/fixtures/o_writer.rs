@@ -14,7 +14,7 @@ use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStor
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
 };
-use crate::services::tui_o::writer::deliver::ChannelWriter;
+use crate::services::tui_o::writer::deliver::{ChannelWriter, StopCause};
 use crate::services::tui_o::writer::{
     AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm, WriterConfig,
     actor,
@@ -163,7 +163,7 @@ impl WriterFixture {
         }
     }
 
-    pub(super) fn start(&self) -> (watch::Sender<bool>, JoinHandle<()>) {
+    pub(super) fn start(&self) -> (watch::Sender<bool>, JoinHandle<Option<StopCause>>) {
         let (stop, stopped) = watch::channel(false);
         let (gate, port, alarms) = (self.gate.clone(), self.port.clone(), self.alarms.clone());
         let writer = ChannelWriter::new(self.channel(), gate, port, FakeLease, alarms);

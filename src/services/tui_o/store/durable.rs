@@ -36,6 +36,8 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 /// `create_new` never opens, and so never truncates, an inode that is already published.
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    fault::strike(path, fault::Step::Write)?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
@@ -73,6 +75,11 @@ pub(super) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 pub(super) fn append_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().append(true).open(path)?;
+    #[cfg(test)]
+    if let Some((kept, error)) = fault::append(path, bytes) {
+        file.write_all(kept)?;
+        return Err(error);
+    }
     file.write_all(bytes)?;
     file.sync_data()
 }
@@ -92,6 +99,174 @@ pub(super) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, S
             .map_err(|error| damage(format!("{}: {error}", path.display()))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Test builds: store writes under a directory fail as a full disk would, and recovery attempts
+/// and ledger withdrawals under it are recorded.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    use tokio::time::Instant;
+
+    /// The store step a planted failure strikes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Step {
+        /// A synced append that first writes none, half or all of its bytes.
+        Append(Keep),
+        /// A temp file written for a create or a replace.
+        Write,
+        /// Cutting a withdrawn ledger line, before the cut or before its sync.
+        Cut,
+        CutSync,
+        /// Recovering the channel's spool and cursors.
+        SpoolRecovery,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Keep {
+        Nothing,
+        Half,
+        All,
+    }
+
+    struct Plant {
+        id: u64,
+        under: PathBuf,
+        step: Step,
+        kind: io::ErrorKind,
+        /// Strikes left; `None` strikes until the plant is dropped.
+        left: Option<usize>,
+    }
+
+    #[derive(Default)]
+    struct Registry {
+        next: u64,
+        plants: Vec<Plant>,
+        watched: Vec<(u64, PathBuf, Vec<Instant>, usize)>,
+    }
+
+    static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
+        next: 0,
+        plants: Vec::new(),
+        watched: Vec::new(),
+    });
+
+    fn registry() -> MutexGuard<'static, Registry> {
+        REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Removes its plant when dropped: the space came back.
+    pub(crate) struct Planted(u64);
+
+    impl Drop for Planted {
+        fn drop(&mut self) {
+            registry().plants.retain(|plant| plant.id != self.0);
+        }
+    }
+
+    /// Fails `step` under `under` with `kind` until dropped, or only `times` times.
+    pub(crate) fn plant(
+        under: &Path,
+        step: Step,
+        kind: io::ErrorKind,
+        times: Option<usize>,
+    ) -> Planted {
+        let mut registry = registry();
+        registry.next += 1;
+        let id = registry.next;
+        let (under, left) = (under.to_path_buf(), times);
+        registry.plants.push(Plant {
+            id,
+            under,
+            step,
+            kind,
+            left,
+        });
+        Planted(id)
+    }
+
+    fn take(path: &Path, wanted: impl Fn(Step) -> bool) -> Option<(Step, io::Error)> {
+        let mut registry = registry();
+        let plant = registry.plants.iter_mut().find(|plant| {
+            path.starts_with(&plant.under) && wanted(plant.step) && plant.left != Some(0)
+        })?;
+        if let Some(left) = plant.left.as_mut() {
+            *left -= 1;
+        }
+        Some((plant.step, io::Error::from(plant.kind)))
+    }
+
+    pub(crate) fn strike(path: &Path, step: Step) -> io::Result<()> {
+        take(path, |planted| planted == step).map_or(Ok(()), |(_, error)| Err(error))
+    }
+
+    /// The bytes a planted append writes before it fails, and the failure.
+    pub(crate) fn append<'a>(path: &Path, bytes: &'a [u8]) -> Option<(&'a [u8], io::Error)> {
+        let (step, error) = take(path, |step| matches!(step, Step::Append(_)))?;
+        let kept = match step {
+            Step::Append(Keep::Nothing) => &bytes[..0],
+            Step::Append(Keep::Half) => &bytes[..bytes.len() / 2],
+            _ => bytes,
+        };
+        Some((kept, error))
+    }
+
+    /// Records recovery attempts and withdrawals under `under` until dropped.
+    pub(crate) struct Watch(u64);
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            registry().watched.retain(|(id, ..)| *id != self.0);
+        }
+    }
+
+    impl Watch {
+        pub(crate) fn opens(&self) -> Vec<Instant> {
+            let registry = registry();
+            let watched = registry.watched.iter().find(|(id, ..)| *id == self.0);
+            watched
+                .map(|(_, _, opens, _)| opens.clone())
+                .unwrap_or_default()
+        }
+
+        pub(crate) fn withdrawals(&self) -> usize {
+            let registry = registry();
+            let watched = registry.watched.iter().find(|(id, ..)| *id == self.0);
+            watched.map_or(0, |(.., withdrawn)| *withdrawn)
+        }
+    }
+
+    pub(crate) fn watch(under: &Path) -> Watch {
+        let mut registry = registry();
+        registry.next += 1;
+        let id = registry.next;
+        registry
+            .watched
+            .push((id, under.to_path_buf(), Vec::new(), 0));
+        Watch(id)
+    }
+
+    pub(crate) fn note_open(dir: &Path) {
+        let now = Instant::now();
+        let mut registry = registry();
+        let watched = registry
+            .watched
+            .iter_mut()
+            .filter(|(_, under, ..)| dir.starts_with(under));
+        watched.for_each(|(_, _, opens, _)| opens.push(now));
+    }
+
+    pub(crate) fn note_withdrawn(path: &Path) {
+        let mut registry = registry();
+        let watched = registry
+            .watched
+            .iter_mut()
+            .filter(|(_, under, ..)| path.starts_with(under));
+        watched.for_each(|(.., withdrawn)| *withdrawn += 1);
     }
 }
 

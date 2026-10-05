@@ -10133,6 +10133,7 @@ services::tui_input::transition_fixture_tests::uncertain_commit_whole_and_cut_re
 services::tui_input::transition_tests::supported::staged_order_survives_checkpoint_handback
 services::tui_input::transition_tests::supported::staged_order_survives_commit_and_checkpoint
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
+services::tui_o::alarm::tests::a_pending_resume_shows_until_settled_and_a_cleared_halt_leaves_every_other_reason
 services::tui_o::alarm::tests::a_released_channel_has_its_own_reason_apart_from_halted
 services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
@@ -10228,6 +10229,7 @@ services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published
 services::tui_o::store::ledger::lock_tests::operator_child
 services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
 services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation
+services::tui_o::store::ledger::tests::recovery_withdraws_only_a_whole_last_prepared_its_evidence_names
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
 services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
 services::tui_o::store::rotation::tests::rotation_fields_are_invisible_to_a_reader_of_the_plain_source_map
@@ -10278,6 +10280,7 @@ services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
 services::tui_o::writer::tests::a_restarted_writer_recovers_the_newest_post_from_its_ledger
+services::tui_o::writer::tests::a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_posted_it
 services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
@@ -10339,6 +10342,16 @@ services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_pro
 services::tui_o::writer::tests::actor::host_start::reclaim::an_adopted_resume_holds_its_rows_until_an_operator_resolves
 services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
+services::tui_o::writer::tests::actor::host_start::resume::a_permanent_stop_is_never_resumed
+services::tui_o::writer::tests::actor::host_start::resume::a_recovery_that_fails_again_keeps_the_wait_growing
+services::tui_o::writer::tests::actor::host_start::resume::a_resume_that_halts_again_waits_longer_up_to_the_cap_until_a_steady_run_starts_over
+services::tui_o::writer::tests::actor::host_start::resume::a_slow_post_releases_its_lease_before_the_next_writer
+services::tui_o::writer::tests::actor::host_start::resume::a_withdrawal_that_fails_keeps_its_evidence_and_starts_no_writer_until_a_retry_recovers
+services::tui_o::writer::tests::actor::host_start::resume::a_withdrawn_piece_whose_post_went_out_is_settled_from_history_not_withdrawn_again
+services::tui_o::writer::tests::actor::host_start::resume::an_out_of_space_spool_append_halts_then_resumes_in_process_and_posts_each_unit_once
+services::tui_o::writer::tests::actor::host_start::resume::only_a_transient_store_io_halt_is_resumable
+services::tui_o::writer::tests::actor::host_start::resume::repeated_whole_ledger_failures_never_spend_an_unposted_piece
+services::tui_o::writer::tests::actor::host_start::resume::store_damage_found_while_resuming_holds_the_channel_without_more_attempts
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source
