@@ -42,6 +42,7 @@ use url::Url;
 mod attachments;
 mod busy_retry;
 mod control;
+mod foreign_row;
 mod goal_lifecycle;
 mod headless_turn;
 mod intake_turn;

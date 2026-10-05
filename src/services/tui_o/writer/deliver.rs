@@ -15,7 +15,7 @@ use super::pieces::{Derived, PieceWork};
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::ChannelStore;
-use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceOutcome};
+use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceOutcome, Unsent};
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -88,8 +88,20 @@ enum Started {
 }
 
 enum Refusal {
-    Store(String),
+    /// The `Prepared` append failed, so no POST was created for it.
+    Store {
+        detail: String,
+        unsent: Option<Box<Unsent>>,
+    },
     Violation(String),
+}
+
+/// A writer's first stop, the store I/O error behind it, and a prepared piece it never posted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopCause {
+    pub alarm: WriterAlarm,
+    pub io: Option<std::io::ErrorKind>,
+    pub unsent: Option<Unsent>,
 }
 
 /// Rides in the POST task so the delivery lease is released only once that task can no longer
@@ -114,7 +126,7 @@ pub struct ChannelWriter<P, L, A> {
     port: Arc<P>,
     lease: L,
     alarms: A,
-    stopped: bool,
+    stopped: Option<StopCause>,
     paused: bool,
 }
 
@@ -128,7 +140,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         alarms: A,
     ) -> Self {
         let channel = store.init().channel;
-        let (stopped, paused) = (false, false);
+        let (stopped, paused) = (None, false);
         let mut writer = Self {
             channel,
             store,
@@ -163,7 +175,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.stopped
+        self.stopped.is_some()
+    }
+
+    pub fn stop_cause(&self) -> Option<&StopCause> {
+        self.stopped.as_ref()
     }
 
     pub fn alarm(&self, alarm: WriterAlarm) {
@@ -176,8 +192,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     /// Stops the channel once; only the first stop raises its alarm.
     pub fn stop(&mut self, alarm: WriterAlarm) -> Step {
-        if !self.stopped {
-            self.stopped = true;
+        self.stop_with(alarm, None)
+    }
+
+    /// The store's I/O error is read now, as the error that caused the first stop is just behind it.
+    fn stop_with(&mut self, alarm: WriterAlarm, unsent: Option<Unsent>) -> Step {
+        if self.stopped.is_none() {
+            let (kept, io) = (alarm.clone(), self.store.io_failure());
+            self.stopped = Some(StopCause {
+                alarm: kept,
+                io,
+                unsent,
+            });
             self.alarms.raise(self.channel, alarm);
         }
         Step::Stopped
@@ -206,7 +232,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     pub async fn deliver(&mut self, item: &Derived) -> Step {
-        if self.stopped {
+        if self.is_stopped() {
             return Step::Stopped;
         }
         if let Err(step) = self.settle_open().await {
@@ -255,7 +281,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         // transition; the rest runs outside the lock.
         let admitted = poll_fn(|cx| {
             Poll::Ready(gate.admit(|epoch| {
-                let prepared = LedgerEntry::Prepared {
+                let prepared = || LedgerEntry::Prepared {
                     serial,
                     unit_key: piece.unit_key.clone(),
                     piece_index: piece.index,
@@ -263,9 +289,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     anchor_id,
                     epoch,
                 };
+                // Returning here comes before `port.post`, so this piece's POST was never created.
                 store
-                    .append_ledger(prepared)
-                    .map_err(|error| Refusal::Store(format!("{error:?}")))?;
+                    .append_ledger(prepared())
+                    .map_err(|error| Refusal::Store {
+                        detail: format!("{error:?}"),
+                        unsent: Unsent::new(prepared()).map(Box::new),
+                    })?;
                 if let Some(detail) = store.ledger().violation() {
                     return Err(Refusal::Violation(detail.to_string()));
                 }
@@ -284,7 +314,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }
                 return Step::NoGateway;
             }
-            Some(Err(Refusal::Store(detail))) => return self.stop(WriterAlarm::Halted { detail }),
+            Some(Err(Refusal::Store { detail, unsent })) => {
+                return self.stop_with(WriterAlarm::Halted { detail }, unsent.map(|u| *u));
+            }
             Some(Err(Refusal::Violation(detail))) => {
                 return self.stop(WriterAlarm::LedgerViolation { detail });
             }

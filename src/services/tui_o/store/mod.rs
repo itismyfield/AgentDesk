@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use super::shadow::SourceId;
 use crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES;
-use ledger::{LedgerEntry, LedgerState};
+use ledger::{LedgerEntry, LedgerState, Unsent};
+
+#[cfg(test)]
+pub(crate) use durable::fault;
 
 pub const STORE_DIR_NAME: &str = "o_store";
 pub const ERA_FILE: &str = "o_era";
@@ -68,6 +71,14 @@ pub enum HaltReason {
 pub struct Halt {
     pub reason: HaltReason,
     pub detail: String,
+    /// The I/O error behind the halt, so a caller can tell a passing condition from damage.
+    pub io: Option<io::ErrorKind>,
+}
+
+/// I/O errors a later attempt may not meet: no space, or a call that was interrupted or would block.
+pub fn transient_io(kind: io::ErrorKind) -> bool {
+    use io::ErrorKind::{Interrupted, QuotaExceeded, StorageFull, WouldBlock};
+    matches!(kind, StorageFull | QuotaExceeded | Interrupted | WouldBlock)
 }
 
 #[derive(Debug)]
@@ -82,7 +93,11 @@ pub enum StoreError {
 
 impl StoreError {
     pub(super) fn halt(reason: HaltReason, detail: String) -> Self {
-        Self::Halt(Halt { reason, detail })
+        Self::Halt(Halt {
+            reason,
+            detail,
+            io: None,
+        })
     }
 }
 
@@ -104,6 +119,10 @@ impl From<StoreError> for Halt {
             StoreError::Halt(halt) => halt,
             other => Self {
                 reason: HaltReason::StoreDamage,
+                io: match &other {
+                    StoreError::Io(error) => Some(error.kind()),
+                    _ => None,
+                },
                 detail: format!("{other:?}"),
             },
         }
@@ -241,6 +260,18 @@ impl OStore {
 
     /// Recovers one channel; `None` means it has no store and is not an era channel.
     pub fn open_channel(&self, era: &OEra, channel: u64) -> Result<Option<ChannelStore>, Halt> {
+        self.open_channel_withdrawing(era, channel, None)
+    }
+
+    /// Recovers as `open_channel` does, first taking back `unsent` if it is the ledger's last line.
+    pub fn open_channel_withdrawing(
+        &self,
+        era: &OEra,
+        channel: u64,
+        unsent: Option<&Unsent>,
+    ) -> Result<Option<ChannelStore>, Halt> {
+        #[cfg(test)]
+        durable::fault::note_open(&self.channel_dir(channel));
         let init = match self.read_init(channel)? {
             Some(init) => init,
             None if era.initial_channels.contains(&channel) => {
@@ -252,7 +283,19 @@ impl OStore {
         for swept in [dir.clone(), dir.join(SPOOL_DIR), dir.join(CURSOR_DIR)] {
             durable::sweep_tmp(&swept).map_err(StoreError::from)?;
         }
-        let ledger = ledger::recover(&dir.join(LEDGER_FILE), init.initial_anchor)?;
+        let (ledger, withdrew) =
+            ledger::recover_withdrawing(&dir.join(LEDGER_FILE), init.initial_anchor, unsent)?;
+        if withdrew {
+            let serial = unsent.map(Unsent::serial);
+            tracing::warn!(
+                channel,
+                serial,
+                "[tui_o] withdrew a prepared entry whose append failed before its POST"
+            );
+        }
+        #[cfg(test)]
+        durable::fault::strike(&dir, durable::fault::Step::SpoolRecovery)
+            .map_err(StoreError::from)?;
         let sources = spool::recover_sources(&dir, &init, &ledger)?;
         let (segment_max, spool_cap) = (spool::SEGMENT_MAX_BYTES, spool::SPOOL_CAP_BYTES);
         Ok(Some(ChannelStore {
@@ -262,7 +305,7 @@ impl OStore {
             sources,
             segment_max,
             spool_cap,
-            failed: false,
+            failed: None,
         }))
     }
 }
@@ -275,7 +318,8 @@ pub struct ChannelStore {
     sources: BTreeMap<String, spool::SourceSpool>,
     segment_max: u64,
     spool_cap: u64,
-    failed: bool,
+    /// The kind of the first I/O error, which leaves the store refusing writes.
+    failed: Option<io::ErrorKind>,
 }
 
 impl ChannelStore {
@@ -285,6 +329,11 @@ impl ChannelStore {
 
     pub fn ledger(&self) -> &LedgerState {
         &self.ledger
+    }
+
+    /// The I/O error that made the store refuse writes, if any.
+    pub fn io_failure(&self) -> Option<io::ErrorKind> {
+        self.failed
     }
 
     /// Delivery entries only; `SpoolGc` is written solely by the GC path that deletes the segment.
@@ -306,13 +355,15 @@ impl ChannelStore {
         &mut self,
         op: impl FnOnce(&mut Self) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        if self.failed {
+        if self.failed.is_some() {
             return Err(StoreError::Rejected(
                 "reopen the channel after an I/O error".into(),
             ));
         }
         let result = op(self);
-        self.failed = matches!(result, Err(StoreError::Io(_)));
+        if let Err(StoreError::Io(error)) = &result {
+            self.failed = Some(error.kind());
+        }
         result
     }
 }

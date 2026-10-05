@@ -68,6 +68,21 @@ impl AlarmHealth {
         locked(&self.active).remove(&reason);
     }
 
+    fn set_resume_pending(&self, channel: u64, pending: bool) {
+        let reason = format!("tui_o:{RESUME_PENDING}:{channel}");
+        let mut active = locked(&self.active);
+        if pending {
+            active.insert(reason);
+        } else {
+            active.remove(&reason);
+        }
+    }
+
+    /// A writer recovered in process replaces the halted one, so its halt is no longer in force.
+    fn clear_halted(&self, channel: u64) {
+        locked(&self.active).remove(&format!("tui_o:halted:{channel}"));
+    }
+
     /// Conditions in force at `now`; NotFound frequency is re-counted against the window here.
     pub(crate) fn current_at(&self, now: Instant) -> Vec<String> {
         let mut current = locked(&self.active).clone();
@@ -128,6 +143,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
 }
 
 const NOT_FOUND_FREQUENT: &str = "not_found_frequent";
+const RESUME_PENDING: &str = "resume_pending";
 const PAUSED_NO_GATEWAY: &str = "paused_no_gateway";
 
 /// The writer's alarm sink: each (channel, kind) alarms once, NotFound only past its frequency.
@@ -198,6 +214,14 @@ impl AlarmSink for AlarmRouter {
             locked(&self.health.active).remove(&format!("tui_o:too_many_readers:{channel}"));
         }
     }
+
+    fn resume_pending(&self, channel: u64, pending: bool) {
+        self.health.set_resume_pending(channel, pending);
+    }
+
+    fn halt_cleared(&self, channel: u64) {
+        self.health.clear_halted(channel);
+    }
 }
 
 impl AlarmSink for Arc<AlarmRouter> {
@@ -207,6 +231,14 @@ impl AlarmSink for Arc<AlarmRouter> {
 
     fn reconcile_reader_count(&self, channel: u64, count: usize) {
         self.as_ref().reconcile_reader_count(channel, count);
+    }
+
+    fn resume_pending(&self, channel: u64, pending: bool) {
+        self.as_ref().resume_pending(channel, pending);
+    }
+
+    fn halt_cleared(&self, channel: u64) {
+        self.as_ref().halt_cleared(channel);
     }
 }
 
@@ -426,5 +458,42 @@ mod tests {
         }
         assert_eq!(health.current_at(again + Duration::from_secs(2)), frequent);
         assert_eq!(sent(&recorder).len(), 1);
+    }
+
+    #[test]
+    fn a_pending_resume_shows_until_settled_and_a_cleared_halt_leaves_every_other_reason() {
+        let (router, recorder, health) = router(Some(ALERT));
+        // The gateway host holds its router in an `Arc`, so the reports must reach it through one.
+        let router = Arc::new(router);
+        let halted = || WriterAlarm::Halted {
+            detail: "spool append".into(),
+        };
+        router.raise(FAILING, halted());
+        router.raise(FAILING + 1, halted());
+        router.raise(FAILING, WriterAlarm::SpoolFull);
+        let messages = sent(&recorder);
+        router.resume_pending(FAILING, true);
+        let reasons = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| format!("tui_o:{name}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            health.current_at(Instant::now()),
+            reasons(&[
+                "halted:42",
+                "halted:43",
+                "resume_pending:42",
+                "spool_full:42"
+            ])
+        );
+        router.halt_cleared(FAILING);
+        router.resume_pending(FAILING, false);
+        assert_eq!(
+            health.current_at(Instant::now()),
+            reasons(&["halted:43", "spool_full:42"])
+        );
+        assert_eq!(sent(&recorder), messages, "resume reports send nothing");
     }
 }

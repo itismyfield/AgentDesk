@@ -213,9 +213,13 @@ mod tests {
     }
 
     pub(super) async fn deliver(app: &Router, agent: &str, body: &str) -> (StatusCode, Value) {
+        post(app, &format!("/agents/{agent}/turn/deliver"), body).await
+    }
+
+    pub(super) async fn post(app: &Router, uri: &str, body: &str) -> (StatusCode, Value) {
         let request = Request::builder()
             .method(Method::POST)
-            .uri(format!("/agents/{agent}/turn/deliver"))
+            .uri(uri)
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .expect("request");
@@ -271,9 +275,53 @@ mod pg_tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::tests::{deliver, router};
+    use super::tests::{deliver, post, router};
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
+    use crate::services::discord::health::{
+        HealthRegistry, register_bot_auth_for_tests, seed_external_turn_row_for_tests,
+    };
+    use crate::services::provider::ProviderKind;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_external_tui_turn_row_is_busy_for_start_and_deliver_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let cc = 6_245_111_u64;
+        crate::db::agents::insert_agent_channels_for_tests(
+            &pool,
+            "busy-agent",
+            Some(&cc.to_string()),
+            None,
+        )
+        .await;
+        let registry = Arc::new(HealthRegistry::new());
+        register_bot_auth_for_tests(&registry, "claude", cc, Some(100), vec![200], false).await;
+        // The TUI-direct turn holds only its durable row; the mailbox stays free.
+        seed_external_turn_row_for_tests(&ProviderKind::Claude, cc);
+        let app = router(Some(pool), Some(registry));
+
+        let start = json!({"prompt": "status?"}).to_string();
+        let input = json!({"text": "status?", "author_discord_user_id": "200"}).to_string();
+        let (start_status, started) = post(&app, "/agents/busy-agent/turn/start", &start).await;
+        let (deliver_status, delivered) = deliver(&app, "busy-agent", &input).await;
+        let shape = |status: StatusCode, body: &Value, key: &str| {
+            let field = |name: &str| body[name].as_str().unwrap_or("-").to_string();
+            format!("{} {} {}", status.as_u16(), field(key), field("reason"))
+        };
+        let observed = [
+            shape(start_status, &started, "status"),
+            shape(deliver_status, &delivered, "delivery"),
+        ];
+        assert_eq!(
+            observed,
+            [
+                "409 conflict external_turn_active",
+                "200 queued external_turn_active"
+            ],
+            "{started} {delivered}"
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn target_and_author_gates_run_at_the_route_boundary_pg() {

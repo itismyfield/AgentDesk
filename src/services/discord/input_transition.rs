@@ -20,6 +20,10 @@ use crate::services::turn_orchestrator::PendingQueueItem;
 pub(in crate::services::discord) trait Effects {
     fn intake_outbox_open(&mut self) -> io::Result<bool>;
     fn evidence(&mut self, key: u64, payload: &Value) -> io::Result<MoveEvidence>;
+    /// Handback evidence for a ledger row; an adapter may judge the row's own attempt witness.
+    fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<MoveEvidence> {
+        self.evidence(key, &row.input)
+    }
     fn provider_alive(&mut self) -> io::Result<bool>;
     fn materialize_bundle(&mut self, upload: &Value) -> io::Result<Vec<(String, Vec<u8>)>>;
     fn enqueue(&mut self, key: u64, payload: &Value) -> io::Result<EnqueueOutcome>;
@@ -117,6 +121,10 @@ impl<E: Effects> Files<E> {
         Ok(files)
     }
 
+    pub fn effects_mut(&mut self) -> &mut E {
+        &mut self.effects
+    }
+
     fn population(&self) -> io::Result<super::input_runtime::fence::ClosedPopulationGuard> {
         super::input_runtime::fence::require_worker()
             .map_err(|failure| invalid(format!("input fence: {failure:?}")))?;
@@ -138,10 +146,7 @@ impl<E: Effects> Files<E> {
                 "discord_queued_placeholders",
                 &[DeletePhase::Accessories][..],
             ),
-            (
-                "discord_queue_exit_placeholder_clears",
-                &[DeletePhase::Accessories][..],
-            ),
+            // Exit-clear records owe a card deletion for an input already gone; they stay put.
         ] {
             for token in children(&self.root.join(name).join(provider))? {
                 if !fs::symlink_metadata(&token)?.file_type().is_dir() {
@@ -519,7 +524,7 @@ impl<E: Effects> Host for Files<E> {
         self.effects.start_actor()
     }
     fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<(bool, Composer)> {
-        let evidence = self.effects.evidence(key, &row.input)?;
+        let evidence = self.effects.reconcile(key, row)?;
         Ok((evidence.user_record, evidence.composer))
     }
     fn enqueue(&mut self, key: u64, row: &Row) -> io::Result<EnqueueOutcome> {

@@ -11,6 +11,7 @@ pub mod deliver;
 pub mod host;
 pub mod input_facts;
 pub mod pieces;
+pub mod resume;
 pub mod rotation;
 pub mod round_trip;
 pub mod switch;
@@ -156,6 +157,10 @@ pub enum WriterAlarm {
 pub trait AlarmSink: Send + Sync {
     fn raise(&self, channel: u64, alarm: WriterAlarm);
     fn reconcile_reader_count(&self, _channel: u64, _count: usize) {}
+    /// Whether the host will start the halted writer again after a wait.
+    fn resume_pending(&self, _channel: u64, _pending: bool) {}
+    /// The halt ended: a recovered writer is about to start in its place.
+    fn halt_cleared(&self, _channel: u64) {}
 }
 
 mod historical_hops;

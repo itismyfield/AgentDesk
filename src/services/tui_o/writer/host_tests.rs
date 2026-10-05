@@ -14,11 +14,23 @@ use chrono::{DateTime, TimeDelta};
 const OTHER: u64 = 8;
 
 #[derive(Clone, Default)]
-struct Raised(Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
+struct Raised(Arc<Mutex<Vec<(u64, WriterAlarm)>>>, Resumes);
+
+/// The host's resume reports, in order: `pending`, `settled` (no longer pending) and `cleared`.
+type Resumes = Arc<Mutex<Vec<(u64, &'static str)>>>;
 
 impl AlarmSink for Raised {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
         self.0.lock().unwrap().push((channel, alarm));
+    }
+
+    fn resume_pending(&self, channel: u64, pending: bool) {
+        let report = if pending { "pending" } else { "settled" };
+        self.1.lock().unwrap().push((channel, report));
+    }
+
+    fn halt_cleared(&self, channel: u64) {
+        self.1.lock().unwrap().push((channel, "cleared"));
     }
 }
 
@@ -64,6 +76,9 @@ struct TestIo {
     legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     busy: std::sync::atomic::AtomicBool,
     relaying: std::sync::atomic::AtomicBool,
+    /// Each lease handed to a new writer: when, how many writers still held one, and how many
+    /// piece leases were back by then.
+    leases: Mutex<Vec<(tokio::time::Instant, usize, usize)>>,
 }
 
 impl TestIo {
@@ -80,6 +95,7 @@ impl TestIo {
             legacy: Mutex::default(),
             busy: Default::default(),
             relaying: Default::default(),
+            leases: Mutex::default(),
         })
     }
 
@@ -108,6 +124,13 @@ impl HostIo for TestIo {
 
     fn lease(&self) -> Arc<FakeLease> {
         self.calls.lock().unwrap().push(("lease", 0));
+        // This handle and the harness's own are the two that outlive every writer.
+        let writers = Arc::strong_count(&self.lease) - 2;
+        let (at, back) = (
+            tokio::time::Instant::now(),
+            self.lease.released.load(Ordering::SeqCst),
+        );
+        self.leases.lock().unwrap().push((at, writers, back));
         Arc::clone(&self.lease)
     }
 
@@ -221,7 +244,8 @@ async fn only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned(
     assert_eq!(host(&harness, &io, true, &ready), 1);
     append(&path, &row("m1", "first"));
     polls(3).await;
-    let expected = [("port", 0), ("lease", 0), ("bindings", CHANNEL)];
+    // Bindings are read once per host; a lease is taken for each writer it starts.
+    let expected = [("port", 0), ("bindings", CHANNEL), ("lease", 0)];
     assert_eq!(io.calls(), expected, "the unselected channel gets nothing");
     assert!(
         !ready.is_ready(CHANNEL),
@@ -1122,6 +1146,10 @@ async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logge
 
 #[path = "deferred_tests.rs"]
 mod deferred;
+
+#[cfg(unix)]
+#[path = "resume_tests.rs"]
+mod resume;
 
 #[cfg(unix)]
 #[path = "reclaim_tests.rs"]
