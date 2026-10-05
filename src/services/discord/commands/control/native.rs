@@ -136,7 +136,7 @@ fn switched_on() -> Option<Arc<dyn NativeClearEffects>> {
 /// A clear whose target, host clearance and canonical baseline were all captured before its
 /// boundary is written.
 pub(super) enum NativeSelection {
-    Tmux(TmuxSelection),
+    Tmux(Box<TmuxSelection>),
     /// A Herdr pane's planned clear and the session key whose selector it clears and saves.
     #[cfg(unix)]
     Herdr(Box<crate::services::session_host::HerdrClearPlan>, String),
@@ -296,12 +296,12 @@ pub(super) async fn select(
     let cleared = cleared.await?;
     let capture = crate::services::tui_prompt_dedupe::native_clear::capture_live_clear;
     let waiter = capture(channel_id.get(), tmux)?;
-    Some(NativeSelection::Tmux(TmuxSelection {
+    Some(NativeSelection::Tmux(Box::new(TmuxSelection {
         effects,
         waiter,
         cleared,
         session_key,
-    }))
+    })))
 }
 
 /// Runs the selected clear; the worker owns `guard` until the outcome and its completion mark are
@@ -322,7 +322,7 @@ pub(super) async fn complete(
                 pool,
                 channel_id,
                 generation,
-                selection,
+                selection: *selection,
             };
             start_native_clear(host, ClearAdmission::Native, guard).await
         }
