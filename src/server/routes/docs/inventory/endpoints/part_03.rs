@@ -20,7 +20,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/agents/{id}/turn/start",
             "agents",
-            "Start a headless agent turn from the agent primary mailbox/session. Returns conflict when another turn is already active for that agent mailbox.",
+            "Start a headless agent turn from the agent primary mailbox/session. Returns 409 conflict when another turn is already active for that agent mailbox, when a turn that never claimed the mailbox (TUI-direct, adopted or monitor) still holds the channel (reason=external_turn_active), or when another turn's durable inflight row holds the channel by the time this turn would create its own. A 409 never starts the turn; use turn/deliver to queue the input instead.",
         )
         .with_params([
             ("id", path_param("Agent id")),
@@ -97,7 +97,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/agents/{id}/turn/deliver",
             "agents",
-            "Deliver a human's external message (for example an iMessage reply). Idle mailbox: starts a turn owned by the author (delivery=started). Otherwise queues it on the channel mailbox with the reason the start was refused (delivery=queued; reason turn_active, background_turn or session_transition). Only the bot's owner_user_id or allowed_user_ids may deliver; allow_all_users is not honored here.",
+            "Deliver a human's external message (for example an iMessage reply). Idle mailbox: starts a turn owned by the author (delivery=started). Otherwise queues it on the channel mailbox with the reason the start was refused (delivery=queued; reason turn_active, background_turn, external_turn_active or session_transition). external_turn_active means a TUI-direct, adopted or monitor turn holds the channel without the mailbox; no start is attempted and the input runs after that turn. Only the bot's owner_user_id or allowed_user_ids may deliver; allow_all_users is not honored here.",
         )
         .with_params([
             ("id", path_param("Agent id")),

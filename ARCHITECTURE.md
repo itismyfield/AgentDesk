@@ -1193,6 +1193,7 @@ src/
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
+│   │   │   │   ├── foreign_row.rs
 │   │   │   │   ├── goal_lifecycle.rs
 │   │   │   │   ├── headless_turn.rs
 │   │   │   │   ├── intake_turn.rs

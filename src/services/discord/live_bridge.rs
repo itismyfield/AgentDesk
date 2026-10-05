@@ -206,55 +206,71 @@ async fn register_for_turn(
     };
     match registration {
         Ok(registration) => Ok(registration),
-        Err(()) => {
-            let channel = ChannelId::new(state.channel_id);
-            let finish = super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
-                shared, provider, channel, poise::serenity_prelude::MessageId::new(state.user_msg_id),
-                state.turn_nonce.clone(), std::time::Instant::now(), Some(cancel.clone()),
-            ).await;
-            if let Some(removed) = finish.removed_token {
-                removed.mark_completion_cleanup();
-                removed
-                    .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                super::saturating_decrement_global_active(shared);
-            }
-            if !requeue_on_deferral {
-                tracing::warn!(
-                    channel_id = state.channel_id,
-                    provider = provider.as_str(),
-                    accepted = false,
-                    "original_bridge_start_deferred"
-                );
-                return Err(false);
-            }
-            let queued = super::mailbox_requeue_inflight_for_followup_retry(
-                shared, provider, channel, state,
-            )
-            .await;
-            tracing::warn!(
-                channel_id = state.channel_id,
-                provider = provider.as_str(),
-                accepted = queued.enqueued,
-                "original_bridge_start_deferred"
-            );
-            let accepted = queued.enqueued
-                || queued.merged
-                || matches!(queued.refusal_reason,
-                Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
-                    | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup));
-            if accepted {
-                super::arm_slow_idle_queue_backstop_if_queue_nonempty(
-                    shared,
-                    provider,
-                    channel,
-                    "original_bridge_start_deferred",
-                )
-                .await;
-            }
-            Err(accepted)
-        }
+        Err(()) => Err(defer_unstarted_turn(
+            shared,
+            provider,
+            state,
+            cancel,
+            requeue_on_deferral,
+            "original_bridge_start_deferred",
+        )
+        .await),
     }
+}
+
+/// Releases an unstarted turn's mailbox claim and, when asked, front-requeues its prompt
+/// behind the slow backstop only; returns whether the prompt is queued for a retry.
+pub(super) async fn defer_unstarted_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    cancel: &Arc<CancelToken>,
+    requeue: bool,
+    reason: &'static str,
+) -> bool {
+    let channel = ChannelId::new(state.channel_id);
+    let finish = super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        shared, provider, channel, poise::serenity_prelude::MessageId::new(state.user_msg_id),
+        state.turn_nonce.clone(), std::time::Instant::now(), Some(cancel.clone()),
+    ).await;
+    if let Some(removed) = finish.removed_token {
+        removed.mark_completion_cleanup();
+        removed
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        super::saturating_decrement_global_active(shared);
+    }
+    if !requeue {
+        tracing::warn!(
+            channel_id = state.channel_id,
+            provider = provider.as_str(),
+            accepted = false,
+            "{reason}"
+        );
+        return false;
+    }
+    let queued =
+        super::mailbox_requeue_inflight_for_followup_retry(shared, provider, channel, state).await;
+    tracing::warn!(
+        channel_id = state.channel_id,
+        provider = provider.as_str(),
+        accepted = queued.enqueued,
+        "{reason}"
+    );
+    let accepted = queued.enqueued
+        || queued.merged
+        || matches!(
+            queued.refusal_reason,
+            Some(
+                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                    | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
+            )
+        );
+    if accepted {
+        super::arm_slow_idle_queue_backstop_if_queue_nonempty(shared, provider, channel, reason)
+            .await;
+    }
+    accepted
 }
 
 pub(super) fn try_recovery(

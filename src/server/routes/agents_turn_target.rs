@@ -135,6 +135,20 @@ fn resolve_bound_target(
     })
 }
 
+/// 409 when a turn that never claimed the mailbox (TUI-direct, adopted or monitor) still
+/// holds the channel: a start there would report `started` and then lose the prompt.
+pub(super) fn external_turn_conflict(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    use crate::services::discord::health::{EXTERNAL_TURN_ACTIVE, external_turn_holds_channel};
+    external_turn_holds_channel(provider, channel_id).then(|| {
+        let error = format!("an external TUI turn holds channel {channel_id}");
+        let body = json!({"ok": false, "status": "conflict", "reason": EXTERNAL_TURN_ACTIVE, "error": error});
+        (StatusCode::CONFLICT, Json(body))
+    })
+}
+
 /// Starts a headless turn on a resolved agent target; returns its turn id and start status.
 /// Shared by the turn-start route and the voice conductor.
 pub(super) async fn start_headless_turn_on_target(

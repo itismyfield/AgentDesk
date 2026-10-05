@@ -819,6 +819,12 @@ pub async fn start_agent_turn(
         Ok(target) => target,
         Err(response) => return response,
     };
+    if dm_user_id_num.is_none()
+        && let Some(conflict) =
+            super::agents_turn_target::external_turn_conflict(&provider, channel_id_num)
+    {
+        return conflict;
+    }
 
     let Some(registry) = state.health_registry.as_deref() else {
         return (
