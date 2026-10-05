@@ -112,6 +112,7 @@ async fn run_placeholder_sweeper_tick(
     // without a surviving turn to clear it. Bound those durable sidecars
     // independently of the normal terminal clear path.
     let swept_busy_retry_bindings = super::super::busy_followup_retry_store::sweep_expired();
+    super::super::health::transcript_turn::observe_durable_residue(provider, &shared.token_hash);
     TickReport {
         pass,
         drained_orphans,
@@ -121,6 +122,10 @@ async fn run_placeholder_sweeper_tick(
         swept_busy_retry_bindings,
     }
 }
+
+#[cfg(test)]
+#[path = "tick_cleanup_tests.rs"]
+mod cleanup_tests;
 
 #[cfg(test)]
 mod tests {

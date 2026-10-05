@@ -138,6 +138,23 @@ pub(in crate::services::discord) fn load_for_channel(
         .collect()
 }
 
+/// Markers recorded for one channel, counted by file name so a corrupt marker still counts.
+pub(in crate::services::discord) fn channel_presence(
+    provider: &str,
+    channel_id: u64,
+) -> crate::services::discord::health::transcript_turn::Presence {
+    let prefix = format!("{}_{channel_id}_", provider.to_ascii_lowercase());
+    crate::services::discord::health::transcript_turn::Presence::of_dir(root(), |path| {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        Ok(usize::from(
+            name.ends_with(".json") && name.to_ascii_lowercase().starts_with(&prefix),
+        ))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Commit tombstones (codex r2 — durable terminal-commit evidence)
 // ---------------------------------------------------------------------------

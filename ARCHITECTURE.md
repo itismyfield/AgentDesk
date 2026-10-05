@@ -859,6 +859,8 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── transcript_binding_stall.rs
+│   │   │   ├── transcript_turn.rs
+│   │   │   ├── transcript_turn_tests.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
@@ -1030,7 +1032,8 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
-│   │   │   └── tick.rs
+│   │   │   ├── tick.rs
+│   │   │   └── tick_cleanup_tests.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs

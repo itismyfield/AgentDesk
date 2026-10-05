@@ -227,6 +227,7 @@ pub(in crate::services::discord) use drain::{
     drain_on_terminal_commit_with_applier_and_offset, drain_on_terminal_commit_with_offset,
     drain_on_terminal_commit_with_offsets, resolve_own_claim_markers_for_visibly_completed_anchor,
 };
+pub(in crate::services::discord) use store::channel_presence;
 use store::reload;
 #[cfg(test)]
 pub(in crate::services::discord) use store::{
