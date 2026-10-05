@@ -48,6 +48,9 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     CapturedContext, HookBindingEnvelope, SpawnNonceMarker, observe_spawn_nonce_marker,
 };
 
+#[cfg(test)]
+thread_local! { pub(crate) static SHADOW_IO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// ObservationOnly uses the existing tracing sink; never installs or publishes a source.
 pub(crate) fn observe_codex_shadow(
     command: Option<&str>,
@@ -56,6 +59,9 @@ pub(crate) fn observe_codex_shadow(
     hook: &HookSignal,
     envelope: Option<&HookBindingEnvelope>,
 ) {
+    if !matches!(hook.event.as_str(), "session_start" | "user_prompt_submit") {
+        return;
+    }
     use crate::services::codex_tui::session::source_observation::{
         CodexFirstProof, CodexFirstProofRejection, codex_first_proof_candidate,
     };
@@ -65,6 +71,8 @@ pub(crate) fn observe_codex_shadow(
         _ => None,
     });
     let result = context.zip(payload_session).and_then(|(captured, id)| {
+        #[cfg(test)]
+        SHADOW_IO_CALLS.with(|calls| calls.set(calls.get() + 1));
         let prepared = match execution_context("codex", &captured.execution_nonce) {
             Ok(c) => c,
             Err(_) => return Some(Err(CodexFirstProofRejection::Context)),
@@ -119,7 +127,7 @@ pub(crate) fn observe_codex_shadow(
         nonce = ?context.map(|c| &c.execution_nonce), root = ?context.and_then(|c| c.provider_root.as_ref()),
         native_uuid = ?payload_session, path = ?verified.map(|v| &v.rollout_path), identity = ?verified.map(|v| &v.identity),
         event = ?hook.event, legacy_selected_id = ?legacy.as_ref().and_then(|b| b.session_id.as_deref()),
-        source_less = legacy.is_none(), command_mapped = command.is_some(), ownership_promoted = false,
+        source_less = legacy.is_none(), command_present = command.is_some(), ownership_promoted = false,
         "Codex local first-proof shadow observation");
 }
 

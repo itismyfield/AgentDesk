@@ -1107,6 +1107,22 @@ fn shadow_ingress_is_readonly_before_equality_and_without_a_source_map() {
     let watch = binding_events::subscribe_binding_events(42).unwrap();
     let before = tree(runtime.path());
     let native_before = tree(sessions.path());
+    dedupe::SHADOW_IO_CALLS.with(|calls| calls.set(0));
+    for event in ["pre_tool_use", "post_tool_use", "stop"] {
+        let hook = binding_events::HookSignal::from_payload(event, &payload);
+        let trace = capture(|| {
+            dedupe::observe_codex_shadow(None, Some(&id), &payload, &hook, Some(&envelope));
+        });
+        assert_eq!(
+            dedupe::SHADOW_IO_CALLS.with(|calls| calls.get()),
+            0,
+            "tool/stop hooks must return before context, marker, or history IO"
+        );
+        assert!(
+            trace.is_empty(),
+            "non-proof hook emitted a shadow trace: {trace}"
+        );
+    }
     let route = |command, mode, headers: &axum::http::HeaderMap| {
         SOURCE_MODE_TEST.with(|m| m.set(Some(mode)));
         let trace = capture(|| {
@@ -1156,12 +1172,14 @@ fn shadow_ingress_is_readonly_before_equality_and_without_a_source_map() {
             "identity",
             "event",
             "legacy_selected_id",
+            "command_present",
             "ownership_promoted=false",
         ] {
             assert!(trace.contains(key), "{key}: {trace}");
         }
         assert!(!trace.contains(prompt) && !trace.contains("SYNTHETIC_PRIVATE_PROMPT"));
     }
+    assert_eq!(dedupe::SHADOW_IO_CALLS.with(|calls| calls.get()), 2);
     assert_eq!(tree(runtime.path()), before);
     assert_eq!(tree(sessions.path()), native_before);
     assert!(!watch.has_changed().unwrap());

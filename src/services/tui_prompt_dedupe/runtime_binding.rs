@@ -6,6 +6,8 @@ mod claude_source;
 pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod codex_hook;
+#[cfg(test)]
+pub(crate) use codex_hook::SHADOW_IO_CALLS;
 pub(crate) use codex_hook::{
     codex_tail_source_retired, codex_tui_binding_is_subagent, observe_codex_hook,
     observe_codex_shadow, publish_unless_codex_tail_retired,
