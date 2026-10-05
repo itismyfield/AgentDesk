@@ -5496,6 +5496,8 @@ services::discord::router::message_handler::attachments::attachment_tests::disco
 services::discord::router::message_handler::attachments::attachment_tests::discord_attachment_url_guard_rejects_ssrf_shapes
 services::discord::router::message_handler::control::command_boundary_tests::legacy_boundary_is_only_a_fixed_denial
 services::discord::router::message_handler::control::command_boundary_tests::wrapper_consumes_unhandled_dispatch_results_with_denial
+services::discord::router::message_handler::foreign_row::tests::an_external_row_requeues_the_promoted_input_and_starts_it_once_after_clear
+services::discord::router::message_handler::foreign_row::tests::intake_judges_its_row_create_before_any_provider_or_bridge_spawn
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_are_classified_precisely
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
