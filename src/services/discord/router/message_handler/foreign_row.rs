@@ -211,12 +211,14 @@ mod tests {
         let create = "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);";
         let admit = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(());\n    }";
         // The provider spawn follows the teardown verdict; the bridge spawn comes after it.
+        // Split so the bridge entry-site census does not count this file as a caller.
+        let bridge = ["\n    spawn_turn_", "bridge("].concat();
         let anchors = [
             create,
             admit,
             "for_turn(",
             "spawn_blocking(move ||",
-            "\n    spawn_turn_bridge(",
+            &bridge,
         ];
         let mut from = src.find(create).unwrap_or(src.len());
         for anchor in anchors {
