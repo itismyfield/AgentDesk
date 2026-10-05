@@ -150,11 +150,11 @@ pub(crate) fn run_plan(
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
 ) -> PlanRun {
-    let session = match target {
-        InputTarget::Tmux(session) => session.as_str(),
-        InputTarget::Refused(refusal) => {
+    let session = match target.tmux_session() {
+        Ok(session) => session,
+        Err(refusal) => {
             return PlanRun {
-                run: InputRun::Refused(*refusal),
+                run: InputRun::Refused(refusal),
                 composer_mutated: false,
                 enter_attempted: false,
             };

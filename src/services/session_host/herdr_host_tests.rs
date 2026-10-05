@@ -1499,8 +1499,8 @@ const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
 /// The timeouts policy repair facade: the one production caller of the target guard.
 const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 
-// Dormant guard: no production code reaches a Herdr host. Owners may only name
-// Herdr items, never construct or route to one; everything else may not name them.
+// Dormant guard: only the boot registry builds a Herdr host. Owners may name Herdr
+// items but never construct one; everything else may not name them.
 #[test]
 fn herdr_items_have_no_production_caller() {
     const OWNERS: &[(&str, usize)] = &[
@@ -1516,6 +1516,11 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/herdr/launch_host.rs", 0),
         ("src/services/session_host/model.rs", 3),
         ("src/services/session_host/resolve.rs", 2),
+        // The input gate and the boot registry, the one place a Herdr host is built.
+        ("src/services/session_host/herdr_gate.rs", 0),
+        (REGISTRY, 0),
+        // Claude input: a Herdr target exists only through the registry and its gate.
+        ("src/services/claude_tui/host_input.rs", 4),
         ("src/services/session_host/consumer_guard.rs", 2),
         ("src/services/session_host/legacy_collapse.rs", 1),
         ("src/services/session_host/tmux_host.rs", 0),
@@ -1552,6 +1557,7 @@ fn herdr_items_have_no_production_caller() {
         "SocketHerdrLaunchHost::new(",
     ];
     const LAUNCH_HOST: &str = "src/services/session_host/herdr/launch_host.rs";
+    const REGISTRY: &str = "src/services/session_host/herdr_registry.rs";
     // Only the inflight binding CAS copies a locator and only the Claude launch writes a
     // (tmux) `.host_kind` marker. Termination holds a locator only as a target.
     const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
@@ -1647,6 +1653,10 @@ fn herdr_items_have_no_production_caller() {
             .filter(|n| {
                 // The launch host owns its transports; the host itself must stay unconstructed.
                 !(relative == LAUNCH_HOST && n.starts_with("HerdrSocketTransport::new("))
+                    // The boot registry builds each local endpoint's transport, host and launch host.
+                    && !(relative == REGISTRY
+                        && ["HerdrHost::new(", "HerdrSocketTransport::new(", "SocketHerdrLaunchHost::new("]
+                            .contains(n))
             });
         violations.extend(
             named

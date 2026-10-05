@@ -422,12 +422,15 @@ static TMUX_HOST: TmuxHost = TmuxHost;
 static PROCESS_HOST: ProcessHost = ProcessHost;
 static UNCONFIGURED_HERDR_HOST: UnconfiguredHerdrHost = UnconfiguredHerdrHost;
 
-/// Herdr has no static endpoint, so it gets the fail-closed host, never a default socket.
+/// Herdr gets the boot registry's one local endpoint, read-only since input goes through its
+/// gate; without exactly one it gets the fail-closed host, never a default socket.
 pub(crate) fn host_for(kind: HostKind) -> &'static dyn InteractiveSessionHost {
     match kind {
         HostKind::Tmux => &TMUX_HOST,
         HostKind::Process => &PROCESS_HOST,
-        HostKind::Herdr => &UNCONFIGURED_HERDR_HOST,
+        HostKind::Herdr => super::herdr_registry::registry()
+            .sole_host()
+            .unwrap_or(&UNCONFIGURED_HERDR_HOST),
     }
 }
 
