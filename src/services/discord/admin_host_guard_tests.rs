@@ -1080,9 +1080,8 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_changes_nothing_pg()
     db.drop().await;
 }
 
-// A clear's target is main's managed-reset verdict for every stored case of a channel without a
-// Herdr endpoint, whatever the Herdr turn switch says, and for a configured channel while it is
-// off; switched on, a configured channel that cannot be judged is refused before any tmux call.
+// A clear's target is main's managed-reset verdict unless the Herdr turn switch is on for a
+// configured channel; then one that cannot be judged is refused before any tmux call.
 #[tokio::test]
 async fn the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg() {
     use super::{ResetTarget, clear_reset_target, managed_reset_refusal};

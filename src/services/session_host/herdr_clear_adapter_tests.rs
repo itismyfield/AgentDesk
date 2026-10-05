@@ -375,9 +375,8 @@ fn restart_boundary(plan_ticket: &Value) -> crate::db::session_transcripts::Nati
     }
 }
 
-// T-C1/T-C2: a Bound execution clears natively through the helper: one `/clear` line on the
-// gate, its own SessionStart(clear) Pending commits it, the cleared session is saved, and the
-// pane, its execution and its row stay; a restart finds the same durable commit.
+// T-C1/T-C2: one gated `/clear` line, committed by its own SessionStart(clear) Pending, saves the
+// cleared session and keeps the pane, execution and row; a restart finds the same commit.
 #[test]
 fn a_pending_clear_commits_with_one_line_and_keeps_the_pane_and_row_pg() {
     let fx = Fixture::new("commit");
@@ -440,9 +439,8 @@ fn an_earlier_or_foreign_clear_event_holds_without_a_second_line_pg() {
     );
 }
 
-// T-C4: admission off, an unverified E7 server, an execution that is not the stored one, a row
-// that is not Bound, or a draft in the composer: refused or held before any line or selector
-// change.
+// T-C4: admission off, an unverified E7 server, a replaced execution or a row that is not Bound
+// is refused before any line or selector change.
 #[test]
 fn every_failed_check_refuses_before_any_change_pg() {
     let fx = Fixture::new("refuse");

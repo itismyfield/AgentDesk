@@ -186,9 +186,8 @@ fn resolved_to(cleared: &str, logical: &str) -> bool {
         if Some(*pending_seq) == pending && source.session_id == cleared)
 }
 
-// A restart after a clear whose own Pending still waits on its new session admits the execution
-// without restoring a source; the next turn takes one paste and Enter on the cleared session and
-// its transcript resolves the Pending.
+// A restart while a clear's own Pending waits admits the execution without a restored source;
+// the next turn prompts the cleared session once and its transcript resolves the Pending.
 #[test]
 fn a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg() {
     let fx = Fixture::new("clear-restart", None);
