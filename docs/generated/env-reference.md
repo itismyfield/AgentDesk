@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 99
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 100
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -43,11 +43,12 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:81` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs:19` |  |
 | `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs:454` | Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no". |
-| `AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE` | `src/services/codex_tui/session/source_observation.rs:416` | Validated once at startup; no active nonce or new launch reparses mutable env. |
+| `AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE` | `src/services/codex_tui/session/source_observation.rs:431` | Validated once at startup; no active nonce or new launch reparses mutable env. |
 | `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs:194` |  |
 | `AGENTDESK_CODEX_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs:51` |  |
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:211` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1268` |  |
+| `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs:489` (+1 more) |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:15` (+1 more) |  |
 | `AGENTDESK_CONFIG` | `src/config.rs:2826` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |

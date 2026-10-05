@@ -51,6 +51,11 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 #[cfg(test)]
 thread_local! { pub(crate) static SHADOW_IO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(test)]
+fn shadow_mutant(name: &str) -> bool {
+    std::env::var("AGENTDESK_CODEX_SHADOW_TEST_MUTATION").is_ok_and(|value| value == name)
+}
+
 /// ObservationOnly uses the existing tracing sink; never installs or publishes a source.
 pub(crate) fn observe_codex_shadow(
     command: Option<&str>,
@@ -70,50 +75,104 @@ pub(crate) fn observe_codex_shadow(
         CapturedContext::Captured(c) => Some(c),
         _ => None,
     });
+    let mut generic_precedent_seqs = Vec::new();
     let result = context.zip(payload_session).and_then(|(captured, id)| {
-        #[cfg(test)]
-        SHADOW_IO_CALLS.with(|calls| calls.set(calls.get() + 1));
-        let prepared = match execution_context("codex", &captured.execution_nonce) {
-            Ok(c) => c,
-            Err(_) => return Some(Err(CodexFirstProofRejection::Context)),
-        };
-        let nonce = match observe_spawn_nonce_marker(&prepared.tmux_session) {
-            SpawnNonceMarker::Known(n) => Some(n),
-            _ => None,
-        };
-        let pristine = prepared
-            .channel_id
-            .and_then(|channel| binding_events::records_strict(channel).ok()?.ok())
-            .is_some_and(|history| {
-                !history.iter().any(|e| {
-                    e.provider == "codex"
-                        && e.tmux_session == prepared.tmux_session
-                        && e.execution_nonce.as_deref() == Some(&prepared.execution_nonce)
-                        && (e.evidence.hook_event.is_some()
-                            || e.cause != binding_events::BindingCause::Startup)
-                })
-            });
-        Some(codex_first_proof_candidate(
-            &CodexFirstProof {
-                captured,
-                prepared: &prepared,
-                current_nonce: nonce.as_deref(),
-                verified_fresh_spawn: nonce.as_deref() == Some(&prepared.execution_nonce),
-                no_prior_claim_or_transition: pristine,
-                event: match hook.event.as_str() {
-                    "session_start" => "SessionStart",
-                    "user_prompt_submit" => "UserPromptSubmit",
-                    _ => "other",
+        crate::services::tmux_common::with_tmux_source_authority(&captured.tmux_session, |_| {
+            #[cfg(test)]
+            SHADOW_IO_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let prepared = match execution_context("codex", &captured.execution_nonce) {
+                Ok(c) => c,
+                Err(_) => return Some(Err(CodexFirstProofRejection::Context)),
+            };
+            let nonce = match observe_spawn_nonce_marker(&prepared.tmux_session) {
+                SpawnNonceMarker::Known(n) => Some(n),
+                _ => None,
+            };
+            let history = prepared
+                .channel_id
+                .and_then(|channel| binding_events::records_strict(channel).ok()?.ok());
+            #[cfg(test)]
+            let nonce = if shadow_mutant("current") {
+                Some(prepared.execution_nonce.clone())
+            } else {
+                nonce
+            };
+            let verified = codex_first_proof_candidate(
+                &CodexFirstProof {
+                    captured,
+                    prepared: &prepared,
+                    current_nonce: nonce.as_deref(),
+                    verified_fresh_spawn: nonce.as_deref() == Some(&prepared.execution_nonce),
+                    no_prior_claim_or_transition: true,
+                    event: match hook.event.as_str() {
+                        "session_start" => "SessionStart",
+                        "user_prompt_submit" => "UserPromptSubmit",
+                        _ => "other",
+                    },
+                    source: payload["source"].as_str(),
+                    prompt: &payload["prompt"],
                 },
-                source: payload["source"].as_str(),
-                prompt: &payload["prompt"],
-            },
-            &CodexHookSourceClaim {
-                session_id: id,
-                transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
-                expected_source: CodexRolloutSource::Cli,
-            },
-        ))
+                &CodexHookSourceClaim {
+                    session_id: id,
+                    transcript_path: hook.transcript_path.as_deref().map(std::path::Path::new),
+                    expected_source: CodexRolloutSource::Cli,
+                },
+            );
+            Some(verified.and_then(|source| {
+                #[cfg(test)]
+                if shadow_mutant("before")
+                    && history.as_ref().is_some_and(|rows| {
+                        rows.iter().any(|r| {
+                            r.provider == "codex"
+                                && r.tmux_session == prepared.tmux_session
+                                && r.execution_nonce.as_deref() == Some(&prepared.execution_nonce)
+                                && (r.evidence.hook_event.is_some()
+                                    || r.cause != binding_events::BindingCause::Startup)
+                        })
+                    })
+                {
+                    return Err(CodexFirstProofRejection::Ineligible);
+                }
+                #[cfg(test)]
+                let history = if shadow_mutant("history_error") && history.is_none() {
+                    Some(Vec::new())
+                } else {
+                    history
+                };
+                let seqs = history
+                    .as_deref()
+                    .and_then(|history| shadow_generic_precedents(&prepared, &source, history))
+                    .ok_or(CodexFirstProofRejection::Ineligible)?;
+                #[cfg(test)]
+                let omit_final = shadow_mutant("final_identity");
+                #[cfg(not(test))]
+                let omit_final = false;
+                if !omit_final {
+                    let final_source = verify_codex_hook_source(
+                        prepared
+                            .provider_root
+                            .as_deref()
+                            .ok_or(CodexFirstProofRejection::Context)?,
+                        &CodexHookSourceClaim {
+                            session_id: id,
+                            transcript_path: Some(&source.rollout_path),
+                            expected_source: CodexRolloutSource::Cli,
+                        },
+                    )
+                    .map_err(CodexFirstProofRejection::Native)?;
+                    if final_source.identity != source.identity
+                        || final_source.rollout_path != source.rollout_path
+                        || final_source.created_at != source.created_at
+                    {
+                        return Err(CodexFirstProofRejection::Native(
+                            session::source_observation::CodexHookSourceRejection::RolloutReplaced,
+                        ));
+                    }
+                }
+                generic_precedent_seqs = seqs;
+                Ok(source)
+            }))
+        })
     });
     let verdict = match &result {
         Some(Ok(_)) => "candidate",
@@ -128,7 +187,138 @@ pub(crate) fn observe_codex_shadow(
         native_uuid = ?payload_session, path = ?verified.map(|v| &v.rollout_path), identity = ?verified.map(|v| &v.identity),
         event = ?hook.event, legacy_selected_id = ?legacy.as_ref().and_then(|b| b.session_id.as_deref()),
         source_less = legacy.is_none(), command_present = command.is_some(), ownership_promoted = false,
+        generic_precedent_neutralized = !generic_precedent_seqs.is_empty(), generic_precedent_seqs = ?generic_precedent_seqs,
         "Codex local first-proof shadow observation");
+}
+
+fn shadow_generic_precedents(
+    prepared: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    verified: &session::source_observation::VerifiedCodexHookSource,
+    history: &[binding_events::BindingEvent],
+) -> Option<Vec<u64>> {
+    #[cfg(unix)]
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    use binding_events::{BindingCause as Cause, BindingTarget as Target};
+    #[cfg(test)]
+    let history = if shadow_mutant("last_only") {
+        &history[history.len().saturating_sub(1)..]
+    } else {
+        history
+    };
+    let matches = |source: &binding_events::SourceId| {
+        #[cfg(test)]
+        if shadow_mutant("identity") {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            source.session_id == verified.session_id
+                && source.path.canonicalize().ok().as_ref() == Some(&verified.rollout_path)
+                && verified.identity
+                    == SourceFileIdentity::Unix {
+                        dev: source.dev,
+                        ino: source.ino,
+                    }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (source, verified);
+            false
+        }
+    };
+    let mut seqs = Vec::new();
+    let mut previous = None;
+    let mut current_seen = false;
+    for record in history {
+        if Some(record.channel_id) != prepared.channel_id {
+            return None;
+        }
+        if record.provider != "codex" || record.tmux_session != prepared.tmux_session {
+            continue;
+        }
+        #[cfg(test)]
+        if shadow_mutant("all_unknown") && record.cause == Cause::Unknown {
+            seqs.push(record.seq);
+            continue;
+        }
+        let current = record.execution_nonce.as_deref() == Some(&prepared.execution_nonce);
+        let source = match &record.new {
+            Target::Source(source) | Target::Resolved { source, .. } => Some(source),
+            _ => None,
+        };
+        if !current {
+            if current_seen {
+                return None;
+            }
+            let named = match &record.new {
+                Target::Pending {
+                    payload_session_id, ..
+                }
+                | Target::Rejected {
+                    payload_session_id, ..
+                } => payload_session_id == &verified.session_id,
+                _ => false,
+            };
+            #[cfg(test)]
+            if shadow_mutant("prior_native") {
+                previous = source;
+                continue;
+            }
+            if named
+                || source
+                    .into_iter()
+                    .chain(record.old.as_ref())
+                    .chain(record.parent_hint.as_ref())
+                    .any(|source| source.session_id == verified.session_id || matches(source))
+            {
+                return None;
+            }
+            if let Some(source) = source {
+                previous = Some(source);
+            }
+            continue;
+        }
+        let Target::Source(source) = &record.new else {
+            return None;
+        };
+        #[cfg(test)]
+        let check_old = !shadow_mutant("old_chain");
+        #[cfg(not(test))]
+        let check_old = true;
+        if record.evidence.hook_event.is_some()
+            || record.parent_hint.is_some()
+            || !matches!(record.cause, Cause::Unknown | Cause::Startup)
+            || !matches(source)
+            || (check_old && current_seen && record.old.as_ref() != previous)
+            || (check_old
+                && !current_seen
+                && record.old.is_some()
+                && record.old.as_ref() != previous)
+        {
+            return None;
+        }
+        current_seen = true;
+        previous = Some(source);
+        seqs.push(record.seq);
+    }
+    // Creation time only excludes old native reuse; it never establishes ownership.
+    #[cfg(test)]
+    if shadow_mutant("timestamp") {
+        return Some(seqs);
+    }
+    #[cfg(test)]
+    if shadow_mutant("shadow_branch") && !seqs.is_empty() {
+        return None;
+    }
+    if !seqs.is_empty()
+        && (prepared.source_policy.as_deref() != Some("shadow")
+            || !verified
+                .created_at
+                .is_some_and(|time| time >= prepared.created_at))
+    {
+        return None;
+    }
+    Some(seqs)
 }
 
 fn reject(reason: NotApplicableReason, session: &str) -> IngressOutcome {
