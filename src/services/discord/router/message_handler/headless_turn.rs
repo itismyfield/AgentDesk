@@ -917,7 +917,8 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             })?;
     let created =
         crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state);
-    refuse_foreign_row(shared, &provider, &inflight_state, &cancel_token, created).await?;
+    super::foreign_row::admit_headless(shared, &provider, &inflight_state, &cancel_token, created)
+        .await?;
 
     let _ = attach_paused_turn_watcher_for_inflight(
         shared,
@@ -1138,35 +1139,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     })
 }
 
-/// Refuses before any spawn when this turn's row create found another turn's row: that
-/// row would abort this bridge at entry after `Started`, losing the prompt.
-async fn refuse_foreign_row(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &InflightTurnState,
-    cancel_token: &Arc<CancelToken>,
-    created: Result<(), crate::services::discord::inflight::CreateNewInflightError>,
-) -> Result<(), HeadlessTurnStartError> {
-    use crate::services::discord::inflight::CreateNewInflightError;
-    if matches!(created, Err(CreateNewInflightError::AlreadyExists)) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            user_msg_id = state.user_msg_id,
-            "headless start refused: another turn's durable inflight row holds the channel"
-        );
-        unwind_unstarted_turn(shared, ChannelId::new(state.channel_id), cancel_token).await;
-        return Err(HeadlessTurnStartError::Conflict(format!(
-            "another turn's durable inflight row holds channel {}",
-            state.channel_id
-        )));
-    }
-    super::intake_turn::inflight_create_log::log_create_new_inflight_outcome(
-        created, provider, state,
-    );
-    Ok(())
-}
-
 async fn register_headless_original(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1218,7 +1190,10 @@ mod foreign_row_refusal_tests {
             let mut mine = row(&provider, channel, 11);
             mine.turn_nonce = token.turn_nonce().map(str::to_owned);
             let created = inflight::save_inflight_state_create_new(&mine);
-            let result = refuse_foreign_row(&shared, &provider, &mine, &token, created).await;
+            let result = super::super::foreign_row::admit_headless(
+                &shared, &provider, &mine, &token, created,
+            )
+            .await;
             let observed = (
                 matches!(result, Err(HeadlessTurnStartError::Conflict(_))),
                 mailbox_snapshot(&shared, channel)
@@ -1242,7 +1217,7 @@ mod foreign_row_refusal_tests {
     #[test]
     fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
         let src = include_str!("headless_turn.rs");
-        let call = "refuse_foreign_row(shared, &provider, &inflight_state, &cancel_token, created).await?;";
+        let call = "foreign_row::admit_headless(shared, &provider, &inflight_state, &cancel_token, created)\n        .await?;";
         let (refusal, spawn) = (src.find(call), src.find("tokio::task::spawn_blocking"));
         assert!(
             refusal

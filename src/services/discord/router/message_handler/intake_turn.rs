@@ -2307,11 +2307,10 @@ pub(super) async fn handle_text_message(
         Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
     };
     inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-    inflight_create_log::log_create_new_inflight_outcome(
-        super::super::super::inflight::save_inflight_state_create_new(&inflight_state),
-        &provider,
-        &inflight_state,
-    );
+    let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);
+    if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
+        return Ok(());
+    }
 
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
