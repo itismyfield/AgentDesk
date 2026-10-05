@@ -420,8 +420,23 @@ mod tests {
             .await;
         assert!(!registry.all_providers_are_standby().await);
         let snapshot = build_health_snapshot(&registry).await;
-        assert_eq!(snapshot.status(), HealthStatus::Healthy);
+        let status = snapshot.status();
         let json = serde_json::to_value(snapshot).unwrap();
+        // TUI-O writer alarms are process-global and raised by concurrent tests; only they may
+        // degrade this snapshot, and never with a reason of the worker's own.
+        let (alarms, own): (Vec<&str>, Vec<&str>) = json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reason| reason.as_str())
+            .partition(|reason| reason.starts_with("tui_o:"));
+        assert!(own.is_empty(), "{own:?}");
+        let expected = if alarms.is_empty() {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded
+        };
+        assert_eq!(status, expected, "{alarms:?}");
         assert_eq!(json["providers"][0]["runtime_role"], "worker");
         assert_eq!(json["providers"][0]["connected"], false);
         shared
