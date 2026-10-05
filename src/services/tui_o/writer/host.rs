@@ -127,7 +127,7 @@ impl Readiness {
     }
 
     /// Rotated-away sources the channel's running actor has not retired, as its last poll read
-    /// them; `None` when no actor runs or its store could not be read.
+    /// them; `None` when no actor runs, its store could not be read or Herdr is not configured.
     pub fn rotation_unsettled(&self, channel: u64) -> Option<usize> {
         let live = locked(&self.live);
         let unsettled = &live.get(&channel)?.unsettled;

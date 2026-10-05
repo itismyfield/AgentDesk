@@ -19,11 +19,16 @@ fn unsettled(projection: &watch::Receiver<Option<usize>>) -> Option<usize> {
     *projection.borrow()
 }
 
+fn herdr_configured() -> crate::config::session_hosts::ForcedSessionHosts {
+    crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(CHANNEL, "mac-mini")])
+}
+
 // T-C5/T-C7: after a clear the old tail posts before the new source and nothing is posted twice;
 // the old source counts as unsettled until O retires it, after its successor was bound.
 #[tokio::test(start_paused = true)]
 async fn a_cleared_source_stays_unsettled_until_retired_and_its_tail_posts_once() {
     let (harness, a_path, a) = switched_over(&row("m0", "before the clear"));
+    let _hosts = herdr_configured();
     let bindings = Arc::new(FakeBindings::new());
     let startup = BindingTarget::Source(a.clone());
     bindings.commit(bound(1, None, startup, BindingCause::Startup, None));
@@ -61,6 +66,7 @@ async fn a_cleared_source_stays_unsettled_until_retired_and_its_tail_posts_once(
 #[tokio::test(start_paused = true)]
 async fn clears_repeated_within_ten_seconds_stay_unsettled_until_all_retire() {
     let (harness, a_path, a) = switched_over(&row("m0", "before the clears"));
+    let _hosts = herdr_configured();
     let bindings = Arc::new(FakeBindings::new());
     let startup = BindingTarget::Source(a.clone());
     bindings.commit(bound(1, None, startup, BindingCause::Startup, None));
@@ -104,9 +110,10 @@ async fn clears_repeated_within_ten_seconds_stay_unsettled_until_all_retire() {
     halt(stop, task).await;
 }
 
-// T-C9: an unreadable rotation record is no answer, and an ended actor reports none.
+// T-C9: a channel without Herdr publishes nothing, an unreadable rotation record is no answer,
+// and an ended actor reports none.
 #[tokio::test(start_paused = true)]
-async fn an_unreadable_rotation_or_an_ended_actor_reports_no_projection() {
+async fn an_unconfigured_channel_an_unreadable_rotation_or_an_ended_actor_report_none() {
     use crate::services::tui_o::store::rotation::BOUNDARY_FILE;
     let (harness, a_path, a) = switched_over(&row("m0", "before"));
     let bindings = Arc::new(FakeBindings::new());
@@ -126,6 +133,9 @@ async fn an_unreadable_rotation_or_an_ended_actor_reports_no_projection() {
         projected,
     );
     let task = tokio::spawn(actor);
+    polls(2).await;
+    assert_eq!(unsettled(&projection), None, "not configured");
+    let _hosts = herdr_configured();
     polls(2).await;
     assert_eq!(unsettled(&projection), Some(0));
     let store = a_path.parent().unwrap().join("o_store");
@@ -148,6 +158,7 @@ async fn the_readiness_map_reports_a_running_actors_projection_only() {
     let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source));
     p5_log(harness._runtime.path(), CHANNEL, &startup);
     let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let _hosts = herdr_configured();
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     harness.gate.acquired();
     assert_eq!(ready.rotation_unsettled(CHANNEL), None, "no actor yet");

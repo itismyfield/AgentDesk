@@ -43,8 +43,8 @@ where
     )
 }
 
-/// After each poll the actor publishes how many rotated-away sources it has not retired yet;
-/// `None` while its store cannot be read.
+/// After each poll the actor of a Herdr-configured channel publishes how many rotated-away
+/// sources it has not retired yet; `None` while its store cannot be read, or for other channels.
 pub type Unsettled = watch::Sender<Option<usize>>;
 
 /// [`spawn_if_enabled`] that also publishes the channel's [`Unsettled`] count.
@@ -132,7 +132,10 @@ pub async fn run_projecting<P, L, A, B>(
         if actor.writer.is_stopped() {
             return;
         }
-        unsettled.send_replace(actor.unsettled());
+        // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
+        if crate::config::session_hosts::herdr_endpoint(actor.writer.channel()).is_some() {
+            unsettled.send_replace(actor.unsettled());
+        }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
             changed = stop.changed() => if changed.is_err() { return },
