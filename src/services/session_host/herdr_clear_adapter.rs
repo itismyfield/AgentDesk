@@ -77,9 +77,8 @@ impl HerdrClearPlan {
     }
 }
 
-/// Judges a channel's `!clear` on its Bound row: no I/O until the row, O's rotation and the input
-/// hold pass, then E7 and the pane on one server, then the canonical baseline. It blocks on the
-/// socket, so callers stay off the async runtime.
+/// Judges `!clear` on a Bound row: row, O's rotation and input hold before any I/O, then E7 and the
+/// pane on one server, then the canonical baseline. Blocks on the socket, off the async runtime.
 pub(crate) fn plan_clear(
     channel: u64,
     row: Option<&HostedRecord>,
