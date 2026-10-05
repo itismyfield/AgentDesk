@@ -1464,6 +1464,472 @@ fn shadow_ingress_is_readonly_before_equality_and_without_a_source_map() {
 }
 
 #[test]
+fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events as events};
+    use binding_context::{CapturedContext, HookBindingEnvelope};
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (runtime, _guards) = binding_context::tests::fixture_after_shared_test_env_lock();
+    dedupe::reset_state_for_tests();
+    events::set_test_root(Some(runtime.path()));
+    let sessions = tempfile::tempdir().unwrap();
+    let tmux = "shadow-generic-history";
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "codex",
+        tmux,
+        Some(42),
+        None,
+        false,
+        Some(sessions.path().into()),
+        (Some(digest("첫 argv\n한글")), Some("shadow".into())),
+    )
+    .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce"),
+        &prepared.context.execution_nonce,
+    )
+    .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = sessions.path().join(format!("rollout-test-{id}.jsonl"));
+    let header = json!({"type":"session_meta","payload":{"id":id,"cwd":"/synthetic","source":"cli",
+        "timestamp":(prepared.context.created_at + chrono::Duration::seconds(1)).to_rfc3339()}});
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    let binding = dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(id.clone()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    // Idle refresh, watcher restore and synthetic start share this production Stat registration.
+    assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+        "codex", tmux, 42, binding
+    ));
+    let history = events::records_strict(42).unwrap().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].cause, events::BindingCause::Unknown);
+    assert_eq!(history[0].evidence.hook_event, None);
+    let envelope = HookBindingEnvelope {
+        context: CapturedContext::Captured(prepared.context.clone()),
+        observed: Default::default(),
+    };
+    let payload = json!({"transcript_path":path,"prompt":"첫 argv\n한글","source":"startup"});
+    let log = runtime.path().join("binding_events/42.log");
+    let encode = |records: &[events::BindingEvent]| {
+        records
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect::<String>()
+    };
+    let allow_native_change = std::cell::Cell::new(false);
+    let run = |payload: &Value, envelope: &HookBindingEnvelope, event: &str, candidate: bool| {
+        let bytes = std::fs::read(&log).unwrap();
+        let native = std::fs::read(&path).unwrap();
+        let runtime_before = format!("{:?}", dedupe::peek_tmux_runtime_binding(tmux));
+        let watch = events::subscribe_binding_events(42).unwrap();
+        let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+        let copy = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || copy.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let hook = events::HookSignal::from_payload(event, payload);
+            dedupe::observe_codex_shadow(Some(&id), Some(&id), payload, &hook, Some(envelope));
+        });
+        let trace = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            trace.contains("verdict=\"candidate\""),
+            candidate,
+            "{trace}"
+        );
+        assert!(trace.contains("ownership_promoted=false"));
+        assert!(!trace.contains("첫 argv"));
+        assert_eq!(std::fs::read(&log).unwrap(), bytes);
+        if !allow_native_change.get() {
+            assert_eq!(std::fs::read(&path).unwrap(), native);
+        }
+        assert_eq!(
+            format!("{:?}", dedupe::peek_tmux_runtime_binding(tmux)),
+            runtime_before
+        );
+        assert!(!watch.has_changed().unwrap());
+        trace
+    };
+    std::fs::write(&log, "").unwrap();
+    run(&payload, &envelope, "session_start", true);
+    std::fs::write(&log, encode(&history)).unwrap();
+    for event in ["session_start", "user_prompt_submit"] {
+        let trace = run(&payload, &envelope, event, true);
+        assert!(
+            trace.contains("generic_precedent_neutralized=true")
+                && trace.contains("generic_precedent_seqs=[1]"),
+            "{trace}"
+        );
+    }
+    std::fs::write(&path, "{\"type\":\"session_meta\"").unwrap();
+    let trace = run(&payload, &envelope, "session_start", false);
+    assert!(trace.contains("verdict=\"pending\""), "{trace}");
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    run(&payload, &envelope, "session_start", true);
+    for case in ["replacement", "changed_creation", "child"] {
+        let target = path.clone();
+        let mut changed = header.clone();
+        if case == "changed_creation" {
+            changed["payload"]["timestamp"] =
+                json!((prepared.context.created_at - chrono::Duration::seconds(1)).to_rfc3339());
+        } else if case == "child" {
+            changed["payload"]["source"] =
+                json!({"subagent":{"thread_spawn":{"parent_thread_id":id}}});
+        }
+        at_verify_step(VerifyStep::AfterVerified, move || {
+            if case == "replacement" {
+                let replacement = target.with_extension("replacement");
+                std::fs::write(&replacement, format!("{changed}\n")).unwrap();
+                std::fs::rename(replacement, target).unwrap();
+            } else {
+                std::fs::write(target, format!("{changed}\n")).unwrap();
+            }
+        });
+        allow_native_change.set(true);
+        run(&payload, &envelope, "session_start", false);
+        allow_native_change.set(false);
+        std::fs::write(&path, format!("{header}\n")).unwrap();
+        // A replacement invalidates the old generic descriptor, so restamp this synthetic row.
+        let mut refreshed = history[0].clone();
+        if let events::BindingTarget::Source(source) = &mut refreshed.new {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&path).unwrap();
+            source.dev = meta.dev();
+            source.ino = meta.ino();
+        }
+        std::fs::write(&log, encode(&[refreshed])).unwrap();
+    }
+    let history = events::records_strict(42).unwrap().unwrap();
+    let original = history[0].clone();
+    let stable = std::fs::read(&log).unwrap();
+    let thread_root = runtime.path().to_path_buf();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = ["session_start", "user_prompt_submit"]
+            .into_iter()
+            .map(|event| {
+                let payload = &payload;
+                let envelope = &envelope;
+                let id = &id;
+                let thread_root = &thread_root;
+                scope.spawn(move || {
+                    events::set_test_root(Some(thread_root));
+                    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+                    let copy = sink.clone();
+                    let subscriber = tracing_subscriber::fmt()
+                        .without_time()
+                        .with_ansi(false)
+                        .with_writer(move || copy.clone())
+                        .finish();
+                    tracing::subscriber::with_default(subscriber, || {
+                        let hook = events::HookSignal::from_payload(event, payload);
+                        dedupe::observe_codex_shadow(
+                            Some(id),
+                            Some(id),
+                            payload,
+                            &hook,
+                            Some(envelope),
+                        );
+                    });
+                    let trace = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+                    assert!(trace.contains("verdict=\"candidate\""), "{trace}");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    assert_eq!(std::fs::read(&log).unwrap(), stable);
+    let foreign_id = uuid::Uuid::new_v4().to_string();
+    let foreign_path = sessions
+        .path()
+        .join(format!("rollout-other-{foreign_id}.jsonl"));
+    let mut foreign_header = header.clone();
+    foreign_header["payload"]["id"] = json!(foreign_id);
+    std::fs::write(&foreign_path, format!("{foreign_header}\n")).unwrap();
+    let mut foreign_binding = dedupe::peek_tmux_runtime_binding(tmux).unwrap();
+    foreign_binding.session_id = Some(foreign_id);
+    foreign_binding.output_path = foreign_path.display().to_string();
+    let writer = Arc::new(Mutex::new(None));
+    let captured_writer = writer.clone();
+    let (release_writer, wait_release) = std::sync::mpsc::channel();
+    at_verify_step(VerifyStep::AfterVerified, move || {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let ready = barrier.clone();
+        let handle = std::thread::spawn(move || {
+            events::set_test_root(Some(&thread_root));
+            ready.wait();
+            crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+                wait_release.recv().unwrap();
+                dedupe::register_rehydrated_tmux_runtime_binding_under_source_authority(
+                    authority,
+                    "codex",
+                    42,
+                    foreign_binding,
+                )
+            })
+        });
+        *captured_writer.lock().unwrap() = Some(handle);
+        barrier.wait();
+    });
+    run(&payload, &envelope, "session_start", true);
+    release_writer.send(()).unwrap();
+    assert!(writer.lock().unwrap().take().unwrap().join().unwrap());
+    run(&payload, &envelope, "session_start", false);
+    dedupe::reset_state_for_tests();
+    std::fs::write(&log, encode(&history)).unwrap();
+
+    for case in [
+        "startup",
+        "uuid",
+        "path",
+        "dev",
+        "ino",
+        "alias",
+        "missing_path",
+        "pending",
+        "resolved",
+        "rejected",
+        "hook",
+        "resume",
+        "clear",
+        "compact",
+        "continuation",
+        "fork",
+        "old",
+        "parent",
+        "nonce",
+        "channel",
+    ] {
+        let mut record = original.clone();
+        match case {
+            "startup" => record.cause = events::BindingCause::Startup,
+            "alias" => {
+                let alias = sessions.path().join(format!("rollout-alias-{id}.jsonl"));
+                std::os::unix::fs::symlink(&path, &alias).unwrap();
+                if let events::BindingTarget::Source(s) = &mut record.new {
+                    s.path = alias;
+                }
+            }
+            "uuid" | "path" | "dev" | "ino" | "missing_path" => {
+                if let events::BindingTarget::Source(s) = &mut record.new {
+                    match case {
+                        "uuid" => s.session_id = uuid::Uuid::new_v4().to_string(),
+                        "path" => {
+                            let other = sessions.path().join("other.jsonl");
+                            std::fs::write(&other, format!("{header}\n")).unwrap();
+                            s.path = other;
+                        }
+                        "missing_path" => s.path = sessions.path().join("absent.jsonl"),
+                        "dev" => s.dev += 1,
+                        "ino" => s.ino += 1,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            "pending" => {
+                record.new = events::BindingTarget::Pending {
+                    payload_session_id: id.clone(),
+                    payload_transcript_path: Some(path.display().to_string()),
+                }
+            }
+            "resolved" => {
+                if let events::BindingTarget::Source(s) = &record.new {
+                    record.new = events::BindingTarget::Resolved {
+                        pending_seq: 1,
+                        source: s.clone(),
+                    };
+                }
+            }
+            "rejected" => {
+                record.new = events::BindingTarget::Rejected {
+                    payload_session_id: id.clone(),
+                    payload_transcript_path: None,
+                    reason: "synthetic".into(),
+                }
+            }
+            "hook" => record.evidence.hook_event = Some("session_start".into()),
+            "resume" => record.cause = events::BindingCause::Resume,
+            "clear" => record.cause = events::BindingCause::Clear,
+            "compact" => record.cause = events::BindingCause::Compact,
+            "continuation" => record.cause = events::BindingCause::Continuation,
+            "fork" => record.cause = events::BindingCause::Fork,
+            "old" | "parent" => {
+                if let events::BindingTarget::Source(s) = &record.new {
+                    let mut foreign = s.clone();
+                    foreign.session_id = uuid::Uuid::new_v4().to_string();
+                    if case == "old" {
+                        record.old = Some(foreign);
+                    } else {
+                        record.parent_hint = Some(foreign);
+                    }
+                }
+            }
+            "nonce" => record.execution_nonce = Some("prior".into()),
+            "channel" => record.channel_id = 43,
+            _ => unreachable!(),
+        }
+        std::fs::write(&log, encode(&[record])).unwrap();
+        run(
+            &payload,
+            &envelope,
+            "session_start",
+            matches!(case, "startup" | "alias"),
+        );
+    }
+    std::fs::write(&log, encode(&history)).unwrap();
+    for timestamp in [
+        Value::Null,
+        json!("malformed"),
+        json!((prepared.context.created_at - chrono::Duration::seconds(1)).to_rfc3339()),
+    ] {
+        let mut old = header.clone();
+        old["payload"]["timestamp"] = timestamp;
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+        run(&payload, &envelope, "session_start", false);
+    }
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    let mut first = original.clone();
+    first.execution_nonce = Some("prior".into());
+    if let events::BindingTarget::Source(s) = &mut first.new {
+        s.session_id = uuid::Uuid::new_v4().to_string();
+    }
+    let mut second = original.clone();
+    second.seq = 2;
+    if let events::BindingTarget::Source(s) = &first.new {
+        second.old = Some(s.clone());
+    }
+    std::fs::write(&log, encode(&[first, second.clone()])).unwrap();
+    run(&payload, &envelope, "session_start", true);
+    let mut conflict = original.clone();
+    conflict.seq = 2;
+    if let events::BindingTarget::Source(s) = &mut conflict.new {
+        s.session_id = uuid::Uuid::new_v4().to_string();
+    }
+    let mut restored = original.clone();
+    restored.seq = 3;
+    if let events::BindingTarget::Source(s) = &conflict.new {
+        restored.old = Some(s.clone());
+    }
+    std::fs::write(&log, encode(&[original.clone(), conflict, restored])).unwrap();
+    run(&payload, &envelope, "session_start", false);
+    let mut repeated = original.clone();
+    repeated.seq = 2;
+    if let events::BindingTarget::Source(source) = &original.new {
+        repeated.old = Some(source.clone());
+    }
+    std::fs::write(&log, encode(&[original.clone(), repeated.clone()])).unwrap();
+    run(&payload, &envelope, "session_start", true);
+    repeated.old = None;
+    std::fs::write(&log, encode(&[original.clone(), repeated])).unwrap();
+    run(&payload, &envelope, "session_start", false);
+    let mut future = serde_json::to_value(&original).unwrap();
+    future["cause"] = json!("future_lifecycle");
+    for bad in [
+        "corrupt\n".to_string(),
+        encode(&[second]),
+        format!("{future}\n"),
+    ] {
+        std::fs::write(&log, bad).unwrap();
+        run(&payload, &envelope, "session_start", false);
+    }
+    std::fs::write(&log, encode(&history)).unwrap();
+    for key in ["source", "prompt"] {
+        let mut invalid = payload.clone();
+        invalid[key] = json!("wrong");
+        run(
+            &invalid,
+            &envelope,
+            if key == "source" {
+                "session_start"
+            } else {
+                "user_prompt_submit"
+            },
+            false,
+        );
+    }
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce"),
+        "stale",
+    )
+    .unwrap();
+    run(&payload, &envelope, "session_start", false);
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce"),
+        &prepared.context.execution_nonce,
+    )
+    .unwrap();
+    for case in ["context", "resume", "expected", "digest_missing"] {
+        let mut invalid = prepared.context.clone();
+        match case {
+            "context" => invalid.first_prompt_digest = Some(digest("different canonical")),
+            "resume" => invalid.launch_mode = "resume".into(),
+            "expected" => invalid.expected_native_session_id = Some(id.clone()),
+            "digest_missing" => invalid.first_prompt_digest = None,
+            _ => unreachable!(),
+        }
+        std::fs::write(&prepared.path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let env = if case == "context" {
+            envelope.clone()
+        } else {
+            HookBindingEnvelope {
+                context: CapturedContext::Captured(invalid),
+                observed: Default::default(),
+            }
+        };
+        run(
+            &payload,
+            &env,
+            if case == "digest_missing" {
+                "user_prompt_submit"
+            } else {
+                "session_start"
+            },
+            false,
+        );
+    }
+    for policy in [None, Some("legacy"), Some("verified")] {
+        let mut invalid = prepared.context.clone();
+        invalid.source_policy = policy.map(str::to_owned);
+        std::fs::write(&prepared.path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let env = HookBindingEnvelope {
+            context: CapturedContext::Captured(invalid),
+            observed: Default::default(),
+        };
+        run(&payload, &env, "session_start", false);
+    }
+    std::fs::write(
+        &prepared.path,
+        serde_json::to_vec(&prepared.context).unwrap(),
+    )
+    .unwrap();
+    run(&payload, &envelope, "session_start", true);
+    events::set_test_root(None);
+    dedupe::reset_state_for_tests();
+}
+
+#[test]
 fn additive_launch_context_round_trips_with_the_schema_one_old_parser() {
     #[derive(serde::Serialize, serde::Deserialize)]
     struct OldContext {

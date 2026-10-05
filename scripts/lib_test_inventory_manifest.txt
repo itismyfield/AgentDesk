@@ -2666,6 +2666,7 @@ services::codex_tui::session::source_observation::source_observation_tests::roll
 services::codex_tui::session::source_observation::source_observation_tests::rollout_source_must_match_the_launch_mode
 services::codex_tui::session::source_observation::source_observation_tests::rollout_whose_session_meta_names_another_session_is_rejected
 services::codex_tui::session::source_observation::source_observation_tests::rollout_without_session_meta_is_never_accepted
+services::codex_tui::session::source_observation::source_observation_tests::shadow_generic_history_accepts_only_strict_fresh_self_observations
 services::codex_tui::session::source_observation::source_observation_tests::shadow_ingress_is_readonly_before_equality_and_without_a_source_map
 services::codex_tui::session::source_observation::source_observation_tests::symlinked_payload_path_must_resolve_to_its_own_rollout_inside_the_root
 services::codex_tui::session::source_observation::source_observation_tests::trust_hash_path_is_reported_inactive_or_unverified_never_usable

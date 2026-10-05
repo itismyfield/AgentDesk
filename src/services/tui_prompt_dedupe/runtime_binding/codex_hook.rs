@@ -51,6 +51,11 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 #[cfg(test)]
 thread_local! { pub(crate) static SHADOW_IO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(test)]
+fn shadow_mutant(name: &str) -> bool {
+    std::env::var("AGENTDESK_CODEX_SHADOW_TEST_MUTATION").is_ok_and(|value| value == name)
+}
+
 /// ObservationOnly uses the existing tracing sink; never installs or publishes a source.
 pub(crate) fn observe_codex_shadow(
     command: Option<&str>,
@@ -86,6 +91,12 @@ pub(crate) fn observe_codex_shadow(
             let history = prepared
                 .channel_id
                 .and_then(|channel| binding_events::records_strict(channel).ok()?.ok());
+            #[cfg(test)]
+            let nonce = if shadow_mutant("current") {
+                Some(prepared.execution_nonce.clone())
+            } else {
+                nonce
+            };
             let verified = codex_first_proof_candidate(
                 &CodexFirstProof {
                     captured,
@@ -108,10 +119,56 @@ pub(crate) fn observe_codex_shadow(
                 },
             );
             Some(verified.and_then(|source| {
+                #[cfg(test)]
+                if shadow_mutant("before")
+                    && history.as_ref().is_some_and(|rows| {
+                        rows.iter().any(|r| {
+                            r.provider == "codex"
+                                && r.tmux_session == prepared.tmux_session
+                                && r.execution_nonce.as_deref() == Some(&prepared.execution_nonce)
+                                && (r.evidence.hook_event.is_some()
+                                    || r.cause != binding_events::BindingCause::Startup)
+                        })
+                    })
+                {
+                    return Err(CodexFirstProofRejection::Ineligible);
+                }
+                #[cfg(test)]
+                let history = if shadow_mutant("history_error") && history.is_none() {
+                    Some(Vec::new())
+                } else {
+                    history
+                };
                 let seqs = history
                     .as_deref()
                     .and_then(|history| shadow_generic_precedents(&prepared, &source, history))
                     .ok_or(CodexFirstProofRejection::Ineligible)?;
+                #[cfg(test)]
+                let omit_final = shadow_mutant("final_identity");
+                #[cfg(not(test))]
+                let omit_final = false;
+                if !omit_final {
+                    let final_source = verify_codex_hook_source(
+                        prepared
+                            .provider_root
+                            .as_deref()
+                            .ok_or(CodexFirstProofRejection::Context)?,
+                        &CodexHookSourceClaim {
+                            session_id: id,
+                            transcript_path: Some(&source.rollout_path),
+                            expected_source: CodexRolloutSource::Cli,
+                        },
+                    )
+                    .map_err(CodexFirstProofRejection::Native)?;
+                    if final_source.identity != source.identity
+                        || final_source.rollout_path != source.rollout_path
+                        || final_source.created_at != source.created_at
+                    {
+                        return Err(CodexFirstProofRejection::Native(
+                            session::source_observation::CodexHookSourceRejection::RolloutReplaced,
+                        ));
+                    }
+                }
                 generic_precedent_seqs = seqs;
                 Ok(source)
             }))
@@ -139,16 +196,35 @@ fn shadow_generic_precedents(
     verified: &session::source_observation::VerifiedCodexHookSource,
     history: &[binding_events::BindingEvent],
 ) -> Option<Vec<u64>> {
+    #[cfg(unix)]
     use crate::services::cluster::stream_relay::SourceFileIdentity;
     use binding_events::{BindingCause as Cause, BindingTarget as Target};
+    #[cfg(test)]
+    let history = if shadow_mutant("last_only") {
+        &history[history.len().saturating_sub(1)..]
+    } else {
+        history
+    };
     let matches = |source: &binding_events::SourceId| {
-        source.session_id == verified.session_id
-            && source.path.canonicalize().ok().as_ref() == Some(&verified.rollout_path)
-            && verified.identity
-                == SourceFileIdentity::Unix {
-                    dev: source.dev,
-                    ino: source.ino,
-                }
+        #[cfg(test)]
+        if shadow_mutant("identity") {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            source.session_id == verified.session_id
+                && source.path.canonicalize().ok().as_ref() == Some(&verified.rollout_path)
+                && verified.identity
+                    == SourceFileIdentity::Unix {
+                        dev: source.dev,
+                        ino: source.ino,
+                    }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (source, verified);
+            false
+        }
     };
     let mut seqs = Vec::new();
     let mut previous = None;
@@ -158,6 +234,11 @@ fn shadow_generic_precedents(
             return None;
         }
         if record.provider != "codex" || record.tmux_session != prepared.tmux_session {
+            continue;
+        }
+        #[cfg(test)]
+        if shadow_mutant("all_unknown") && record.cause == Cause::Unknown {
+            seqs.push(record.seq);
             continue;
         }
         let current = record.execution_nonce.as_deref() == Some(&prepared.execution_nonce);
@@ -178,6 +259,11 @@ fn shadow_generic_precedents(
                 } => payload_session_id == &verified.session_id,
                 _ => false,
             };
+            #[cfg(test)]
+            if shadow_mutant("prior_native") {
+                previous = source;
+                continue;
+            }
             if named
                 || source
                     .into_iter()
@@ -193,12 +279,19 @@ fn shadow_generic_precedents(
         let Target::Source(source) = &record.new else {
             return None;
         };
+        #[cfg(test)]
+        let check_old = !shadow_mutant("old_chain");
+        #[cfg(not(test))]
+        let check_old = true;
         if record.evidence.hook_event.is_some()
             || record.parent_hint.is_some()
             || !matches!(record.cause, Cause::Unknown | Cause::Startup)
             || !matches(source)
-            || (current_seen && record.old.as_ref() != previous)
-            || (!current_seen && record.old.is_some() && record.old.as_ref() != previous)
+            || (check_old && current_seen && record.old.as_ref() != previous)
+            || (check_old
+                && !current_seen
+                && record.old.is_some()
+                && record.old.as_ref() != previous)
         {
             return None;
         }
@@ -207,6 +300,14 @@ fn shadow_generic_precedents(
         seqs.push(record.seq);
     }
     // Creation time only excludes old native reuse; it never establishes ownership.
+    #[cfg(test)]
+    if shadow_mutant("timestamp") {
+        return Some(seqs);
+    }
+    #[cfg(test)]
+    if shadow_mutant("shadow_branch") && !seqs.is_empty() {
+        return None;
+    }
     if !seqs.is_empty()
         && (prepared.source_policy.as_deref() != Some("shadow")
             || !verified

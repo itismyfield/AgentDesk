@@ -304,6 +304,8 @@ enum VerifyStep {
     AfterOpen,
     AfterHeader,
     BeforeFinalIdentity,
+    #[cfg(test)]
+    AfterVerified,
 }
 
 #[cfg(test)]
@@ -381,6 +383,8 @@ fn verify_rollout(
     if current != canonical || path_identity(&current) != identity {
         return Err(Reject::RolloutReplaced);
     }
+    #[cfg(test)]
+    run_verify_step(VerifyStep::AfterVerified);
     Ok(VerifiedCodexHookSource {
         session_id: id.hyphenated().to_string(),
         rollout_path: canonical,
@@ -480,21 +484,41 @@ impl CodexFirstProofRejection {
     }
 }
 
+#[cfg(test)]
+fn shadow_test_mutant(name: &str) -> bool {
+    std::env::var("AGENTDESK_CODEX_SHADOW_TEST_MUTATION").is_ok_and(|value| value == name)
+}
+
 /// Read-only initial-parent qualification, not publication or delivery authority.
 pub(crate) fn codex_first_proof_candidate(
     launch: &CodexFirstProof<'_>,
     claim: &CodexHookSourceClaim<'_>,
 ) -> Result<VerifiedCodexHookSource, CodexFirstProofRejection> {
-    crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
-        launch.captured,
-        launch.prepared,
-        launch.current_nonce,
-    )
-    .map_err(|_| CodexFirstProofRejection::Context)?;
+    #[cfg(test)]
+    let omit_context = shadow_test_mutant("context");
+    #[cfg(not(test))]
+    let omit_context = false;
+    if !omit_context {
+        crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
+            launch.captured,
+            launch.prepared,
+            launch.current_nonce,
+        )
+        .map_err(|_| CodexFirstProofRejection::Context)?;
+    }
+    #[cfg(test)]
+    let omit_fresh = shadow_test_mutant("fresh");
+    #[cfg(not(test))]
+    let omit_fresh = false;
+    #[cfg(test)]
+    let omit_digest = shadow_test_mutant("digest");
+    #[cfg(not(test))]
+    let omit_digest = false;
     if !launch.verified_fresh_spawn
         || !launch.no_prior_claim_or_transition
-        || launch.prepared.launch_mode != "fresh"
-        || launch.prepared.expected_native_session_id.is_some()
+        || (!omit_fresh
+            && (launch.prepared.launch_mode != "fresh"
+                || launch.prepared.expected_native_session_id.is_some()))
         || !matches!(
             launch.prepared.source_policy.as_deref(),
             Some("shadow" | "verified")
@@ -502,10 +526,13 @@ pub(crate) fn codex_first_proof_candidate(
         || claim.expected_source != CodexRolloutSource::Cli
         || !match launch.event {
             "SessionStart" => launch.source == Some("startup"),
-            "UserPromptSubmit" => first_prompt_matches(
-                launch.prepared.first_prompt_digest.as_deref(),
-                launch.prompt,
-            ),
+            "UserPromptSubmit" => {
+                omit_digest
+                    || first_prompt_matches(
+                        launch.prepared.first_prompt_digest.as_deref(),
+                        launch.prompt,
+                    )
+            }
             _ => false,
         }
     {
