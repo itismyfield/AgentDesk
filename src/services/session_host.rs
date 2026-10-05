@@ -19,6 +19,8 @@ mod consumer_guard;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+#[cfg(test)]
+pub(crate) mod herdr_socket_rig_tests;
 pub(crate) mod legacy_collapse;
 mod model;
 mod process_host;
@@ -30,7 +32,7 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
-// Dormant: the Herdr turn executor builds targets from the boot registry.
+// The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{HerdrGateRefusal, HerdrTarget, Mutation as HerdrMutation};
 #[cfg_attr(not(test), allow(unused_imports))]

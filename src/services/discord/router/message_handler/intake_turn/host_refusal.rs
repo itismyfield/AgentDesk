@@ -14,7 +14,7 @@ pub(super) async fn admitted_uploads(
 ) -> Result<Option<crate::services::cluster::attachment_transfer::uploads::PendingUploads>, Error> {
     let session_key = || build_adk_session_key(shared, channel_id, provider, None);
     let pool = shared.pg_pool.as_ref();
-    let judged = crate::services::turn_host::refusal_before_turn(
+    let judged = crate::services::turn_host::intake_refusal_before_turn(
         pool,
         provider,
         channel_id.get(),

@@ -551,6 +551,7 @@ src/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
+│   │   ├── herdr_turn.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
 │   │   ├── process_session_launch.rs
@@ -1181,6 +1182,7 @@ src/
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
+│   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
@@ -2093,6 +2095,7 @@ src/
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
+│   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs

@@ -10,11 +10,12 @@ use super::herdr::contract::{self, HerdrTransport, ServerWitness};
 use super::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::herdr::observe::{self, RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::{self, EvidenceGap, HostOs, PaneProcesses, ProbeRequest, ProcessOs};
-use super::model::{HostError, HostKey, HostMutation, HostPresence, HostRefusal};
+use super::model::{HostError, HostKey, HostKind, HostMutation, HostPresence, HostRefusal};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedExecution, HostedLocation, HostedState,
 };
 use crate::services::herdr_admission::{self, StopCause};
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 /// Why the gate let nothing through; every case is decided before any input is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,10 @@ pub(crate) enum HerdrGateRefusal {
     RestoreUnverified(RestoreUnverified),
     /// The row holds no Pending or Bound execution with a location and launch evidence.
     NoStoredExecution,
+    /// The logical key's `.host_kind` marker names another host.
+    MarkerOtherHost,
+    /// The marker is absent, unrecognized or unreadable.
+    MarkerUnverified,
     /// A pane reading came from another server than the one E7 named.
     ServerChanged,
     /// The pane did not read as one root shell running one provider.
@@ -70,6 +75,7 @@ struct PaneGate {
     transport: Arc<dyn HerdrTransport>,
     pane: String,
     nonce: String,
+    logical_key: String,
     expected: ExpectedExecution,
     read_restore: fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume,
     os: Arc<dyn ProcessOs>,
@@ -137,6 +143,7 @@ impl HerdrTarget {
             transport,
             pane: location.pane_id.clone(),
             nonce: stored.execution_nonce.clone(),
+            logical_key: stored.owner.logical_key.clone(),
             expected: expected.clone(),
             read_restore: read_restore_off,
             os: Arc::new(HostOs),
@@ -180,6 +187,12 @@ impl HerdrTarget {
         }
     }
 
+    /// Drops a judgment no send will use, so a later send without its own judgment writes nothing.
+    pub(crate) fn discard_pin(&self) {
+        let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
+        *pinned = None;
+    }
+
     pub(crate) fn send_text(&self, text: &str) -> Result<HostMutation, HostError> {
         let pane_id = self.0.pane.clone();
         let text = text.to_string();
@@ -190,6 +203,7 @@ impl HerdrTarget {
     /// marker would close the paste early, so it is refused unsent.
     pub(crate) fn send_paste(&self, text: &str) -> Result<HostMutation, HostError> {
         if text.contains(PASTE_END) {
+            self.discard_pin();
             return Ok(refused("paste_end_marker_in_text"));
         }
         self.send_text(&format!("{PASTE_START}{text}{PASTE_END}"))
@@ -269,10 +283,16 @@ impl PaneGate {
         }
     }
 
-    /// Admission first (no I/O), then E7, then the pane on the server E7 named.
+    /// Admission first (no I/O), the `.host_kind` marker, then E7, then the pane on the server
+    /// E7 named.
     fn judge(&self, mutation: Mutation) -> Result<Judged, HerdrGateRefusal> {
         if mutation == Mutation::Input {
             herdr_admission::check().map_err(HerdrGateRefusal::AdmissionStopped)?;
+        }
+        match read_host_kind_marker(&self.logical_key) {
+            HostKindMarker::Known(HostKind::Herdr) => {}
+            HostKindMarker::Known(_) => return Err(HerdrGateRefusal::MarkerOtherHost),
+            _ => return Err(HerdrGateRefusal::MarkerUnverified),
         }
         let witness = match (self.read_restore)(self.transport.as_ref(), &self.endpoint) {
             RestoreResume::Off { witness } => witness,

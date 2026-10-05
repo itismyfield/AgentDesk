@@ -5571,6 +5571,18 @@ services::discord::router::message_handler::pre_admission_control::pre_admission
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::intake_turn_keeps_the_gate_above_the_deferred_take
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_matched_bound_execution_takes_one_prompt_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::after_a_paste_then_cancel_the_next_prompt_is_held_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::after_an_unclear_paste_the_next_prompt_is_held_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
+services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
 services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
@@ -9719,6 +9731,7 @@ services::session_host::herdr::wire::tests::herdr_wire_matches_the_vendored_sche
 services::session_host::herdr::wire::tests::herdr_write_failure_reports_bytes_already_sent
 services::session_host::herdr_gate::tests::a_failed_gate_check_writes_nothing_and_names_why
 services::session_host::herdr_gate::tests::a_herdr_followup_retire_is_refused_and_kills_nothing
+services::session_host::herdr_gate::tests::a_marker_not_naming_herdr_refuses_every_write
 services::session_host::herdr_gate::tests::a_server_changed_after_the_gate_gets_no_byte
 services::session_host::herdr_gate::tests::herdr_plan_pastes_once_bracketed_then_enter_each_on_its_own_connection
 services::session_host::herdr_gate::tests::host_for_herdr_reads_the_registry_endpoint_and_never_writes

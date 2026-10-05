@@ -220,6 +220,7 @@ impl MutationGate for HerdrTarget {
 impl HerdrTarget {
     fn admit_as(&self, session: &str, mutation: HerdrMutation) -> Result<(), InputRefusal> {
         if session != self.pane_id() {
+            self.discard_pin();
             return Err(InputRefusal::Conflict);
         }
         self.pin(mutation).map_err(InputRefusal::Herdr)
@@ -336,8 +337,9 @@ impl InputTransport for HerdrInput<'_> {
         herdr_written(self.target.send_text(text))
     }
 
-    /// Kept here until its paste; nothing reaches the pane.
+    /// Kept here until its paste, which is judged again; nothing reaches the pane.
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
+        self.target.discard_pin();
         self.buffers.insert(buffer.to_string(), text.to_string());
         herdr_written(Ok(HostMutation::Confirmed))
     }

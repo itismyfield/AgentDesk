@@ -37,6 +37,7 @@ use crate::services::session_host::{
 };
 
 const PANE: &str = "w1-1";
+const LOGICAL: &str = "AgentDesk-claude-herdr";
 const SHELL: u32 = 10;
 const PROVIDER: u32 = 20;
 const CHILD: u32 = 30;
@@ -247,7 +248,7 @@ fn stored(server: &Server, state: HostedState) -> HostedExecution {
         provider: "claude".into(),
         discord_token_hash: "hash".into(),
         channel_id: "1".into(),
-        logical_key: "AgentDesk-claude-herdr".into(),
+        logical_key: LOGICAL.into(),
         owner_node: "mac-mini".into(),
         runtime_root: "test".into(),
     };
@@ -295,7 +296,8 @@ fn resolved(pane: &str) -> ResolvedSessionTarget {
     }
 }
 
-/// A test runtime root holding the launch context, admission open, and the server.
+/// A test runtime root holding the launch context and a Herdr `.host_kind` marker, admission
+/// open, and the server.
 struct Rig {
     server: Server,
     context: PathBuf,
@@ -305,6 +307,7 @@ struct Rig {
 
 fn rig() -> Rig {
     let root = TestRuntimeRootGuard::new();
+    std::fs::write(marker_path(), "herdr").unwrap();
     let stop_file = std::env::temp_dir().join(format!("adk-hg-none-{}", uuid::Uuid::new_v4()));
     Rig {
         server: serve(),
@@ -315,6 +318,10 @@ fn rig() -> Rig {
 }
 
 type Os = fn(&Rig) -> Arc<dyn ProcessOs>;
+
+fn marker_path() -> String {
+    crate::services::tmux_common::session_temp_path(LOGICAL, "host_kind")
+}
 
 /// The launch's own provider: its environment names this execution's context.
 fn launched_os(rig: &Rig) -> Arc<dyn ProcessOs> {
@@ -436,6 +443,45 @@ fn a_failed_gate_check_writes_nothing_and_names_why() {
         );
         assert!(rig.server.sends().is_empty(), "{why:?}");
     }
+}
+
+// A `.host_kind` marker naming another host, or no readable host, refuses input and cancel
+// keys alike with nothing written; the same target writes once the marker names Herdr again.
+#[test]
+fn a_marker_not_naming_herdr_refuses_every_write() {
+    use HerdrGateRefusal as Why;
+    let rig = rig();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let set = |marker: Option<&str>| {
+        let path = marker_path();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&path);
+        match marker {
+            Some("<dir>") => std::fs::create_dir(&path).unwrap(),
+            Some(text) => std::fs::write(&path, text).unwrap(),
+            None => {}
+        }
+    };
+    let cases = [
+        (Some("tmux"), Why::MarkerOtherHost),
+        (Some("zellij"), Why::MarkerUnverified),
+        (None, Why::MarkerUnverified),
+        (Some("<dir>"), Why::MarkerUnverified),
+    ];
+    for (marker, why) in cases {
+        set(marker);
+        for plan in [
+            &[TuiInputAction::Literal("x".into()), TuiInputAction::Enter][..],
+            &[TuiInputAction::Escape][..],
+        ] {
+            let refused = InputRun::Refused(InputRefusal::Herdr(why));
+            assert_eq!(run(&target, plan), refused, "{marker:?}");
+        }
+        assert!(rig.server.sends().is_empty(), "{marker:?}");
+    }
+    set(Some("herdr"));
+    assert_eq!(run(&target, &[TuiInputAction::Escape]), InputRun::Applied);
+    assert_eq!(rig.server.sends().len(), 1);
 }
 
 // With admission stopped no input goes out, yet a cancel key still does, after E7 and the pane.
