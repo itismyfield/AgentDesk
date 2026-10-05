@@ -379,6 +379,53 @@ fn verify_rollout(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexSourceMode {
+    Legacy,
+    Shadow,
+    Verified,
+    Invalid,
+}
+impl CodexSourceMode {
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("legacy") => Self::Legacy,
+            Some("shadow") => Self::Shadow,
+            Some("verified") => Self::Verified,
+            _ => Self::Invalid,
+        }
+    }
+    pub(crate) fn launch_policy(self) -> Result<&'static str, &'static str> {
+        match self {
+            Self::Legacy => Ok("legacy"),
+            Self::Shadow => Ok("shadow"),
+            Self::Verified => Err("SourceModeVerifiedNotLanded"),
+            Self::Invalid => Err("SourceModeInvalid"),
+        }
+    }
+}
+
+/// Validated once at startup; no active nonce or new launch reparses mutable env.
+pub(crate) fn codex_source_mode_snapshot() -> CodexSourceMode {
+    #[cfg(test)]
+    if let Some(mode) = SOURCE_MODE_TEST.with(|mode| mode.get()) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<CodexSourceMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let value = std::env::var_os("AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE");
+        let mode = CodexSourceMode::parse(value.as_ref().map(|v| v.to_str().unwrap_or("invalid")));
+        tracing::info!(
+            ?mode,
+            eligible = mode.launch_policy().is_ok(),
+            "Codex source-mode startup snapshot"
+        );
+        mode
+    })
+}
+#[cfg(test)]
+thread_local! { pub(crate) static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
+
 /// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.
 pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bool {
     use sha2::{Digest, Sha256};
