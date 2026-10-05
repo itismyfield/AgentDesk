@@ -298,6 +298,54 @@ pub(crate) async fn load_hosted_execution_pg(
     })
 }
 
+/// The record states of a live execution.
+pub(crate) const LIVE: &[&str] = &["pending", "bound"];
+
+/// Every row whose record places a Herdr execution in one of `states` on `node`; a record that does
+/// not decode, or names another owner than its row, comes back Unknown.
+pub(crate) async fn list_local_herdr_rows_pg(
+    pool: &PgPool,
+    node: &str,
+    states: &[&str],
+) -> Result<Vec<HostedObservation>, String> {
+    let rows = sqlx::query(
+        "SELECT id, provider, identity_kind, discord_token_hash, channel_id, hosted_execution
+         FROM sessions
+         WHERE hosted_execution->'location'->>'host' = $1
+           AND hosted_execution->'location'->>'execution_node' = $2
+           AND hosted_execution->>'state' = ANY($3)
+         ORDER BY id",
+    )
+    .bind(HERDR_HOST)
+    .bind(node)
+    .bind(states)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("list herdr rows: {error}"))?;
+    let observe = |row: &PgRow| -> Result<HostedObservation, sqlx::Error> {
+        let identity: [Option<String>; 4] = [
+            row.try_get("provider")?,
+            row.try_get("identity_kind")?,
+            row.try_get("discord_token_hash")?,
+            row.try_get("channel_id")?,
+        ];
+        let raw: Option<Value> = row.try_get("hosted_execution")?;
+        let record = match HostedRecord::decode(raw.as_ref()) {
+            HostedRecord::Known(known) if !owner_matches_row(&known.owner, &identity) => {
+                HostedRecord::Unknown(raw.clone().unwrap_or_default())
+            }
+            record => record,
+        };
+        Ok(HostedObservation {
+            session_id: row.try_get("id")?,
+            raw,
+            record,
+        })
+    };
+    let listed = rows.iter().map(observe).collect::<Result<_, _>>();
+    listed.map_err(|error| format!("decode herdr rows: {error}"))
+}
+
 fn owner_matches_row(owner: &HostedOwner, identity: &[Option<String>; 4]) -> bool {
     let expected = [
         owner.provider.as_str(),

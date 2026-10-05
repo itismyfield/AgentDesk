@@ -66,6 +66,8 @@ src/
 │   ├── discord_thread_create.rs
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
+│   ├── herdr.rs
+│   ├── herdr_tests.rs
 │   ├── init.rs
 │   ├── intake_outbox.rs
 │   ├── json_output.rs
@@ -1080,6 +1082,8 @@ src/
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
+│   │   │   ├── herdr_reader.rs
+│   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
 │   │   │   ├── idle_captured_response.rs
@@ -1187,6 +1191,7 @@ src/
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
+│   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs

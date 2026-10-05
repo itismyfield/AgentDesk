@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5d76a96c0796a44fd11d85eee9c9c7da4c6ee8ec",
+  "measured_at_sha": "6bd1e56048a89d01b6ffcc9b3badc6ebb8bf4db7",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2539,6 +2539,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:f215ec8f3fb72d1ce1b7a1bfa0849999b0f5d44bb994ad91d7e1be21f1c36528"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/herdr_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:39f593884569ab29ee3b8205914b5eb53239012c28cebb5b2fb4f79494576436"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/herdr_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:32ec52aad4e45a1d9124e6e6f37367d6a39bff42f603a74340a03754364675b1"
     },
     {
       "root": "src",
@@ -7669,6 +7687,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:412ebc2bedbe330b0e4a79c2a47e6fc330c65a84e1baf49138ee119a29656a70"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions/hosted_execution.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aec5ea9c71ef9e582a25a859b83c56648d641f35b75ecb4b413b4fd1b70b4eb3"
     },
     {
       "root": "src",
