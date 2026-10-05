@@ -96,6 +96,7 @@ mod tests {
         message: MessageId,
         sources: &[MessageId],
         retry: MessageId,
+        text: &str,
     ) -> (Arc<CancelToken>, Result<bool, String>) {
         let provider = shared.provider.clone();
         let taken = idle_queue_take_next_soft_if_ready(shared, &provider, channel).await;
@@ -112,7 +113,7 @@ mod tests {
             7,
             message.get(),
             0,
-            PROMPT.to_string(),
+            text.to_string(),
             None,
             None,
             None,
@@ -176,7 +177,7 @@ mod tests {
 
         // The kickoff promotes it while the external row is still on disk.
         let (token, verdict) =
-            promote_and_admit(&shared, channel, message, &[message], message).await;
+            promote_and_admit(&shared, channel, message, &[message], message, PROMPT).await;
         let snapshot = mailbox_snapshot(&shared, channel).await;
         let row = inflight::load_inflight_state_read_only(&provider, channel.get());
         assert_eq!(
@@ -205,7 +206,7 @@ mod tests {
         // After the external row clears, the same prompt starts exactly once.
         inflight::clear_inflight_state(&provider, channel.get());
         let (_token, verdict) =
-            promote_and_admit(&shared, channel, message, &[message], message).await;
+            promote_and_admit(&shared, channel, message, &[message], message, PROMPT).await;
         let snapshot = mailbox_snapshot(&shared, channel).await;
         assert_eq!(
             (verdict, queued_ids(&snapshot.intervention_queue)),
@@ -219,7 +220,7 @@ mod tests {
         let ids = [6_245_401, 6_245_402, 6_245_403];
         let [a, b, c] = ids.map(MessageId::new);
         let mut missing = Vec::new();
-        // Without a busy retry binding the retry id is the primary; with one it is the head.
+        // Without a busy retry binding the retry id is the primary; with one it is the oldest id.
         for (variant, retry) in [(0, c), (1, a)] {
             let shared = crate::services::discord::make_shared_data_for_tests();
             let provider = shared.provider.clone();
@@ -234,7 +235,8 @@ mod tests {
                     .await
                     .enqueued
             );
-            let (_token, verdict) = promote_and_admit(&shared, channel, c, &[a, b, c], retry).await;
+            let (_token, verdict) =
+                promote_and_admit(&shared, channel, c, &[a, b, c], retry, PROMPT).await;
             let snapshot = mailbox_snapshot(&shared, channel).await;
             let known =
                 crate::services::discord::recovery_known_ids::recovery_known_message_ids(&snapshot);
@@ -243,7 +245,8 @@ mod tests {
 
             // The retry claims the merged head again and its delivery settles A, B and C.
             inflight::clear_inflight_state(&provider, channel.get());
-            let (token, verdict) = promote_and_admit(&shared, channel, c, &[a, b, c], retry).await;
+            let (token, verdict) =
+                promote_and_admit(&shared, channel, c, &[a, b, c], retry, PROMPT).await;
             assert_eq!(verdict, Ok(true));
             crate::services::discord::outbound::completed_turn_ledger::append_completed_episode(
                 &provider,
@@ -262,6 +265,57 @@ mod tests {
         }
         // Neither catch-up's known set nor the settled ledger may lose an absorbed id.
         assert_eq!(missing, [(0, vec![], vec![]), (1, vec![], vec![])]);
+    }
+
+    #[tokio::test]
+    async fn a_requeued_merged_head_keeps_each_body_on_its_own_id_through_a_partial_strip() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let [a, b, c] = [6_245_501, 6_245_502, 6_245_503].map(MessageId::new);
+        // Without explicit segments each line belongs to the id at the same position.
+        let bodies = "body A\nbody B\nbody C";
+        let mut left = Vec::new();
+        for (variant, retry) in [(0, c), (1, a)] {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let provider = shared.provider.clone();
+            let channel = ChannelId::new(6_245_510 + variant);
+            crate::services::discord::health::seed_external_turn_row_for_tests(
+                &provider,
+                channel.get(),
+            );
+            let mut merged = queued(c, &[a, b, c]);
+            merged.text = bodies.to_string();
+            assert!(
+                mailbox_enqueue_intervention(&shared, &provider, channel, merged)
+                    .await
+                    .enqueued
+            );
+            let (_token, verdict) =
+                promote_and_admit(&shared, channel, c, &[a, b, c], retry, bodies).await;
+            assert_eq!(verdict, Ok(false));
+
+            // A settles after the requeue, so the next dequeue strips A from the merged head.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            crate::services::discord::outbound::completed_turn_ledger::append_completed_episode(
+                &provider,
+                channel.get(),
+                a.get(),
+                None,
+            );
+            let taken = idle_queue_take_next_soft_if_ready(&shared, &provider, channel).await;
+            let (item, _, _lease) = taken.into_intervention().expect("stripped head");
+            let segments: Vec<(u64, String)> = item
+                .source_text_segments()
+                .into_iter()
+                .map(|segment| (segment.message_id.get(), segment.text))
+                .collect();
+            left.push((variant, segments, item.text));
+        }
+        let kept = vec![
+            (b.get(), "body B".to_string()),
+            (c.get(), "body C".to_string()),
+        ];
+        let text = "body B\nbody C".to_string();
+        assert_eq!(left, [(0, kept.clone(), text.clone()), (1, kept, text)]);
     }
 
     #[test]
