@@ -379,6 +379,72 @@ fn verify_rollout(
     })
 }
 
+/// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.
+#[allow(dead_code)]
+pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bool {
+    use sha2::{Digest, Sha256};
+    let (Some(hex), Some(prompt)) = (
+        expected.and_then(|s| s.strip_prefix("sha256:")),
+        prompt.as_str(),
+    ) else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && hex == format!("{:x}", Sha256::digest(prompt.as_bytes()))
+}
+
+#[allow(dead_code)]
+pub(crate) struct CodexFirstProof<'a> {
+    pub captured: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    pub prepared: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    pub current_nonce: Option<&'a str>,
+    pub verified_fresh_spawn: bool,
+    pub no_prior_claim_or_transition: bool,
+    pub event: &'a str,
+    pub source: Option<&'a str>,
+    pub expected_digest: Option<&'a str>,
+    pub prompt: &'a Value,
+}
+
+/// Dormant initial-parent qualification, not publication or delivery authority.
+#[allow(dead_code)]
+pub(crate) fn codex_first_proof_candidate(
+    launch: &CodexFirstProof<'_>,
+    claim: &CodexHookSourceClaim<'_>,
+) -> Result<VerifiedCodexHookSource, String> {
+    crate::services::tui_prompt_dedupe::binding_context::codex_context_candidate(
+        launch.captured,
+        launch.prepared,
+        launch.current_nonce,
+    )?;
+    if !launch.verified_fresh_spawn
+        || !launch.no_prior_claim_or_transition
+        || launch.prepared.launch_mode != "fresh"
+        || launch.prepared.expected_native_session_id.is_some()
+        || claim.expected_source != CodexRolloutSource::Cli
+        || !match launch.event {
+            "SessionStart" => launch.source == Some("startup"),
+            "UserPromptSubmit" => first_prompt_matches(launch.expected_digest, launch.prompt),
+            _ => false,
+        }
+    {
+        return Err("Codex hook is not a fresh first-proof candidate".into());
+    }
+    let root = launch
+        .prepared
+        .provider_root
+        .as_deref()
+        .ok_or("missing Codex root")?;
+    verify_codex_hook_source(root, claim).map_err(|error| format!("{error:?}"))
+}
+
+#[cfg(test)]
+#[path = "first_proof_tests.rs"]
+mod first_proof_tests;
+
 #[cfg(test)]
 #[path = "source_observation_tests.rs"]
 mod source_observation_tests;
