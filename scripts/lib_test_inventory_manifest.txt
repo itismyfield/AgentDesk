@@ -2648,6 +2648,8 @@ services::codex_tui::rollout_tail::tests::two_segments_with_long_pause_emits_ful
 services::codex_tui::session::source_observation::source_observation_tests::captured_cli_advertising_the_bypass_has_hooks_only_through_it
 services::codex_tui::session::source_observation::source_observation_tests::captured_exec_tui_and_clear_hooks_verify_by_payload_path
 services::codex_tui::session::source_observation::source_observation_tests::cli_without_the_bypass_has_no_hooks_whatever_its_trust_hashes
+services::codex_tui::session::source_observation::source_observation_tests::first_prompt_digest_requires_exact_utf8_and_a_string
+services::codex_tui::session::source_observation::source_observation_tests::first_proof_candidate_requires_canonical_current_fresh_launch_and_strict_parent
 services::codex_tui::session::source_observation::source_observation_tests::header_is_read_from_the_open_descriptor_not_by_reopening_the_path
 services::codex_tui::session::source_observation::source_observation_tests::incomplete_rollout_index_lookup_is_retryable_not_a_single_candidate
 services::codex_tui::session::source_observation::source_observation_tests::malformed_first_record_is_rejected_even_with_a_valid_header_after_it
@@ -11069,5 +11071,3 @@ voice::utils::tests::passes_through_relative_paths_without_tilde
 voice::utils::tests::preserves_non_tilde_path_text_exactly
 voice::utils::tests::preserves_tilde_path_component_trailing_space
 voice::utils::tests::returns_input_when_no_tilde
-services::codex_tui::session::source_observation::source_observation_tests::first_prompt_digest_requires_exact_utf8_and_a_string
-services::codex_tui::session::source_observation::source_observation_tests::first_proof_candidate_requires_canonical_current_fresh_launch_and_strict_parent
