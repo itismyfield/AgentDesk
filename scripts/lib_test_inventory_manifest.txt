@@ -11069,5 +11069,5 @@ voice::utils::tests::passes_through_relative_paths_without_tilde
 voice::utils::tests::preserves_non_tilde_path_text_exactly
 voice::utils::tests::preserves_tilde_path_component_trailing_space
 voice::utils::tests::returns_input_when_no_tilde
-services::codex_tui::session::source_observation::source_observation_tests::first_proof_tests::first_prompt_digest_requires_exact_utf8_and_a_string
-services::codex_tui::session::source_observation::source_observation_tests::first_proof_tests::first_proof_candidate_requires_canonical_current_fresh_launch_and_strict_parent
+services::codex_tui::session::source_observation::source_observation_tests::first_prompt_digest_requires_exact_utf8_and_a_string
+services::codex_tui::session::source_observation::source_observation_tests::first_proof_candidate_requires_canonical_current_fresh_launch_and_strict_parent
