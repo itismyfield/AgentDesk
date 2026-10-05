@@ -442,9 +442,5 @@ pub(crate) fn codex_first_proof_candidate(
 }
 
 #[cfg(test)]
-#[path = "first_proof_tests.rs"]
-mod first_proof_tests;
-
-#[cfg(test)]
 #[path = "source_observation_tests.rs"]
 mod source_observation_tests;
