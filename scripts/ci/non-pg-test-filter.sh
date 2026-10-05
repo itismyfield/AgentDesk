@@ -149,6 +149,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
@@ -499,6 +500,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_local_accepted_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
+  services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
+  services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
+  services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
   services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
@@ -843,6 +847,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  services::discord::router::message_handler::provider_dispatch::herdr_tests
   services::discord::router::message_handler::provider_dispatch::tests
   services::discord::router::message_handler::provider_isolation::host_tests
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests

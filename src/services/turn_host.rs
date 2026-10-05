@@ -24,6 +24,7 @@ pub(crate) enum TurnHost {
 pub(crate) struct HerdrTurnPlan {
     pub endpoint: HerdrLaunchEndpoint,
     /// `None` while the channel has no sessions row yet.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub row: Option<HostedObservation>,
 }
 

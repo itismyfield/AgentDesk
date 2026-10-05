@@ -339,6 +339,7 @@ jobs:
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
               - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'

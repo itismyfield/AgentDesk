@@ -1536,6 +1536,11 @@ fn herdr_items_have_no_production_caller() {
         (RECONCILE, 1),
         // Dormant source attach: takes the caller's reader, never constructs or routes to a host.
         ("src/services/discord/tui_prompt_relay/herdr_source.rs", 0),
+        // Switched-on Claude Herdr turn: reads the stored pane through its gate, never a host.
+        (
+            "src/services/discord/router/message_handler/provider_dispatch.rs",
+            0,
+        ),
         // Watcher host snapshot: reads the marker beside the admission map and row, never a host.
         (WATCH_HOST, 1),
     ];

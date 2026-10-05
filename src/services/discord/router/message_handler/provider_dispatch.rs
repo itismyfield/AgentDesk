@@ -169,6 +169,7 @@ pub(super) fn execute(
 }
 
 /// The switch is read first; off, the turn is refused before any I/O.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn herdr_turn(
     turn: &StreamingTurn<'_>,
     plan: &HerdrTurnPlan,

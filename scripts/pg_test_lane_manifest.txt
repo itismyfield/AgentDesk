@@ -126,6 +126,7 @@ src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
+src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
@@ -326,6 +327,7 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
@@ -1118,6 +1120,9 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
 services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups

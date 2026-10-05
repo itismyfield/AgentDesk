@@ -282,6 +282,8 @@ impl Fixture {
         let (owner, endpoint, cwd) = (self.owner.clone(), self.endpoint(), self.cwd.path());
         let finished = &self.finished;
         let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
+        let cancel = Arc::new(CancelToken::new());
+        let token = cancel.clone();
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
                 let _runtime = rt.enter();
@@ -302,14 +304,32 @@ impl Fixture {
                     system_prompt: None,
                     model: None,
                     hook_endpoint: Some("http://127.0.0.1:1".into()),
-                    cancel: None,
+                    cancel: Some(token),
                 };
                 let result = herdr_turn::execute(turn, ports, sender);
                 finished.store(true, Ordering::SeqCst);
                 (result, receiver.try_iter().collect())
             });
-            claude();
-            executor.join().unwrap()
+            // A provider that gave up, or a turn still reading after it, is cancelled, so the
+            // executor never outlives the test.
+            let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(claude));
+            let deadline = Instant::now() + LIMIT;
+            while played.is_ok() && !finished.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let outlived = played.is_ok() && !finished.load(Ordering::SeqCst);
+            cancel
+                .cancelled
+                .store(played.is_err() || outlived, Ordering::SeqCst);
+            let joined = executor.join();
+            if let Err(panic) = played {
+                std::panic::resume_unwind(panic);
+            }
+            assert!(
+                !outlived,
+                "the turn was still running after its provider finished"
+            );
+            joined.unwrap()
         })
     }
 }
