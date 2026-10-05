@@ -384,7 +384,9 @@ fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
 #[test]
 fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
     let prefix = |n: usize| text().chars().take(n).collect::<String>();
-    let cases: Vec<(&str, Vec<String>, bool, Outcome, (usize, usize, usize))> = vec![
+    // (name, captures, transcript accepts on Enter, outcome, (pastes, Enter keys, other keys))
+    type Case<'a> = (&'a str, Vec<String>, bool, Outcome, (usize, usize, usize));
+    let cases: Vec<Case> = vec![
         (
             "stale capture",
             vec![busy_empty()],
