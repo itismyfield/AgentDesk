@@ -431,6 +431,24 @@ pub(crate) fn save_channel_queue(
     queue: &[Intervention],
     dispatch_role_override: Option<u64>,
 ) -> Result<(), String> {
+    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
+        save_channel_queue_locked(
+            provider,
+            token_hash,
+            channel_id,
+            queue,
+            dispatch_role_override,
+        )
+    })
+}
+
+fn save_channel_queue_locked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+    queue: &[Intervention],
+    dispatch_role_override: Option<u64>,
+) -> Result<(), String> {
     let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
         return Err(format!(
             "pending queue root unavailable for provider={} token_hash={} channel_id={}",
@@ -448,6 +466,16 @@ pub(crate) fn save_channel_queue(
     }
     if queue.is_empty() {
         return match fs::remove_file(&path) {
+            Ok(())
+                if crate::services::discord::input_runtime::fence::lookup(
+                    provider,
+                    channel_id.get(),
+                )
+                .is_some() =>
+            {
+                crate::services::discord::runtime_store::fsync_parent_dir(&path)
+                    .map_err(|e| e.to_string())
+            }
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
@@ -525,6 +553,24 @@ pub(crate) fn save_channel_pending_dispatch_marker(
     intervention: &Intervention,
     dispatch_role_override: Option<u64>,
 ) -> Result<(), String> {
+    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
+        save_channel_pending_dispatch_marker_locked(
+            provider,
+            token_hash,
+            channel_id,
+            intervention,
+            dispatch_role_override,
+        )
+    })
+}
+
+fn save_channel_pending_dispatch_marker_locked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+    intervention: &Intervention,
+    dispatch_role_override: Option<u64>,
+) -> Result<(), String> {
     let Some(path) = pending_dispatch_marker_file_path(provider, token_hash, channel_id) else {
         return Err(format!(
             "pending dispatch marker root unavailable for provider={} token_hash={} channel_id={}",
@@ -558,10 +604,30 @@ pub(super) fn remove_channel_pending_dispatch_marker(
     token_hash: &str,
     channel_id: ChannelId,
 ) -> Result<(), String> {
+    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
+        remove_channel_pending_dispatch_marker_locked(provider, token_hash, channel_id)
+    })
+}
+
+fn remove_channel_pending_dispatch_marker_locked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Result<(), String> {
     let Some(path) = pending_dispatch_marker_file_path(provider, token_hash, channel_id) else {
         return Ok(());
     };
     match fs::remove_file(&path) {
+        Ok(())
+            if crate::services::discord::input_runtime::fence::lookup(
+                provider,
+                channel_id.get(),
+            )
+            .is_some() =>
+        {
+            crate::services::discord::runtime_store::fsync_parent_dir(&path)
+                .map_err(|e| e.to_string())
+        }
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
@@ -578,6 +644,10 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> usize {
+    if crate::services::discord::input_runtime::fence::lookup(provider, channel_id.get()).is_some()
+    {
+        return 0;
+    }
     let Some(root) = pending_queue_root() else {
         return 0;
     };

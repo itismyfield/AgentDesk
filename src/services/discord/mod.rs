@@ -155,6 +155,7 @@ mod tmux_watcher_registry;
 #[rustfmt::skip]
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
+pub(crate) mod input_runtime;
 #[allow(dead_code)]
 mod input_transition;
 #[cfg(test)]

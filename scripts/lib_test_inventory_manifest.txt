@@ -4060,6 +4060,13 @@ services::discord::inflight::wave_a_cleanup_tests::invalidate_stale_generation_r
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_delay_below_placeholder_abandon
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
+services::discord::input_runtime::fence::tests::borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
+services::discord::input_runtime::fence::tests::canonical_borrowing_and_supervisor_contention_never_prepare
+services::discord::input_runtime::fence::tests::closing_drains_only_existing_permits_and_rejects_redirect
+services::discord::input_runtime::fence::tests::off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore
+services::discord::input_runtime::fence::tests::ordinary_writer_waits_for_release_and_timeout_is_typed
+services::discord::input_runtime::fence::tests::queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_stall
+services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
 services::discord::input_transition::tests::supported::changed_row_under_lock_never_unlinks_successor
 services::discord::input_transition::tests::supported::contended_row_lock_holds_without_waiting_and_resumes_after_release
 services::discord::input_transition::tests::supported::malformed_population_and_outbox_leave_legacy_while_dead_row_stays_held
