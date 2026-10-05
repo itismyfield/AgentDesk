@@ -29,17 +29,31 @@ fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
             let entry = serde_json::json!({"node": node, "local": local, "last_e7": "never"});
             endpoints.insert(key.clone(), entry);
         }
-        serde_json::json!({
+        let mut view = serde_json::json!({
             "configured_channels": channels,
             "admission": admission,
             "endpoints": endpoints,
             "restart_required": *boot.config() != config.session_hosts,
-        })
+        });
+        attach_local_herdr(&mut view);
+        view
     };
     with_boot(|boot| match boot {
         Some(boot) => view(boot),
         None => view(&BootSessionHosts::default()),
     })
+}
+
+/// The restart reconnect's latest counts and the held inputs, only on a node with a local
+/// endpoint; without one nothing is read.
+fn attach_local_herdr(view: &mut serde_json::Value) {
+    #[cfg(unix)]
+    if let Some((counts, holds)) = crate::services::discord::herdr_reconnect_health() {
+        view["reconnect"] = serde_json::json!(counts);
+        view["input_holds"] = holds.map_or_else(|_| "unreadable".into(), serde_json::Value::from);
+    }
+    #[cfg(not(unix))]
+    let _ = view;
 }
 
 pub(super) async fn cluster_standby_without_gateway(
@@ -116,6 +130,33 @@ mod tests {
             herdr(&live),
             expected,
             "the live section differs from the booted one"
+        );
+    }
+
+    // A local endpoint adds the latest restart reconnect counts and the held inputs; without one the
+    // projection above stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint() {
+        use crate::services::session_host::herdr_socket_rig_tests::HerdrRig;
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let live = crate::config::Config::default();
+        let _hosts = force_for_test(Some("mac-mini"), &[]);
+        assert_eq!(herdr(&live).get("reconnect"), None);
+        let holds = crate::config::runtime_root()
+            .unwrap()
+            .join("runtime/herdr_input_holds");
+        std::fs::create_dir_all(&holds).unwrap();
+        std::fs::write(holds.join("n1"), "2026-10-05T07:00:00+00:00").unwrap();
+
+        let rig = HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
+        let health = herdr(&live);
+        let none = json!({"channels": 0, "published": 0, "withheld": 0, "unknown": 0,
+            "pending": 0});
+        assert_eq!(
+            (&health["reconnect"], &health["input_holds"]),
+            (&none, &json!(1))
         );
     }
 }

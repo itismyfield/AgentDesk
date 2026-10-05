@@ -1544,6 +1544,8 @@ fn herdr_items_have_no_production_caller() {
         ),
         // Watcher host snapshot: reads the marker beside the admission map and row, never a host.
         (WATCH_HOST, 1),
+        // Restart reader and reconnect pass: read the stored pane through its gate, never a host.
+        ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",

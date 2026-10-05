@@ -34,7 +34,9 @@ mod traits;
 pub(crate) use herdr::contract::ServerWitness;
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use herdr_gate::{HerdrGateRefusal, HerdrTarget, Mutation as HerdrMutation};
+pub(crate) use herdr_gate::{
+    HerdrGateRefusal, HerdrTarget, Mutation as HerdrMutation, PaneProvider, PaneReading,
+};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_registry::registry as herdr_endpoints;
 // Dormant: activation constructs it for a configured endpoint.

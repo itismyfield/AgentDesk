@@ -214,8 +214,48 @@ fn hold_path(nonce: &str) -> Result<PathBuf, String> {
     if nonce.is_empty() || !nonce.chars().all(plain) {
         return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
     }
+    Ok(holds_dir()?.join(nonce))
+}
+
+fn holds_dir() -> Result<PathBuf, String> {
     let root = crate::config::runtime_root().ok_or("herdr turn: no runtime root")?;
-    Ok(root.join("runtime/herdr_input_holds").join(nonce))
+    Ok(root.join("runtime/herdr_input_holds"))
+}
+
+/// Ends execution `nonce`'s hold; an absent hold is already ended. Only a confirmed retire calls it.
+pub(crate) fn release_hold(nonce: &str) -> Result<(), String> {
+    let path = hold_path(nonce)?;
+    let removed = match std::fs::remove_file(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        removed => {
+            removed.and_then(|()| crate::services::discord::runtime_store::fsync_parent_dir(&path))
+        }
+    };
+    removed.map_err(|error| format!("herdr turn: input hold of {nonce} not removed: {error}"))
+}
+
+/// Each held nonce and when its hold was recorded; the file holds only that time.
+pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
+    let dir = holds_dir()?;
+    let entries = match std::fs::read_dir(&dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        entries => {
+            entries.map_err(|error| format!("herdr turn: input holds unreadable: {error}"))?
+        }
+    };
+    let mut holds = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("herdr turn: input holds unreadable: {error}"))?;
+        let recorded = std::fs::read_to_string(entry.path()).ok().and_then(|text| {
+            chrono::DateTime::parse_from_rfc3339(text.trim())
+                .ok()
+                .map(|at| at.to_rfc3339())
+        });
+        holds.push((entry.file_name().to_string_lossy().into_owned(), recorded));
+    }
+    holds.sort();
+    Ok(holds)
 }
 
 /// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.

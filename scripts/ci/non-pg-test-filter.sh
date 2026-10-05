@@ -15,6 +15,7 @@ NON_PG_SKIP_ARGS=(
   --skip _pg
   --skip pg_
   --skip postgres
+  --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
   --skip db::auto_queue::phase_gates::current_batch_phase_pg_tests
@@ -150,6 +151,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
+  --skip services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   --skip services::discord::router::message_handler::provider_dispatch::tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
@@ -713,6 +715,7 @@ PG_INCLUDE_ARGS_SHARD_0=(
 )
 PG_INCLUDE_ARGS_SHARD_1=(
   _pg
+  cli::herdr::tests
   db::auto_queue::entries::dispatch_failure::tests
   db::auto_queue::entries::tests
   db::auto_queue::phase_gates::current_batch_phase_pg_tests
@@ -848,6 +851,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests
+  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   services::discord::router::message_handler::provider_dispatch::tests
   services::discord::router::message_handler::provider_isolation::host_tests
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests

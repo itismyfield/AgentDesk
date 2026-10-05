@@ -213,6 +213,7 @@ jobs:
               #   python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths
               # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
               # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
+              - 'src/cli/herdr_tests.rs'
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'
@@ -339,6 +340,7 @@ jobs:
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'

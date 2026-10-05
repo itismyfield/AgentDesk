@@ -376,6 +376,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/tmux_runtime/judged_stop_tests.rs",
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
+        "src/cli/herdr_tests.rs",
+        "src/services/discord/recovery_engine/herdr_reader_tests.rs",
+        "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
     }
 )
 

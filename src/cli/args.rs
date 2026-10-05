@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+pub(crate) use super::migrate::MigrateAction;
+
 #[derive(Parser)]
 #[command(name = "agentdesk", version = env!("CARGO_PKG_VERSION"), about = "AI agent orchestration platform")]
 struct Cli {
@@ -563,6 +565,8 @@ pub(crate) enum Commands {
     #[command(subcommand)]
     OShadow(crate::cli::o_shadow::OShadowCommand),
     O(crate::cli::o::OArgs),
+    /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
+    Herdr(crate::cli::herdr::HerdrArgs),
 }
 
 /// Subcommands for `adk query` (issue #2651).
@@ -895,12 +899,6 @@ pub(crate) struct DispatchArgs {
     /// Generate the run but do not activate it.
     #[arg(long)]
     pub(crate) no_activate: bool,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum MigrateAction {
-    /// Import OpenClaw durable state into AgentDesk
-    Openclaw(super::migrate::OpenClawMigrateArgs),
 }
 
 #[derive(Subcommand)]

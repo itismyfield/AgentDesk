@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 56
-- Commands including nested subcommands: 99
+- Top-level commands: 57
+- Commands including nested subcommands: 102
 
 ## Global options
 
@@ -125,6 +125,9 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk o-shadow`](#agentdesk-o-shadow) | Read-only TUI output shadow: window start, report, synthetic manifest |  |
 | [`agentdesk o`](#agentdesk-o) |  |  |
 | [`agentdesk o boundary`](#agentdesk-o-boundary) | Source boundaries the writer could not decide |  |
+| [`agentdesk herdr`](#agentdesk-herdr) | Herdr-hosted executions on this node: read-only status, and retire of an ended one |  |
+| [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
+| [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
 
 ## Commands
 
@@ -1260,3 +1263,30 @@ Subcommands:
 Source boundaries the writer could not decide
 
 Usage: `agentdesk o boundary`
+
+## `agentdesk herdr`
+
+Herdr-hosted executions on this node: read-only status, and retire of an ended one
+
+Usage: `agentdesk herdr <COMMAND>`
+
+Subcommands:
+
+- `status` — Each local Herdr row, its pane as read now and the held inputs; changes nothing
+- `retire` — Retire a channel's execution once its pane is gone or only its shell is left
+
+### `agentdesk herdr status`
+
+Each local Herdr row, its pane as read now and the held inputs; changes nothing
+
+Usage: `agentdesk herdr status`
+
+### `agentdesk herdr retire`
+
+Retire a channel's execution once its pane is gone or only its shell is left
+
+Usage: `agentdesk herdr retire <CHANNEL>`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `<CHANNEL>` | `u64` |  | Discord channel id of the execution |

@@ -21,7 +21,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
 use crate::services::tmux_common::with_tmux_source_authority;
-use crate::services::tui_prompt_dedupe::binding_events::{self, BindingTarget, SourceId};
+use crate::services::tui_prompt_dedupe::binding_events::{
+    self, BindingCause, BindingEvent, BindingTarget, SourceId,
+};
 use crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane_under_source_authority;
 use crate::services::tui_prompt_dedupe::{self as dedupe, Persisted, Record, TuiRuntimeBinding};
 use dedupe::withhold_herdr_execution;
@@ -35,6 +37,9 @@ pub(in crate::services::discord) enum HerdrSourceAttach {
     Refused(HostReconcile),
     /// The log names no source of this execution to restore.
     NoBaseline,
+    /// The execution's own canonical clear waits on its new session: input is admitted and no
+    /// source or cursor is restored until that session's record lands.
+    AwaitingClear,
     /// The binding event was not persisted, the log refused it, or another source is live there;
     /// nothing was published.
     NotPublished,
@@ -92,22 +97,46 @@ async fn reconcile(
     (verdict, nonce, recorded.1.into_inner())
 }
 
-/// The pane's latest logged source when execution `nonce` logged it; refusal audits do not move
-/// the pane, and a later Pending or another execution's record leaves none.
-fn nonce_baseline(channel: u64, logical: &str, nonce: &str) -> Option<SourceId> {
-    let events = binding_events::binding_events_since(channel, 0).ok()?;
-    let latest = events
-        .iter()
-        .rev()
-        .filter(|event| event.tmux_session == logical)
-        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. }))?;
-    match &latest.new {
-        _ if latest.execution_nonce.as_deref() != Some(nonce) => None,
+/// The pane's logged records in order; refusal audits do not move the pane.
+fn pane_records(channel: u64, logical: &str) -> Vec<BindingEvent> {
+    let events = binding_events::binding_events_since(channel, 0).unwrap_or_default();
+    let moved = |event: &BindingEvent| !matches!(event.new, BindingTarget::Rejected { .. });
+    let pane = events
+        .into_iter()
+        .filter(|event| event.tmux_session == logical);
+    pane.filter(moved).collect()
+}
+
+/// The source `event` names when execution `nonce` logged it.
+fn source_of(event: &BindingEvent, nonce: &str) -> Option<SourceId> {
+    match &event.new {
+        _ if event.execution_nonce.as_deref() != Some(nonce) => None,
         BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
             Some(source.clone())
         }
         _ => None,
     }
+}
+
+/// The pane's latest logged source when execution `nonce` logged it; a later Pending or another
+/// execution's record leaves none.
+fn nonce_baseline(channel: u64, logical: &str, nonce: &str) -> Option<SourceId> {
+    source_of(pane_records(channel, logical).last()?, nonce)
+}
+
+/// Whether the pane's latest record is execution `nonce`'s own SessionStart(clear) Pending, taken
+/// from the source that execution logged just before it.
+fn awaits_own_clear(channel: u64, logical: &str, nonce: &str) -> bool {
+    let records = pane_records(channel, logical);
+    let Some((pending, earlier)) = records.split_last() else {
+        return false;
+    };
+    let canonical = matches!(pending.new, BindingTarget::Pending { .. })
+        && pending.execution_nonce.as_deref() == Some(nonce)
+        && pending.cause == BindingCause::Clear
+        && pending.evidence.hook_event.as_deref() == Some("session_start");
+    let from = earlier.last().and_then(|event| source_of(event, nonce));
+    canonical && from.is_some_and(|source| pending.old.as_ref() == Some(&source))
 }
 
 fn live_is(live: &TuiRuntimeBinding, source: &SourceId) -> bool {
@@ -176,7 +205,8 @@ pub(in crate::services::discord) async fn attach_launched_herdr_source(
 }
 
 /// Re-attaches a Bound execution after a restart: only a confirmed match restores the source the
-/// log names for that execution, and only while its path still names that same file.
+/// log names for that execution, and only while its path still names that same file. Its own
+/// pending clear admits input without restoring a source.
 pub(in crate::services::discord) async fn attach_restarted_herdr_source(
     pool: &PgPool,
     owner: &HostedOwner,
@@ -194,6 +224,11 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
         }
     };
     let Some(source) = nonce_baseline(channel, logical, &nonce) else {
+        if awaits_own_clear(channel, logical, &nonce) {
+            // The next prompt writes the cleared session, which its Pending already awaits.
+            admit_herdr_execution(logical, &nonce);
+            return HerdrSourceAttach::AwaitingClear;
+        }
         withhold_herdr_execution(logical, Some(&nonce));
         return HerdrSourceAttach::NoBaseline;
     };

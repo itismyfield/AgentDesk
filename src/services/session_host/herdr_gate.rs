@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
-use super::herdr::contract::{self, HerdrTransport, ServerWitness};
+use super::herdr::contract::{self, ForegroundProcesses, HerdrTransport, ServerWitness};
 use super::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::herdr::observe::{self, RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::{self, EvidenceGap, HostOs, PaneProcesses, ProbeRequest, ProcessOs};
 use super::model::{HostError, HostKey, HostKind, HostMutation, HostPresence, HostRefusal};
 use crate::db::dispatched_sessions::hosted_execution::{
-    ExpectedExecution, HostedExecution, HostedLocation, HostedState,
+    ExpectedExecution, HostedExecution, HostedLocation, HostedState, ProcessStamp,
 };
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
@@ -37,6 +37,28 @@ pub(crate) enum HerdrGateRefusal {
     OtherNonce,
     RootReplaced,
     ProviderReplaced,
+}
+
+/// What one server reports of the recorded pane: a reading for a reconnect or a retire, never an
+/// input judgment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaneReading {
+    /// A complete snapshot of the server has no such pane.
+    Missing,
+    Unreadable(String),
+    Present {
+        root: ProcessStamp,
+        provider: PaneProvider,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaneProvider {
+    /// The root shell is the only foreground process.
+    Exited,
+    /// The one foreground child of the root shell, its environment naming this execution.
+    Execution(ProcessStamp),
+    Unverified(String),
 }
 
 /// What an input does to the pane: a cancel key only stops work, so admission lets it through.
@@ -247,6 +269,50 @@ impl HerdrTarget {
             == HostPresence::Present
     }
 
+    /// The pane's presence, root shell and provider, every answer from one server; no input.
+    pub(crate) fn read_execution(&self) -> PaneReading {
+        let unreadable = |why: &dyn std::fmt::Debug| PaneReading::Unreadable(format!("{why:?}"));
+        let witness = match self.0.transport.server_witness() {
+            Ok(witness) => witness,
+            Err(why) => return unreadable(&why),
+        };
+        let call = self.0.call(HerdrRequest::SessionSnapshot {});
+        let (outcome, answered) = self.0.transport.call(&call);
+        if answered.as_ref() != Ok(&witness) {
+            return unreadable(&"snapshot from another server");
+        }
+        match contract::snapshot_observation(&call, outcome, &self.0.pane).presence() {
+            HostPresence::Present => {}
+            HostPresence::Missing => return PaneReading::Missing,
+            other => return unreadable(&other),
+        }
+        let (read, answered) = self.0.read_processes();
+        if answered.as_ref() != Ok(&witness) {
+            return unreadable(&"processes from another server");
+        }
+        let (root, foreground) = match read {
+            Ok((Some(root), ForegroundProcesses::Listed(foreground))) => (root, foreground),
+            other => return unreadable(&other),
+        };
+        let root = match self.0.os.start(root) {
+            Ok(start) => ProcessStamp {
+                pid: root,
+                start: pane_probe::start_text(start.identity),
+            },
+            Err(why) => return unreadable(&why),
+        };
+        let provider = if foreground == [root.pid] {
+            PaneProvider::Exited
+        } else {
+            match self.0.provider_on(&witness) {
+                Ok(now) if now.root == root => PaneProvider::Execution(now.provider_process),
+                Ok(_) => PaneProvider::Unverified("root shell changed between readings".into()),
+                Err(gap) => PaneProvider::Unverified(format!("{gap:?}")),
+            }
+        };
+        PaneReading::Present { root, provider }
+    }
+
     /// Whether the stored execution still runs in the pane, read on one server.
     pub(crate) fn execution_alive(&self) -> bool {
         self.0
@@ -312,9 +378,8 @@ impl PaneGate {
         (read.map_err(|error| format!("{error:?}")), witness)
     }
 
-    /// The launch's provenance rule, read once more on `witness`'s server, must name the
-    /// recorded root shell and provider processes.
-    fn verify_pane(&self, witness: &ServerWitness) -> Result<(), HerdrGateRefusal> {
+    /// The launch's provenance rule read once more on `witness`'s server.
+    fn provider_on(&self, witness: &ServerWitness) -> Result<ExpectedExecution, EvidenceGap> {
         let request = ProbeRequest {
             provider: &self.expected.binding_provider,
             nonce: &self.nonce,
@@ -322,17 +387,22 @@ impl PaneGate {
             witness,
             window: Duration::ZERO,
         };
-        let now = pane_probe::probe(&|| self.read_processes(), self.os.as_ref(), &request)
-            .map_err(|gap| {
-                tracing::debug!(pane = %self.pane, ?gap, "herdr input gate: pane unverified");
-                match gap {
-                    EvidenceGap::ServerChanged => HerdrGateRefusal::ServerChanged,
-                    EvidenceGap::NonceMissing | EvidenceGap::OtherNonce(_) => {
-                        HerdrGateRefusal::OtherNonce
-                    }
-                    _ => HerdrGateRefusal::PaneUnverified,
+        pane_probe::probe(&|| self.read_processes(), self.os.as_ref(), &request)
+    }
+
+    /// The provenance rule on `witness`'s server must name the recorded root shell and provider
+    /// processes.
+    fn verify_pane(&self, witness: &ServerWitness) -> Result<(), HerdrGateRefusal> {
+        let now = self.provider_on(witness).map_err(|gap| {
+            tracing::debug!(pane = %self.pane, ?gap, "herdr input gate: pane unverified");
+            match gap {
+                EvidenceGap::ServerChanged => HerdrGateRefusal::ServerChanged,
+                EvidenceGap::NonceMissing | EvidenceGap::OtherNonce(_) => {
+                    HerdrGateRefusal::OtherNonce
                 }
-            })?;
+                _ => HerdrGateRefusal::PaneUnverified,
+            }
+        })?;
         if now.root != self.expected.root {
             return Err(HerdrGateRefusal::RootReplaced);
         }
