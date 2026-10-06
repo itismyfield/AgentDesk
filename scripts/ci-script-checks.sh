@@ -400,7 +400,7 @@ bash scripts/main-ci-triage.sh --self-test
 # End nightly notification contract.
 fi
 
-if run_check guards "Lib test build swap and memory probe contract"; then
+if run_check guards "Lib test build and clippy swap + memory probe contract"; then
 "$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring
 fi
 
