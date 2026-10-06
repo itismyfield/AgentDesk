@@ -8,15 +8,29 @@ use super::auto_heal_attempts::{
 use super::auto_heal_confirm::{ReattachConfirmation, classify_reattach_confirmation};
 use super::*;
 
+/// A closed input gate turns the plan into a skip before any reservation or mutation; an
+/// admitted plan holds its effect until the apply settles.
 pub(super) async fn apply_relay_recovery_plan(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    decision: RelayRecoveryDecision,
+    mut decision: RelayRecoveryDecision,
     now_ms: i64,
     source: RelayRecoveryApplySource,
 ) -> RelayRecoveryResponse {
-    apply_relay_recovery_plan_with_seams(
+    use crate::services::discord::input_runtime::fence;
+    let permit = match fence::effect::admit(provider, decision.channel_id) {
+        Ok(permit) => permit,
+        Err(failure) => {
+            if decision.auto_heal.eligible {
+                fence::record_failure(provider, decision.channel_id, &[], failure);
+                decision.auto_heal.eligible = false;
+                decision.auto_heal.skipped_reason = Some("input_fenced");
+            }
+            None
+        }
+    };
+    let apply = apply_relay_recovery_plan_with_seams(
         registry,
         shared,
         provider,
@@ -25,8 +39,8 @@ pub(super) async fn apply_relay_recovery_plan(
         source,
         &circuit_breaker::PgCircuitAlertEnqueue,
         &ImmediateApplyBoundary,
-    )
-    .await
+    );
+    fence::effect::scope(permit, Box::pin(apply)).await
 }
 
 #[async_trait::async_trait]

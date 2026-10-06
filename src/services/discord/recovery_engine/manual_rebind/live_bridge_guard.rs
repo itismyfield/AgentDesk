@@ -1,4 +1,16 @@
 use super::*;
+use crate::services::discord::input_runtime::fence;
+
+/// A closed input gate refuses the rebind before its first effect; an admitted one spans it.
+fn admit_input(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<Option<fence::Permit>, RebindError> {
+    fence::effect::admit(provider, channel_id).map_err(|failure| {
+        fence::record_failure(provider, channel_id, &[], failure);
+        RebindError::InputFenced(format!("{failure:?}"))
+    })
+}
 
 pub(crate) async fn rebind_inflight_for_channel(
     http: &Arc<serenity::Http>,
@@ -9,10 +21,11 @@ pub(crate) async fn rebind_inflight_for_channel(
     overrides: ManualRebindOverrides,
     expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
+    let permit = admit_input(provider, channel_id)?;
     let recovery = super::super::live_bridge::try_recovery(provider, channel_id)
         .map_err(|()| RebindError::InflightAlreadyExists)?;
     recovery
-        .run(async {
+        .run(fence::effect::scope(permit, async {
             rebind_inflight_for_channel_inner(
                 http,
                 shared,
@@ -24,7 +37,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                 expected_episode,
             )
             .await
-        })
+        }))
         .await
 }
 
@@ -37,10 +50,11 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
     minimum_initial_offset: Option<u64>,
     expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
+    let permit = admit_input(provider, channel_id)?;
     let recovery = super::super::live_bridge::try_recovery(provider, channel_id)
         .map_err(|()| RebindError::InflightAlreadyExists)?;
     recovery
-        .run(async {
+        .run(fence::effect::scope(permit, async {
             rebind_inflight_for_channel_inner(
                 http,
                 shared,
@@ -52,6 +66,6 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
                 expected_episode,
             )
             .await
-        })
+        }))
         .await
 }
