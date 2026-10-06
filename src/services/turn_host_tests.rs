@@ -128,3 +128,88 @@ async fn unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_n
     pool.close().await;
     db.drop().await;
 }
+
+const DELEGATED: u64 = 9_200_000_000_000_001;
+
+/// What the turn's two judgements return for `channel`, and whether either read the session key.
+async fn judged(channel: u64) -> (TurnHost, Option<HerdrRefusal>, bool) {
+    let asked = std::cell::Cell::new(false);
+    let key = || {
+        asked.set(true);
+        async { Some(SESSION_KEY.to_owned()) }
+    };
+    let first = refusal_before_turn(None, &ProviderKind::Claude, channel, key).await;
+    let host = for_turn(None, &ProviderKind::Claude, channel, Some(SESSION_KEY)).await;
+    (host, first, asked.get())
+}
+
+// A channel with no home registered here keeps the existing path whether the registry was never
+// used or holds other channels; a delegated one runs only while held with intake open.
+#[tokio::test]
+async fn a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open() {
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home::register_for_test as register;
+    assert!(!channel_home::any_registered(), "never registered");
+    let unregistered = judged(8).await;
+    assert!(matches!(unregistered, (TurnHost::Tmux, None, false)));
+    register(DELEGATED + 1, Some(HomeState::Worker));
+    let unregistered = judged(8).await;
+    assert!(matches!(unregistered, (TurnHost::Tmux, None, false)));
+
+    let home = register(DELEGATED, Some(HomeState::Worker));
+    assert!(matches!(
+        judged(DELEGATED).await,
+        (TurnHost::Tmux, None, false)
+    ));
+    let refused = |(host, first, asked): (TurnHost, Option<HerdrRefusal>, bool), want| {
+        assert_eq!((first, asked), (Some(Clone::clone(&want)), false));
+        assert_eq!(refusal(host), want);
+    };
+    home.close_intake();
+    refused(judged(DELEGATED).await, HerdrRefusal::HomeDraining);
+    let _open = force_admission(Admission::new(Some("on".as_ref()), None));
+    let switch = force_switch_for_test(Some(true));
+    let draining = intake_refusal_before_turn(None, &ProviderKind::Claude, DELEGATED, || async {
+        Some(SESSION_KEY.to_owned())
+    });
+    assert_eq!(draining.await, Some(HerdrRefusal::HomeDraining));
+    drop(switch);
+    // A Herdr-configured channel is judged on its home before its endpoint.
+    let _hosts = force_hosts(Some("mac-mini"), &[(DELEGATED, "mac-book")]);
+    refused(judged(DELEGATED).await, HerdrRefusal::HomeDraining);
+    home.close();
+    refused(judged(DELEGATED).await, HerdrRefusal::HomeNotHeld);
+    register(DELEGATED, None);
+    refused(judged(DELEGATED).await, HerdrRefusal::HomeNotHeld);
+}
+
+// The turn takes its mailbox before this check, so a drain closing intake right after it reads
+// the turn as running and waits; a turn checked after the close is refused.
+#[tokio::test]
+async fn a_close_right_after_the_check_finds_the_turn_in_its_mailbox() {
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home_drain::DrainPort;
+    use crate::services::cluster::channel_home_port::ChannelHomePort;
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    const CHECKED: u64 = DELEGATED + 2;
+    let home = channel_home::register_for_test(CHECKED, Some(HomeState::Worker));
+    let mailboxes = ChannelMailboxRegistry::default();
+    let mailbox = mailboxes.handle(ChannelId::new(CHECKED));
+    let token = std::sync::Arc::new(CancelToken::new());
+    assert!(
+        mailbox
+            .try_start_turn(token, UserId::new(1), MessageId::new(1))
+            .await
+    );
+    let host = for_turn(None, &ProviderKind::Claude, CHECKED, None).await;
+    assert!(matches!(host, TurnHost::Tmux), "{host:?}");
+    home.close_intake();
+    let restored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let port = ChannelHomePort::new(CHECKED, std::sync::Arc::default(), restored);
+    assert_eq!(port.turn_running().await, Some(true), "the drain waits");
+    let late = for_turn(None, &ProviderKind::Claude, CHECKED, None).await;
+    assert_eq!(refusal(late), HerdrRefusal::HomeDraining);
+    mailboxes.remove_fixture_for_test(ChannelId::new(CHECKED));
+}

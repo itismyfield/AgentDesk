@@ -366,6 +366,8 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     assert!(probe.contains("fn a()") && probe.contains("fn d<") && !probe.contains("fn b()"));
     // A non-owner reading the home table: the words it may not name, or `None` when it reads none.
     let outside = |relative: &str, code: &str| {
+        // `confirm::` is the O writer's settle module; the gate's `confirm` is only ever called.
+        let code = &code.replace("confirm::", "");
         let tokens: Vec<&str> = code
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .collect();
@@ -401,6 +403,16 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
             "src/services/discord/runtime_bootstrap.rs: ChannelHomePort".to_string()
         ]),
         "the scan catches a production build of the drain port"
+    );
+    let opened = "use crate::services::cluster::channel_home;\n\
+                  use super::confirm::{self, Verdict};\n\
+                  fn open(h: &channel_home::HomeGate) { h.confirm(&w, t); confirm::settle(); }";
+    let opened = outside("src/services/tui_o/writer/deliver.rs", opened);
+    let opened_named = vec!["src/services/tui_o/writer/deliver.rs: confirm".to_string()];
+    assert_eq!(
+        opened,
+        Some(opened_named),
+        "a gate confirm beside the module"
     );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -102,6 +102,7 @@ src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
+src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/input_clear_tests.rs
 src/services/discord/commands/control/native_herdr_e2e_tests.rs
 src/services/discord/commands/control/native_herdr_tests.rs
@@ -316,6 +317,7 @@ services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::control::home_fence::tests
 services::discord::commands::control::input_clear::tests
 services::discord::commands::control::native::herdr_tests
 services::discord::commands::control::native::herdr_tests::e2e
@@ -1109,6 +1111,7 @@ services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_ou
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
+services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
 services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg

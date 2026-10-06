@@ -315,6 +315,7 @@ jobs:
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
               - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/control/home_fence_tests.rs'
               - 'src/services/discord/commands/control/input_clear_tests.rs'
               - 'src/services/discord/commands/control/native_herdr_e2e_tests.rs'
               - 'src/services/discord/commands/control/native_herdr_tests.rs'

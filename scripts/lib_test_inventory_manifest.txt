@@ -2986,6 +2986,7 @@ services::discord::commands::control::clear_persist_failure_tests::failed_clear_
 services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
 services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
@@ -10514,6 +10515,8 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::an_open_turn
 services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intake_open_when_the_stall_ends_restarts_it
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
+services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate
+services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound
@@ -10596,6 +10599,8 @@ services::tui_o::writer::tests::actor::the_writer_stays_dormant_unless_enabled
 services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
+services::tui_o::writer::tests::deliver_home::a_delegated_channel_posts_under_its_home_through_the_drain_and_none_after_close
+services::tui_o::writer::tests::deliver_home::the_final_close_waits_for_an_admission_in_progress
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
 services::tui_o::writer::tests::no_post_starts_its_request_after_ownership_closes
 services::tui_o::writer::tests::nothing_is_prepared_or_posted_without_ownership_and_the_delivery_lease
@@ -10920,6 +10925,8 @@ services::turn_cancel_queue_guard::tests::queue_truth_purge_requires_a_complete_
 services::turn_cancel_queue_guard::tests::records_the_queued_message_a_cancel_removed
 services::turn_cancel_queue_guard::tests::the_guard_never_writes_to_the_mailbox
 services::turn_cancel_queue_guard::tests::the_promoted_message_is_not_recorded_as_lost
+services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
+services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
 services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg

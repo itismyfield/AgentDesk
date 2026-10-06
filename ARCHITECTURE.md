@@ -748,6 +748,8 @@ src/
 │   │   │   └── too_old_notice.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── home_fence.rs
+│   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── input_clear.rs
 │   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── native.rs
@@ -2247,12 +2249,14 @@ src/
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_tests.rs
 │   │   │   ├── deliver.rs
+│   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
