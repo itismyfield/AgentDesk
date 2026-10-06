@@ -1,7 +1,7 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod supported {
     use super::super::handover::{Composer, EnqueueOutcome, MoveEvidence};
-    use super::super::ledger::Ledger;
+    use super::super::ledger::{Ledger, LedgerLease};
     use super::super::rows::Row;
     use super::super::rows::{Entry, RowState};
     use super::super::transition::{DeletePhase, Host, Input, Outcome, handback};
@@ -107,7 +107,11 @@ mod supported {
             drop(ledger);
             let mut destination = Destination(vec![99]);
             assert_eq!(
-                handback(root.path(), channel, &mut destination).unwrap(),
+                handback(
+                    &mut LedgerLease::new(root.path(), channel),
+                    &mut destination
+                )
+                .unwrap(),
                 Outcome::Legacy
             );
             assert_eq!(
