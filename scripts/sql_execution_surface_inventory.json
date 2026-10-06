@@ -24687,7 +24687,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:0fda3d709858290ce2347062d65a460c201dd622679b902909ec2cc92770672d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/channel_home_drain_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:7b18c6905d09b24930d3dfa716e2aed4421a4d5679ee253ecdfcef9b0ad7b3d3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/channel_home_drain_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:887857eb0561a07cc69ac3b654b7082954d1616b8364507e10901c8dcd47f167"
     },
     {
       "root": "src",
