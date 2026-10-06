@@ -41,6 +41,77 @@ pub(super) struct StreamingTurn<'a> {
     pub force_fresh: bool,
 }
 
+#[cfg(test)]
+pub(super) struct InputEffectProbe {
+    pub channel: u64,
+    pub entered: tokio::sync::oneshot::Sender<(bool, bool)>,
+    pub release: std::sync::mpsc::Receiver<()>,
+    pub terminal_before_release: bool,
+}
+#[cfg(test)]
+pub(super) static INPUT_EFFECT_PROBE: std::sync::Mutex<Option<InputEffectProbe>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+fn input_effect_probe(
+    turn: &StreamingTurn<'_>,
+    sender: &Sender<StreamMessage>,
+) -> Option<Result<(), String>> {
+    let probe = {
+        let mut slot = INPUT_EFFECT_PROBE.lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|probe| probe.channel == turn.channel_id)
+        {
+            slot.take()
+        } else {
+            None
+        }
+    }?;
+    use crate::services::discord::input_runtime::fence;
+    let named = fence::effect::current()
+        .is_some_and(|permit| permit.validate(turn.provider, turn.channel_id).is_ok());
+    let _ = probe.entered.send((named, fence::require_worker().is_ok()));
+    let terminal = || {
+        sender
+            .send(StreamMessage::Done {
+                result: "NO_REPLY".into(),
+                session_id: Some("input-effect-provider".into()),
+            })
+            .map_err(|error| error.to_string())
+    };
+    if probe.terminal_before_release {
+        let result = terminal();
+        // Sender disconnect also releases the fixture during assertion unwinding.
+        let _ = probe.release.recv_timeout(Duration::from_secs(30));
+        Some(result)
+    } else {
+        let _ = probe.release.recv_timeout(Duration::from_secs(30));
+        Some(terminal())
+    }
+}
+
+#[cfg(test)]
+pub(super) static INPUT_EFFECT_COMPLETION_PROBE: std::sync::Mutex<
+    Option<(u64, tokio::sync::oneshot::Sender<()>)>,
+> = std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(super) fn observe_input_effect_completion(channel: u64, task: tokio::task::JoinHandle<()>) {
+    let probe = {
+        let mut slot = INPUT_EFFECT_COMPLETION_PROBE.lock().unwrap();
+        if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, completed)) = probe {
+        tokio::spawn(async move {
+            task.await.unwrap();
+            let _ = completed.send(());
+        });
+    }
+}
+
 pub(super) fn execute(
     turn: StreamingTurn<'_>,
     sender: Sender<StreamMessage>,
@@ -50,6 +121,10 @@ pub(super) fn execute(
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
         // A Herdr turn never falls back to another driver.
         TurnHost::Herdr(plan) => return herdr_turn(&turn, plan, sender),
+    }
+    #[cfg(test)]
+    if let Some(result) = input_effect_probe(&turn, &sender) {
+        return result;
     }
     let _execution_guard = crate::services::cluster::execution_capacity::acquire(
         turn.pool,

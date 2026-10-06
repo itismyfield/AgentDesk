@@ -33,7 +33,7 @@ mod input_effect_tests {
     #[tokio::test]
     async fn c1b_worker_core_refuses_closing_before_settings_or_voice_consumption() {
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(6_325_501);
+        let channel = ChannelId::new(6_325_601);
         let gate = Gate::protect(shared.provider.clone(), channel.get()).unwrap();
         let _health = fence::test_health::Clear::new(&gate);
         let closing = gate.close().unwrap();
@@ -215,7 +215,6 @@ mod intake_outbox_state_builder_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
@@ -850,23 +849,23 @@ async fn handle_text_message_admitted(
     let dispatch_uses_thread_routing =
         crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
     let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit)) =
-        adk_thread::redirect_dispatch(
+        adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
             http,
             cache,
             shared,
-            &provider,
+            provider: &provider,
             channel_id,
             original_channel_id,
-            &dispatch_id_for_thread,
-            &dispatch_info_cached,
-            dispatch_type_str.as_deref(),
+            dispatch_id_for_thread: &dispatch_id_for_thread,
+            dispatch_info_cached: &dispatch_info_cached,
+            dispatch_type_str: dispatch_type_str.as_deref(),
             dispatch_uses_thread_routing,
             is_already_thread,
             user_text,
-            &dispatch_effective_path,
-            &mut pending_uploads,
+            dispatch_effective_path: &dispatch_effective_path,
+            pending_uploads: &mut pending_uploads,
             session_was_cleared,
-        )
+        })
         .await?
     else {
         return Ok(());

@@ -536,6 +536,41 @@ async fn c1b_nested_identity_scope_restores_worker_on_poll_and_cancel() {
 }
 
 #[tokio::test]
+async fn c1b_same_identity_stale_epoch_is_not_replaced_by_root_admission() {
+    let gate = Gate::protect(ProviderKind::Codex, 6_325_536).unwrap();
+    let _health = super::super::test_health::Clear::new(&gate);
+    let permit = gate.admit().unwrap();
+    gate.state.lock().unwrap().epoch += 1;
+    scope(Some(permit), async {
+        assert!(matches!(
+            admit(&ProviderKind::Codex, 6_325_536),
+            Err(Failure::StalePermit)
+        ));
+        assert_eq!(gate.state.lock().unwrap().effects, 1);
+    })
+    .await;
+    gate.close().unwrap().drain().await;
+}
+
+#[tokio::test]
+async fn c1b_off_root_run_does_not_create_registration_or_worker_transport() {
+    assert!(current().is_none());
+    assert!(super::super::lookup(&ProviderKind::Codex, 6_325_537).is_none());
+    let permit = admit(&ProviderKind::Codex, 6_325_537).unwrap();
+    assert!(permit.is_none());
+    assert_eq!(
+        run(permit, async {
+            assert!(current().is_none());
+            assert!(super::super::require_worker().is_err());
+            17
+        })
+        .await,
+        17
+    );
+    assert!(super::super::lookup(&ProviderKind::Codex, 6_325_537).is_none());
+}
+
+#[tokio::test]
 async fn c1b_explicit_empty_worker_scope_masks_task_capability() {
     let gate = Gate::protect(ProviderKind::Codex, 6_325_457).unwrap();
     let _health = super::super::test_health::Clear::new(&gate);

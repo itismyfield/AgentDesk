@@ -253,6 +253,8 @@ async fn requeue_admitted(
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
 ) -> MailboxEnqueueOutcome {
+    #[cfg(test)]
+    tests::pause_root_retry(provider, channel_id).await;
     let user_msg_id = inflight_state.user_msg_id;
     let retry_user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id();
     if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
@@ -627,6 +629,77 @@ fn clear_if_current_unfenced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
+
+    static ROOT_RETRY_PROBE: Mutex<
+        Option<(
+            ChannelId,
+            tokio::sync::oneshot::Sender<(bool, bool)>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    > = Mutex::new(None);
+    pub(super) async fn pause_root_retry(provider: &ProviderKind, channel: ChannelId) {
+        let probe = {
+            let mut slot = ROOT_RETRY_PROBE.lock().unwrap();
+            if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered, resume)) = probe {
+            let named = fence::effect::current()
+                .is_some_and(|permit| permit.validate(provider, channel.get()).is_ok());
+            let _ = entered.send((named, fence::require_worker().is_ok()));
+            let _ = resume.await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1b_retry_root_cancel_releases_effect_before_any_mailbox_readmission() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = shared.provider.clone();
+        let channel = ChannelId::new(6_325_532);
+        let state = InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            6_325_533,
+            6_325_534,
+            7,
+            "cancel root retry".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (_release, resume) = tokio::sync::oneshot::channel();
+        *ROOT_RETRY_PROBE.lock().unwrap() = Some((channel, entered, resume));
+        let mut retry = Box::pin(requeue_inflight_for_followup_retry(
+            &shared, &provider, channel, &state,
+        ));
+        let observed = tokio::select! {
+            observation = observed => observation.unwrap(),
+            _ = &mut retry => panic!("root retry must reach the rendezvous before mailbox re-admission"),
+        };
+        let closing = gate.close().unwrap();
+        assert!(
+            closing.drain().now_or_never().is_none(),
+            "root retry owns a preclose effect"
+        );
+        drop(retry);
+        tokio::time::timeout(Duration::from_secs(10), closing.drain())
+            .await
+            .unwrap();
+        assert_eq!(observed, (true, true));
+        assert!(shared.mailbox_peek(channel).is_none());
+        assert!(fence::effect::current().is_none());
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn c1b_retry_requeues_all_sources_and_updates_binding_after_closing() {
@@ -640,7 +713,7 @@ mod tests {
         );
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = shared.provider.clone();
-        let channel = ChannelId::new(6_325_503);
+        let channel = ChannelId::new(6_325_603);
         let mut state = InflightTurnState::new(
             provider.clone(),
             channel.get(),
