@@ -157,6 +157,25 @@ fn c2_boot_restore_installs_nothing_for_an_input_protected_channel() {
         .unwrap();
     let (stale_cards, live) = runtime.block_on(async {
         let cards = restore_queued_and_inflight_work(&http, &shared, &provider).await;
+        let _closing = gates[0].close().unwrap();
+        let settings = shared.settings.write().await;
+        let deps = super::super::router::IntakeDeps {
+            http: &http,
+            cache: None,
+            ctx_for_chained_dispatch: None,
+            shared: &shared,
+            token: "test-token",
+        };
+        use futures::FutureExt;
+        let kickoff = super::super::queue_dispatch::kickoff::kickoff_idle_queue_channel(
+            &deps,
+            &provider,
+            ChannelId::new(protected),
+        )
+        .now_or_never()
+        .expect("closed restore channel refuses kickoff before settings or dequeue");
+        assert!(!kickoff.started);
+        drop(settings);
         (
             cards,
             super::super::queued_placeholders::collect_live_queue_message_ids(&shared).await,

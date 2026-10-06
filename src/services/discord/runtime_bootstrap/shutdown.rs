@@ -21,92 +21,7 @@ pub(super) fn run_bot_spawn_sigterm_handler(
                 // Set global shutdown flag
                 shared_for_signal.restart.legacy_sigterm();
 
-                // ── Critical state persistence (MUST run before any I/O) ──
-                // Save pending queues and last_message_ids FIRST, before any
-                // network calls that might block/timeout and prevent saving.
-
-                let drain =
-                    mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
-                let queue_count = drain.queued_count;
-                if !drain.persistence_errors.is_empty() {
-                    tracing::error!(
-                        failures = drain.persistence_errors.len(),
-                        "SIGTERM initial drain observed pending-queue persistence failure(s)"
-                    );
-                }
-                if queue_count > 0 {
-                    let ts3 = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts3}] 📋 mailbox persisted {queue_count} pending queue item(s)"
-                    );
-                }
-
-                // Persist last_message_ids for catch-up polling after restart
-                {
-                    let ids: std::collections::HashMap<u64, u64> = shared_for_signal
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    if !ids.is_empty() {
-                        runtime_store::save_all_last_message_ids(
-                            provider_for_shutdown.as_str(),
-                            &ids,
-                        );
-                    }
-                }
-
-                // ── Inflight state preservation for silent re-attach ──
-                let inflight_states = inflight::load_inflight_states(&provider_for_shutdown);
-                if !inflight_states.is_empty() {
-                    let ts2 = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
-                        inflight_states.len()
-                    );
-                    let marked = inflight::mark_all_inflight_states_restart_mode(
-                        &provider_for_shutdown,
-                        crate::services::discord::InflightRestartMode::DrainRestart,
-                    );
-                    tracing::info!(
-                        "  [{ts2}] 🔖 marked {marked} inflight turn(s) as drain_restart"
-                    );
-                }
-
-                // ── Final state snapshot (belt-and-suspenders) ──
-                // During the HTTP placeholder edits above, active turns may have
-                // finished and mutated queues/last_message_ids. Re-save to capture
-                // any changes that occurred after the initial save.
-                {
-                    let drain =
-                        mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
-                    let queue_count = drain.queued_count;
-                    if !drain.persistence_errors.is_empty() {
-                        tracing::error!(
-                            failures = drain.persistence_errors.len(),
-                            "SIGTERM final drain observed pending-queue persistence failure(s)"
-                        );
-                    }
-                    if queue_count > 0 {
-                        let ts4 = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts4}] 📋 mailbox final drain: {queue_count} pending queue item(s)"
-                        );
-                    }
-                }
-                {
-                    let ids: std::collections::HashMap<u64, u64> = shared_for_signal
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    if !ids.is_empty() {
-                        runtime_store::save_all_last_message_ids(
-                            provider_for_shutdown.as_str(),
-                            &ids,
-                        );
-                    }
-                }
+                persist_sigterm_state(&shared_for_signal, &provider_for_shutdown).await;
 
                 crate::services::opencode::shutdown_warm_servers();
 
@@ -135,6 +50,95 @@ pub(super) fn run_bot_spawn_sigterm_handler(
             }
         }
     });
+}
+
+/// Persist both restart snapshots around inflight marking without exiting the process.
+async fn persist_sigterm_state(
+    shared: &SharedData,
+    provider: &ProviderKind,
+) -> [crate::services::turn_orchestrator::RestartDrainAllResult; 2] {
+    persist_sigterm_state_with_boundaries(shared, provider, || {}, || {}).await
+}
+
+async fn persist_sigterm_state_with_boundaries(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    after_initial: impl FnOnce(),
+    before_final: impl FnOnce(),
+) -> [crate::services::turn_orchestrator::RestartDrainAllResult; 2] {
+    // Save queues and catch-up checkpoints before network I/O can block shutdown.
+
+    let initial_drain = mailbox_restart_drain_all(shared, provider).await;
+    let queue_count = initial_drain.queued_count;
+    if !initial_drain.persistence_errors.is_empty() {
+        tracing::error!(
+            failures = initial_drain.persistence_errors.len(),
+            "SIGTERM initial drain observed pending-queue persistence failure(s)"
+        );
+    }
+    if queue_count > 0 {
+        let ts3 = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!("  [{ts3}] 📋 mailbox persisted {queue_count} pending queue item(s)");
+    }
+
+    // Persist last_message_ids for catch-up polling after restart
+    {
+        let ids: std::collections::HashMap<u64, u64> = shared
+            .last_message_ids
+            .iter()
+            .map(|entry| (entry.key().get(), *entry.value()))
+            .collect();
+        if !ids.is_empty() {
+            runtime_store::save_all_last_message_ids(provider.as_str(), &ids);
+        }
+    }
+
+    after_initial();
+
+    // Preserve inflight state for silent re-attach.
+    let inflight_states = inflight::load_inflight_states(provider);
+    if !inflight_states.is_empty() {
+        let ts2 = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
+            inflight_states.len()
+        );
+        let marked = inflight::mark_all_inflight_states_restart_mode(
+            provider,
+            crate::services::discord::InflightRestartMode::DrainRestart,
+        );
+        tracing::info!("  [{ts2}] 🔖 marked {marked} inflight turn(s) as drain_restart");
+    }
+
+    before_final();
+
+    // Re-save queues and checkpoints to capture turns finishing during the initial pass.
+    let final_drain_block = {
+        let final_drain = mailbox_restart_drain_all(shared, provider).await;
+        let queue_count = final_drain.queued_count;
+        if !final_drain.persistence_errors.is_empty() {
+            tracing::error!(
+                failures = final_drain.persistence_errors.len(),
+                "SIGTERM final drain observed pending-queue persistence failure(s)"
+            );
+        }
+        if queue_count > 0 {
+            let ts4 = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts4}] 📋 mailbox final drain: {queue_count} pending queue item(s)");
+        }
+        final_drain
+    };
+    {
+        let ids: std::collections::HashMap<u64, u64> = shared
+            .last_message_ids
+            .iter()
+            .map(|entry| (entry.key().get(), *entry.value()))
+            .collect();
+        if !ids.is_empty() {
+            runtime_store::save_all_last_message_ids(provider.as_str(), &ids);
+        }
+    }
+    [initial_drain, final_drain_block]
 }
 
 async fn abort_and_join_task(handle: Option<tokio::task::JoinHandle<()>>) {
@@ -229,6 +233,10 @@ pub(super) async fn run_bot_run_gateway_backend(
     )
     .await;
 }
+
+#[cfg(test)]
+#[path = "shutdown_input_fence_tests.rs"]
+mod input_fence_tests;
 
 #[cfg(test)]
 mod lifecycle_tests {
