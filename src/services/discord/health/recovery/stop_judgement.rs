@@ -34,6 +34,15 @@ impl ProviderChannelStop {
             .is_some_and(|judged| keeps_turn(&judged.stop))
     }
 
+    pub(crate) fn unobserved_reason(&self) -> Option<&'static str> {
+        self.0
+            .as_ref()?
+            .stop
+            .as_ref()
+            .err()
+            .map(|error| error.reason())
+    }
+
     /// The session the verdict judged.
     pub(crate) fn session(&self) -> Option<String> {
         self.judged_stop()?.session().map(str::to_string)
@@ -52,7 +61,9 @@ pub(crate) async fn judge_provider_channel_stop(
     let judged = async {
         let provider = ProviderKind::from_str(provider_name)?;
         let shared = shared_for_provider(registry, &provider, channel).await?;
-        let stop = ChannelStop::judge(&shared, &provider, channel, None, false).await;
+        let stop = ChannelStop::offline_if_closed(
+            ChannelStop::judge(&shared, &provider, channel, None, false).await,
+        );
         Some(JudgedChannel {
             shared,
             provider,

@@ -129,7 +129,9 @@ pub(in crate::services::discord) async fn release_or_rekey_locked(
         .copied()
         .find(|item| !intervention_ids(item).any(|id| departing.contains(&id)))
         .unwrap_or(newest_candidate);
-    shared.insert_queued_placeholder_locked(channel_id, pick.message_id, card);
+    shared
+        .insert_queued_placeholder_on_worker_locked(channel_id, pick.message_id, card)
+        .await;
     QueuedCardDisposition::Preserved {
         owner: pick.message_id,
     }

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
+#[path = "effect.rs"]
+pub(crate) mod effect;
 pub(crate) mod modes;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +57,21 @@ pub(crate) fn lookup(provider: &ProviderKind, channel: u64) -> Option<Arc<Gate>>
 }
 pub(crate) fn channel_gate(channel: u64) -> Option<Arc<Gate>> {
     find(|gate| gate.channel == channel)
+}
+pub(crate) fn held_channels(provider: &str) -> Vec<String> {
+    let mut channels = Vec::new();
+    let mut slot = &GATES;
+    while let Some(entry) = slot.get() {
+        let gate = &entry.gate;
+        if gate.provider.as_str() == provider
+            && gate.protected.load(std::sync::atomic::Ordering::Acquire)
+            && gate.mode() != Mode::LegacyOpen
+        {
+            channels.push(gate.channel.to_string());
+        }
+        slot = &entry.next;
+    }
+    channels
 }
 // Observability only, never admission or durable ownership evidence.
 pub(crate) fn record_failure(
@@ -166,6 +183,9 @@ impl Gate {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
+    pub(crate) fn provider(&self) -> &ProviderKind {
+        &self.provider
+    }
     pub(crate) fn mode(&self) -> Mode {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).mode
     }
@@ -178,10 +198,10 @@ impl Gate {
             return Err(Failure::Mode(state.mode));
         }
         state.effects += 1;
-        Ok(Permit {
+        Ok(Permit(Arc::new(Effect {
             gate: self.clone(),
             epoch: state.epoch,
-        })
+        })))
     }
     pub(crate) fn close(self: &Arc<Self>) -> Result<Closing, Failure> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -198,16 +218,18 @@ impl Gate {
         })
     }
 }
-pub(crate) struct Permit {
+#[derive(Clone)]
+pub(crate) struct Permit(Arc<Effect>);
+struct Effect {
     gate: Arc<Gate>,
     epoch: u64,
 }
 impl Permit {
     pub(crate) fn validate(&self, provider: &ProviderKind, channel: u64) -> Result<(), Failure> {
-        let state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        if channel != self.gate.channel
-            || provider != &self.gate.provider
-            || self.epoch != state.epoch
+        let state = self.0.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        if channel != self.0.gate.channel
+            || provider != &self.0.gate.provider
+            || self.0.epoch != state.epoch
         {
             return Err(Failure::StalePermit);
         }
@@ -217,7 +239,7 @@ impl Permit {
         Ok(())
     }
 }
-impl Drop for Permit {
+impl Drop for Effect {
     fn drop(&mut self) {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         state.effects -= 1;
@@ -401,7 +423,9 @@ pub(crate) fn inflight_writer(path: &Path) -> Result<Option<PopulationWriter>, F
     if scope_held() {
         return Err(failed(Failure::Busy));
     }
-    let permit = gate.admit().map_err(failed)?;
+    let permit = effect::admit(&gate.provider, gate.channel)
+        .map_err(failed)?
+        .ok_or_else(|| failed(Failure::StalePermit))?;
     require_worker().map_err(failed)?;
     let inflight = provider_dir
         .parent()
@@ -586,7 +610,9 @@ pub(crate) fn write<T>(
     if scope_held() {
         return Err(failed(Failure::Busy));
     }
-    let permit = gate.admit().map_err(failed)?;
+    let permit = effect::admit(&gate.provider, gate.channel)
+        .map_err(failed)?
+        .ok_or_else(|| failed(Failure::StalePermit))?;
     require_worker().map_err(failed)?;
     let _scope = PopulationScope::writer(&root, provider, channel, &permit).map_err(failed)?;
     work().inspect_err(|_| gate.record_failure(&[], Failure::Persistence))

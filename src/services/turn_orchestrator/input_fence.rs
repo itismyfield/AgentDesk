@@ -116,6 +116,7 @@ pub(super) fn freeze(
 }
 pub(super) struct StepGuard {
     _population: Option<fence::PopulationScope>,
+    _effect: Option<fence::effect::WorkerScope>,
     _permit: Option<Permit>,
 }
 fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
@@ -157,6 +158,7 @@ pub(super) fn enter(
     else {
         return Ok(StepGuard {
             _population: None,
+            _effect: None,
             _permit: None,
         });
     };
@@ -172,6 +174,7 @@ pub(super) fn enter(
     ) {
         return Ok(StepGuard {
             _population: None,
+            _effect: None,
             _permit: None,
         });
     }
@@ -181,13 +184,11 @@ pub(super) fn enter(
             input_permit.take()
         }
         _ => None,
-    };
+    }
+    .or_else(fence::effect::current);
     let permit = match permit {
         Some(permit) => {
-            permit.validate(
-                &persistence(msg).ok_or(Failure::Persistence)?.provider,
-                channel.get(),
-            )?;
+            permit.validate(gate.provider(), channel.get())?;
             permit
         }
         None => gate.admit()?,
@@ -204,6 +205,7 @@ pub(super) fn enter(
     }
     Ok(StepGuard {
         _population: population,
+        _effect: Some(fence::effect::worker_scope(Some(permit.clone()))),
         _permit: Some(permit),
     })
 }

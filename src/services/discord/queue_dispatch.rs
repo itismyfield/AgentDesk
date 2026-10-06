@@ -3,6 +3,9 @@ use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 
 pub(super) mod kickoff;
 
+#[cfg(test)]
+mod input_effect_tests;
+
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
 
 pub(super) fn persistence_context(
@@ -135,10 +138,33 @@ pub(super) async fn mailbox_take_next_soft_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    mailbox_take_soft_intervention(shared, provider, channel_id, None).await
+    let Ok(permit) = input_runtime::fence::effect::admit(provider, channel_id.get()) else {
+        return MailboxTakeNextSoftOutcome::default();
+    };
+    input_runtime::fence::effect::scope(
+        permit,
+        mailbox_take_soft_intervention(shared, provider, channel_id, None),
+    )
+    .await
 }
 
 pub(super) async fn mailbox_take_next_automatic_intervention(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> MailboxTakeNextSoftOutcome {
+    let Ok(permit) = input_runtime::fence::effect::admit(provider, channel_id.get()) else {
+        return MailboxTakeNextSoftOutcome::default();
+    };
+    // Selection, feedback, and a capped-after-selection restore are one effect.
+    input_runtime::fence::effect::scope(
+        permit,
+        mailbox_take_admitted_automatic_intervention(shared, provider, channel_id),
+    )
+    .await
+}
+
+async fn mailbox_take_admitted_automatic_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -179,6 +205,8 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
             }
             return result;
         };
+        #[cfg(test)]
+        input_effect_tests::after_selection(channel_id).await;
         if !intervention_became_capped(provider, channel_id, intervention) {
             return result;
         }
@@ -348,11 +376,37 @@ where
     Fut:
         std::future::Future<Output = crate::services::turn_orchestrator::RequeueInterventionResult>,
 {
+    use super::input_runtime::fence::{self, effect};
+    let permit = match effect::admit(provider, channel_id.get()) {
+        Ok(permit) => permit,
+        Err(failure) => {
+            use crate::services::turn_orchestrator::EnqueueRefusalReason as R;
+            let reason = match failure {
+                fence::Failure::Mode(mode) => R::InputModeFenced(mode),
+                fence::Failure::LockTimeout => R::LockTimeout,
+                fence::Failure::ActorUnreachable => R::ActorUnreachable,
+                _ => R::InputPersistence,
+            };
+            return MailboxEnqueueOutcome {
+                refusal_reason: Some(reason),
+                ..Default::default()
+            };
+        }
+    };
     let resolve = || Some(shared.mailbox(channel_id));
-    let Some((_, result)) = retry_while_closed(channel_id, resolve, request).await else {
+    let Some((_, result)) = effect::scope(
+        permit.clone(),
+        retry_while_closed(channel_id, resolve, request),
+    )
+    .await
+    else {
         return MailboxEnqueueOutcome::default();
     };
-    super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    effect::scope(
+        permit,
+        super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events),
+    )
+    .await;
     if let Some(error) = result.persistence_error.as_ref() {
         tracing::warn!(
             provider = provider.as_str(),

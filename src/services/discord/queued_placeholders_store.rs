@@ -337,6 +337,41 @@ fn persist_channel_from_map_unfenced(
     save_channel_queued_placeholders(provider, token_hash, channel_id, &entries);
 }
 
+pub(super) async fn persist_map_on_worker(
+    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+    pending_clear: bool,
+) {
+    if fence::lookup(provider, channel_id.get()).is_none() {
+        if pending_clear {
+            persist_queue_exit_placeholder_clears_channel_from_map(
+                map, provider, token_hash, channel_id,
+            );
+        } else {
+            persist_channel_from_map(map, provider, token_hash, channel_id);
+        }
+        return;
+    }
+    let entries = snapshot_map(map, channel_id);
+    let provider = provider.clone();
+    let token_hash = token_hash.to_owned();
+    fence::effect::io(move || {
+        if pending_clear {
+            save_channel_queue_exit_placeholder_clears(
+                &provider,
+                &token_hash,
+                channel_id,
+                &entries,
+            );
+        } else {
+            save_channel_queued_placeholders(&provider, &token_hash, channel_id, &entries);
+        }
+    })
+    .await;
+}
+
 pub(super) fn persist_queue_exit_placeholder_clears_channel_from_map(
     map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
     provider: &ProviderKind,
@@ -381,6 +416,70 @@ fn persist_queue_exit_placeholder_clears_channel_from_map_unfenced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn c1_shared_async_accessory_writes_existing_effect_after_closing() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_413);
+        let gate = fence::Gate::protect(shared.provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        fence::effect::scope(Some(gate.admit().unwrap()), async {
+            let _closing = gate.close().unwrap();
+            let persist_lock = shared.queued_placeholders_persist_lock(channel);
+            let guard = persist_lock.lock().await;
+            shared
+                .insert_queued_placeholder_on_worker_locked(
+                    channel,
+                    MessageId::new(7),
+                    MessageId::new(107),
+                )
+                .await;
+            let card_path =
+                channel_file_path(&shared.provider, &shared.token_hash, channel).unwrap();
+            let card: Vec<QueuedPlaceholderEntry> =
+                serde_json::from_slice(&fs::read(&card_path).unwrap()).unwrap();
+            assert_eq!(
+                (card[0].user_message_id, card[0].placeholder_message_id),
+                (7, 107)
+            );
+            assert_eq!(
+                shared
+                    .remove_queued_placeholder_on_worker_locked(channel, MessageId::new(7))
+                    .await,
+                Some(MessageId::new(107))
+            );
+            assert!(!card_path.exists());
+            drop(guard);
+            shared
+                .add_pending_queue_exit_placeholder_clear_one(
+                    channel,
+                    MessageId::new(8),
+                    MessageId::new(108),
+                )
+                .await;
+            let path =
+                pending_clear_channel_file_path(&shared.provider, &shared.token_hash, channel)
+                    .unwrap();
+            let entries: Vec<QueuedPlaceholderEntry> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].user_message_id, 8);
+            assert_eq!(entries[0].placeholder_message_id, 108);
+            shared
+                .remove_pending_queue_exit_placeholder_clears(
+                    channel,
+                    &[(MessageId::new(8), MessageId::new(108))],
+                )
+                .await;
+            assert!(!path.exists());
+        })
+        .await;
+    }
     #[test]
     fn b2_placeholder_off_delta_zero_and_protected_failures_are_observable() {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();

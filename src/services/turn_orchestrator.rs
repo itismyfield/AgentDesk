@@ -443,20 +443,30 @@ static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMai
 
 #[derive(Clone)]
 pub(crate) struct ChannelMailboxHandle {
-    sender: mpsc::UnboundedSender<ChannelMailboxMsg>,
+    sender: mpsc::UnboundedSender<(
+        ChannelMailboxMsg,
+        Option<crate::services::discord::input_runtime::fence::Permit>,
+    )>,
     /// This incarnation's own signal, so follow-up to an accepted request never
     /// reaches a successor minted by a purge.
     recovery_done: Arc<RecoveryDoneSignal>,
 }
 
 impl ChannelMailboxHandle {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     async fn request<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> ChannelMailboxMsg,
     ) -> Result<T, MailboxUnreachable> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
-            .send(build(reply_tx))
+            .send((
+                build(reply_tx),
+                crate::services::discord::input_runtime::fence::effect::current(),
+            ))
             .map_err(|_| MailboxUnreachable)?;
         reply_rx.await.map_err(|_| MailboxUnreachable)
     }
@@ -1717,20 +1727,28 @@ fn spawn_channel_mailbox(
             remint_fence: fence,
             ..Default::default()
         };
-        while let Some(msg) = rx.recv().await {
+        while let Some((msg, input_permit)) = rx.recv().await {
             if crate::services::discord::input_runtime::fence::channel_gate(channel_id.get())
                 .is_some()
             {
                 let signal = own_recovery_done.clone();
                 state = tokio::task::spawn_blocking(move || {
-                    crate::services::discord::input_runtime::fence::blocking(|| {
-                        input_mailbox_step(state, channel_id, msg, &signal)
-                    })
+                    crate::services::discord::input_runtime::fence::effect::synchronous(
+                        input_permit,
+                        || {
+                            crate::services::discord::input_runtime::fence::blocking(|| {
+                                input_mailbox_step(state, channel_id, msg, &signal)
+                            })
+                        },
+                    )
                 })
                 .await
                 .expect("input mailbox step panicked");
             } else {
-                state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
+                state = crate::services::discord::input_runtime::fence::effect::synchronous(
+                    input_permit,
+                    || input_mailbox_step(state, channel_id, msg, &own_recovery_done),
+                );
             }
         }
     });

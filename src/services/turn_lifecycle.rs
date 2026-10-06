@@ -95,7 +95,18 @@ impl TurnLifecycleStopResult {
     /// The host guard kept the session: nothing was stopped, cleared or killed, and the caller
     /// must change nothing more.
     pub(crate) fn host_guard_kept(&self) -> bool {
-        self.lifecycle_path == HOST_GUARD_KEPT_PATH
+        matches!(
+            self.lifecycle_path,
+            HOST_GUARD_KEPT_PATH | "stop-unobserved-kept" | "actor-unreachable-kept"
+        )
+    }
+
+    pub(crate) fn refusal_reason(&self) -> &'static str {
+        match self.lifecycle_path {
+            "actor-unreachable-kept" => "actor_unreachable",
+            "stop-unobserved-kept" => "stop_unobserved",
+            _ => "session host is not legacy tmux",
+        }
     }
 
     pub(crate) fn queue_depth_if_observed(&self) -> Option<usize> {
@@ -345,7 +356,15 @@ async fn stop_turn_with_policy(
         _ => None,
     };
     if let Some(judged) = judged.as_ref().filter(|judged| judged.host_refused()) {
-        return kept_by_host_guard(judged.session());
+        let mut result = kept_by_host_guard(judged.session());
+        if let Some(reason) = judged.unobserved_reason() {
+            result.lifecycle_path = if reason == "actor_unreachable" {
+                "actor-unreachable-kept"
+            } else {
+                "stop-unobserved-kept"
+            };
+        }
+        return result;
     }
     let (tmux_session_observed, backfill, host) = match verdict {
         Some(verdict) => (verdict.observed, verdict.backfill, verdict.host),

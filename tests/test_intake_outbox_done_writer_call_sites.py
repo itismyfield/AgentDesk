@@ -394,7 +394,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(tick.count("admission_action("), 3)
-        self.assertEqual(tick.count("release_cancelled_claim(pool, &row, claim_owner)"), 3)
+        self.assert_effect_release_sites(tick)
         self.assertIn("let owner_shutdown = runtime.shared.restart.shutdown_reader();", tick)
         self.assertIn("shared.restart.intake_worker_lifecycle.admission_is_fenced()", tick)
         self.assertIn("owner_shutdown.load(Ordering::Acquire)", tick)
@@ -426,6 +426,58 @@ class TransportLegacyInventoryTests(unittest.TestCase):
             self.assertEqual(self.RAW_STORE.findall(caller), [], caller_file)
             stores += len(expected)
         self.assertEqual((len(rows), stores), (7, 10))
+
+    def assert_effect_release_sites(self, tick: str) -> None:
+        release = "release_cancelled_claim(pool, &row, claim_owner)"
+        held = re.escape(release) + r"\.await\?;\s*return Ok\(TickOutcome::Held\);"
+        admit = re.compile(
+            r"let input_permit = match input_channel \{\s*"
+            r"Some\(channel\) => match crate::services::discord::input_runtime::fence::effect::admit\("
+            r"\s*&input_provider,\s*channel,\s*\) \{\s*"
+            r"Ok\(permit\) => permit,\s*Err\(_\) => \{\s*" + held +
+            r"\s*\}\s*\},\s*None => None,\s*\};"
+        )
+        mode = re.compile(
+            r"test_executor::checkpoint\(test_executor::Checkpoint::PreAccept\)\.await;\s*"
+            r"if input_channel\.is_some_and\(\|channel\| \{\s*"
+            r"crate::services::discord::input_runtime::fence::lookup\(&input_provider, channel\)"
+            r"\s*\.is_some_and\(\|gate\| gate\.mode\(\) != "
+            r"crate::services::discord::input_runtime::fence::Mode::LegacyOpen\)"
+            r"\s*\}\) \{\s*" + held + r"\s*\}"
+        )
+        spans = []
+        for pattern in (admit, mode):
+            matches = list(pattern.finditer(tick))
+            self.assertEqual(len(matches), 1, "each held release stays in its admission guard")
+            spans.append(matches[0].span())
+        accept = tick.index("mark_accepted(")
+        self.assertLess(spans[0][1], spans[1][0])
+        self.assertLess(spans[1][1], accept)
+        self.assertEqual(tick.count(release), 5)
+        legacy = tick
+        for start, end in reversed(spans):
+            legacy = legacy[:start] + legacy[end:]
+        self.assertEqual(legacy.count(release), 3)
+
+    def test_effect_release_inventory_rejects_guard_drift(self):
+        tick = self.item(self.WORKER.read_text(encoding="utf-8"),
+                         "pub(crate) async fn run_intake_worker_tick(")
+        mutations = {
+            "admit succeeds": ("Err(_) => {", "Ok(_) => {"),
+            "mode inverted": ("gate.mode() !=", "gate.mode() =="),
+            "wrong checkpoint": ("Checkpoint::PreAccept)", "Checkpoint::AfterClaim)"),
+            "accept before guards": ("let input_permit = match input_channel {",
+                                     "mark_accepted(pool, row.id, claim_owner).await?;\n"
+                                     "let input_permit = match input_channel {"),
+            "extra release": ("let input_permit = match input_channel {",
+                              "release_cancelled_claim(pool, &row, claim_owner).await?;\n"
+                              "let input_permit = match input_channel {"),
+        }
+        for name, (before, after) in mutations.items():
+            with self.subTest(name=name):
+                self.assertIn(before, tick)
+                with self.assertRaises(AssertionError):
+                    self.assert_effect_release_sites(tick.replace(before, after, 1))
 
     def assert_reader_surface(self, owner: str) -> None:
         """Audit every `impl ... ShutdownReader`; first-block-only was #5831 P1-1."""

@@ -16,6 +16,22 @@ use crate::services::discord::health::{HealthRegistry, InflightDisposition};
 use crate::services::session_host::HostMutation;
 use crate::services::turn_lifecycle::TurnLifecycleTarget;
 
+#[test]
+fn c1_unreachable_mailbox_keeps_confirmed_session_without_fallback_or_interrupt() {
+    let fx = Fixture::new();
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_407);
+        let _confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
+        shared.mailboxes.insert_unreachable_for_test(channel);
+        let result = begin_command_stop(&shared, &ProviderKind::Claude, channel, true).await;
+        assert!(matches!(result, CommandStop::HostRefused));
+        assert!(fx.take_calls().is_empty());
+        assert_eq!(tombstone(channel), None);
+        shared.mailboxes.remove_fixture_for_test(channel);
+    });
+}
+
 async fn runtime() -> (Arc<SharedData>, Arc<HealthRegistry>) {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let registry = Arc::new(HealthRegistry::new());
@@ -633,4 +649,34 @@ impl Drop for PrivateServer {
     fn drop(&mut self) {
         let _ = real_tmux(&self.0, &["kill-server"]);
     }
+}
+
+#[test]
+fn c1_offline_closed_verdict_uses_failed_handle_not_registry_replacement() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_463);
+        for closed in [true, false] {
+            if closed {
+                shared.mailboxes.insert_unreachable_for_test(channel);
+            } else {
+                shared.mailboxes.insert_reply_dropping_for_test(channel);
+            }
+            let judged =
+                ChannelStop::judge(&shared, &ProviderKind::Claude, channel, None, false).await;
+            assert!(judged.is_err());
+            if closed {
+                shared.mailboxes.insert_reply_dropping_for_test(channel);
+            } else {
+                shared.mailboxes.insert_unreachable_for_test(channel);
+            }
+            assert_eq!(
+                ChannelStop::offline_if_closed(judged).is_ok(),
+                closed,
+                "a replacement receiver cannot change the failed handle observation"
+            );
+            shared.mailboxes.remove_fixture_for_test(channel);
+        }
+    });
 }
