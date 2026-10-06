@@ -100,7 +100,7 @@ fn legacy_probe_keeps_two_seconds_for_each_command() {
     assert_eq!(
         pane_liveness_using(
             "test-pane",
-            || Command::new("unused-fake-tmux"),
+            || Some(Command::new("unused-fake-tmux")),
             |_, budget, _| {
                 calls += 1;
                 assert_eq!(budget, Duration::from_secs(2));
@@ -110,4 +110,8 @@ fn legacy_probe_keeps_two_seconds_for_each_command() {
         PaneLiveness::Live
     );
     assert_eq!(calls, 2);
+    assert_eq!(
+        pane_liveness_using("test-pane", || None, |_, _, _| unreachable!()),
+        PaneLiveness::ProbeError
+    );
 }
