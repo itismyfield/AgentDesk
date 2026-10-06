@@ -1957,6 +1957,14 @@ jobs:
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: cargo
 
+      - name: Production PR cap
+        shell: bash
+        run: bash scripts/pr_cap_check.sh
+        env:
+          PR_CAP_CI: "1"
+          PR_CAP_MODE: ${{ vars.PR_CAP_MODE || 'enforce' }}
+          BASH_ENV: /dev/null
+
       - name: Upload giant-file progress evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -2107,7 +2115,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c
+          expected=8588e8a9c2727083a47394f4ab6ad59781bc69e9f4378638b140ed7310ef516f
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2340,7 +2348,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c
+          expected=8588e8a9c2727083a47394f4ab6ad59781bc69e9f4378638b140ed7310ef516f
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

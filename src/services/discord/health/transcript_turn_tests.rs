@@ -328,10 +328,21 @@ async fn row_observation_tells_a_missing_row_from_a_failed_stat() {
         ("codex".to_string(), 6_325_430_401),
         ("codex".to_string(), 6_325_430_402),
         ("claude".to_string(), 6_325_430_403),
+        ("invalid\0provider".to_string(), 6_325_430_404),
     ];
     let rows = legacy_supervision::observe_rows(&channels).await;
     assert_eq!(rows[..2], [Presence::Present(1), Presence::Absent]);
+    #[cfg(not(windows))]
     assert!(matches!(rows[2], Presence::Unknown(_)), "{rows:?}");
+    #[cfg(windows)]
+    assert_eq!(rows[2], Presence::Absent);
+    // Embedded NUL is InvalidInput on both platforms, not a missing path.
+    let invalid = inflight.join("invalid\0provider/6325430404.json");
+    assert_eq!(
+        std::fs::metadata(invalid).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(rows[3], Presence::Unknown("row_stat_failed"));
     assert_eq!(
         std::fs::read_to_string(inflight.join("codex/6325430401.json")).unwrap(),
         "corrupt"

@@ -689,6 +689,12 @@ unless execution_contract(script_check_execution, expected_script_check_executio
   warn "#{path}: Script checks aggregate effective execution changed; expected #{expected}; found #{found}"
   exit 1
 end
+expected_cap = {"name" => "Production PR cap", "shell" => "bash", "run" => "bash scripts/pr_cap_check.sh", "env" => {"PR_CAP_CI" => "1", "PR_CAP_MODE" => "${{ vars.PR_CAP_MODE || 'enforce' }}", "BASH_ENV" => "/dev/null"}}
+cap_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Hash) && step["name"] == "Production PR cap" }
+unless cap_steps == [expected_cap] && Array(script_checks_job["steps"]).index(expected_cap) > script_check_step_index
+  warn "#{path}: production PR cap must retain its unconditional exact post-aggregate execution"
+  exit 1
+end
 evidence_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Hash) && step["name"] == "Upload giant-file progress evidence" }
 unless evidence_steps == [{"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]
   warn "#{path}: giant-file progress evidence upload must remain exact and unconditional"
@@ -1342,7 +1348,8 @@ evidence = uploads.select { |_, step| step["name"] == "Upload giant-file progres
 unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]]
   errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
 end
-errors << "artifact uploads must stay in the cargo shard job" unless uploads.all? { |job_id, _| job_id == "scripts" }
+clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1386,6 +1393,18 @@ if lint.is_a?(Hash)
   ["Policy JS unit tests", "just fmt-check", "just lint", lint_tests_name].each do |name|
     errors << "job lint must have exactly one #{name.inspect} step" unless lint_steps.count { |step| step["name"] == name } == 1
   end
+  expected_lint_run = <<~CLIPPY
+    set -o pipefail
+    mkdir -p target/clippy-observation
+    cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+    if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then
+      echo '::warning::Clippy observation invalid; no warning baseline can be derived'
+    fi
+  CLIPPY
+  expected_lint = {"name" => "just lint", "shell" => "bash", "run" => expected_lint_run}
+  errors << "main Clippy observation must retain exact argv and fail-closed compilation" unless lint_steps.select { |step| step["name"] == "just lint" } == [expected_lint]
+  expected_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
+  errors << "main Clippy observation upload must remain exact" unless lint_steps.select { |step| step["name"] == "Upload Clippy observation" } == [expected_upload]
   tests = lint_steps.find { |step| step["name"] == lint_tests_name }
   %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"

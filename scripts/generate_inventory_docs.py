@@ -27,6 +27,8 @@ TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 GIANT_FILE_REGISTRY = REPO_ROOT / "scripts" / "giant_file_registry.toml"
 GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
 GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=30)
+# Off only while reading a PR's base tree; the candidate snapshot is always age-checked.
+ENFORCE_ISSUE_SNAPSHOT_FRESHNESS = True
 GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = (
     REPO_ROOT / "scripts" / "giant_file_closed_issue_transition_list.txt"
 )
@@ -990,7 +992,7 @@ def load_giant_file_issue_snapshot(
     snapshot_age = now_utc() - refreshed
     if snapshot_age < timedelta(0):
         raise ParseError("giant-file issue metadata refreshed_at cannot be in the future")
-    if snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
+    if ENFORCE_ISSUE_SNAPSHOT_FRESHNESS and snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
         fresh_through = refreshed + GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE
         staleness_problem = (
             "giant-file issue metadata snapshot is older than 30 days; freshness "
