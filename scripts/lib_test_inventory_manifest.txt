@@ -2831,6 +2831,8 @@ services::discord::answer_flush_barrier::tests::waiter_unblocks_when_flush_ends
 services::discord::bot_role::tests::utility_bot_role_aliases_round_trip_and_are_unique
 services::discord::bot_role::tests::utility_bot_role_metadata_is_exhaustive
 services::discord::busy_followup_retry_store::tests::b2_busy_off_delta_zero_and_frozen_sweep_preserves_population
+services::discord::busy_followup_retry_store::tests::c1b_retry_requeues_all_sources_and_updates_binding_after_closing
+services::discord::busy_followup_retry_store::tests::c1b_retry_root_admits_protected_open_without_scheduler_writes
 services::discord::busy_followup_retry_store::tests::crash_before_first_retry_binding_is_swept_by_file_mtime_4888
 services::discord::busy_followup_retry_store::tests::elapsed_cap_and_identity_guarded_clear_preserve_current_binding_4888
 services::discord::busy_followup_retry_store::tests::merged_head_inherits_source_retry_identity_and_unrelated_head_does_not_4888
@@ -4208,12 +4210,17 @@ services::discord::input_runtime::fence::effect::tests::c1_detached_panic_preser
 services::discord::input_runtime::fence::effect::tests::c1_detached_worker_holds_effect_until_cleanup_after_caller_returns
 services::discord::input_runtime::fence::effect::tests::c1_io_worker_preserves_original_panic_payload
 services::discord::input_runtime::fence::effect::tests::c1_outer_abort_before_first_poll_disposes_capture_on_worker
-services::discord::input_runtime::fence::effect::tests::c1_scope_rejects_cross_channel_and_cross_provider_without_new_admission
 services::discord::input_runtime::fence::effect::tests::c1_shutdown_disposes_queued_and_rejected_cleanup_with_preclose_effect
 services::discord::input_runtime::fence::effect::tests::c1_worker_panic_restores_capability_and_blocking_backstop
 services::discord::input_runtime::fence::effect::tests::c1_worker_wake_after_pending_returns_pool_thread
 services::discord::input_runtime::fence::effect::tests::c1_worker_wake_and_outer_abort_cleanup_after_inflight_poll
 services::discord::input_runtime::fence::effect::tests::c1_worker_wake_before_pending_is_not_lost
+services::discord::input_runtime::fence::effect::tests::c1b_detached_cross_channel_uses_root_admission_without_lending_capability
+services::discord::input_runtime::fence::effect::tests::c1b_explicit_empty_worker_scope_masks_task_capability
+services::discord::input_runtime::fence::effect::tests::c1b_nested_identity_scope_restores_worker_on_poll_and_cancel
+services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_before_first_poll_disposes_capture_on_worker
+services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_during_poll_holds_effect_until_worker_cleanup
+services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_pending_returns_pool_thread_and_cleans_on_worker
 services::discord::input_runtime::fence::modes::tests::e1_abort_returns_only_a_history_free_close_and_hold_refuses_both_owners
 services::discord::input_runtime::fence::modes::tests::e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barrier
 services::discord::input_runtime::fence::modes::tests::e1_drain_timeout_holds_closing_and_keeps_the_admitted_permit_valid
@@ -5725,6 +5732,8 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_identity_separates_original_and_execution_provider
+services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_redirect_refuses_closed_thread_before_bootstrap_or_mapping
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg
@@ -5734,6 +5743,7 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn
+services::discord::router::message_handler::intake_turn::input_effect_tests::c1b_worker_core_refuses_closing_before_settings_or_voice_consumption
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_adopts_worker_intake_outbox_identity
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_cannot_replace_an_already_adopted_intake_outbox_identity
@@ -7956,6 +7966,7 @@ services::discord::turn_bridge::finalize_epilogue::tests::dispatch_failure_reque
 services::discord::turn_bridge::finalize_epilogue::tests::session_transition_fences_finalizer_dequeue_and_preserves_fifo_4794
 services::discord::turn_bridge::finalize_epilogue::tests::stale_queue_flag_skips_capped_retry_and_dispatches_unrelated_backlog_4893
 services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_preserves_existing_merged_marker
+services::discord::turn_bridge::followup_requeue::tests::c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_adds_queue_reaction_immediately_through_reconciler
