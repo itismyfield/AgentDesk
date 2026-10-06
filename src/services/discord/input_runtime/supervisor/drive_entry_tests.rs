@@ -6,12 +6,13 @@ use crate::services::discord::input_runtime::supervisor::drive::{
     ChannelDrive, DrivePorts, Eligibility, HOLD_GRACE, SupervisorCmd, TICK, ViewKey,
 };
 use crate::services::tui_input::actor::pane::{Pane, SendOutcome};
-use crate::services::tui_input::rows::{DoneReason, HeldReason};
+use crate::services::tui_input::rows::{AbandonReason, DoneReason, HeldReason};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::writer::binding::{BindingCause, BindingEvidence, BindingTarget};
 use crate::services::tui_o::writer::input_facts::reactions::ReactionPort;
 use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 
 /// A named binding state a test plants before the drive's first pass.
 type Fixture = (&'static str, fn(&Rig));
@@ -27,21 +28,36 @@ const READY: &str = "\
 const REAL: u64 = 1_300_000_000_000_000_000;
 
 // What the fake pane and reaction port observed; `record` is where the TUI writes a prompt.
+// The next submit signals `entered` and waits on `latch`; a dropped pane signals `dropped`.
 #[derive(Default)]
 struct Screen {
     busy: AtomicBool,
+    refuse: AtomicBool,
+    panic: AtomicBool,
     unreachable: AtomicUsize,
     sent: Mutex<Vec<String>>,
     off_worker: AtomicUsize,
     record: Mutex<Option<PathBuf>>,
     reactions: Mutex<Vec<u64>>,
     reactions_fail: AtomicBool,
+    latch: Mutex<Option<mpsc::Receiver<()>>>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 struct TestPane(Arc<Screen>);
 
+impl Drop for TestPane {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.0.dropped.lock().unwrap().take() {
+            let _ = dropped.send(());
+        }
+    }
+}
+
 impl Pane for TestPane {
     fn capture(&mut self) -> Result<String, String> {
+        assert!(!self.0.panic.load(Ordering::SeqCst), "the pane worker died");
         if fence::require_worker().is_err() {
             self.0.off_worker.fetch_add(1, Ordering::SeqCst);
         }
@@ -51,6 +67,15 @@ impl Pane for TestPane {
         })
     }
     fn submit(&mut self, text: &str) -> SendOutcome {
+        if self.0.refuse.load(Ordering::SeqCst) {
+            return SendOutcome::Refused("oversized prompt".into());
+        }
+        if let Some(latch) = self.0.latch.lock().unwrap().take() {
+            if let Some(entered) = self.0.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let _ = latch.recv();
+        }
         self.0.sent.lock().unwrap().push(text.to_owned());
         if let Some(path) = self.0.record.lock().unwrap().as_ref() {
             user(path, text);
@@ -640,4 +665,253 @@ async fn the_drive_loop_submits_pauses_for_a_clear_and_holds_the_gate_when_it_en
     assert_eq!(rig.gate.mode(), Mode::Held);
     assert_eq!(screen.sent.lock().unwrap().len(), 1);
     assert!(supervisor.release());
+}
+
+/// Polls the live loop until `done` holds; the loop must not end first.
+async fn until(run: &mut Pin<Box<impl Future<Output = ()>>>, done: impl Fn() -> bool) {
+    let wait = async {
+        while !done() {
+            tokio::task::yield_now().await;
+        }
+    };
+    let raced = async {
+        tokio::select! {
+            () = run.as_mut() => panic!("the live loop ended"),
+            () = wait => {}
+        }
+    };
+    (tokio::time::timeout(Duration::from_secs(10), raced).await).expect("the loop got there");
+}
+
+#[tokio::test]
+async fn failed_row_notice_keeps_health_and_retries_until_the_row_is_settled() {
+    let rig = Rig::new(6_325_880);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.refuse.store(true, Ordering::SeqCst);
+    screen.reactions_fail.store(true, Ordering::SeqCst);
+    rig.world.failing_delivery.store(true, Ordering::SeqCst);
+    let mut driven = Driven::start(admitted(&rig, &[REAL, 42]).await, &screen).await;
+    assert_eq!(state(&rig, REAL), RowState::Held(HeldReason::NotReady));
+    assert_eq!(driven.sent(), 0);
+    let line = held_line(&rig, "row_held", REAL, 2);
+    assert_eq!(input_lines(&rig), [line.clone()], "reported at once");
+    driven.wait(2 * HOLD_GRACE).await;
+    assert!(
+        rig.world.undelivered.load(Ordering::SeqCst) > 1,
+        "each pass retries"
+    );
+    assert_eq!(input_lines(&rig), [line.clone()]);
+    rig.world.failing_delivery.store(false, Ordering::SeqCst);
+    driven.idle(3).await;
+    let notices = rig.world.notices();
+    assert_eq!(notices.len(), 1, "delivered once, then never again");
+    assert!(notices[0].contains(&format!("입력 `{REAL}`의 처리 결과를 확인할 수 없어")));
+    assert_eq!(
+        input_lines(&rig),
+        [line],
+        "a delivered Notice settles nothing"
+    );
+    assert_eq!(
+        *screen.reactions.lock().unwrap(),
+        [REAL],
+        "reacted on the move only"
+    );
+    // Someone settles the held input: the row behind it goes and the line leaves.
+    screen.refuse.store(false, Ordering::SeqCst);
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    let settled = Entry::Transition {
+        key: REAL,
+        state: RowState::Abandoned(AbandonReason::UserClear),
+        attempt: None,
+    };
+    let ledger = driven.supervisor.slot().get().unwrap();
+    ledger.append_entry(&settled, &[]).unwrap();
+    driven.idle(3).await;
+    assert_eq!(driven.sent(), 1);
+    assert_eq!(state(&rig, 42), RowState::Running);
+    assert!(input_lines(&rig).is_empty());
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn lost_worker_closes_gate_before_tick_returns() {
+    let rig = Rig::new(6_325_881);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    assert_eq!(rig.gate.mode(), Mode::LedgerOpen);
+    screen.panic.store(true, Ordering::SeqCst);
+    driven.idle(1).await;
+    assert_eq!(rig.gate.mode(), Mode::Held, "held before the pass returns");
+    let at = format!("provider=claude channel={}", rig.channel);
+    let lost = format!("turn_transition_held {at} reason=supervisor_lost");
+    assert!(rig.health().contains(&lost));
+    screen.panic.store(false, Ordering::SeqCst);
+    screen.busy.store(false, Ordering::SeqCst);
+    driven.idle(3).await;
+    assert_eq!(rig.gate.mode(), Mode::Held, "a lost drive never reopens");
+    assert_eq!(driven.sent(), 0);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn run_cancellation_holds_gate_even_when_supervisor_remains() {
+    let rig = Rig::new(6_325_882);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    let mut supervisor = admitted(&rig, &[41]).await;
+    let (_commands, received) = tokio::sync::mpsc::channel(1);
+    let mut run = Box::pin(supervisor.run(DriveFake(screen), received));
+    until(&mut run, || rig.gate.mode() == Mode::LedgerOpen).await;
+    drop(run);
+    assert_eq!(
+        rig.gate.mode(),
+        Mode::Held,
+        "dropping the loop holds its gate"
+    );
+    drop(supervisor);
+    let lost = format!("channel={} reason=supervisor_lost", rig.channel);
+    assert!(rig.health().iter().any(|line| line.contains(&lost)));
+}
+
+#[tokio::test]
+async fn run_cancellation_mid_step_keeps_the_worker_write() {
+    let rig = Rig::new(6_325_883);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    let (release, latch) = mpsc::channel();
+    let (entered, inside) = tokio::sync::oneshot::channel();
+    let (dropped, finished) = tokio::sync::oneshot::channel();
+    *screen.latch.lock().unwrap() = Some(latch);
+    *screen.entered.lock().unwrap() = Some(entered);
+    let mut supervisor = admitted(&rig, &[41]).await;
+    let (_commands, received) = tokio::sync::mpsc::channel(1);
+    let mut run = Box::pin(supervisor.run(DriveFake(screen.clone()), received));
+    let submitting = async {
+        tokio::select! {
+            () = &mut run => panic!("the live loop ended"),
+            inside = inside => inside.unwrap(),
+        }
+    };
+    let submitting = tokio::time::timeout(Duration::from_secs(10), submitting).await;
+    submitting.expect("the worker reached its submit");
+    *screen.dropped.lock().unwrap() = Some(dropped);
+    drop(run);
+    assert_eq!(
+        rig.gate.mode(),
+        Mode::Held,
+        "the gate holds while the worker still runs"
+    );
+    assert_eq!(state(&rig, 41), RowState::Injecting);
+    release.send(()).unwrap();
+    // The worker's output, pane included, drops only after its last ledger write.
+    let finished = tokio::time::timeout(Duration::from_secs(10), finished).await;
+    finished.expect("the worker finished").unwrap();
+    assert_eq!(state(&rig, 41), RowState::AwaitTurn, "its write landed");
+    assert_eq!(screen.sent.lock().unwrap().len(), 1);
+    assert!(
+        !supervisor.release(),
+        "the abandoned loan keeps the slot lent"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_binding_does_not_ignore_clear_or_command_channel_close() {
+    let rig = Rig::new(6_325_884);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    let mut supervisor = admitted(&rig, &[41]).await;
+    let (commands, received) = tokio::sync::mpsc::channel(1);
+    let mut run = Box::pin(supervisor.run(DriveFake(screen), received));
+    until(&mut run, || rig.gate.mode() == Mode::LedgerOpen).await;
+    rig.binding.unreadable.store(true, Ordering::SeqCst);
+    push(&rig, "n1", source(Some(&a), &a));
+    let at = format!("provider=claude channel={}", rig.channel);
+    let unreadable = format!("input_reconcile_required {at} reason=binding_unreadable");
+    until(&mut run, || rig.health().contains(&unreadable)).await;
+    let clears = || rig.world.clears.lock().unwrap().len();
+    let before = clears();
+    commands.send(SupervisorCmd::Clear).await.unwrap();
+    until(&mut run, || clears() > before).await;
+    // The clear held the gate; the pass after it reopens the gate over a reread log.
+    until(&mut run, || rig.gate.mode() == Mode::LedgerOpen).await;
+    assert!(
+        rig.health().contains(&unreadable),
+        "only a working reread clears it"
+    );
+    drop(commands);
+    let ended = tokio::time::timeout(Duration::from_secs(5), &mut run).await;
+    assert!(
+        ended.is_ok(),
+        "a closed sender ends the loop while the log is unreadable"
+    );
+    drop(run);
+    assert_eq!(rig.gate.mode(), Mode::Held);
+    assert!(supervisor.release());
+}
+
+/// Passes past any backoff that each advance the binding log, so every one may retry a clear.
+async fn advance(rig: &Rig, a: &SourceId, driven: &mut Driven, passes: usize) {
+    for _ in 0..passes {
+        driven.at += Duration::from_secs(301);
+        push(rig, "n1", source(Some(a), a));
+        driven.wake().await;
+    }
+}
+
+#[tokio::test]
+async fn clear_retry_budget_is_eight_and_exhaustion_stays_held() {
+    let rig = Rig::new(6_325_885);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    let ledger = driven.supervisor.slot().get().unwrap();
+    rig.world.durable_ticket(rig.channel, ledger, &[]);
+    for _ in 0..3 * BUDGET {
+        rig.world.reset(false, None);
+    }
+    let clears = || rig.world.clears.lock().unwrap().len();
+    let before = clears();
+    let at = driven.at;
+    (driven.supervisor).clear(&mut driven.drive, at).await;
+    screen.busy.store(false, Ordering::SeqCst);
+    advance(&rig, &a, &mut driven, 12).await;
+    assert_eq!(
+        clears() - before,
+        1 + BUDGET as usize,
+        "one clear, eight retries"
+    );
+    assert_eq!(rig.gate.mode(), Mode::Held);
+    let exhausted = |rig: &Rig| {
+        let notices = rig.world.notices();
+        notices.iter().filter(|n| n.contains("재시도 한도")).count()
+    };
+    assert_eq!(exhausted(&rig), 1);
+    let at = format!("provider=claude channel={}", rig.channel);
+    let line = format!("turn_transition_held {at} reason=clear_retry_exhausted");
+    assert!(rig.health().contains(&line));
+    advance(&rig, &a, &mut driven, 5).await;
+    driven.idle(3).await;
+    assert_eq!(
+        clears() - before,
+        1 + BUDGET as usize,
+        "nothing retries after"
+    );
+    assert_eq!(
+        (rig.gate.mode(), driven.sent(), exhausted(&rig)),
+        (Mode::Held, 0, 1)
+    );
+    assert!(rig.health().contains(&line));
+    assert!(driven.release());
 }

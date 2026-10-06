@@ -4171,11 +4171,17 @@ services::discord::input_runtime::supervisor::tests::crash_left_clear_resumes_be
 services::discord::input_runtime::supervisor::tests::drive_entry::a_pending_bind_drops_the_instance_whose_facts_already_saw_idle
 services::discord::input_runtime::supervisor::tests::drive_entry::a_rejected_binding_ends_its_facts_and_only_the_rebound_instances_own_idle_submits
 services::discord::input_runtime::supervisor::tests::drive_entry::an_open_turn_is_no_hold_and_an_in_flight_row_still_steps_under_it
+services::discord::input_runtime::supervisor::tests::drive_entry::clear_retry_budget_is_eight_and_exhaustion_stays_held
 services::discord::input_runtime::supervisor::tests::drive_entry::each_binding_change_rebuilds_facts_and_one_actor_and_old_idle_never_submits
+services::discord::input_runtime::supervisor::tests::drive_entry::failed_row_notice_keeps_health_and_retries_until_the_row_is_settled
 services::discord::input_runtime::supervisor::tests::drive_entry::held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery
+services::discord::input_runtime::supervisor::tests::drive_entry::lost_worker_closes_gate_before_tick_returns
 services::discord::input_runtime::supervisor::tests::drive_entry::pending_binding_opens_the_gate_once_holds_input_and_its_resolution_submits_once
 services::discord::input_runtime::supervisor::tests::drive_entry::reactions_skip_synthetic_inputs_and_a_failed_one_changes_no_ledger_record
+services::discord::input_runtime::supervisor::tests::drive_entry::run_cancellation_holds_gate_even_when_supervisor_remains
+services::discord::input_runtime::supervisor::tests::drive_entry::run_cancellation_mid_step_keeps_the_worker_write
 services::discord::input_runtime::supervisor::tests::drive_entry::the_drive_loop_submits_pauses_for_a_clear_and_holds_the_gate_when_it_ends
+services::discord::input_runtime::supervisor::tests::drive_entry::unreadable_binding_does_not_ignore_clear_or_command_channel_close
 services::discord::input_runtime::supervisor::tests::drive_entry::unready_bindings_hold_input_without_writes_and_report_after_grace_per_boot
 services::discord::input_runtime::supervisor::tests::every_boot_closes_admission_until_its_own_clear_and_move_pass
 services::discord::input_runtime::supervisor::tests::failed_append_reopens_on_the_next_access_and_keeps_the_chain

@@ -281,11 +281,30 @@ impl<D: DrivePorts> ChannelDrive<D> {
     }
 }
 
+/// A drive dropped without [`Supervisor::stop_drive`], by cancellation or a panic, still holds an
+/// open gate. A loan it abandoned keeps the slot lent, so that worker's writes stay its own.
+impl<D: DrivePorts> Drop for ChannelDrive<D> {
+    fn drop(&mut self) {
+        if self.ready {
+            let _ = self.closing.hold();
+        }
+    }
+}
+
 impl Cursor {
     /// Rereads the whole log; events read during boot were consumed there, not applied.
     fn replay(&mut self) -> Result<Vec<BindingEvent>, String> {
         self.seq = 0;
         self.read()
+    }
+
+    /// A pass without a wake applies nothing; after a failed read it resubscribes and rereads,
+    /// so the failure clears only on a read that works.
+    fn reread(&mut self, unreadable: bool) -> Result<Vec<BindingEvent>, String> {
+        match unreadable {
+            true => self.recover(),
+            false => Ok(Vec::new()),
+        }
     }
 }
 
@@ -365,30 +384,25 @@ impl<P: Ports> Supervisor<P> {
             self.tick(&mut drive, woke, Instant::now()).await;
             let unreadable = drive.unreadable;
             let Some(cursor) = self.cursor.as_mut() else {
-                return;
+                return self.stop_drive(drive);
             };
-            let command = if unreadable {
-                tokio::time::sleep(TICK).await;
-                woke = cursor.recover();
-                continue;
-            } else {
-                tokio::select! {
-                    command = commands.recv() => command,
-                    events = cursor.wake() => {
-                        woke = events;
-                        continue;
-                    }
-                    () = tokio::time::sleep(TICK) => {
-                        woke = Ok(Vec::new());
-                        continue;
-                    }
+            // An unreadable log waits for the tick's reread, but commands and their close still land.
+            let command = tokio::select! {
+                command = commands.recv() => command,
+                events = cursor.wake(), if !unreadable => {
+                    woke = events;
+                    continue;
+                }
+                () = tokio::time::sleep(TICK) => {
+                    woke = cursor.reread(unreadable);
+                    continue;
                 }
             };
             match command {
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 None => return self.stop_drive(drive),
             }
-            woke = Ok(Vec::new());
+            woke = (self.cursor.as_mut()).map_or(Ok(Vec::new()), |c| c.reread(unreadable));
         }
     }
 
@@ -441,17 +455,15 @@ impl<P: Ports> Supervisor<P> {
         let Some((key, row)) = actor::head(&rows) else {
             return self.hold(drive, None, now).await;
         };
+        let open = rows.open_rows().count();
+        if matches!(row.state, RowState::Held(_) | RowState::Unaccepted) {
+            return self.row_held(drive, key, open).await;
+        }
         let waiting = matches!(row.state, RowState::Received | RowState::Ready);
-        let flight = matches!(
-            row.state,
-            RowState::Injecting | RowState::AwaitTurn | RowState::Running
-        );
-        let cause = |reason| Some((reason, key, rows.open_rows().count()));
-        let lent = (waiting || flight).then(|| drive.life.lend()).flatten();
-        let Some(mut instance) = lent else {
+        let cause = |reason| Some((reason, key, open));
+        let Some(mut instance) = drive.life.lend() else {
             let reason = binding_hold(drive.life.view().eligibility());
-            let reason = (waiting || flight).then_some(reason).and_then(cause);
-            return self.hold(drive, reason, now).await;
+            return self.hold(drive, cause(reason), now).await;
         };
         let source = SourceBinding {
             channel_id: self.config.channel,
@@ -498,6 +510,7 @@ impl<P: Ports> Supervisor<P> {
         .await;
         let Some((instance, step)) = stepped else {
             drive.lost = true;
+            self.gate(drive, false);
             return self.registration.report(&held("supervisor_lost"), true);
         };
         let unknown = !matches!(
@@ -505,17 +518,14 @@ impl<P: Ports> Supervisor<P> {
             Some(TurnState::Open { .. } | TurnState::Idle)
         );
         drive.life.restore(instance);
+        if let Ok(Step::Moved(key, RowState::Held(_) | RowState::Unaccepted)) = step {
+            self.row_held(drive, key, open).await;
+            return self.react(drive, key, InputReaction::Warning).await;
+        }
         let reason = (waiting && unknown).then_some("facts_unknown");
         self.hold(drive, reason.and_then(cause), now).await;
-        match step {
-            Ok(Step::Moved(key, RowState::Done(_))) => {
-                self.react(drive, key, InputReaction::Done).await;
-            }
-            Ok(Step::Moved(key, RowState::Held(_) | RowState::Unaccepted)) => {
-                self.notify(Some(key), "row_held").await;
-                self.react(drive, key, InputReaction::Warning).await;
-            }
-            _ => {}
+        if let Ok(Step::Moved(key, RowState::Done(_))) = step {
+            self.react(drive, key, InputReaction::Done).await;
         }
     }
 
@@ -559,6 +569,8 @@ impl<P: Ports> Supervisor<P> {
             }
             _ if retry => {
                 clearing.at = None;
+                self.registration
+                    .report(&held("clear_retry_exhausted"), true);
                 self.notify(None, "clear_retry_exhausted").await;
             }
             _ => {
@@ -620,6 +632,20 @@ impl<P: Ports> Supervisor<P> {
         if !self.sent.contains(&episode) && self.ports.notice(text).await {
             self.sent.insert(episode);
         }
+    }
+
+    /// A Held or Unaccepted head blocks every row behind it until someone settles it, so it stays
+    /// in health and its Notice is retried each pass until one is delivered.
+    async fn row_held<D: DrivePorts>(
+        &mut self,
+        drive: &mut ChannelDrive<D>,
+        head: u64,
+        held: usize,
+    ) {
+        drive.hold = None;
+        let cause = HoldCause::InputHeld("row_held", head, held);
+        self.registration.report(&cause, true);
+        self.notify(Some(head), "row_held").await;
     }
 
     /// Synthetic inputs have no Discord message to react on; a failed reaction leaves the ledger
