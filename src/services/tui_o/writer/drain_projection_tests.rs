@@ -14,6 +14,7 @@ fn herdr_configured() -> crate::config::session_hosts::ForcedSessionHosts {
     crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(CHANNEL, "mac-mini")])
 }
 
+/// What a poll publishes for the single read each test makes, stamped with that read's number.
 fn owes(owed: usize, prepared: usize, uncaptured: usize, binding_pending: usize) -> Undelivered {
     Undelivered {
         owed,
@@ -21,6 +22,7 @@ fn owes(owed: usize, prepared: usize, uncaptured: usize, binding_pending: usize)
         unsealed: 0,
         uncaptured,
         binding_pending,
+        asked: 1,
     }
 }
 
@@ -110,7 +112,7 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     bindings.commit(event(3, resolved, Utc::now()));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["one", "two", "new"]);
-    assert_eq!(*owed.borrow(), Some(Undelivered::default()), "all clear");
+    assert_eq!(*owed.borrow(), Some(owes(0, 0, 0, 0)), "all clear");
 
     let store = path.parent().unwrap().join("o_store");
     let boundary = store.join(CHANNEL.to_string()).join(BOUNDARY_FILE);
@@ -162,7 +164,7 @@ async fn an_announced_unit_counts_as_unsealed_until_its_record_seals_it() {
     polls(3).await;
     let unsealed = Undelivered {
         unsealed: 1,
-        ..Undelivered::default()
+        ..owes(0, 0, 0, 0)
     };
     assert_eq!(*owed.borrow(), Some(unsealed));
     let sealed = serde_json::json!({"type": "response_item", "payload": {
@@ -171,11 +173,7 @@ async fn an_announced_unit_counts_as_unsealed_until_its_record_seals_it() {
     append(&path, &codex(sealed));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["hello"]);
-    assert_eq!(
-        *owed.borrow(),
-        Some(Undelivered::default()),
-        "sealed and posted"
-    );
+    assert_eq!(*owed.borrow(), Some(owes(0, 0, 0, 0)), "sealed and posted");
     halt(stop, task).await;
 }
 

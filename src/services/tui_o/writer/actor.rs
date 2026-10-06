@@ -3,7 +3,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -62,29 +62,50 @@ pub struct Undelivered {
     pub uncaptured: usize,
     /// Binds past the checkpoint not applied yet, and sources whose start waits on an operator.
     pub binding_pending: usize,
+    /// The last read that had asked when this poll began; a read takes only a poll begun after it.
+    pub asked: u64,
+}
+
+#[derive(Debug, Default)]
+struct Asks {
+    waiting: AtomicUsize,
+    last: AtomicU64,
 }
 
 /// Drain reads waiting on what a channel owes; its actor reads the store for them only meanwhile.
 #[derive(Clone, Debug, Default)]
-pub struct Demand(Arc<AtomicUsize>);
+pub struct Demand(Arc<Asks>);
 
 impl Demand {
-    /// Counts one waiting read until the returned guard drops.
+    /// Counts one waiting read until the returned guard drops, numbered after every earlier read.
     pub fn want(&self) -> Wanting {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Wanting(Arc::clone(&self.0))
+        self.0.waiting.fetch_add(1, Ordering::SeqCst);
+        let asked = self.0.last.fetch_add(1, Ordering::SeqCst) + 1;
+        Wanting(Arc::clone(&self.0), asked)
     }
 
     pub fn wanted(&self) -> bool {
-        self.0.load(Ordering::SeqCst) > 0
+        self.0.waiting.load(Ordering::SeqCst) > 0
+    }
+
+    /// The number of the last read that asked so far.
+    pub fn asked(&self) -> u64 {
+        self.0.last.load(Ordering::SeqCst)
     }
 }
 
-pub struct Wanting(Arc<AtomicUsize>);
+pub struct Wanting(Arc<Asks>, u64);
+
+impl Wanting {
+    /// This read's number; an answer stamped lower was computed before it asked.
+    pub fn asked(&self) -> u64 {
+        self.1
+    }
+}
 
 impl Drop for Wanting {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.waiting.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -227,8 +248,9 @@ where
         if crate::config::session_hosts::herdr_endpoint(actor.writer.channel()).is_some() {
             unsettled.send_replace(actor.unsettled());
             // Read only while a drain waits on it, so a channel nobody drains adds no reads.
+            let asked = owing.demand.asked();
             if owing.demand.wanted() {
-                owing.published.send_replace(actor.undelivered());
+                owing.published.send_replace(actor.undelivered(asked));
             }
         }
         tokio::select! {
@@ -287,8 +309,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
-    /// applied; `None` when the store, the checkpoint or a read source's length cannot be read.
-    fn undelivered(&mut self) -> Option<Undelivered> {
+    /// applied, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
+    fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
         #[cfg(test)]
         UNDELIVERED_READS.with(|reads| reads.set(reads.get() + 1));
         let channel = self.writer.channel();
@@ -314,6 +336,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             unsealed,
             uncaptured,
             binding_pending: unapplied.saturating_add(waiting.count()),
+            asked,
         })
     }
 

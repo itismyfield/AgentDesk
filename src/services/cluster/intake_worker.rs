@@ -435,6 +435,15 @@ pub(crate) async fn run_intake_worker_tick(
     // ABORT (do not spawn) — Ok(false) means we lost ownership.
     let advanced = mark_accepted(pool, row.id, claim_owner).await?;
     if !advanced {
+        // Still claimed here means the home moved since the last check: the row waits in pending.
+        if return_claimed_to_pending(pool, row.id, claim_owner).await? {
+            tracing::warn!(
+                row_id = row.id,
+                channel_id = row.channel_id,
+                "[intake_worker] channel home refused the accept — returned to pending"
+            );
+            return Ok(TickOutcome::Held);
+        }
         tracing::warn!(
             row_id = row.id,
             channel_id = row.channel_id,
@@ -992,6 +1001,9 @@ mod tests {
 #[path = "intake_worker/dispatch_stamp_tests.rs"]
 mod dispatch_stamp_tests;
 
+#[cfg(test)]
+#[path = "intake_worker/home_accept_tests.rs"]
+mod home_accept_tests;
 #[cfg(test)]
 #[path = "intake_worker/home_route_tests.rs"]
 mod home_route_tests;

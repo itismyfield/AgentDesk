@@ -10,6 +10,8 @@ use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 
 mod attachment;
+#[cfg(test)]
+mod home_order_tests;
 mod notice;
 mod policy_channel;
 mod queued;
@@ -102,8 +104,13 @@ pub(crate) async fn admit_text_intake(
 ) -> IntakeAdmission {
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
-    if let IntakeRoute::Hold(detail) =
-        intake_route::route_for_placement(provider, destination.get())
+    // A delegated channel's home row decides first, in the router; without Postgres it holds here.
+    let home_first = deps.shared.pg_pool.is_some()
+        && crate::services::cluster::channel_home::registered(&destination.get().to_string())
+            .is_some();
+    if !home_first
+        && let IntakeRoute::Hold(detail) =
+            intake_route::route_for_placement(provider, destination.get())
     {
         let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
         return IntakeAdmission::Blocked { reason };
