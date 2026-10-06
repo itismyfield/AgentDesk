@@ -11,7 +11,7 @@ use poise::serenity_prelude::ChannelId;
 use super::channel_home_drain::{DrainPort, Owed, ResetRefused};
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::deliver;
-use crate::services::tui_o::writer::host::Readiness;
+use crate::services::tui_o::writer::host::{OwedView, Readiness};
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 
 /// An owed read waits this long for the actor's next poll; none by then reads as unknown.
@@ -49,13 +49,20 @@ impl DrainPort for ChannelHomePort {
     /// What the actor publishes after the read began, so a check after the final close sees a
     /// poll that ran after it; an ended, halted or silent actor is `None`.
     fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
-        let published = self.readiness.undelivered(self.channel);
+        let view = self.readiness.undelivered(self.channel);
         async move {
-            let mut published = published?;
+            let OwedView {
+                mut published,
+                demand,
+            } = view?;
+            let _wanting = demand.want();
             published.borrow_and_update();
             let next = tokio::time::timeout(FRESH_WITHIN, published.changed()).await;
             next.ok()?.ok()?;
-            let undelivered = (*published.borrow())?;
+            let undelivered = *published.borrow();
+            // An actor that ended after its last send may have sent it while ending: unknown.
+            published.has_changed().ok()?;
+            let undelivered = undelivered?;
             Some(Owed {
                 owed: undelivered.owed,
                 prepared: undelivered.prepared,

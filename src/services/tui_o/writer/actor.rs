@@ -3,6 +3,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -34,7 +35,7 @@ where
     A: AlarmSink + 'static,
     B: BindingEvents,
 {
-    let (unsettled, owing) = (watch::channel(None).0, watch::channel(None).0);
+    let (unsettled, owing) = (watch::channel(None).0, Owing::default());
     spawn_projecting(
         config,
         writer,
@@ -63,9 +64,44 @@ pub struct Undelivered {
     pub binding_pending: usize,
 }
 
-/// After each poll the actor of a Herdr-configured channel publishes what it still owes; `None`
-/// while its store or a source cannot be read, or for other channels.
-pub type Owing = watch::Sender<Option<Undelivered>>;
+/// Drain reads waiting on what a channel owes; its actor reads the store for them only meanwhile.
+#[derive(Clone, Debug, Default)]
+pub struct Demand(Arc<AtomicUsize>);
+
+impl Demand {
+    /// Counts one waiting read until the returned guard drops.
+    pub fn want(&self) -> Wanting {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Wanting(Arc::clone(&self.0))
+    }
+
+    pub fn wanted(&self) -> bool {
+        self.0.load(Ordering::SeqCst) > 0
+    }
+}
+
+pub struct Wanting(Arc<AtomicUsize>);
+
+impl Drop for Wanting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// After each poll in which a read waits on `demand`, a Herdr-configured channel's actor publishes
+/// what it still owes; `None` while its store or a source cannot be read.
+pub struct Owing {
+    pub published: watch::Sender<Option<Undelivered>>,
+    pub demand: Demand,
+}
+
+impl Default for Owing {
+    fn default() -> Self {
+        let published = watch::channel(None).0;
+        let demand = Demand::default();
+        Self { published, demand }
+    }
+}
 
 /// [`spawn_if_enabled`] that also publishes the channel's [`Unsettled`] count and [`Owing`].
 pub fn spawn_projecting<P, L, A, B>(
@@ -143,7 +179,7 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let projections = (unsettled, watch::channel(None).0);
+    let projections = (unsettled, Owing::default());
     run_publishing(writer, provider, bindings, (stop, resumed), projections).await
 }
 
@@ -190,9 +226,9 @@ where
         // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
         if crate::config::session_hosts::herdr_endpoint(actor.writer.channel()).is_some() {
             unsettled.send_replace(actor.unsettled());
-            // Read only while a drain may look, so an unwatched actor adds no reads.
-            if !owing.is_closed() {
-                owing.send_replace(actor.undelivered());
+            // Read only while a drain waits on it, so a channel nobody drains adds no reads.
+            if owing.demand.wanted() {
+                owing.published.send_replace(actor.undelivered());
             }
         }
         tokio::select! {
@@ -253,6 +289,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
     /// applied; `None` when the store, the checkpoint or a read source's length cannot be read.
     fn undelivered(&mut self) -> Option<Undelivered> {
+        #[cfg(test)]
+        UNDELIVERED_READS.with(|reads| reads.set(reads.get() + 1));
         let channel = self.writer.channel();
         let notice = (self.notice).get_or_insert_with(|| self.bindings.subscribe(channel));
         let latest = *notice.borrow();
@@ -292,4 +330,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             self.writer.stop(alarm);
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNDELIVERED_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times an actor on this thread read what its channel owes.
+#[cfg(test)]
+pub(crate) fn undelivered_reads_for_test() -> usize {
+    UNDELIVERED_READS.with(std::cell::Cell::get)
 }

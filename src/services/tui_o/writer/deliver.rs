@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
+use futures::FutureExt;
 use tokio::sync::oneshot;
 
 use super::confirm::{self, Verdict};
@@ -357,11 +358,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }
                 let running = posts.take().map(Running::start);
                 let post = port.post(channel, piece.payload.clone());
+                // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                 let mut request: Request = match running {
-                    Some(running) => Box::pin(async move {
-                        let _running = running;
-                        post.await
-                    }),
+                    Some(running) => Box::pin(post.map(move |outcome| {
+                        drop(running);
+                        outcome
+                    })),
                     None => Box::pin(post),
                 };
                 Ok(match request.as_mut().poll(cx) {

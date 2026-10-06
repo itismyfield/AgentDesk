@@ -1,6 +1,7 @@
 //! The production drain port read against a hosted O writer and the channel's mailbox.
 
 use super::*;
+use crate::services::tui_o::writer::actor::{Owing, Undelivered};
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
 
@@ -37,6 +38,62 @@ async fn the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero() {
     }
 }
 
+fn hosted_owing(ready: &Readiness, channel: u64) -> Owing {
+    let owing = Owing::default();
+    let published = owing.published.subscribe();
+    let demand = owing.demand.clone();
+    ready.track_owed_for_test(channel, OwedView { published, demand });
+    owing
+}
+
+/// Lets a spawned read run until it waits on the next send.
+async fn settle() {
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+}
+
+// A read waiting when the actor sends its last value and ends reads unknown, not owed nothing;
+// from a running actor the same send is the answer. The read wants the store read only meanwhile.
+#[tokio::test]
+async fn a_last_send_from_an_ending_actor_reads_as_unknown() {
+    const ENDING: u64 = 9_100_000_000_000_005;
+    const RUNNING: u64 = 9_100_000_000_000_006;
+    let ready = Arc::new(Readiness::default());
+    let port = |channel| ChannelHomePort::new(channel, Arc::clone(&ready));
+
+    let owing = hosted_owing(&ready, ENDING);
+    let reader = port(ENDING);
+    let read = tokio::spawn(async move { reader.owed().await });
+    settle().await;
+    assert!(owing.demand.wanted(), "the waiting read wants it");
+    owing.published.send_replace(Some(Undelivered::default()));
+    let demand = owing.demand.clone();
+    drop(owing);
+    assert_eq!(
+        read.await.unwrap(),
+        None,
+        "the actor ended after its last send"
+    );
+    assert!(!demand.wanted());
+
+    let owing = hosted_owing(&ready, RUNNING);
+    let reader = port(RUNNING);
+    let read = tokio::spawn(async move { reader.owed().await });
+    settle().await;
+    let one = Undelivered {
+        owed: 1,
+        ..Undelivered::default()
+    };
+    owing.published.send_replace(Some(one));
+    let expected = Owed {
+        owed: 1,
+        ..Owed::default()
+    };
+    assert_eq!(read.await.unwrap(), Some(expected));
+    assert!(!owing.demand.wanted(), "the read ended");
+}
+
 /// The writer host needs the O store, which only a platform with directory fsync enables.
 #[cfg(unix)]
 mod hosted {
@@ -52,6 +109,7 @@ mod hosted {
     use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
     use crate::services::tui_o::store::fault::{self, Keep, Step as At};
     use crate::services::tui_o::writer::WriterAlarm;
+    use crate::services::tui_o::writer::actor::undelivered_reads_for_test;
     use crate::services::tui_o::writer::host::{self, HostParts, test_io::TestHost};
 
     const O: u64 = 1_490_141_479_707_086_938;
@@ -179,5 +237,30 @@ mod hosted {
         assert_eq!(scene.io.posts.to(O), ["one", "two"]);
         assert_eq!(port.owed().await, owed(0));
         assert_eq!(port.posts_in_flight().await, Some(0));
+    }
+
+    // A hosted Herdr actor reads nothing for what it owes while no drain asks; a drain's read makes
+    // it read and publish, and once that read returns it reads nothing again.
+    #[tokio::test(start_paused = true)]
+    async fn a_hosted_herdr_actor_reads_what_it_owes_only_while_a_drain_waits() {
+        let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(O, "mini")]);
+        let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
+        let _pending = test_override::force_candidates(&[(O, ClaudeTui)]);
+        let scene = Scene::hosted().await;
+        append(&scene.transcript, &row("m1", "one"));
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(scene.io.posts.to(O), ["one"]);
+        assert_eq!(undelivered_reads_for_test(), 0, "no drain asks");
+
+        let port = ChannelHomePort::new(O, Arc::clone(&scene.ready));
+        assert_eq!(port.owed().await, owed(0));
+        let read = undelivered_reads_for_test();
+        assert!(read >= 1, "read while the drain waited");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            undelivered_reads_for_test(),
+            read,
+            "nothing read after it returned"
+        );
     }
 }

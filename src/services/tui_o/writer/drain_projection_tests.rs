@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use super::super::super::actor::{Undelivered, spawn_projecting};
+use super::super::super::actor::{
+    Demand, Owing, Undelivered, spawn_projecting, undelivered_reads_for_test,
+};
 use super::super::super::deliver::{POST_TIMEOUT, posts_in_flight};
 use super::*;
 use crate::services::tui_o::store::rotation::BOUNDARY_FILE;
@@ -37,17 +39,20 @@ fn crashed_mid_post(harness: &Harness) {
     channel.append_ledger(prepared).unwrap();
 }
 
-/// Runs the actor publishing what it owes; the stop sender ends it.
+/// Runs the actor publishing what it owes while its demand is wanted; the stop sender ends it.
 fn spawn_owing(
     writer: Writer,
     bindings: Arc<FakeBindings>,
+    provider: ShadowProvider,
 ) -> (
     watch::Sender<bool>,
     Actor,
     watch::Receiver<Option<Undelivered>>,
+    Demand,
 ) {
     let (stop, stopped) = watch::channel(false);
-    let (owing, owed) = watch::channel(None);
+    let owing = Owing::default();
+    let (owed, demand) = (owing.published.subscribe(), owing.demand.clone());
     let watches = (
         stopped,
         watch::channel(false).0,
@@ -55,9 +60,8 @@ fn spawn_owing(
         owing,
     );
     let config = WriterConfig { enabled: true };
-    let provider = ShadowProvider::Claude;
     let task = spawn_projecting(&config, writer, provider, bindings, watches);
-    (stop, task.expect("enabled"), owed)
+    (stop, task.expect("enabled"), owed, demand)
 }
 
 // Each kind of responsibility the drain waits on shows in the published projection while it
@@ -69,7 +73,9 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     crashed_mid_post(&harness);
     let mut writer = harness.writer();
     let bindings = startup_log(&mut writer);
-    let (stop, task, owed) = spawn_owing(writer, Arc::clone(&bindings));
+    let claude = ShadowProvider::Claude;
+    let (stop, task, owed, demand) = spawn_owing(writer, Arc::clone(&bindings), claude);
+    let _wanting = demand.want();
     polls(2).await;
     assert_eq!(*owed.borrow(), Some(owes(0, 1, 0, 0)), "an open Prepared");
 
@@ -115,20 +121,61 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     assert!(owed.has_changed().is_err(), "the ended actor dropped it");
 }
 
-// A channel without Herdr publishes nothing and counts no POSTs, so it pays no extra reads.
+// A channel without Herdr publishes nothing and counts no POSTs, even while a read waits, so it
+// pays no extra reads.
 #[tokio::test(start_paused = true)]
 async fn a_channel_without_herdr_publishes_nothing_and_counts_no_posts() {
     let (harness, path, _) = switched_over(&row("m0", "before"));
     harness.gate.acquired();
     let mut writer = harness.writer();
     let bindings = startup_log(&mut writer);
-    let (stop, task, owed) = spawn_owing(writer, bindings);
+    let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Claude);
+    let _wanting = demand.want();
     append(&path, &row("m1", "one"));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["one"]);
     assert_eq!(*owed.borrow(), None);
     assert!(!owed.has_changed().unwrap(), "never published");
+    assert_eq!(undelivered_reads_for_test(), 0);
     assert_eq!(posts_in_flight(CHANNEL), None);
+    halt(stop, task).await;
+}
+
+// An announced unit whose sealing record has not come yet is owed until that record arrives.
+#[tokio::test(start_paused = true)]
+async fn an_announced_unit_counts_as_unsealed_until_its_record_seals_it() {
+    let codex = |value: serde_json::Value| {
+        let mut line = serde_json::to_vec(&value).unwrap();
+        line.push(b'\n');
+        line
+    };
+    let (harness, path, _) = switched_over(b"");
+    let _hosts = herdr_configured();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let bindings = startup_log(&mut writer);
+    let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Codex);
+    let _wanting = demand.want();
+    let announced = serde_json::json!({"type": "event_msg", "payload": {
+        "type": "item_completed", "item": {"type": "AgentMessage", "id": "msg_c1"}}});
+    append(&path, &codex(announced));
+    polls(3).await;
+    let unsealed = Undelivered {
+        unsealed: 1,
+        ..Undelivered::default()
+    };
+    assert_eq!(*owed.borrow(), Some(unsealed));
+    let sealed = serde_json::json!({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "id": "msg_c1",
+        "content": [{"type": "output_text", "text": "hello"}]}});
+    append(&path, &codex(sealed));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["hello"]);
+    assert_eq!(
+        *owed.borrow(),
+        Some(Undelivered::default()),
+        "sealed and posted"
+    );
     halt(stop, task).await;
 }
 
