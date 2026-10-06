@@ -20,6 +20,7 @@ use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::tui_prompt_dedupe::{
     ExternalInputRelayLease, ExternalInputRelayOwner, ObservedTuiPrompt,
 };
+use tracing::Instrument;
 
 mod injected_prompt_policy;
 use self::injected_prompt_policy::{
