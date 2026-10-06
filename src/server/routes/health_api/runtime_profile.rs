@@ -7,6 +7,9 @@ pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crat
     json["dashboard_required"] =
         serde_json::json!(config.cluster.runtime_profile.modules().dashboard);
     json["herdr"] = herdr_health(config);
+    if let Some(homes) = crate::services::cluster::channel_home::health() {
+        json["channel_homes"] = homes;
+    }
 }
 
 /// The boot `session_hosts` view and the admission switch. No E7 runs here; `last_e7` is `never`
