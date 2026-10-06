@@ -125,6 +125,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::input_clear::tests
   --skip services::discord::commands::control::native::herdr_tests
+  --skip services::discord::commands::control::native::herdr_tests::e2e
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
@@ -389,6 +390,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
   services::discord::commands::control::input_clear::tests::without_postgres_the_adapter_refuses_with_the_retry_notice
+  services::discord::commands::control::native::herdr_tests::e2e::o_actor::the_clear_entry_follows_a_hosted_actors_projection_until_its_rotation_settles_pg
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session
@@ -834,6 +836,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::input_clear::tests
   services::discord::commands::control::native::herdr_tests
+  services::discord::commands::control::native::herdr_tests::e2e
   services::discord::commands::control::native::tests
   services::discord::commands::restart::host_guard_tests
   services::discord::commands::tui_passthrough::host_guard_tests

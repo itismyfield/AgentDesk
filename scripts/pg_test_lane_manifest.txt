@@ -101,6 +101,7 @@ src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
 src/services/discord/commands/control/input_clear_tests.rs
+src/services/discord/commands/control/native_herdr_e2e_tests.rs
 src/services/discord/commands/control/native_herdr_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
@@ -310,6 +311,7 @@ services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::input_clear::tests
 services::discord::commands::control::native::herdr_tests
+services::discord::commands::control::native::herdr_tests::e2e
 services::discord::commands::control::native::tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::tui_passthrough::host_guard_tests
@@ -1097,6 +1099,9 @@ services::discord::commands::control::native::herdr_tests::a_configured_channel_
 services::discord::commands::control::native::herdr_tests::a_configured_clear_without_its_database_or_switch_changes_nothing_pg
 services::discord::commands::control::native::herdr_tests::a_held_herdr_clear_completes_at_admission_without_a_second_line_pg
 services::discord::commands::control::native::herdr_tests::a_running_turn_refuses_the_herdr_clear_before_any_change_pg
+services::discord::commands::control::native::herdr_tests::e2e::a_crash_after_the_clears_pending_is_logged_completes_at_boot_without_a_second_line_pg
+services::discord::commands::control::native::herdr_tests::e2e::a_crash_before_the_clears_pending_is_logged_completes_at_boot_without_a_second_line_pg
+services::discord::commands::control::native::herdr_tests::e2e::two_clears_from_the_entry_take_the_next_turn_to_the_latest_cleared_session_pg
 services::discord::commands::control::native::herdr_tests::the_herdr_clear_holds_the_channel_until_its_commit_is_settled_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg

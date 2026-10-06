@@ -2984,6 +2984,10 @@ services::discord::commands::control::native::herdr_tests::a_configured_channel_
 services::discord::commands::control::native::herdr_tests::a_configured_clear_without_its_database_or_switch_changes_nothing_pg
 services::discord::commands::control::native::herdr_tests::a_held_herdr_clear_completes_at_admission_without_a_second_line_pg
 services::discord::commands::control::native::herdr_tests::a_running_turn_refuses_the_herdr_clear_before_any_change_pg
+services::discord::commands::control::native::herdr_tests::e2e::a_crash_after_the_clears_pending_is_logged_completes_at_boot_without_a_second_line_pg
+services::discord::commands::control::native::herdr_tests::e2e::a_crash_before_the_clears_pending_is_logged_completes_at_boot_without_a_second_line_pg
+services::discord::commands::control::native::herdr_tests::e2e::o_actor::the_clear_entry_follows_a_hosted_actors_projection_until_its_rotation_settles_pg
+services::discord::commands::control::native::herdr_tests::e2e::two_clears_from_the_entry_take_the_next_turn_to_the_latest_cleared_session_pg
 services::discord::commands::control::native::herdr_tests::the_herdr_clear_holds_the_channel_until_its_commit_is_settled_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
@@ -10478,6 +10482,7 @@ services::tui_o::writer::tests::actor::host_start::rotation_unsettled::a_cleared
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::an_unconfigured_channel_an_unreadable_rotation_or_an_ended_actor_report_none
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::clears_repeated_within_ten_seconds_stay_unsettled_until_all_retire
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::consecutive_pending_clears_stay_settled_until_the_latest_resolves
+services::tui_o::writer::tests::actor::host_start::rotation_unsettled::resume::a_resumed_actor_publishes_its_unretired_predecessor_and_never_an_unread_zero
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readiness_map_reports_a_running_actors_projection_only
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it

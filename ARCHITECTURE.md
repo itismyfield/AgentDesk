@@ -748,6 +748,8 @@ src/
 │   │   │   │   ├── input_clear.rs
 │   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── native.rs
+│   │   │   │   ├── native_herdr_e2e_o_tests.rs
+│   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
@@ -2250,6 +2252,7 @@ src/
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
+│   │   │   ├── rotation_unsettled_resume_tests.rs
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── stall_tests.rs

@@ -179,9 +179,8 @@ impl HerdrTurnPorts for BoundPorts<'_> {
     }
 }
 
-/// The channel's next turn on its own thread, as provider dispatch runs it, while this thread
-/// plays the pane's provider: once the prompt's paste and Enter follow the `sent` writes, it
-/// answers in `session`'s transcript.
+/// The next turn on its own thread, as provider dispatch runs it; this thread plays the provider,
+/// answering in `session`'s transcript once paste and Enter follow the `sent` writes.
 fn next_turn(
     fx: &Fixture,
     home: &Home,
@@ -377,9 +376,8 @@ impl NativeClearEffects for Crashing {
     }
 }
 
-/// Runs `!clear` in a dcserver process of its own until `/clear` was sent and, when `logged`, the
-/// Pending of `session` is logged; then the process dies with its runtime, tasks, guard, pool and
-/// memory, and only the pane, its log, files and PG remain.
+/// `!clear` in a dcserver of its own until `/clear` is sent (and `session`'s Pending logged when
+/// `logged`); then it dies with its runtime, tasks, guard, pool and memory.
 fn clear_then_crash(fx: &Fixture, home: &Home, session: &str, logged: bool) -> Vec<String> {
     let rt = {
         let (rig, log) = (fx.rig.clone(), fx.log.path().to_path_buf());
@@ -442,9 +440,8 @@ fn clear_then_crash(fx: &Fixture, home: &Home, session: &str, logged: bool) -> V
     effects.calls.lock().unwrap().clone()
 }
 
-/// After a crash once `/clear` was sent, before or after its Pending was logged: the booted
-/// process holds input until the Pending is logged, completes it from PG and the log with one save
-/// and no second line or reset, and its next turn prompts the cleared session once.
+/// A boot after that crash holds input until the Pending is logged, completes it with one save and
+/// no second line or reset, and its next turn prompts the cleared session once.
 fn assert_boot_completes_the_crashed_clear(n: u64, logged: bool) {
     let fx = Fixture::new(n);
     let home = Home::new();
