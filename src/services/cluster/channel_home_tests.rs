@@ -321,9 +321,8 @@ fn production_text(text: &str) -> String {
     out
 }
 
-// Dormant guard: production code outside the owners may read home rows and consult gates, but
-// never writes a home row, makes or registers a gate, or runs the lease or the drain. The
-// operator CLI may only start a delegate, a reclaim or a force.
+// Dormant guard: outside the owners, production only reads rows and consults gates; the switched
+// operator CLI may also start a delegate, a reclaim or a force.
 #[test]
 fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     const OWNERS: &[&str] = &[
