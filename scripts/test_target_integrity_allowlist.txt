@@ -4,8 +4,9 @@
 # spaces, exactly as printed in the violation's `command:` field). Add an
 # entry ONLY for lanes that legitimately select zero tests on some platform
 # (e.g. an entire suite behind #[cfg(target_os = "...")]) and document the
-# reason in a `#` comment directly above the entry.
+# reason in a nonempty `#` comment directly above the entry (no blank gap).
+# Duplicate entries and entries matching no extracted command are rejected.
 #
-# target-mismatch violations (wrong --lib/--bin/--test pairing) can NOT be
-# allowlisted — check_test_target_integrity.py ignores allowlist entries for
-# that kind in code. Fix the command instead.
+# Only zero-match and empty-target findings are excused. Wrong target pairing,
+# unknown modules/targets and inventory failures cannot be allowlisted.
+# Fix those commands or source inventories instead.

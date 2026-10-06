@@ -23,6 +23,7 @@ source inventory and reports both sides of the diff.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import os
 import re
@@ -58,7 +59,7 @@ CARGO_VALUE_OPTIONS = {
 }
 TARGET_VALUE_OPTIONS = {"--bin", "--test"}
 # Target selectors we cannot statically map to a module tree (skipped).
-UNSUPPORTED_TARGET_OPTIONS = {"--bins", "--tests", "--bench", "--benches",
+UNSUPPORTED_TARGET_OPTIONS = {"--tests", "--bench", "--benches",
                               "--example", "--examples", "--doc"}
 LIBTEST_VALUE_OPTIONS = frozenset({
     "--test-threads", "--format", "--color", "--logfile", "-Z",
@@ -158,8 +159,22 @@ class Violation:
 
 def load_allowlist(path: Path) -> set[str]:
     lines = path.read_text("utf-8").splitlines() if path.is_file() else []
-    return {ln.strip() for ln in lines
-            if ln.strip() and not ln.strip().startswith("#")}
+    entries: set[str] = set()
+    reason = ""
+    for lineno, line in enumerate(lines, 1):
+        row = line.strip()
+        if row.startswith("#"):
+            reason = row[1:].strip()
+            continue
+        if row:
+            if not reason:
+                raise ValueError(f"{path}:{lineno}: allowlist entry needs an "
+                                 "adjacent nonempty reason comment")
+            if row in entries:
+                raise ValueError(f"{path}:{lineno}: duplicate allowlist entry")
+            entries.add(row)
+        reason = ""
+    return entries
 
 
 def load_source_floors(path: Path) -> dict[str, int]:
@@ -197,6 +212,35 @@ def discover_targets(repo_root: Path) -> dict[str, Path]:
         targets[f"bin:{package_name}"] = main_rs
     for auto_bin in sorted((repo_root / "src/bin").glob("*.rs")):
         targets.setdefault(f"bin:{auto_bin.stem}", auto_bin)
+    return targets
+
+
+def discover_union_targets(repo_root: Path) -> dict[str, Path]:
+    """Include Cargo's integration/example/bench roots in union observations."""
+    targets = discover_targets(repo_root)
+    manifest = tomllib.loads((repo_root / "Cargo.toml").read_text("utf-8"))
+    package = manifest.get("package", {})
+    for kind, directory in (("test", "tests"), ("example", "examples"),
+                            ("bench", "benches")):
+        explicit = manifest.get(kind, [])
+        reserved = {entry.get("name") for entry in explicit}
+        for entry in explicit:
+            name = entry.get("name")
+            path = entry.get("path")
+            if name:
+                root = repo_root / path if path else repo_root / directory / f"{name}.rs"
+                if not path and not root.is_file():
+                    root = repo_root / directory / name / "main.rs"
+                if root.is_file():
+                    targets[f"{kind}:{name}"] = root
+        if not package.get(f"auto{directory}", True):
+            continue
+        roots = sorted((repo_root / directory).glob("*.rs"))
+        roots += sorted((repo_root / directory).glob("*/main.rs"))
+        for root in roots:
+            name = root.stem if root.name != "main.rs" else root.parent.name
+            if name not in reserved:
+                targets.setdefault(f"{kind}:{name}", root)
     return targets
 
 
@@ -920,6 +964,8 @@ def extract_justfile_commands(justfile: Path,
 class TargetSelection(Enum):
     EXPLICIT = "explicit"
     ALL_TARGETS = "all-targets"
+    BINS = "bins"
+    DEFAULT = "default"
     UNJUDGED = "unjudged"
 
 
@@ -945,6 +991,7 @@ def parse_command(words: list[str]) -> CommandSpec:
     skip_filters: list[str] = []
     exact = False
     all_targets = False
+    bins = False
     unsupported = False
     target_inconclusive = False
 
@@ -985,6 +1032,8 @@ def parse_command(words: list[str]) -> CommandSpec:
             targets.append("lib")
         elif token == "--all-targets":
             all_targets = True
+        elif token == "--bins":
+            bins = True
         elif token in UNSUPPORTED_TARGET_OPTIONS:
             unsupported = True
         elif (consumed := consume_filter_option(before, index)) is not None:
@@ -1011,16 +1060,15 @@ def parse_command(words: list[str]) -> CommandSpec:
         selection = TargetSelection.UNJUDGED
     elif all_targets:
         selection = TargetSelection.ALL_TARGETS
+    elif bins:
+        selection = TargetSelection.BINS
     elif targets_tuple:
         selection = TargetSelection.EXPLICIT
     else:
-        selection = TargetSelection.UNJUDGED
+        selection = TargetSelection.DEFAULT
     return CommandSpec(
         targets_tuple, tuple(filters), tuple(skip_filters), exact, selection,
-        unsupported or (
-            selection is TargetSelection.UNJUDGED and not target_inconclusive
-        ),
-        target_inconclusive,
+        unsupported, target_inconclusive,
     )
 
 
@@ -1049,11 +1097,24 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
     """Return (kind, detail) findings for one parsed cargo test command."""
     findings: list[tuple[str, str]] = []
     selected: dict[str, str] = {}
-    selected_targets = (tuple(inventories)
-                        if spec.selection is TargetSelection.ALL_TARGETS
-                        else spec.targets)
+    if spec.selection in (TargetSelection.ALL_TARGETS, TargetSelection.DEFAULT):
+        selected_targets = tuple(inventories)
+    elif spec.selection is TargetSelection.BINS:
+        selected_targets = tuple(dict.fromkeys((
+            *spec.targets, *(key for key in inventories if key.startswith("bin:")),
+        )))
+    else:
+        selected_targets = spec.targets
+    selected_targets = tuple(dict.fromkeys(
+        resolved for target in selected_targets
+        for resolved in (
+            (tuple(key for key in inventories if fnmatch.fnmatchcase(key, target))
+             or (target,))
+            if any(char in target for char in "*?[") else (target,)
+        )
+    ))
     for target in selected_targets:
-        if target.startswith("test:"):
+        if target.startswith("test:") and target not in inventories:
             name = target.partition(":")[2]
             path = integration_test_root(repo_root, name)
             if not path.is_file():
@@ -1086,10 +1147,11 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             and "lib" not in selected_targets:
         nonlib_ids = set()
         try:
-            roots = discover_targets(repo_root)
+            roots = discover_union_targets(repo_root)
             for target in selected_targets:
-                root = (integration_test_root(repo_root, target.partition(":")[2])
-                        if target.startswith("test:") else roots.get(target))
+                root = roots.get(target)
+                if root is None and target.startswith("test:"):
+                    root = integration_test_root(repo_root, target.partition(":")[2])
                 if root is None or not root.is_file():
                     raise ValueError(f"missing source for {target}")
                 inventory = collect_static_tests(root, repo_root)
@@ -1106,14 +1168,15 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             target: modules[lead]
             for target, modules in inventories.items() if lead in modules
         }
-        if declared_in:
+        if declared_in and ("::" in filt or spec.selection is TargetSelection.EXPLICIT):
             sites = ", ".join(f"{t} ({site})" for t, site in
                               sorted(declared_in.items()))
             findings.append(("target-mismatch", (
                 f"filter `{filt}` names module `{lead}` declared in {sites}, "
                 f"but the command only selects {'/'.join(spec.targets)}; the "
                 f"filter matches 0 tests there and cargo still exits 0")))
-        elif "::" in filt and not lib_judged:
+        elif "::" in filt and not (
+                lib_judged and spec.selection is TargetSelection.EXPLICIT):
             findings.append(("unknown-module", (
                 f"module-path filter `{filt}`: leading segment `{lead}` is "
                 f"not a module in any known target")))
@@ -1459,7 +1522,7 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
         -> list[Violation]:
     inventories = {
         target: collect_modules(root, repo_root)
-        for target, root in discover_targets(repo_root).items()
+        for target, root in discover_union_targets(repo_root).items()
     }
     if lib_test_ids is None:
         try:
@@ -1476,6 +1539,12 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
         if justfile.is_file() else []
     sources = [*workflow_sources, (justfile, just_commands)]
     violations: list[Violation] = []
+    active_commands = {normalized for _, commands in sources
+                       for _, _, normalized in commands}
+    violations.extend(Violation(
+        "scripts/test_target_integrity_allowlist.txt", 0, command,
+        "stale-allowlist", "allowlist entry matches no extracted cargo test command",
+    ) for command in sorted(allowlist - active_commands))
     if source_floors is not None:
         extracted = {
             "workflows": sum(len(commands) for _, commands in workflow_sources),
@@ -1500,11 +1569,10 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
                 spec, inventories, repo_root, lib_test_ids
             )
             if allowlisted:
-                # The allowlist only excuses legitimately-empty lanes; a
-                # target-mismatch means the command itself is wrong and must
-                # be fixed, never allowlisted (enforced here, not just docs).
+                # A platform exception excuses emptiness, not a broken
+                # target, module path or unreadable source inventory.
                 findings = [(kind, detail) for kind, detail in findings
-                            if kind == "target-mismatch"]
+                            if kind not in {"zero-match", "empty-target"}]
             if with_list_check and not findings and not allowlisted:
                 detail = run_list_check(words, repo_root)
                 if detail:
@@ -1754,8 +1822,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"test-target integrity: cannot read source floors: {error}",
               file=sys.stderr)
         return 2
-    allowlist = load_allowlist(args.allowlist or (
-        repo_root / "scripts/test_target_integrity_allowlist.txt"))
+    try:
+        allowlist = load_allowlist(args.allowlist or (
+            repo_root / "scripts/test_target_integrity_allowlist.txt"))
+    except (OSError, ValueError) as error:
+        print(f"test-target integrity: invalid allowlist: {error}", file=sys.stderr)
+        return 2
     diagnostics: list[str] = []
     violations = check_workflows(repo_root,
                                  [Path(w).resolve() for w in workflows],
