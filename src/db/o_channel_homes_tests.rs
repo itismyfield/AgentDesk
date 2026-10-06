@@ -372,3 +372,19 @@ async fn a_renewal_and_a_force_racing_on_one_row_never_both_win_pg() {
     assert_eq!(renewal, HomeWrite::Stale);
     assert!(matches!(force, ForceOutcome::Orphaned(_)), "{force:?}");
 }
+
+/// The database layer refuses a provider other than claude or codex itself, before any write, so
+/// a caller that skips the CLI's own check still stores nothing.
+#[tokio::test]
+async fn a_delegate_naming_an_unknown_provider_writes_nothing_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let refused = delegate(&pool, C, "gemini", "gw", "mini").await;
+    assert!(
+        matches!(&refused, Err(HomeError::UnknownProvider(name)) if name == "gemini"),
+        "{refused:?}"
+    );
+    assert_eq!(home(&pool).await, None);
+    pool.close().await;
+    pg_db.drop().await;
+}

@@ -163,3 +163,71 @@ async fn status_reads_only_and_shows_open_intake_by_routed_epoch_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// Delegate and reclaim name the node they ran on and the holder and target they set; reclaim and
+/// force write their row change from the CLI, and force waits out F.
+#[tokio::test]
+async fn reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (on, connected) = (config(Some(true)), Cell::new(0));
+    let shown = run(&on, delegate_to("claude", "mini"), &pg_db, &connected).await;
+    let shown: Value = serde_json::from_str(&shown.expect("delegate")).expect("json");
+    let planned = json!({"holder": "gw", "target": "mini"});
+    assert_eq!(
+        (&shown["run_on"], &shown["planned"]),
+        (&json!("gw"), &planned)
+    );
+    assert_eq!(shown["row"]["state"], "releasing");
+    let channel = C.to_string();
+    let first = rows(&pool).await[0].epoch;
+    let released = o_channel_homes::finish_release(&pool, &channel, "gw", first).await;
+    let HomeWrite::Applied(released) = released.expect("release") else {
+        panic!("released");
+    };
+    let adopted = o_channel_homes::adopt(&pool, &channel, "mini", released.epoch).await;
+    assert!(matches!(adopted, Ok(HomeWrite::Applied(_))), "{adopted:?}");
+
+    let shown = run(
+        &on,
+        ChannelHomeCommand::Reclaim { channel: C },
+        &pg_db,
+        &connected,
+    )
+    .await;
+    let shown: Value = serde_json::from_str(&shown.expect("reclaim")).expect("json");
+    let planned = json!({"holder": "mini", "target": "gw"});
+    assert_eq!(
+        (&shown["run_on"], &shown["planned"]),
+        (&json!("gw"), &planned)
+    );
+    let held = |homes: Vec<ChannelHome>| {
+        let home = &homes[0];
+        (home.state, home.holder.clone(), home.target.clone())
+    };
+    let reclaiming = (
+        HomeState::Reclaiming,
+        Some("mini".into()),
+        Some("gw".into()),
+    );
+    assert_eq!(held(rows(&pool).await), reclaiming);
+
+    let force = || ChannelHomeCommand::Force { channel: C };
+    let fresh = run(&on, force(), &pg_db, &connected).await;
+    assert!(fresh.is_err_and(|e| e.contains("within F")));
+    assert_eq!(held(rows(&pool).await), reclaiming);
+    sqlx::query("UPDATE o_channel_homes SET renewed_at = NOW() - INTERVAL '201 seconds'")
+        .execute(&pool)
+        .await
+        .expect("silence the lease past F");
+    let forced = run(&on, force(), &pg_db, &connected).await;
+    let forced: Value = serde_json::from_str(&forced.expect("force")).expect("json");
+    assert_eq!(
+        (&forced["state"], &forced["holder"]),
+        (&json!("orphaned"), &Value::Null)
+    );
+    let orphaned = (HomeState::Orphaned, None, Some("gw".into()));
+    assert_eq!(held(rows(&pool).await), orphaned);
+    pool.close().await;
+    pg_db.drop().await;
+}

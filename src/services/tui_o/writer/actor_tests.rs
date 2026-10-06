@@ -421,3 +421,6 @@ mod rotation;
 
 #[path = "host_tests.rs"]
 mod host_start;
+
+#[path = "drain_projection_tests.rs"]
+mod drain_projection;
