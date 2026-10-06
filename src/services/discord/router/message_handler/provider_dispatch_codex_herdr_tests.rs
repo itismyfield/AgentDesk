@@ -580,6 +580,34 @@ fn a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_p
     assert_eq!(fx.row(), Some(HostedState::Bound));
 }
 
+// A first write the gate refuses before any key lands releases the hold; the next prompt is
+// written once on the same pane.
+#[test]
+fn a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg() {
+    let fx = Fixture::admitted("refused-write");
+    let launcher = Arc::new(Launcher::default());
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "host_kind");
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
+        if fx.start_provider(&launcher, false).is_some() {
+            std::fs::remove_file(&marker).unwrap();
+            fx.rig.answer("pane.read", screen(READY));
+        }
+    });
+    assert!(first.is_err());
+    assert!(fx.rig.sends().is_empty());
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(!hold_of(&nonce).exists());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    std::fs::write(&marker, "herdr").unwrap();
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        fx.rig.answer("pane.read", screen(READY));
+        fx.answer(&nonce);
+    });
+    assert_eq!(second, Ok(()));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+}
+
 // T1-7/T1-8: with only an older execution's starts logged or relayed, nothing attaches or is
 // resent, the row stays Pending and the hold keeps the next prompt out.
 #[test]
@@ -665,6 +693,55 @@ fn an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg()
     assert!(second.unwrap_err().contains("input held"));
     assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
     assert_eq!(fx.row(), Some(HostedState::Pending));
+}
+
+// 6a: a cancel once the prompt is submitted does not end the wait for the launch's own start; the
+// pane still attaches and binds, and its hold ends.
+#[test]
+fn a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg() {
+    let fx = Fixture::admitted("late-cancel");
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        let Some(nonce) = fx.start_provider(&launcher, true) else {
+            return;
+        };
+        if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
+            fx.cancel_now();
+        }
+        fx.answer(&nonce);
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(*ports.attaches.lock().unwrap(), [(2, true)]);
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(!hold_of(&nonce).exists());
+}
+
+// A Pending pane whose own start was logged after its turn gave up never takes a second first
+// prompt, even once its hold is gone.
+#[test]
+fn a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg() {
+    let fx = Fixture::admitted("late-start");
+    let launcher = Arc::new(Launcher::default());
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
+        fx.start_provider(&launcher, true);
+    });
+    assert!(first.unwrap_err().contains("no session start"));
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    let session = uuid::Uuid::new_v4().to_string();
+    let path = fx.rollout(&session);
+    assert_eq!(fx.session_start(&context_of(&nonce), &session, &path), 202);
+    assert_eq!(pane_events(&fx), 1);
+    std::fs::remove_file(hold_of(&nonce)).unwrap();
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    assert!(
+        second
+            .unwrap_err()
+            .contains("already took its first prompt")
+    );
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
 }
 
 /// A bound cold start whose hold release meets a holds directory of `mode`; the turn's result,
