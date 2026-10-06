@@ -136,6 +136,9 @@ mod session_bound_ack;
 #[path = "tmux_watcher/terminal_readiness.rs"]
 mod terminal_readiness;
 
+#[path = "tmux_watcher/path_b_record.rs"]
+mod path_b_record;
+
 #[path = "tmux_watcher/utf8_chunk_decoder.rs"]
 mod utf8_chunk_decoder;
 
@@ -2226,10 +2229,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if terminal_output_committed
             && !lifecycle_stage_paused
             && !completion_is_stale_for_newer_turn
-            && let Some(state) = inflight_state
-                .as_ref()
-                .filter(|s| watcher_completion_lifecycle_applies(s))
+            && let Some(record) = path_b_record::PathBRecord::select(
+                inflight_state.as_ref(),
+                inflight_before_relay.as_ref(),
+                &tmux_session_name,
+                current_offset,
+            )
         {
+            let state = record.state;
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
             crate::services::discord::turn_view_reconciler::note_intake_turn_completed(
                 &shared,
@@ -2242,61 +2249,40 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .await;
 
             if has_assistant_response && shared.pg_pool.is_some() {
-                let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
-                let channel_id_text = channel_id.get().to_string();
-                let resolved_did = inflight_state
-                    .as_ref()
-                    .and_then(|s| s.dispatch_id.clone())
-                    .or_else(|| {
-                        crate::services::discord::adk_session::parse_dispatch_id(&state.user_text)
-                    })
-                    .or(
-                        crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
-                            shared.api_port,
-                            channel_id.get(),
-                        )
-                        .await,
+                let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
+                let dispatch_id = record
+                    .persist_transcript(
+                        path_b_record::PathBTranscript {
+                            pool: shared.pg_pool.as_ref(),
+                            channel_id,
+                            provider: &provider_kind,
+                            agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
+                            assistant_message: &full_response,
+                            events: &tool_state.transcript_events,
+                        },
+                        || async {
+                            crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
+                                shared.api_port,
+                                channel_id.get(),
+                            )
+                            .await
+                            .or_else(|| {
+                                resolve_dispatched_thread_dispatch_from_db(
+                                    shared.pg_pool.as_ref(),
+                                    channel_id.get(),
+                                )
+                            })
+                        },
                     )
-                    .or_else(|| {
-                        resolve_dispatched_thread_dispatch_from_db(
-                            shared.pg_pool.as_ref(),
-                            channel_id.get(),
-                        )
-                    });
-                if let Err(e) = crate::db::session_transcripts::persist_turn_db(
-                    shared.pg_pool.as_ref(),
-                    crate::db::session_transcripts::PersistSessionTranscript {
-                        turn_id: &turn_id,
-                        session_key: state.session_key.as_deref(),
-                        channel_id: Some(channel_id_text.as_str()),
-                        agent_id: resolve_role_binding(channel_id, state.channel_name.as_deref())
-                            .as_ref()
-                            .map(|binding| binding.role_id.as_str()),
-                        provider: Some(provider_kind.as_str()),
-                        dispatch_id: resolved_did.as_deref().or(state.dispatch_id.as_deref()),
-                        user_message: &state.user_text,
-                        assistant_message: &full_response,
-                        events: &tool_state.transcript_events,
-                        duration_ms: inflight_duration_ms(Some(state.started_at.as_str())),
-                        turn_started_at_millis:
-                            crate::db::session_transcripts::discord_message_started_at_millis(Some(
-                                user_msg_id,
-                            )),
-                    },
-                )
-                .await
-                {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
-                }
+                    .await;
 
                 crate::services::discord::turn_bridge::persist_turn_analytics_row_with_handles(
                     shared.pg_pool.as_ref(),
                     &provider_kind,
                     channel_id,
                     user_msg_id,
-                    resolve_role_binding(channel_id, state.channel_name.as_deref()).as_ref(),
-                    resolved_did.as_deref().or(state.dispatch_id.as_deref()),
+                    role_binding.as_ref(),
+                    dispatch_id.as_deref(),
                     state.session_key.as_deref(),
                     watcher_session_id
                         .as_deref()

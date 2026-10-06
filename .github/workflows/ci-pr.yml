@@ -365,6 +365,7 @@ jobs:
               - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
+              - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/streaming_baseline_tests.rs'
               - 'src/services/discord/tui_prompt_relay/herdr_source_tests.rs'
