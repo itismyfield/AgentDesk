@@ -167,4 +167,4 @@ mod historical_hops;
 
 #[cfg(test)]
 #[path = "writer_tests.rs"]
-mod tests;
+pub(crate) mod tests;

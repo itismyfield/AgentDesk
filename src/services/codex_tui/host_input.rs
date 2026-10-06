@@ -7,12 +7,15 @@ use std::time::Duration;
 use super::input::{PROMPT_READY_CANCELLED_ERROR, TuiInputAction};
 #[cfg(test)]
 pub(crate) use crate::services::claude_tui::host_input::InputRefusal;
+use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
 pub(crate) use crate::services::claude_tui::host_input::{
     InputRun, InputTarget, LegacyTmuxGate, MutationGate, StopCause,
 };
 use crate::services::platform::tmux;
 use crate::services::process::ProcessIdentity;
 use crate::services::provider::{CancelToken, cancel_requested};
+#[cfg(unix)]
+use crate::services::session_host::HerdrTarget;
 use crate::services::session_host::{HostKey, TmuxHost};
 
 const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
@@ -45,6 +48,25 @@ pub(crate) trait CodexTransport: CodexWrites {
 }
 
 struct TmuxCodexInput;
+
+/// Herdr writes as the Claude executor makes them: a buffer stays in memory until its paste.
+impl CodexWrites for HerdrInput<'_> {
+    fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
+        InputTransport::send_literal(self, session, text)
+    }
+
+    fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
+        InputTransport::load_buffer(self, buffer, text)
+    }
+
+    fn paste_buffer(&mut self, s: &str, buffer: &str, delete: bool) -> Result<Output, String> {
+        InputTransport::paste_buffer(self, s, buffer, delete)
+    }
+
+    fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
+        InputTransport::send_keys(self, session, keys)
+    }
+}
 
 impl CodexWrites for TmuxCodexInput {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
@@ -160,6 +182,27 @@ pub(crate) fn run_plan(
             };
         }
     };
+    run_on(session, gate, transport, actions, cancel_token)
+}
+
+/// A plan on a Herdr pane: its own gate admits each write, and only a confirmed write succeeds.
+#[cfg(unix)]
+pub(crate) fn run_herdr(
+    target: &HerdrTarget,
+    actions: &[TuiInputAction],
+    cancel_token: Option<&CancelToken>,
+) -> PlanRun {
+    let mut input = HerdrInput::new(target);
+    run_on(target.pane_id(), target, &mut input, actions, cancel_token)
+}
+
+fn run_on(
+    session: &str,
+    gate: &dyn MutationGate,
+    transport: &mut dyn CodexWrites,
+    actions: &[TuiInputAction],
+    cancel_token: Option<&CancelToken>,
+) -> PlanRun {
     let mut plan = Plan {
         session,
         gate,

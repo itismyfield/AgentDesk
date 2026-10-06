@@ -1,0 +1,952 @@
+//! The Codex Herdr turn from its entries: both switches at intake and dispatch, then the cold
+//! start over an in-process Herdr socket, a PG row, the hook receiver and the production attach.
+#![cfg(unix)]
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use sqlx::PgPool;
+
+use super::herdr::BootPorts;
+use super::*;
+use crate::config::{TestEnvVarGuard as Guard, TestRuntimeRootGuard};
+use crate::db::dispatched_sessions::hosted_execution::{
+    ExpectedExecution, HostedExecution, HostedOwner, HostedRecord, HostedState,
+};
+use crate::services::claude_tui::hook_server::observation_ingress::tests::Ingress;
+use crate::services::codex::herdr_turn::{self, CodexHerdrPorts, CodexHerdrTurn};
+use crate::services::herdr_admission::{Admission, ForcedAdmission, force_for_test};
+use crate::services::herdr_launch::{
+    EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
+};
+use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
+use crate::services::session_host::{EvidenceGap, HerdrTarget, RestoreResume, ServerWitness};
+use crate::services::tui_o::writer::tests::codex_herdr_drive::{O_CHANNEL, ODrive};
+use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
+use crate::services::tui_prompt_dedupe::binding_events::{
+    BindingTarget, SourceId, binding_events_since,
+};
+
+const CHANNEL: u64 = O_CHANNEL;
+const TOKEN: &str = "discord_0123456789abcdef";
+const LIMIT: Duration = Duration::from_secs(30);
+const READY: &str = "earlier output\n\
+╭──────────────────────────────────────────────────────────────╮\n\
+│ ▌                                                            │\n\
+╰──────────────────────────────────────────────────────────────╯\n\
+  Esc to interrupt   Ctrl+J newline   ⏎ send";
+
+/// The launch's Herdr side: E7 off, one created pane, its evidence; it reports each nonce.
+#[derive(Default)]
+struct Launcher {
+    creates: AtomicUsize,
+    nonces: Mutex<Vec<String>>,
+}
+
+impl HerdrLaunchHost for Launcher {
+    fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
+        RestoreResume::Off {
+            witness: ServerWitness::for_test(1),
+        }
+    }
+
+    fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+        self.creates.fetch_add(1, Ordering::SeqCst);
+        HerdrCreateOutcome::Created {
+            pane_id: PANE.into(),
+        }
+    }
+
+    fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
+        let nonce = probe.execution_nonce.clone();
+        self.nonces.lock().unwrap().push(nonce.clone());
+        let stamp = |pid, seconds| crate::db::dispatched_sessions::hosted_execution::ProcessStamp {
+            pid,
+            start: format!("darwin:{seconds}.000000"),
+        };
+        Ok(ExpectedExecution {
+            binding_provider: "codex".into(),
+            binding_nonce: nonce,
+            root: stamp(10, 1_001),
+            provider_process: stamp(20, 1_002),
+            provenance: "herdr_launch:ppid+env;exec=?".into(),
+        })
+    }
+}
+
+/// The production attach, with this test's launch host; each attach logs the pane writes and
+/// whether SessionStart was sent as it began, and may first let O post what it owes.
+struct Ports<'a> {
+    boot: BootPorts<'a>,
+    launcher: Arc<Launcher>,
+    rig: &'a HerdrRig,
+    started: &'a AtomicBool,
+    attaches: Mutex<Vec<(usize, bool)>>,
+    o: Option<&'a Mutex<Option<ODrive>>>,
+    posted_before_attach: Mutex<Vec<Vec<String>>>,
+}
+
+impl CodexHerdrPorts for Ports<'_> {
+    fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
+        Some(self.launcher.clone())
+    }
+
+    fn attach(
+        &self,
+        owner: &HostedOwner,
+        record: &HostedExecution,
+        source: &SourceId,
+        target: &HerdrTarget,
+    ) -> Result<bool, String> {
+        let seen = (self.rig.sends().len(), self.started.load(Ordering::SeqCst));
+        self.attaches.lock().unwrap().push(seen);
+        if let Some(o) = self.o {
+            let mut o = o.lock().unwrap();
+            let drive = o.get_or_insert_with(ODrive::new);
+            let posts = tokio::runtime::Handle::current().block_on(drive.step());
+            self.posted_before_attach.lock().unwrap().push(posts);
+        }
+        CodexHerdrPorts::attach(&self.boot, owner, record, source, target)
+    }
+}
+
+/// A Codex channel's canonical row on PG, its Herdr endpoint, hook receiver, Codex home and a
+/// Codex CLI that advertises hooks and daemon isolation unless `help` says otherwise.
+struct Fixture {
+    ingress: Ingress,
+    rt: tokio::runtime::Runtime,
+    db: Option<crate::db::auto_queue::test_support::TestPostgresDb>,
+    pool: PgPool,
+    owner: HostedOwner,
+    rig: HerdrRig,
+    cwd: PathBuf,
+    home: PathBuf,
+    started: AtomicBool,
+    finished: AtomicBool,
+    cancel: Mutex<Arc<CancelToken>>,
+    _dirs: (tempfile::TempDir, tempfile::TempDir),
+    _endpoint: crate::services::claude_tui::hook_server::HookEndpointGuard,
+    _guards: Vec<Guard>,
+    _endpoint_lock: std::sync::MutexGuard<'static, ()>,
+    _root: TestRuntimeRootGuard,
+}
+
+impl Fixture {
+    fn new(tag: &str, help: &str) -> Self {
+        let root = TestRuntimeRootGuard::new();
+        let endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap().join("codex-home");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        let codex = dir.path().join("codex");
+        let stub = format!(
+            "#!/bin/bash\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.160.0'\n\
+             elif [ \"$1 $2\" = 'resume --help' ]; then echo '{help}'\n\
+             else printf 'home=%s\\n' \"$CODEX_HOME\"; printf 'arg=%s\\n' \"$@\"; env; fi\n"
+        );
+        std::fs::write(&codex, stub).unwrap();
+        let executable = std::os::unix::fs::PermissionsExt::from_mode(0o700);
+        std::fs::set_permissions(&codex, executable).unwrap();
+        let guards = vec![
+            Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &codex),
+            Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &home),
+            Guard::set_value_after_shared_test_env_lock(
+                "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+                "1".as_ref(),
+            ),
+        ];
+        let endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".into(),
+        );
+        let ingress = Ingress::new();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = HostedOwner {
+            provider: "codex".into(),
+            discord_token_hash: TOKEN.into(),
+            channel_id: CHANNEL.to_string(),
+            logical_key: format!("AgentDesk-codex-p10-{tag}"),
+            owner_node: NODE.into(),
+            runtime_root: "/adk/runtime".into(),
+        };
+        let (db, pool) = rt.block_on(async {
+            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            sqlx::query(
+                "INSERT INTO sessions (session_key, provider, status, identity_kind,
+                                       discord_token_hash, channel_id)
+                 VALUES ($1, 'codex', 'idle', 'discord_channel', $2, $3)",
+            )
+            .bind(format!("codex/{TOKEN}/{NODE}:{}", owner.logical_key))
+            .bind(TOKEN)
+            .bind(CHANNEL.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+            (db, pool)
+        });
+        let cwd = tempfile::tempdir().unwrap();
+        Self {
+            ingress,
+            rt,
+            db: Some(db),
+            pool,
+            owner,
+            rig: HerdrRig::start(),
+            cwd: cwd.path().canonicalize().unwrap(),
+            home,
+            started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            cancel: Mutex::new(Arc::new(CancelToken::new())),
+            _dirs: (dir, cwd),
+            _endpoint: endpoint,
+            _guards: guards,
+            _endpoint_lock: endpoint_lock,
+            _root: root,
+        }
+    }
+
+    fn admitted(tag: &str) -> Self {
+        Self::new(tag, "--dangerously-bypass-hook-trust --no-daemon")
+    }
+
+    fn logical(&self) -> &str {
+        &self.owner.logical_key
+    }
+
+    fn ports<'a>(&'a self, launcher: &Arc<Launcher>) -> Ports<'a> {
+        Ports {
+            boot: BootPorts {
+                pool: &self.pool,
+                channel_id: CHANNEL,
+            },
+            launcher: launcher.clone(),
+            rig: &self.rig,
+            started: &self.started,
+            attaches: Mutex::default(),
+            o: None,
+            posted_before_attach: Mutex::default(),
+        }
+    }
+
+    fn record(&self) -> HostedRecord {
+        let raw: Option<Value> = self.rt.block_on(async {
+            sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id = $1")
+                .bind(CHANNEL.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        });
+        HostedRecord::decode(raw.as_ref())
+    }
+
+    fn row(&self) -> Option<HostedState> {
+        match self.record() {
+            HostedRecord::Known(record) => Some(record.state),
+            _ => None,
+        }
+    }
+
+    fn cancel_now(&self) {
+        let cancel = self.cancel.lock().unwrap().clone();
+        cancel.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// The launched pane runs its provider and shows a ready composer; `None` once the turn ended.
+    fn start_provider(&self, launcher: &Launcher, ready: bool) -> Option<String> {
+        if !wait_for(&self.finished, "launch evidence", || {
+            !launcher.nonces.lock().unwrap().is_empty()
+        }) {
+            return None;
+        }
+        let nonce = launcher.nonces.lock().unwrap()[0].clone();
+        self.rig.run_provider(&context_of(&nonce), false);
+        if ready {
+            self.rig.answer("pane.read", screen(READY));
+        }
+        Some(nonce)
+    }
+
+    /// A new rollout of `session` under the Codex home, holding only its header.
+    fn rollout(&self, session: &str) -> PathBuf {
+        let path = self.home.join(format!(
+            "sessions/2026/10/07/rollout-2026-10-07T07-00-00-{session}.jsonl"
+        ));
+        let header = json!({"timestamp": "2026-10-07T07:00:00.000Z", "type": "session_meta",
+            "payload": {"id": session, "session_id": session, "cwd": self.cwd,
+                "originator": "codex-tui", "cli_version": "0.160.0", "source": "cli"}});
+        append(&path, &[header]);
+        path
+    }
+
+    /// SessionStart(startup) of `session`, relayed with the launch context at `context`.
+    fn session_start(&self, context: &Path, session: &str, path: &Path) -> u16 {
+        let envelope = HookBindingEnvelope::capture_from_env("codex", |name| {
+            (name == "AGENTDESK_BINDING_CONTEXT").then(|| context.as_os_str().to_owned())
+        });
+        let payload = json!({"session_id": session, "source": "startup",
+            "hook_event_name": "SessionStart", "cwd": self.cwd, "transcript_path": path});
+        let uri = format!("/hooks/codex/SessionStart?session_id={}", self.logical());
+        self.started.store(true, Ordering::SeqCst);
+        let envelope = envelope.encode().unwrap();
+        self.ingress
+            .send_envelope(&uri, &payload, None, Some(&envelope))
+            .0
+    }
+
+    /// The pane's provider takes the one prompt, logs its start, then answers it in full.
+    fn answer(&self, nonce: &str) -> Option<(String, PathBuf)> {
+        if !wait_for(&self.finished, "the prompt", || self.rig.sends().len() == 2) {
+            return None;
+        }
+        let session = uuid::Uuid::new_v4().to_string();
+        let path = self.rollout(&session);
+        assert_eq!(self.session_start(&context_of(nonce), &session, &path), 202);
+        append(&path, &answer_lines());
+        Some((session, path))
+    }
+
+    /// Runs one turn on its own thread, as provider dispatch does on a blocking thread, while
+    /// `codex` plays the pane's provider on this one.
+    fn turn(
+        &self,
+        row: &HostedRecord,
+        ports: &Ports<'_>,
+        codex: impl FnOnce(),
+    ) -> (Result<(), String>, Vec<StreamMessage>) {
+        let (rt, rig, pool) = (&self.rt, &self.rig, &self.pool);
+        let (owner, cwd) = (self.owner.clone(), self.cwd.clone());
+        let endpoint = HerdrLaunchEndpoint {
+            execution_node: NODE.into(),
+            config_key: KEY.into(),
+            socket_addr: self.rig.socket().display().to_string(),
+            herdr_session: SESSION.into(),
+        };
+        let finished = &self.finished;
+        finished.store(false, Ordering::SeqCst);
+        let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
+        let cancel = Arc::new(CancelToken::new());
+        *self.cancel.lock().unwrap() = cancel.clone();
+        let token = cancel.clone();
+        std::thread::scope(|scope| {
+            let executor = scope.spawn(move || {
+                let _runtime = rt.enter();
+                crate::services::tui_prompt_dedupe::binding_events::set_test_root(
+                    log_root.as_deref(),
+                );
+                let _registry = rig.registry_on_this_thread();
+                let _admission = open_admission();
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let turn = CodexHerdrTurn {
+                    pool,
+                    owner,
+                    channel_id: CHANNEL,
+                    endpoint,
+                    row: Some(row),
+                    prompt: "질문",
+                    working_dir: cwd.to_str().unwrap(),
+                    system_prompt: None,
+                    allowed_tools: &[],
+                    model: None,
+                    fast_mode: None,
+                    goals: None,
+                    compact_token_limit: None,
+                    cancel: Some(token),
+                };
+                let result = herdr_turn::execute(turn, ports, sender);
+                finished.store(true, Ordering::SeqCst);
+                (result, receiver.try_iter().collect())
+            });
+            let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(codex));
+            let deadline = Instant::now() + LIMIT;
+            while played.is_ok() && !finished.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let outlived = played.is_ok() && !finished.load(Ordering::SeqCst);
+            if played.is_err() || outlived {
+                cancel.cancelled.store(true, Ordering::SeqCst);
+            }
+            let (result, messages) = executor.join().unwrap();
+            if let Err(panic) = played {
+                std::panic::resume_unwind(panic);
+            }
+            let result = match outlived {
+                true => Err(format!("the turn outlived its provider: {result:?}")),
+                false => result,
+            };
+            (result, messages)
+        })
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let (db, pool) = (self.db.take().unwrap(), self.pool.clone());
+        self.rt.block_on(async {
+            pool.close().await;
+            db.drop().await;
+        });
+    }
+}
+
+fn open_admission() -> ForcedAdmission {
+    let stop = std::env::temp_dir().join(format!("adk-cx-none-{}", uuid::Uuid::new_v4()));
+    force_for_test(Admission::new(None, Some(stop)))
+}
+
+/// `false` once the executor ended first; its result then tells why.
+fn wait_for(finished: &AtomicBool, what: &str, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + LIMIT;
+    while !done() {
+        if finished.load(Ordering::SeqCst) {
+            return false;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+fn append(path: &Path, lines: &[Value]) {
+    use std::io::Write;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    for line in lines {
+        writeln!(file, "{line}").unwrap();
+    }
+}
+
+fn answer_lines() -> Vec<Value> {
+    vec![
+        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}}),
+        json!({"type": "response_item", "timestamp": "2026-10-07T07:00:01.000Z", "payload": {
+            "type": "message", "role": "assistant", "id": "msg_1",
+            "content": [{"type": "output_text", "text": "답"}]}}),
+        json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1",
+            "last_agent_message": "답"}}),
+    ]
+}
+
+fn screen(text: &str) -> Value {
+    json!({"type": "pane_read", "read": {
+        "pane_id": PANE, "workspace_id": "w1", "tab_id": "w1:1", "source": "recent_unwrapped",
+        "format": "text", "text": text, "revision": 3, "truncated": false
+    }})
+}
+
+fn prompt_sends() -> Vec<Value> {
+    vec![
+        json!({"pane_id": PANE, "text": "질문"}),
+        json!({"pane_id": PANE, "keys": ["enter"]}),
+    ]
+}
+
+fn context_of(nonce: &str) -> PathBuf {
+    let root = crate::config::runtime_root().unwrap();
+    root.join(format!("runtime/binding_contexts/codex/{nonce}.json"))
+}
+
+fn hold_of(nonce: &str) -> PathBuf {
+    let root = crate::config::runtime_root().unwrap();
+    root.join("runtime/herdr_input_holds").join(nonce)
+}
+
+fn pane_events(fx: &Fixture) -> usize {
+    let events = binding_events_since(CHANNEL, 0).unwrap();
+    let logical = fx.logical();
+    events.iter().filter(|e| e.tmux_session == logical).count()
+}
+
+// T1-4/T1-6/T1-9/T1-14: a prompt-less launch takes one prompt, logs nothing until its own start,
+// then attaches, binds, ends its hold and reads the new rollout; the next turn is not input-held.
+#[test]
+fn cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg() {
+    let fx = Fixture::admitted("cold");
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let before_start = Mutex::new(None);
+    let launched = Mutex::new(None);
+    let (result, messages) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        let Some(nonce) = fx.start_provider(&launcher, true) else {
+            return;
+        };
+        if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
+            *before_start.lock().unwrap() = Some(pane_events(&fx));
+        }
+        *launched.lock().unwrap() = fx.answer(&nonce).map(|(_, path)| (nonce, path));
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(*before_start.lock().unwrap(), Some(0), "B1: nothing logged");
+    assert_eq!(*ports.attaches.lock().unwrap(), [(2, true)]);
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    let (nonce, path) = launched.into_inner().unwrap().unwrap();
+    assert!(
+        !hold_of(&nonce).exists(),
+        "the bound cold start ends its hold"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, StreamMessage::Text { content } if content.trim() == "답")),
+        "{messages:?}"
+    );
+    let rollout = path.canonicalize().unwrap().display().to_string();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, StreamMessage::RuntimeReady { handoff:
+            crate::services::agent_protocol::RuntimeHandoff::CodexTui { rollout_path, .. } }
+            if *rollout_path == rollout)),
+        "{messages:?}"
+    );
+    let script = crate::services::tmux_common::session_temp_path(fx.logical(), "sh");
+    let script = std::fs::read_to_string(script).unwrap();
+    let exec = script.find("\nexec ").unwrap();
+    assert!(script[..exec].ends_with(&format!(
+        "unset {}",
+        crate::services::herdr_launch::HERDR_PANE_ENV.join(" ")
+    )));
+    let ran = std::process::Command::new("/bin/bash")
+        .arg("-c")
+        .arg(&script)
+        .env("HERDR_ENV", "1")
+        .env("CODEX_HOME", "/elsewhere")
+        .output()
+        .unwrap();
+    let ran = String::from_utf8(ran.stdout).unwrap();
+    let args: Vec<&str> = ran.lines().filter_map(|l| l.strip_prefix("arg=")).collect();
+    assert!(args.contains(&"--no-daemon"), "{args:?}");
+    assert!(
+        args.contains(&"--dangerously-bypass-hook-trust"),
+        "{args:?}"
+    );
+    assert!(
+        args.contains(&"check_for_update_on_startup=false"),
+        "{args:?}"
+    );
+    assert!(!args.contains(&"--") && !args.contains(&"질문"), "{args:?}");
+    assert!(
+        ran.contains(&format!("home={}\n", fx.home.display())),
+        "{ran}"
+    );
+    assert!(!ran.contains("HERDR_ENV="), "{ran}");
+
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    let second = second.unwrap_err();
+    assert!(!second.contains("input held"), "{second}");
+    assert!(second.contains("no follow-up yet"), "{second}");
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+}
+
+// T1-15: a cancel before any write leaves the Pending pane with no hold; the next turn creates
+// nothing and sends only its own prompt once.
+#[test]
+fn a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg() {
+    let fx = Fixture::admitted("cancel");
+    let launcher = Arc::new(Launcher::default());
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
+        if fx.start_provider(&launcher, false).is_some() {
+            fx.cancel_now();
+        }
+    });
+    assert!(first.unwrap_err().contains("cancel"));
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(!hold_of(&nonce).exists());
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&fx.record(), &ports, || {
+        fx.rig.answer("pane.read", screen(READY));
+        fx.answer(&nonce);
+    });
+    assert_eq!(second, Ok(()));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+}
+
+// T1-7/T1-8: with only an older execution's starts logged or relayed, nothing attaches or is
+// resent, the row stays Pending and the hold keeps the next prompt out.
+#[test]
+fn without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg() {
+    let fx = Fixture::admitted("unstarted");
+    let older = crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+        crate::services::tui_prompt_dedupe::binding_context::BindingContext {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: chrono::Utc::now(),
+            execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+            tmux_session: fx.logical().into(),
+            channel_id: Some(CHANNEL),
+            owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some(fx.home.join("sessions")),
+            first_prompt_digest: None,
+            source_policy: None,
+        },
+    )
+    .unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
+    std::fs::write(&marker, &older.context.execution_nonce).unwrap();
+    crate::services::tui_prompt_dedupe::register_provider_session(
+        "codex",
+        fx.logical(),
+        fx.logical(),
+    );
+    crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(fx.logical(), CHANNEL);
+    let old_session = uuid::Uuid::new_v4().to_string();
+    let old_path = fx.rollout(&old_session);
+    assert_eq!(fx.session_start(&older.path, &old_session, &old_path), 202);
+    fx.started.store(false, Ordering::SeqCst);
+    let logged = pane_events(&fx);
+    assert_eq!(
+        logged, 1,
+        "the older execution's start is the pane's latest record"
+    );
+
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if fx.start_provider(&launcher, true).is_some()
+            && wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2)
+        {
+            let session = uuid::Uuid::new_v4().to_string();
+            let path = fx.rollout(&session);
+            fx.session_start(&older.path, &session, &path);
+        }
+    });
+    let first = first.unwrap_err();
+    assert!(first.contains("no session start"), "{first}");
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert_eq!(pane_events(&fx), logged);
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(hold_of(&nonce).exists());
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    assert!(second.unwrap_err().contains("input held"));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+}
+
+// N1: a first write that may have landed although its reply never came keeps the hold, though no
+// write was confirmed and no Enter tried; the next turn writes nothing.
+#[test]
+fn an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg() {
+    let fx = Fixture::admitted("unclear");
+    let launcher = Arc::new(Launcher::default());
+    fx.rig.leave_sends_unanswered(true);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
+        fx.start_provider(&launcher, true);
+    });
+    assert!(first.is_err());
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(hold_of(&nonce).exists());
+    fx.rig.leave_sends_unanswered(false);
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    assert!(second.unwrap_err().contains("input held"));
+    assert_eq!(fx.rig.sends(), prompt_sends()[..1]);
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+}
+
+/// A bound cold start whose hold release meets a holds directory of `mode`; the turn's result,
+/// its nonce and what a release under that mode returns.
+fn bound_with_holds_dir(tag: &str, mode: u32) -> (Fixture, Result<(), String>, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::admitted(tag);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        let Some(nonce) = fx.start_provider(&launcher, true) else {
+            return;
+        };
+        if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
+            let dir = hold_of(&nonce).parent().unwrap().to_owned();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        fx.answer(&nonce);
+    });
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    (fx, result, nonce)
+}
+
+// N2: a removal whose directory sync fails is NotDurable with the hold gone; a removal that fails
+// is Kept with the hold in place, and the next prompt is held.
+#[test]
+fn a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg() {
+    use std::os::unix::fs::PermissionsExt;
+    let restore = |nonce: &str| {
+        let dir = hold_of(nonce).parent().unwrap().to_owned();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let (fx, result, nonce) = bound_with_holds_dir("unsynced", 0o300);
+    assert_eq!(result, Ok(()));
+    assert!(!hold_of(&nonce).exists(), "NotDurable: the hold is gone");
+    std::fs::write(hold_of("unsynced-probe"), "").unwrap();
+    assert!(matches!(
+        crate::services::claude::herdr_turn::release_hold("unsynced-probe"),
+        crate::services::claude::herdr_turn::HoldRelease::NotDurable(_)
+    ));
+    assert!(!hold_of("unsynced-probe").exists());
+    restore(&nonce);
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&Arc::default()), || {});
+    assert!(second.unwrap_err().contains("no follow-up yet"));
+    drop(fx);
+
+    let (fx, result, nonce) = bound_with_holds_dir("unlinked", 0o500);
+    assert_eq!(result, Ok(()));
+    assert!(hold_of(&nonce).exists(), "Kept: the hold stays");
+    assert!(matches!(
+        crate::services::claude::herdr_turn::release_hold(&nonce),
+        crate::services::claude::herdr_turn::HoldRelease::Kept(_)
+    ));
+    restore(&nonce);
+    let sends = fx.rig.sends().len();
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&Arc::default()), || {});
+    assert!(second.unwrap_err().contains("input held"));
+    assert_eq!(fx.rig.sends().len(), sends);
+}
+
+// T1-5: a CLI without daemon isolation, or without the hook trust bypass, is refused before its
+// Pending row: no row change, no create, no host marker.
+#[test]
+fn a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg() {
+    for (help, refused) in [
+        (
+            "--dangerously-bypass-hook-trust",
+            "DaemonIsolationUnavailable",
+        ),
+        ("--no-daemon", "HooksUnavailable"),
+    ] {
+        let fx = Fixture::new("refused", help);
+        let launcher = Arc::new(Launcher::default());
+        let (result, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {});
+        let error = result.unwrap_err();
+        assert!(error.contains(refused), "{error}");
+        assert_eq!(fx.record(), HostedRecord::Legacy, "{help}");
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+        let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "host_kind");
+        assert!(!Path::new(&marker).exists(), "{help}");
+    }
+}
+
+// T1-12/T1-13: O posts a cold start's answer once, written before the attach or with its start
+// relayed and attached again; no attach adds a binding record or moves O's cursor back.
+#[test]
+fn o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg() {
+    let fx = Fixture::admitted("o");
+    let launcher = Arc::new(Launcher::default());
+    let o = Mutex::new(None);
+    let mut ports = fx.ports(&launcher);
+    ports.o = Some(&o);
+    let launched = Mutex::new(None);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(nonce) = fx.start_provider(&launcher, true) {
+            *launched.lock().unwrap() = fx.answer(&nonce).map(|started| (nonce, started));
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(*ports.posted_before_attach.lock().unwrap(), [vec!["답"]]);
+    let (nonce, (session, path)) = launched.into_inner().unwrap().unwrap();
+    let source = match binding_events_since(CHANNEL, 0)
+        .unwrap()
+        .last()
+        .unwrap()
+        .new
+        .clone()
+    {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => source,
+        other => panic!("no source logged: {other:?}"),
+    };
+    let logged = pane_events(&fx);
+    let mut o = o.into_inner().unwrap().unwrap();
+    let step = |o: &mut ODrive| {
+        let _runtime = fx.rt.enter();
+        fx.rt.block_on(o.step())
+    };
+    assert_eq!(step(&mut o), ["답"]);
+    let captured = o.captured_through(&source).unwrap();
+    assert_eq!(captured, std::fs::metadata(&path).unwrap().len());
+
+    assert_eq!(fx.session_start(&context_of(&nonce), &session, &path), 202);
+    let record = match fx.record() {
+        HostedRecord::Known(record) => record,
+        other => panic!("{other:?}"),
+    };
+    let attached = {
+        let _runtime = fx.rt.enter();
+        let _registry = fx.rig.registry_on_this_thread();
+        let target = crate::services::session_host::herdr_endpoints()
+            .target(&record)
+            .unwrap();
+        let boot = BootPorts {
+            pool: &fx.pool,
+            channel_id: CHANNEL,
+        };
+        CodexHerdrPorts::attach(&boot, &fx.owner, &record, &source, &target)
+    };
+    assert_eq!(attached, Ok(true));
+    assert_eq!(
+        pane_events(&fx),
+        logged,
+        "neither the repeat nor the attach logs a record"
+    );
+    assert_eq!(step(&mut o), ["답"]);
+    assert_eq!(o.captured_through(&source), Some(captured));
+}
+
+const CLAUDE_CHANNEL: u64 = 1_490_141_479_707_086_938;
+const CODEX_CHANNEL: u64 = 1_490_141_485_167_808_532;
+
+fn session_key(provider: &ProviderKind) -> String {
+    format!(
+        "{}/{TOKEN}/mac-mini:AgentDesk-{}-dash",
+        provider.as_str(),
+        provider.as_str()
+    )
+}
+
+// T1-1/T1-1b/T1-2/T1-10: each provider follows only its own switch at intake and dispatch, with no
+// tmux or provider I/O; on, Codex is O-ready by its own kind and its `!clear` is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::tui_prompt_dedupe::binding_context::tests;
+    let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, env) = tests::fixture_after_shared_test_env_lock();
+    let tmux = tests::fake_tmux(root.path());
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (store, era) = crate::services::herdr_launch::o_store_for_test(
+        root.path(),
+        &[CLAUDE_CHANNEL, CODEX_CHANNEL],
+    );
+    for channel in [CLAUDE_CHANNEL, CODEX_CHANNEL] {
+        let mut seeded = store.open_channel(&era, channel).unwrap().unwrap();
+        seeded.set_binding_checkpoint(3).unwrap();
+    }
+    let absent = root.path().join("no-stop-file");
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("mac-mini"),
+        &[(CLAUDE_CHANNEL, "mac-mini"), (CODEX_CHANNEL, "mac-mini")],
+    );
+    let _owned = crate::services::tui_o::cutover::test_override::force_channels(&[
+        (CLAUDE_CHANNEL, ClaudeTui),
+        (CODEX_CHANNEL, CodexTui),
+    ]);
+    let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
+    let _admission = force_for_test(Admission::new(Some("on".as_ref()), Some(absent)));
+    let judge = |provider: ProviderKind, claude: bool, codex: bool| {
+        let pool = &pool;
+        async move {
+            let _claude = crate::services::turn_host::force_switch_for_test(Some(claude));
+            let _codex = crate::services::turn_host::force_codex_switch_for_test(Some(codex));
+            let channel = match provider {
+                ProviderKind::Claude => CLAUDE_CHANNEL,
+                _ => CODEX_CHANNEL,
+            };
+            let key = session_key(&provider);
+            let built = || async { Some(session_key(&provider)) };
+            let intake = crate::services::turn_host::intake_refusal_before_turn(
+                Some(pool),
+                &provider,
+                channel,
+                built,
+            )
+            .await;
+            let host =
+                crate::services::turn_host::for_turn(Some(pool), &provider, channel, Some(&key))
+                    .await;
+            let (sender, _receiver) = std::sync::mpsc::channel();
+            let turn = StreamingTurn {
+                pool: None,
+                provider: &provider,
+                prompt: "question",
+                session_id: None,
+                working_dir: "/tmp",
+                system_prompt: None,
+                allowed_tools: &[],
+                cancel: Arc::new(CancelToken::new()),
+                remote_profile: None,
+                tmux_session_name: Some("AgentDesk-dash"),
+                teardown: None,
+                host: &host,
+                channel_id: channel,
+                model: None,
+                native_fast_mode: None,
+                codex_goals: None,
+                compact_percent: None,
+                compact_lower_bound_tokens: 0,
+                compact_token_limit: None,
+                cache_ttl_minutes: None,
+                dispatch_type: None,
+                force_fresh: false,
+            };
+            let dispatched = execute(turn, sender);
+            let clear = crate::services::discord::admin_host_guard::read_herdr_clear(
+                Some(pool),
+                &provider,
+                channel,
+                Some(&key),
+            )
+            .await
+            .err();
+            (intake, dispatched, clear)
+        }
+    };
+    let entered = Err("herdr turn: no database".to_string());
+    for claude in [false, true] {
+        for codex in [false, true] {
+            let case = format!("claude={claude} codex={codex}");
+            let (intake, dispatched, _) = judge(ProviderKind::Claude, claude, codex).await;
+            match claude {
+                true => assert_eq!((intake, &dispatched), (None, &entered), "{case}"),
+                false => {
+                    let unwired = HerdrRefusal::ExecutorNotWired;
+                    assert_eq!(intake, Some(unwired.clone()), "{case}");
+                    assert_eq!(dispatched, Err(unwired.to_string()), "{case}");
+                }
+            }
+            let (intake, dispatched, clear) = judge(ProviderKind::Codex, claude, codex).await;
+            match codex {
+                true => {
+                    assert_eq!((intake, &dispatched), (None, &entered), "{case}");
+                    let unsupported =
+                        crate::services::discord::admin_host_guard::HERDR_CODEX_CLEAR_UNSUPPORTED;
+                    assert_eq!(clear.as_deref(), Some(unsupported), "{case}");
+                }
+                false => {
+                    let provider = "codex".to_string();
+                    let refused = HerdrRefusal::ProviderUnsupported { provider };
+                    assert_eq!(intake, Some(refused.clone()), "{case}");
+                    assert_eq!(dispatched, Err(refused.to_string()), "{case}");
+                    assert_eq!(clear, Some(refused.to_string()), "{case}");
+                }
+            }
+        }
+    }
+    for driver in ["tmux.calls", "codex.calls", "claude.calls"] {
+        assert!(!root.path().join(driver).exists(), "{driver} ran");
+    }
+    drop((tmux, env, lock));
+    pool.close().await;
+    db.drop().await;
+}

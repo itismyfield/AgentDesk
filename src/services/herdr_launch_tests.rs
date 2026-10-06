@@ -28,6 +28,7 @@ fn launch(endpoint: Option<HerdrLaunchEndpoint>) -> HerdrLaunch {
         channel_id: Some(1),
         expected_native_session_id: None,
         resume: false,
+        provider_root: None,
     }
 }
 
@@ -764,7 +765,7 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
         .map(|channel| (channel, RuntimeHandoffKind::ClaudeTui))
         .into();
     let root = tempfile::tempdir().unwrap();
-    let ready = |channel| o_ready_at(Some(root.path()), channel);
+    let ready = |channel| o_ready_at(Some(root.path()), channel, RuntimeHandoffKind::ClaudeTui);
     let _gate = force_writer_accepts(Some(true));
     // Windows has no directory fsync, so the O store refuses to open and no channel is ready.
     if cfg!(windows) {
@@ -801,9 +802,15 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
         assert!(!ready(other), "the channel has no store");
         assert!(!ready(misnamed), "the checkpoint names another channel");
         assert!(!ready(garbled), "the checkpoint is unreadable");
-        assert!(!o_ready_at(None, owned), "no runtime root");
+        assert!(
+            !o_ready_at(None, owned, RuntimeHandoffKind::ClaudeTui),
+            "no runtime root"
+        );
         let empty = tempfile::tempdir().unwrap();
-        assert!(!o_ready_at(Some(empty.path()), owned), "no O store at all");
+        assert!(
+            !o_ready_at(Some(empty.path()), owned, RuntimeHandoffKind::ClaudeTui),
+            "no O store at all"
+        );
         assert!(
             store_tree(empty.path()).len() == 1,
             "the empty root gains nothing"

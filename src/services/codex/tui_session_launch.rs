@@ -140,6 +140,188 @@ pub(super) fn prepare_codex_tui_launch_script(
     })
 }
 
+/// Why a Codex Herdr launch is refused, judged from reads before its Pending row.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexHerdrLaunchRefused {
+    CliMissing,
+    SourceModeInvalid(&'static str),
+    /// Without hooks no Source of the launch is ever recorded, so its first prompt has no commit.
+    HooksUnavailable,
+    /// Without `--no-daemon` a shared app-server keeps the first launch's binding context.
+    DaemonIsolationUnavailable,
+}
+
+/// What an admitted Codex Herdr launch runs: the binary, its source mode and its hook endpoint.
+#[cfg(unix)]
+pub(super) struct CodexHerdrLaunchable {
+    codex_bin: String,
+    resolution: crate::services::platform::BinaryResolution,
+    policy: &'static str,
+}
+
+/// Both hooks and daemon isolation are required, read from the binary's `--version` and
+/// `resume --help` before anything is written.
+#[cfg(unix)]
+pub(super) fn codex_herdr_launch_admissible()
+-> Result<CodexHerdrLaunchable, CodexHerdrLaunchRefused> {
+    use crate::services::claude_tui::hook_bundle::{
+        codex_hook_capability, probe_codex_cli_version_with_path,
+    };
+    let policy = codex_source_mode_snapshot()
+        .launch_policy()
+        .map_err(CodexHerdrLaunchRefused::SourceModeInvalid)?;
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution.resolved_path.clone();
+    let codex_bin = codex_bin.ok_or(CodexHerdrLaunchRefused::CliMissing)?;
+    if !codex_direct_tui_hook_overrides_enabled() || current_hook_endpoint().is_none() {
+        return Err(CodexHerdrLaunchRefused::HooksUnavailable);
+    }
+    let help = codex_resume_help(&codex_bin, &resolution).unwrap_or_default();
+    let version = probe_codex_cli_version_with_path(&codex_bin, resolution.exec_path.as_deref());
+    let bypass = codex_resume_help_mentions_hook_trust_bypass(&help);
+    if !codex_hook_capability(version.as_deref(), bypass).hooks_available() {
+        return Err(CodexHerdrLaunchRefused::HooksUnavailable);
+    }
+    if !help.contains("--no-daemon") {
+        return Err(CodexHerdrLaunchRefused::DaemonIsolationUnavailable);
+    }
+    Ok(CodexHerdrLaunchable {
+        codex_bin,
+        resolution,
+        policy,
+    })
+}
+
+/// The Codex home a Herdr launch exports and its hooks verify sources under: the auth
+/// profile's, else this host's.
+#[cfg(unix)]
+pub(super) fn codex_herdr_home(
+    auth_overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+) -> Option<PathBuf> {
+    match auth_overlay.env.get("CODEX_HOME") {
+        Some(home) => Some(PathBuf::from(home)),
+        None => crate::services::codex_tui::rollout_tail::default_codex_home(),
+    }
+}
+
+/// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
+/// hooks and an exported home, with the Herdr pane variables unset right before the exec.
+#[cfg(unix)]
+pub(super) fn prepare_codex_herdr_launch(
+    prepared: &PreparedIncarnation,
+    launchable: &CodexHerdrLaunchable,
+    launch_options: &CodexLaunchOptions,
+    auth_overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+    home: &std::path::Path,
+) -> Result<crate::services::herdr_launch::HerdrLaunchCommand, String> {
+    use crate::services::herdr_launch::{HerdrLaunchCommand, unset_herdr_env_before_exec};
+    let logical = prepared.context.tmux_session.as_str();
+    let (codex_bin, exec_path) = (
+        &launchable.codex_bin,
+        launchable.resolution.exec_path.as_deref(),
+    );
+    let channel = prepared.context.channel_id;
+    let mut env_lines = build_tmux_launch_env_lines(exec_path, channel, Some(ProviderKind::Codex));
+    env_lines
+        .push_str(&crate::services::provider_auth_profile::overlay_shell_env_lines(auth_overlay));
+    env_lines.push_str(&prepared.env_lines());
+    env_lines.push_str(&format!(
+        "export AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE={}\nexport CODEX_HOME={}\n",
+        shell_escape(launchable.policy),
+        shell_escape(&home.to_string_lossy())
+    ));
+    let mut args = codex_tui_option_args(launch_options);
+    args.insert(0, "--no-daemon".to_string());
+    let overrides = prepare_codex_tui_hook_overrides(logical, None, codex_bin, exec_path);
+    if overrides.is_empty() {
+        return Err("codex herdr launch: no hook overrides".into());
+    }
+    append_codex_config_overrides(&mut args, overrides);
+    insert_codex_resume_option_before_other_options(&mut args, "--dangerously-bypass-hook-trust");
+    let script = render_codex_tui_tmux_script(&env_lines, codex_bin, &args);
+    let script = unset_herdr_env_before_exec(&script)?;
+    let path = crate::services::tmux_common::session_temp_path(logical, "sh");
+    std::fs::write(&path, script)
+        .map_err(|error| format!("Failed to write Codex Herdr launch script: {error}"))?;
+    let cwd = launch_options.cwd.as_deref().map(PathBuf::from);
+    Ok(HerdrLaunchCommand {
+        cwd: cwd.ok_or("codex herdr launch: no working directory")?,
+        command: format!("bash {}", shell_escape(&path)),
+    })
+}
+
+fn codex_resume_supports_hook_trust_bypass(
+    codex_bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
+) -> bool {
+    codex_resume_help(codex_bin, resolution)
+        .is_some_and(|help| codex_resume_help_mentions_hook_trust_bypass(&help))
+}
+
+/// `codex resume --help` within two seconds, when it exits successfully.
+fn codex_resume_help(
+    codex_bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
+) -> Option<String> {
+    let mut command = Command::new(codex_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, resolution);
+    command
+        .args(["resume", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    match command.spawn() {
+        Ok(mut child) => {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            tracing::warn!(
+                                codex_bin,
+                                "timed out inspecting Codex resume help for hook trust bypass support"
+                            );
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        tracing::warn!(
+                            codex_bin,
+                            error = %error,
+                            "could not wait for Codex resume help probe"
+                        );
+                        return None;
+                    }
+                }
+            };
+            let mut help_text = String::new();
+            if let Some(mut stdout) = child.stdout.take() {
+                let _ = stdout.read_to_string(&mut help_text);
+            }
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut help_text);
+            }
+            status.success().then_some(help_text)
+        }
+        Err(error) => {
+            tracing::warn!(
+                codex_bin,
+                error = %error,
+                "could not inspect Codex resume help for hook trust bypass support"
+            );
+            None
+        }
+    }
+}
+
 /// Hook overrides enter the argv only together with the trust bypass; trust hashes alone never do.
 fn add_codex_tui_hooks(
     args: &mut Vec<String>,

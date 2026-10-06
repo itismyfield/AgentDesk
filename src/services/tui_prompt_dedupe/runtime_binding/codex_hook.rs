@@ -20,6 +20,34 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
         .is_some_and(Persisted::published)
 }
 
+/// A Herdr Codex pane before its first prompt: the hook that records its source finds a Codex pane
+/// on the channel, while the empty path gives no reader or relay and logs no binding event.
+pub(crate) fn register_codex_herdr_placeholder(logical: &str, channel_id: u64) {
+    super::register_tmux_channel(logical, channel_id);
+    crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+        with_runtime_binding_state_under_source_authority(authority, |state| {
+            let placeholder = TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: String::new(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 0,
+                relay_last_offset: None,
+            };
+            let recorded_at = Instant::now();
+            let entry = TimedValue {
+                value: placeholder,
+                recorded_at,
+            };
+            state
+                .runtime_by_tmux
+                .entry(logical.to_owned())
+                .or_insert(entry);
+        })
+    });
+}
+
 /// Child rollouts cannot supply the output source of a Codex TUI pane.
 pub(crate) fn codex_tui_binding_is_subagent(
     tmux_session_name: &str,

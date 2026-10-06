@@ -1,5 +1,6 @@
 //! A Herdr Claude pane's source is registered under its logical key, through the binding log's
 //! append-before-publish path, only for an admitted execution; a refusal withholds hook switches.
+//! A Codex pane's source is the one its own hook published; the attach only confirms it.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::cell::RefCell;
@@ -198,6 +199,52 @@ pub(in crate::services::discord) async fn attach_launched_herdr_source(
     HerdrSourceAttach::Published {
         bound,
         agent_agrees,
+    }
+}
+
+/// Attaches Codex launch `nonce` to the source its own hook published, while it is the pane's
+/// latest and live one; nothing is published here, so no binding event or cursor moves.
+pub(in crate::services::discord) async fn attach_launched_codex_herdr_source(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    channel: u64,
+    nonce: &str,
+    source: &SourceId,
+    reader: &dyn HerdrExecutionReader,
+) -> HerdrSourceAttach {
+    let logical = owner.logical_key.as_str();
+    let (verdict, row_nonce, agent) = reconcile(pool, owner, reader).await;
+    let bound = match verdict {
+        HostReconcile::Legacy => return HerdrSourceAttach::NotHerdr,
+        _ if row_nonce.as_deref() != Some(nonce) => None,
+        HostReconcile::Pending(HerdrExecutionMatch::Match) => Some(false),
+        HostReconcile::Herdr(HerdrExecutionMatch::Match) => Some(true),
+        _ => None,
+    };
+    let Some(already) = bound else {
+        withhold_herdr_execution(logical, Some(nonce));
+        return HerdrSourceAttach::Refused(verdict);
+    };
+    let live = with_tmux_source_authority(logical, |authority| {
+        runtime_binding_for_tmux_session_under_source_authority(authority)
+    });
+    let live = live.filter(|live| live.runtime_kind == RuntimeHandoffKind::CodexTui);
+    let baseline = nonce_baseline(channel, logical, nonce);
+    if baseline.as_ref() != Some(source) || !live.is_some_and(|live| live_is(&live, source)) {
+        withhold_herdr_execution(logical, Some(nonce));
+        return HerdrSourceAttach::NotPublished;
+    }
+    admit_herdr_execution(logical, nonce);
+    let bound = already
+        || match load(pool, owner).await {
+            HostedLookup::Found(observed) => {
+                bind_pg(pool, &observed, owner, nonce).await == Ok(HostedCasOutcome::Written)
+            }
+            _ => false,
+        };
+    HerdrSourceAttach::Published {
+        bound,
+        agent_agrees: agent_agrees(agent, baseline.as_ref()),
     }
 }
 

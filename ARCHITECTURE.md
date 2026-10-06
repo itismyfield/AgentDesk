@@ -702,6 +702,8 @@ src/
 │   ├── codex/
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
+│   │   ├── herdr_guard_tests.rs
+│   │   ├── herdr_turn.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
@@ -1230,6 +1232,7 @@ src/
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_isolation.rs
@@ -2245,6 +2248,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── clear_launch_tests.rs
+│   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_tests.rs
