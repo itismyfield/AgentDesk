@@ -1327,6 +1327,56 @@ if [ "$rc" -ne 0 ]; then
 else pass_test
 fi
 
+# --------------------------------------------------------------------------
+# 4i. Only stdout is parsed: a child's stderr merged in split `... ok` into
+#     `... okno server running ...` and a passed test went lane-missing.
+# --------------------------------------------------------------------------
+TMUX_ID=services::discord::health::runtime_resolve::direct_meeting_candidate_tests::explicit_owner_does_not_wait_for_unrelated_live_probes
+TMUX_STDERR='no server running on /tmp/tmux-1001/default'
+write_manifest a::b "$TMUX_ID" >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+# $1 prelude, $2 stderr line, $3 summary, $4 id. The child writes between the
+# name and the verdict, and between the verdict and its newline.
+FAKE_LIBTEST="$TMP_ROOT/fake-libtest-child-stderr.sh"
+cat >"$FAKE_LIBTEST" <<'SH'
+cat "$1"
+printf 'test a::b ... '
+sh -c 'printf "%s\n" "$1" >&2' child "$2"
+printf 'ok\n'
+printf 'test %s ... ok' "$4"
+sh -c 'printf "%s\n" "$1" >&2' child "$2"
+printf '\n%s\n' "$3"
+SH
+STDOUT_LOG="$TMP_ROOT/child-stderr-transcript.log"
+rc=0
+"$PYTHON" "$RUNNER" --ledger "$LEDGER" --inventory-manifest "$MANIFEST" \
+    --log "$STDOUT_LOG" --lane demo -- \
+    bash "$FAKE_LIBTEST" "$PRELUDE" "$TMUX_STDERR" "$(summary_line 2 0 0)" "$TMUX_ID" \
+    >"$OUT" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+    fail_test "a child's stderr must not cost a passed test its result (rc=$rc): $(grep -E '^(lane-missing|ERROR)' "$OUT" | head -2)"
+else pass_test
+fi
+if grep -q 'lane-missing' "$OUT"; then
+    fail_test "no id may be lane-missing when a child writes to stderr: $(grep 'lane-missing' "$OUT" | head -2)"
+else pass_test
+fi
+if ! grep -q "test-lane summary: lane=demo executed=$((EXTRA + 2)) passed=$((EXTRA + 2)) .* missing=0 " "$OUT"; then
+    fail_test "executed must equal libtest's $((EXTRA + 2)) passed: $(grep 'test-lane summary' "$OUT")"
+else pass_test
+fi
+if ! grep -qxF "test $TMUX_ID ... ok" "$STDOUT_LOG" || grep -qF "$TMUX_STDERR" "$STDOUT_LOG"; then
+    fail_test "the parsed transcript must be stdout only, with the result line intact"
+else pass_test
+fi
+if [ "$(grep -cxF "$TMUX_STDERR" "$OUT")" -ne 2 ]; then
+    fail_test "the child's stderr must stay visible in the lane output, both writes"
+else pass_test
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf '%s\n' "test_run_test_lane_5185: $failures assertion(s) failed, $passed passed" >&2
     exit 1
