@@ -7,6 +7,9 @@ pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crat
     json["dashboard_required"] =
         serde_json::json!(config.cluster.runtime_profile.modules().dashboard);
     json["herdr"] = herdr_health(config);
+    if let Some(homes) = crate::services::cluster::channel_home::health() {
+        json["channel_homes"] = homes;
+    }
 }
 
 /// The boot `session_hosts` view and the admission switch. No E7 runs here; `last_e7` is `never`
@@ -135,6 +138,38 @@ mod tests {
             expected,
             "the live section differs from the booted one"
         );
+    }
+
+    // With no delegated home registered the body has no channel home key at all; a registered
+    // one shows its state and what its drain waits on, read from memory.
+    #[test]
+    fn health_shows_channel_homes_only_once_one_is_registered() {
+        use crate::db::o_channel_homes::{HeldHome, HomeState};
+        use crate::services::cluster::channel_home::{self, HomeGate};
+        let config = crate::config::Config::default();
+        let mut quiet = json!({});
+        super::attach_runtime_profile(&mut quiet, &config);
+        assert_eq!(quiet.get("channel_homes"), None);
+
+        let home = std::sync::Arc::new(HomeGate::new("77", "mini"));
+        channel_home::register(std::sync::Arc::clone(&home));
+        let mut health = json!({});
+        super::attach_runtime_profile(&mut health, &config);
+        let lost = json!({"homes": [{"channel": "77", "holder": "mini", "home": "lost",
+            "epoch": null}], "home_draining": []});
+        assert_eq!(health["channel_homes"], lost);
+
+        let renewal = HeldHome::for_test("77", "mini", 5, HomeState::Reclaiming);
+        home.confirm(&renewal, tokio::time::Instant::now()).unwrap();
+        home.note_drain(Some("owed"));
+        super::attach_runtime_profile(&mut health, &config);
+        let draining = json!({"homes": [{"channel": "77", "holder": "mini", "home": "draining",
+            "epoch": 5}], "home_draining": [{"channel": "77", "blocker": "owed"}]});
+        assert_eq!(health["channel_homes"], draining);
+        channel_home::unregister("77");
+        let mut after = json!({});
+        super::attach_runtime_profile(&mut after, &config);
+        assert_eq!(after, quiet);
     }
 
     // A local endpoint adds the latest restart reconnect counts and the held inputs that pass

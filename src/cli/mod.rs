@@ -1,4 +1,5 @@
 pub(crate) mod args;
+pub(crate) mod channel_home;
 pub(crate) mod client;
 pub(crate) mod dcserver;
 pub(crate) mod dcserver_pg_bootstrap;

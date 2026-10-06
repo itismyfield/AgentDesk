@@ -118,6 +118,10 @@ pub struct RuntimeSettingsConfig {
     /// them before any pane I/O.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_turn_enabled: Option<bool>,
+    /// Switch for the `channel-home` delegate, reclaim and force commands; unset or false refuses
+    /// them before any database access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_home_delegation_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -164,6 +168,7 @@ impl RuntimeSettingsConfig {
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && self.native_clear_enabled.is_none()
             && self.herdr_turn_enabled.is_none()
+            && self.channel_home_delegation_enabled.is_none()
             && !self.reset_overrides_on_restart
     }
 

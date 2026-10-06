@@ -4,9 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-#[cfg(not(test))]
-use std::sync::OnceLock;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -73,6 +71,10 @@ struct HomeLocal {
     retired: Option<i64>,
     /// Renewals sent before the last close or loss never reopen the gate.
     closed_at: Option<Instant>,
+    /// Replaced or unregistered: never opens again and its lease ends.
+    withdrawn: bool,
+    /// What the drain waits on, shown by health only.
+    drain_blocker: Option<&'static str>,
 }
 
 pub(crate) struct HomeGate {
@@ -96,6 +98,14 @@ impl HomeGate {
     /// The admission primitive a writer posts through; it is `Owned` exactly when this home is.
     pub(crate) fn gate(&self) -> Arc<OwnershipGate> {
         Arc::clone(&self.gate)
+    }
+
+    pub(crate) fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    pub(crate) fn holder(&self) -> &str {
+        &self.holder
     }
 
     fn locked(&self) -> MutexGuard<'_, HomeLocal> {
@@ -168,14 +178,22 @@ impl HomeGate {
         written: &HeldHome,
         sent: Instant,
     ) -> Result<HomeOwnership, ConfirmRefused> {
-        let mut local = self.locked();
+        self.confirm_locked(&mut self.locked(), written, sent)
+    }
+
+    fn confirm_locked(
+        &self,
+        local: &mut HomeLocal,
+        written: &HeldHome,
+        sent: Instant,
+    ) -> Result<HomeOwnership, ConfirmRefused> {
         let now = Instant::now();
-        self.expire(&mut local, now);
+        self.expire(local, now);
         if written.channel_id() != self.channel_id || written.holder() != self.holder {
             return Err(ConfirmRefused::Foreign);
         }
         let epoch = written.epoch();
-        if local.retired.is_some_and(|retired| epoch <= retired) {
+        if local.withdrawn || local.retired.is_some_and(|retired| epoch <= retired) {
             return Err(ConfirmRefused::Retired);
         }
         let late = now.saturating_duration_since(sent) >= HOLD_FOR
@@ -183,7 +201,7 @@ impl HomeGate {
         if late {
             return Err(ConfirmRefused::Late);
         }
-        match self.read(&local) {
+        match self.read(local) {
             HomeOwnership::Owned { home_epoch, .. } if home_epoch > epoch => {
                 return Err(ConfirmRefused::Superseded);
             }
@@ -205,7 +223,52 @@ impl HomeGate {
         if written.state() != HomeState::Worker {
             local.intake_closed = Some(epoch);
         }
-        Ok(self.read(&local))
+        Ok(self.read(local))
+    }
+
+    /// Reopens a drain its final close ended early, from a renewal written at the retired epoch
+    /// while the row still drains; intake stays closed and older epochs stay retired.
+    pub(crate) fn resume_drain(
+        &self,
+        written: &HeldHome,
+        sent: Instant,
+    ) -> Result<HomeOwnership, ConfirmRefused> {
+        let mut local = self.locked();
+        let epoch = written.epoch();
+        let draining = matches!(
+            written.state(),
+            HomeState::Releasing | HomeState::Reclaiming
+        );
+        if !draining || local.retired != Some(epoch) {
+            return Err(ConfirmRefused::Retired);
+        }
+        local.retired = Some(epoch - 1);
+        let resumed = self.confirm_locked(&mut local, written, sent);
+        if resumed.is_err() {
+            local.retired = Some(epoch);
+        }
+        resumed
+    }
+
+    /// Whether the final close already retired `epoch`.
+    pub(crate) fn final_closed(&self, epoch: i64) -> bool {
+        let local = self.locked();
+        local.withdrawn || local.retired.is_some_and(|retired| retired >= epoch)
+    }
+
+    fn withdraw(&self) {
+        let mut local = self.locked();
+        local.withdrawn = true;
+        self.close_locked(&mut local);
+    }
+
+    pub(crate) fn withdrawn(&self) -> bool {
+        self.locked().withdrawn
+    }
+
+    /// Records what the drain waits on; `None` once it is not waiting.
+    pub(crate) fn note_drain(&self, blocker: Option<&'static str>) {
+        self.locked().drain_blocker = blocker;
     }
 
     /// A renewal at `epoch` matched no row: the row no longer names this holder there.
@@ -231,11 +294,14 @@ impl HomeGate {
     /// The final close before a leaving write: no later renewal reopens the last epoch held,
     /// even when the hold had already lapsed.
     pub(crate) fn close(&self) {
-        let mut local = self.locked();
+        self.close_locked(&mut self.locked());
+    }
+
+    fn close_locked(&self, local: &mut HomeLocal) {
         if let Some(epoch) = local.last_epoch {
             local.retired = Some(local.retired.map_or(epoch, |retired| retired.max(epoch)));
         }
-        self.drop_hold(&mut local, Instant::now());
+        self.drop_hold(local, Instant::now());
     }
 
     /// Whether this process may take new intake for the channel: held, with intake open.
@@ -263,45 +329,52 @@ impl HomeGate {
 
 type Homes = BTreeMap<String, Arc<HomeGate>>;
 
+type Registry = OnceLock<Mutex<Homes>>;
+
 /// The gates of the channels this process takes part in as holder or target; a channel without
-/// one follows the gateway rules. Test builds keep one set per thread.
+/// one follows the gateway rules. Test builds keep the same store once per thread.
 #[cfg(not(test))]
-static HOMES: OnceLock<Mutex<Homes>> = OnceLock::new();
+static HOMES: Registry = OnceLock::new();
 #[cfg(test)]
 thread_local! {
-    static HOMES: std::cell::RefCell<Homes> = std::cell::RefCell::default();
+    static HOMES: Registry = const { OnceLock::new() };
+}
+
+fn with_homes<R>(use_homes: impl FnOnce(&Registry) -> R) -> R {
+    #[cfg(not(test))]
+    return use_homes(&HOMES);
+    #[cfg(test)]
+    HOMES.with(use_homes)
+}
+
+fn lock_homes(homes: &Mutex<Homes>) -> MutexGuard<'_, Homes> {
+    homes.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Reads the registered gates; while none was ever registered nothing is locked.
 fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
-    #[cfg(not(test))]
-    {
-        let homes = HOMES.get()?;
-        Some(read(&homes.lock().unwrap_or_else(PoisonError::into_inner)))
-    }
-    #[cfg(test)]
-    HOMES.with(|homes| {
-        let homes = homes.borrow();
-        (!homes.is_empty()).then(|| read(&homes))
-    })
+    with_homes(|homes| Some(read(&lock_homes(homes.get()?))))
 }
 
 /// Makes `home` its channel's gate in this process; intake for the channel then follows it.
+/// A gate it replaces is withdrawn after the swap, so its lease ends and it never reopens.
 pub(crate) fn register(home: Arc<HomeGate>) {
     let channel_id = home.channel_id.clone();
-    #[cfg(not(test))]
-    HOMES
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(channel_id, home);
-    #[cfg(test)]
-    HOMES.with(|homes| homes.borrow_mut().insert(channel_id, home));
+    let replaced = with_homes(|homes| {
+        lock_homes(homes.get_or_init(Mutex::default)).insert(channel_id, Arc::clone(&home))
+    });
+    if let Some(old) = replaced.filter(|old| !Arc::ptr_eq(old, &home)) {
+        old.withdraw();
+    }
 }
 
-#[cfg(test)]
-pub(crate) fn unregister(channel_id: &str) {
-    HOMES.with(|homes| homes.borrow_mut().remove(channel_id));
+/// Returns the channel to the gateway rules here: its gate leaves the registry, then is withdrawn.
+pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
+    let removed = with_homes(|homes| lock_homes(homes.get()?).remove(channel_id));
+    if let Some(home) = &removed {
+        home.withdraw();
+    }
+    removed
 }
 
 /// The gate of a channel this process takes part in; none means the gateway rules apply.
@@ -311,6 +384,34 @@ pub(crate) fn registered(channel_id: &str) -> Option<Arc<HomeGate>> {
 
 pub(crate) fn any_registered() -> bool {
     read_homes(|homes| !homes.is_empty()).unwrap_or(false)
+}
+
+/// The registered homes and what each drain waits on, read from memory only; `None` while
+/// nothing is registered, so health stays as it was.
+pub(crate) fn health() -> Option<serde_json::Value> {
+    let view = |homes: &Homes| {
+        let (mut listed, mut draining) = (Vec::new(), Vec::new());
+        for (channel, home) in homes {
+            let (state, epoch) = match home.ownership() {
+                HomeOwnership::Owned {
+                    home_epoch, intake, ..
+                } => match intake {
+                    HomeIntake::Open => ("intake_open", Some(home_epoch)),
+                    HomeIntake::Closed => ("draining", Some(home_epoch)),
+                },
+                HomeOwnership::Lost => ("lost", None),
+            };
+            let entry = serde_json::json!({"channel": channel, "holder": home.holder,
+                "home": state, "epoch": epoch});
+            listed.push(entry);
+            if let Some(blocker) = home.locked().drain_blocker {
+                draining.push(serde_json::json!({"channel": channel, "blocker": blocker}));
+            }
+        }
+        let view = serde_json::json!({"homes": listed, "home_draining": draining});
+        (!homes.is_empty()).then_some(view)
+    };
+    read_homes(view).flatten()
 }
 
 /// Registered channels whose gate takes no new intake here.
@@ -419,9 +520,10 @@ pub(crate) async fn lease_round(
     }
 }
 
-/// The holder's lease loop at `epoch`; ends when the row stops naming it. Not started yet.
+/// The holder's lease loop at `epoch`; ends when the row stops naming it or the gate is withdrawn.
+/// Not started yet.
 pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
-    loop {
+    while !home.withdrawn() {
         let sent = Instant::now();
         let renewal = o_channel_homes::renew(&pool, &home.channel_id, &home.holder, epoch);
         if let LeaseRound::Stale = lease_round(&home, epoch, sent, renewal).await {

@@ -15,6 +15,7 @@ NON_PG_SKIP_ARGS=(
   --skip _pg
   --skip pg_
   --skip postgres
+  --skip cli::channel_home::tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
@@ -103,6 +104,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::automation_candidate_materializer::iteration_result_tests
   --skip services::cluster::attachment_transfer::storage_tests
   --skip services::cluster::channel_home::tests
+  --skip services::cluster::channel_home_drain::tests
   --skip services::cluster::execution_capacity::tests
   --skip services::cluster::intake_preflight::tests
   --skip services::cluster::intake_router_hook::agent_execution_node_tests
@@ -367,6 +369,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
   services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
   services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
+  services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
@@ -721,6 +724,7 @@ PG_INCLUDE_ARGS_SHARD_0=(
 )
 PG_INCLUDE_ARGS_SHARD_1=(
   _pg
+  cli::channel_home::tests
   cli::herdr::tests
   db::auto_queue::entries::dispatch_failure::tests
   db::auto_queue::entries::tests
@@ -809,6 +813,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::automation_candidate_materializer::iteration_result_tests
   services::cluster::attachment_transfer::storage_tests
   services::cluster::channel_home::tests
+  services::cluster::channel_home_drain::tests
   services::cluster::execution_capacity::tests
   services::cluster::intake_preflight::tests
   services::cluster::intake_router_hook::agent_execution_node_tests

@@ -30,6 +30,8 @@ cli::args::tests::send_to_agent_requires_expect_reply
 cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
 cli::args::tests::turn_lease_cli_parses_read_and_exact_release
 cli::args::tests::turn_lease_cli_rejects_unpinned_release_and_zero_channel
+cli::channel_home::tests::mutations_are_refused_before_any_database_access_while_the_switch_is_off_pg
+cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoch_pg
 cli::channel_provider::tests::onboarding_routing_cli_reads_config_and_rejects_unknown_keys
 cli::client::activity_tests::activity_counts_buckets_by_kind
 cli::client::activity_tests::parse_duration_suffix_handles_each_unit
@@ -572,6 +574,7 @@ db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
+db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
 db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_create_boundaries_protect_live_owner
 db::postgres::test_db_reclaim::tests::pg_reclaim_dead_owner_young_database_is_reclaimed_immediately
@@ -1172,6 +1175,7 @@ server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_rec
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
 server::routes::health_api::runtime_profile::tests::health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint
 server::routes::health_api::runtime_profile::tests::health_projects_the_boot_session_hosts_and_admission
+server::routes::health_api::runtime_profile::tests::health_shows_channel_homes_only_once_one_is_registered
 server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
 server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
@@ -2151,9 +2155,16 @@ services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_n
 services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
+services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
 services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
+services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
+services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
+services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
+services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
+services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching

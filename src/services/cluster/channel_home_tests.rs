@@ -5,7 +5,7 @@ use tokio::time::{Instant, advance};
 
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::o_channel_homes::{ForceOutcome, HomeState};
+use crate::db::o_channel_homes::{ForceOutcome, ForceWindow, HomeState};
 
 const C: &str = "1490141479707086938";
 
@@ -169,7 +169,7 @@ async fn a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg() {
         .execute(&pool)
         .await
         .expect("age lease");
-    let force = o_channel_homes::force_orphan(&pool, C, 2, FORCE_AFTER, "op").await;
+    let force = o_channel_homes::force_orphan(&pool, C, 2, ForceWindow::MIN, "op").await;
     assert!(matches!(force, Ok(ForceOutcome::Orphaned(_))), "{force:?}");
     // The lease loop's next renewal finds the row gone from it and ends with the gate closed.
     let ended = tokio::time::timeout(RENEW_EVERY * 3, lease).await;
@@ -321,14 +321,19 @@ fn production_text(text: &str) -> String {
     out
 }
 
-// Dormant guard: production code outside the two owners may read home rows and consult gates,
-// but never writes a home row, makes or registers a gate, or runs the lease.
+// Dormant guard: outside the owners, production only reads rows and consults gates; the switched
+// operator CLI may also start a delegate, a reclaim or a force.
 #[test]
 fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     const OWNERS: &[&str] = &[
         "src/db/o_channel_homes.rs",
         "src/services/cluster/channel_home.rs",
+        "src/services/cluster/channel_home_drain.rs",
     ];
+    const OPERATOR: (&str, &[&str]) = (
+        "src/cli/channel_home.rs",
+        &["delegate", "begin_reclaim", "force_orphan"],
+    );
     const FORBIDDEN: &[&str] = &[
         "delegate",
         "finish_release",
@@ -344,6 +349,12 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
         "boot_home",
         "confirm",
         "close_intake",
+        "resume_drain",
+        "note_drain",
+        "unregister",
+        "run_drain",
+        "drain_round",
+        "finish_return",
     ];
     let probe = production_text(concat!(
         "fn a() {}\n#[cfg(test)]\nmod t { fn b() { c(\"{\", '{', r#\"}\"#); } // }\n }",
@@ -375,21 +386,31 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).expect("source file");
             let code = String::from_utf8(mask_literals(&production_text(&text))).unwrap();
-            if OWNERS.contains(&relative.as_str()) {
-                let starts = code.matches("run_lease(").count();
-                if relative.ends_with("channel_home.rs") && starts != 1 {
-                    violations.push(format!(
-                        "{relative}: run_lease( x{starts}, only its definition"
-                    ));
-                }
-                continue;
-            }
             let tokens: Vec<&str> = code
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .collect();
-            if !tokens.contains(&"o_channel_homes") && !tokens.contains(&"channel_home") {
+            if OWNERS.contains(&relative.as_str()) {
+                // Each loop is named once, at its definition: nothing in the owners starts one.
+                for (owner, start) in [
+                    ("src/services/cluster/channel_home.rs", "run_lease"),
+                    ("src/services/cluster/channel_home_drain.rs", "run_drain"),
+                ] {
+                    let expected = usize::from(relative == owner);
+                    let named = tokens.iter().filter(|token| **token == start).count();
+                    if named != expected {
+                        violations.push(format!("{relative}: {start} x{named}"));
+                    }
+                }
                 continue;
             }
+            let readers = ["o_channel_homes", "channel_home", "channel_home_drain"];
+            if !readers.iter().any(|reader| tokens.contains(reader)) {
+                continue;
+            }
+            let allowed = match OPERATOR {
+                (operator, allowed) if relative == operator => allowed,
+                _ => &[][..],
+            };
             users += 1;
             if code.contains("HomeGate::new") {
                 violations.push(format!("{relative}: HomeGate::new"));
@@ -397,7 +418,7 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
             violations.extend(
                 FORBIDDEN
                     .iter()
-                    .filter(|word| tokens.contains(word))
+                    .filter(|word| tokens.contains(word) && !allowed.contains(word))
                     .map(|word| format!("{relative}: {word}")),
             );
         }
@@ -407,6 +428,39 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
         violations.is_empty(),
         "channel home writer outside its owners: {violations:?}"
     );
+}
+
+/// Replacing a channel's gate withdraws the old one: it closes, never reopens and its lease ends
+/// before any write; unregistering returns the channel to the gateway rules.
+#[tokio::test(start_paused = true)]
+async fn a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends() {
+    let first = Arc::new(HomeGate::new(C, "mini"));
+    register(Arc::clone(&first));
+    first
+        .confirm(&written("mini", 4, HomeState::Worker), Instant::now())
+        .expect("opens");
+    assert_eq!(intake_hold(C, Some(4)), None);
+    let second = Arc::new(HomeGate::new(C, "mini"));
+    register(Arc::clone(&second));
+    assert_eq!(admitted(&first), (None, None));
+    advance(Duration::from_millis(1)).await;
+    let reopened = first.confirm(&written("mini", 5, HomeState::Worker), Instant::now());
+    assert_eq!(reopened, Err(ConfirmRefused::Retired));
+    let nowhere = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://127.0.0.1:1/none");
+    let lease = run_lease(nowhere.expect("lazy pool"), Arc::clone(&first), 4);
+    let lease = tokio::time::timeout(RENEW_EVERY, lease).await;
+    lease.expect("a withdrawn gate's lease ends at once");
+    let current = registered(C).expect("the new gate");
+    assert!(Arc::ptr_eq(&current, &second));
+    assert!(
+        intake_hold(C, Some(4)).is_some(),
+        "the new gate has not opened"
+    );
+
+    let removed = unregister(C).expect("registered");
+    assert!(Arc::ptr_eq(&removed, &second) && removed.withdrawn());
+    assert!(registered(C).is_none() && !any_registered());
+    assert_eq!(intake_hold(C, None), None, "the gateway rules again");
 }
 
 #[tokio::test(start_paused = true)]

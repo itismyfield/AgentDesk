@@ -567,6 +567,8 @@ pub(crate) enum Commands {
     O(crate::cli::o::OArgs),
     /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
     Herdr(crate::cli::herdr::HerdrArgs),
+    /// Delegated channel homes: status, and the switched delegate, reclaim and force
+    ChannelHome(crate::cli::channel_home::ChannelHomeArgs),
 }
 
 /// Subcommands for `adk query` (issue #2651).
@@ -1144,6 +1146,7 @@ mod tests {
             "o-shadow",
             "o",
             "herdr",
+            "channel-home",
             "help",
         ];
 
