@@ -117,6 +117,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_router_hook::owner_record::tests
   --skip services::cluster::intake_router_hook::pg_tests
   --skip services::cluster::intake_worker::dispatch_stamp_tests
+  --skip services::cluster::intake_worker::home_accept_tests
   --skip services::cluster::intake_worker::home_route_tests
   --skip services::cluster::intake_worker::input_effect_tests
   --skip services::cluster::intake_worker::o_route_tests
@@ -152,6 +153,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  --skip services::discord::router::intake_dispatch::home_order_tests
   --skip services::discord::router::intake_dispatch::tests
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -830,6 +832,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_router_hook::owner_record::tests
   services::cluster::intake_router_hook::pg_tests
   services::cluster::intake_worker::dispatch_stamp_tests
+  services::cluster::intake_worker::home_accept_tests
   services::cluster::intake_worker::home_route_tests
   services::cluster::intake_worker::input_effect_tests
   services::cluster::intake_worker::o_route_tests
@@ -865,6 +868,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  services::discord::router::intake_dispatch::home_order_tests
   services::discord::router::intake_dispatch::tests
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests

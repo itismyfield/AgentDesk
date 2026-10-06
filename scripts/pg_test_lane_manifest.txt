@@ -94,6 +94,7 @@ src/services/cluster/intake_router_hook/home_route_tests.rs
 src/services/cluster/intake_router_hook/o_route_tests.rs
 src/services/cluster/intake_router_hook/owner_record.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
+src/services/cluster/intake_worker/home_accept_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
 src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
@@ -128,6 +129,7 @@ src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
+src/services/discord/router/intake_dispatch/home_order_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
@@ -304,6 +306,7 @@ services::cluster::intake_router_hook::o_route_tests
 services::cluster::intake_router_hook::owner_record::tests
 services::cluster::intake_router_hook::pg_tests
 services::cluster::intake_worker::dispatch_stamp_tests
+services::cluster::intake_worker::home_accept_tests
 services::cluster::intake_worker::home_route_tests
 services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
@@ -339,6 +342,7 @@ services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+services::discord::router::intake_dispatch::home_order_tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -1071,6 +1075,7 @@ services::cluster::intake_router_hook::pg_tests::stale_owner_recovers_when_worke
 services::cluster::intake_router_hook::pg_tests::unmapped_channel_records_no_agent_for_channel
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_dispatched_is_not_a_divergence_pg
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_missing_row_is_a_divergence_pg
+services::cluster::intake_worker::home_accept_tests::a_home_moved_after_the_last_check_refuses_the_accept_and_keeps_the_row_open_pg
 services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
 services::cluster::intake_worker::input_effect_tests::c1_worker_afterclaim_closing_returns_only_own_claim_pg
 services::cluster::intake_worker::input_effect_tests::c1_worker_beforeclaim_excludes_closing_population_pg
@@ -1170,6 +1175,7 @@ services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionabl
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::enqueue_default_off_leaves_all_circuit_columns_null_pg
+services::discord::router::intake_dispatch::home_order_tests::only_a_registered_delegated_channel_skips_the_placement_hold_and_reaches_its_holder_pg
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::live_and_skill_producers_forward_to_foreign_owner_pg
