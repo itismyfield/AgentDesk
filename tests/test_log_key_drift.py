@@ -165,7 +165,7 @@ class InlineMacroDetectionTest(unittest.TestCase):
                 tracing::info!(session_id = %event.session_id);
             }
             """,
-            rel="src/services/discord/tui_prompt_relay.rs",
+            rel="src/services/discord/tui_prompt_relay/hook_observer.rs",
         )
         self.assertEqual(violations, [])
 
@@ -308,6 +308,21 @@ class StatementAndBindingExclusionTest(unittest.TestCase):
 
 
 class SessionIdAllowlistTest(unittest.TestCase):
+    def test_raw_hook_session_only_passes_at_its_observer_path(self) -> None:
+        for rel, value in [
+            ("src/services/discord/tui_prompt_relay.rs", "%event.session_id"),
+            (
+                "src/services/discord/tui_prompt_relay/hook_observer.rs",
+                "%event.other_id",
+            ),
+        ]:
+            with self.subTest(rel=rel, value=value):
+                violations = _scan_fixture(
+                    f"fn probe() {{ tracing::debug!(session_id = {value}); }}",
+                    rel=rel,
+                )
+                self.assertEqual(_keys(violations), ["session_id"])
+
     def test_allowlisted_voice_gateway_site_passes(self) -> None:
         violations = _scan_fixture(
             """
