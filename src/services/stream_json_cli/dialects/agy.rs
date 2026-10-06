@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::platform::binary_resolver::resolution::finalize_fallback_resolution;
 use crate::services::platform::probe_provider_binary_version;
 use crate::services::stream_json_cli::codec::AgyCodec;
 use crate::services::stream_json_cli::policy::ToolPolicy;
@@ -106,20 +107,14 @@ fn compose_envelope(system: &str, user: &str) -> String {
 }
 
 pub fn resolve_agy_binary() -> crate::services::platform::BinaryResolution {
-    let mut resolution = probe_provider_binary_version("agy").resolution;
+    let resolution = probe_provider_binary_version("agy").resolution;
     if resolution.resolved_path.is_some() {
         return resolution;
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let candidate = PathBuf::from(local).join("agy").join("bin").join("agy.exe");
         if candidate.is_file() {
-            let path = candidate.to_string_lossy().into_owned();
-            resolution.resolved_path = Some(path.clone());
-            resolution.canonical_path = Some(path.clone());
-            // exec_path is a PATH search list, not the executable path. Let
-            // apply_binary_resolution augment PATH from resolved_path.
-            resolution.exec_path = None;
-            resolution.source = Some("localappdata_agy_bin".into());
+            return finalize_fallback_resolution(resolution, candidate, "localappdata_agy_bin");
         }
     }
     resolution
@@ -189,6 +184,60 @@ mod tests {
         assert_eq!(prepared.executable, cwd.join(&relative).join("agy"));
         assert!(prepared.executable.is_absolute());
         assert_eq!(prepared.current_dir, PathBuf::from("/tmp"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn localappdata_fallback_runs_the_found_agy_by_absolute_path_from_another_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let (bin, marker) = (root.path().join("agy/bin"), root.path().join("ran"));
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        let stub = format!("#!/bin/sh\n: > '{}'\n", marker.display());
+        std::fs::write(bin.join("agy.exe"), stub).expect("stub");
+        std::fs::set_permissions(bin.join("agy.exe"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let cwd = std::env::current_dir().expect("cwd");
+        let relative: PathBuf = cwd
+            .components()
+            .skip(1)
+            .map(|_| std::path::Path::new(".."))
+            .chain(
+                root.path()
+                    .components()
+                    .skip(1)
+                    .map(|part| part.as_os_str().as_ref()),
+            )
+            .collect();
+        let _local = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "LOCALAPPDATA",
+            &relative,
+        );
+        let _override = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+            "AGENTDESK_AGY_PATH",
+        );
+        unsafe { std::env::remove_var("AGENTDESK_AGY_PATH") };
+        let mut req = request();
+        req.working_directory = root.path().join("a/b/c/d/e/f/g/h/i/j/k/l/m");
+        std::fs::create_dir_all(&req.working_directory).expect("child cwd");
+
+        let prepared = prepare(&req).expect("agy from LOCALAPPDATA");
+        assert_eq!(
+            prepared.executable,
+            cwd.join(&relative).join("agy/bin/agy.exe")
+        );
+        assert!(prepared.executable.is_absolute());
+        let _ = run_prepared(
+            prepared,
+            std::sync::mpsc::channel().0,
+            Duration::from_secs(5),
+            None,
+        );
+        assert!(
+            marker.exists(),
+            "the selected agy must start from the child cwd"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use crate::runtime_layout::expand_user_path;
 
 mod grok;
-mod resolution;
+pub(crate) mod resolution;
 mod runtime_path;
 use resolution::finalize_resolution;
 use runtime_path::runtime_path_entries;

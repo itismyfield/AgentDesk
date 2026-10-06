@@ -9971,9 +9971,11 @@ services::stream_json_cli::codec::tests::grok_messages_codec_preserves_terminal_
 services::stream_json_cli::codec::tests::grok_messages_codec_rejects_clean_eof_after_init
 services::stream_json_cli::dialects::agy::tests::default_argv_uses_conversation_not_continue
 services::stream_json_cli::dialects::agy::tests::envelope_preserves_lengths
+services::stream_json_cli::dialects::agy::tests::localappdata_fallback_runs_the_found_agy_by_absolute_path_from_another_cwd
 services::stream_json_cli::dialects::agy::tests::prepare_launches_an_agy_found_on_a_relative_path_entry_by_absolute_path
 services::stream_json_cli::dialects::agy::tests::restricted_policy_fails_before_prepare
 services::stream_json_cli::dialects::grok::tests::forwards_configured_reasoning_effort
+services::stream_json_cli::dialects::grok::tests::home_fallback_runs_the_found_grok_by_absolute_path_from_another_cwd
 services::stream_json_cli::dialects::grok::tests::provider_default_argv_has_no_resume_or_session_id
 services::stream_json_cli::dialects::grok::tests::readonly_mapping_is_fail_closed_for_write_tools
 services::stream_json_cli::dialects::grok::tests::resume_requires_uuid

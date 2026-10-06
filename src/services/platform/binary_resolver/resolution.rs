@@ -49,3 +49,19 @@ pub(super) fn finalize_resolution(
         exec_path: build_exec_path(&resolved_path, canonical_path.as_deref()),
     }
 }
+
+/// Finalize a provider-specific fallback hit exactly like a PATH or override hit.
+pub(crate) fn finalize_fallback_resolution(
+    unresolved: BinaryResolution,
+    path: PathBuf,
+    source: &str,
+) -> BinaryResolution {
+    let mut attempts = unresolved.attempts;
+    attempts.push(format!("{source}=found:{}", path.display()));
+    finalize_resolution(
+        unresolved.requested_binary,
+        path,
+        source.to_string(),
+        attempts,
+    )
+}

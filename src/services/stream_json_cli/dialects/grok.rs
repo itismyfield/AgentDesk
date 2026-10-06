@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::platform::binary_resolver::resolution::finalize_fallback_resolution;
 use crate::services::platform::probe_provider_binary_version;
 use crate::services::stream_json_cli::codec::MessagesJsonCodec;
 use crate::services::stream_json_cli::policy::{AgentTool, ToolPolicy};
@@ -165,7 +166,7 @@ fn append_readonly_flags(
 }
 
 pub fn resolve_grok_binary() -> crate::services::platform::BinaryResolution {
-    let mut resolution = probe_provider_binary_version("grok").resolution;
+    let resolution = probe_provider_binary_version("grok").resolution;
     if resolution.resolved_path.is_some() {
         return resolution;
     }
@@ -175,12 +176,7 @@ pub fn resolve_grok_binary() -> crate::services::platform::BinaryResolution {
             home.join(".grok").join("bin").join("grok.exe"),
         ] {
             if candidate.is_file() {
-                let path = candidate.to_string_lossy().into_owned();
-                resolution.resolved_path = Some(path.clone());
-                resolution.canonical_path = Some(path.clone());
-                resolution.exec_path = Some(path);
-                resolution.source = Some("grok_home_bin".into());
-                break;
+                return finalize_fallback_resolution(resolution, candidate, "grok_home_bin");
             }
         }
     }
@@ -215,6 +211,59 @@ mod tests {
                 crate::services::provider::ProviderKind::Grok,
             ),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_fallback_runs_the_found_grok_by_absolute_path_from_another_cwd() {
+        use crate::config::TestEnvVarGuard;
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let (bin, marker) = (root.path().join(".grok/bin"), root.path().join("ran"));
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        let stub = format!("#!/bin/sh\n: > '{}'\n", marker.display());
+        std::fs::write(bin.join("grok.exe"), stub).expect("stub");
+        std::fs::set_permissions(bin.join("grok.exe"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let cwd = std::env::current_dir().expect("cwd");
+        let relative: PathBuf = cwd
+            .components()
+            .skip(1)
+            .map(|_| std::path::Path::new(".."))
+            .chain(
+                root.path()
+                    .components()
+                    .skip(1)
+                    .map(|part| part.as_os_str().as_ref()),
+            )
+            .collect();
+        let _home = TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", &relative);
+        let _unset = ["AGENTDESK_GROK_PATH", "GROK_BIN_DIR", "GROK_HOME"].map(|key| {
+            let guard = TestEnvVarGuard::capture_after_shared_test_env_lock(key);
+            unsafe { std::env::remove_var(key) };
+            guard
+        });
+        let mut req = request(ConfiguredToolPolicy::for_new_stream_json_provider());
+        req.working_directory = root.path().join("a/b/c/d/e/f/g/h/i/j/k/l/m");
+        std::fs::create_dir_all(&req.working_directory).expect("child cwd");
+
+        let prepared = prepare(&req).expect("grok from HOME");
+        assert_eq!(
+            prepared.executable,
+            cwd.join(&relative).join(".grok/bin/grok.exe")
+        );
+        assert!(prepared.executable.is_absolute());
+        let _ = run_prepared(
+            prepared,
+            std::sync::mpsc::channel().0,
+            Duration::from_secs(5),
+            None,
+        );
+        assert!(
+            marker.exists(),
+            "the selected grok must start from the child cwd"
+        );
     }
 
     #[test]
