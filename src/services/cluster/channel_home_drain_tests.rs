@@ -314,6 +314,28 @@ async fn an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg()
         LeaseRound::Renewed(_)
     ));
     assert_eq!(owned(&mini), Some((epoch, HomeIntake::Closed)));
+
+    // An open intake row of the channel keeps the row and the gate as they are until it ends.
+    sqlx::query(
+        "INSERT INTO intake_outbox (target_instance_id, forwarded_by_instance_id, channel_id,
+            user_msg_id, request_owner_id, user_text, turn_kind, agent_id, provider, status)
+         VALUES ('mini', 'gw', $1, 'm1', 'user', 'hi', 'standard', 'agent', 'claude', 'pending')",
+    )
+    .bind(C)
+    .execute(&pool)
+    .await
+    .expect("seed intake row");
+    let step = drain_round(&pool, &mini, &actor).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::OpenIntake(1))),
+        "{step:?}"
+    );
+    assert_eq!(row(&pool).await, reclaiming);
+    assert_eq!(owned(&mini), Some((epoch, HomeIntake::Closed)));
+    sqlx::query("UPDATE intake_outbox SET status = 'done'")
+        .execute(&pool)
+        .await
+        .expect("settle intake row");
     let step = drain_round(&pool, &mini, &actor).await;
     assert!(matches!(step, DrainStep::Left(_)), "{step:?}");
     pool.close().await;
@@ -368,7 +390,9 @@ async fn two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg()
                 left = Some(row);
                 break;
             }
-            DrainStep::Waiting(Blocker::PostsInFlight(1)) => {}
+            DrainStep::Waiting(Blocker::PostsInFlight(1)) => {
+                assert_eq!(gw.admit(|e| e), None, "closed while its last POST runs");
+            }
             other => panic!("unexpected drain step: {other:?}"),
         }
         if let Some((HomeState::Released, None, released)) = row(&pool).await {
