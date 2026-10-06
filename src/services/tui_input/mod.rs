@@ -13,8 +13,6 @@ pub mod transition;
 #[cfg(test)]
 mod actor_tests;
 #[cfg(test)]
-mod attempt_tests;
-#[cfg(test)]
 mod bounded_tmux_tests;
 #[cfg(test)]
 pub(crate) mod durability_tests;

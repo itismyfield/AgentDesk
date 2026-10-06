@@ -295,7 +295,17 @@ impl Rows {
             (None, Some(witness), None) if evidence.is_none() => {
                 attempt::admits_witness(row, state, witness)
             }
-            (None, None, Some(_)) if !row.state.is_terminal() || state == row.state => Ok(()),
+            // A close reason never stands in for a model record: it may only settle or hold a row.
+            (None, None, Some(_)) if row.state.is_terminal() && state != row.state => {
+                Err("a settled row keeps its state")
+            }
+            (None, None, Some(_)) if row.state.is_terminal() => Ok(()),
+            (None, None, Some(_))
+                if state.is_terminal()
+                    || matches!(state, RowState::Unaccepted | RowState::Held(_)) =>
+            {
+                Ok(())
+            }
             _ => Err("tracking must carry exactly one consistent fact"),
         }
     }
