@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 101
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 102
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -40,6 +40,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:110` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:553` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
+| `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs:66` | `0` lets watcher respawn take over a live Claude original again. |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:220` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:81` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs:19` |  |

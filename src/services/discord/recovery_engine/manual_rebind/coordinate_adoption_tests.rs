@@ -215,3 +215,109 @@ fn actual_caller_wires_adoption_before_guarded_handoff() {
         .unwrap();
     assert!(rejected < handoff);
 }
+
+/// Stops one channel's blocking adoption before it takes the episode lock.
+pub(super) mod adoption_gap {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    type Gap = (Sender<()>, Receiver<()>);
+    static GAPS: Mutex<Option<HashMap<u64, Gap>>> = Mutex::new(None);
+
+    /// Returns (reached, resume) for the channel's next blocking adoption.
+    pub(super) fn arm(channel_id: u64) -> (Receiver<()>, Sender<()>) {
+        let (reached_tx, reached_rx) = channel();
+        let (resume_tx, resume_rx) = channel();
+        let mut gaps = GAPS.lock().unwrap_or_else(|e| e.into_inner());
+        gaps.get_or_insert_with(HashMap::new)
+            .insert(channel_id, (reached_tx, resume_rx));
+        (reached_rx, resume_tx)
+    }
+
+    pub(in super::super) fn pause(channel_id: u64) {
+        let gap = {
+            let mut gaps = GAPS.lock().unwrap_or_else(|e| e.into_inner());
+            gaps.as_mut().and_then(|gaps| gaps.remove(&channel_id))
+        };
+        if let Some((reached, resume)) = gap {
+            let _ = reached.send(());
+            let _ = resume.recv();
+        }
+    }
+}
+
+#[test]
+fn a_cancelled_respawn_keeps_the_slot_until_its_blocking_adoption_returns() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let provider = ProviderKind::Claude;
+    let mut original = raw_episode();
+    original.provider = provider.as_str().to_string();
+    original.channel_id = 5_707_301;
+    inflight::save_inflight_state(&original).unwrap();
+    let original = inflight::load_inflight_state(&provider, 5_707_301).unwrap();
+    let pin = InflightEpisodePin::from_state(&original);
+    let (reached, resume) = adoption_gap::arm(5_707_301);
+    let original_could_start =
+        || super::super::live_bridge::try_respawn_recovery(&provider, 5_707_301).is_ok();
+
+    let recovery = super::super::live_bridge::try_respawn_recovery(&provider, 5_707_301).unwrap();
+    assert!(recovery.is_guarded());
+    let mut adopted = original.clone();
+    let task = runtime.spawn(async move {
+        recovery
+            .run(async move {
+                let mut held = None;
+                coordinate_adoption::adopt_coordinates(
+                    &mut adopted,
+                    coordinate_adoption::AdoptionCoordinates {
+                        tmux_session_name: "normalized-tmux",
+                        output_path: "/normalized/transcript.jsonl",
+                        input_fifo_for_state: &None,
+                        existing_offset_rebase_to_output: None,
+                        runtime_kind_for_state: Some(RuntimeHandoffKind::ClaudeTui),
+                        session_id_for_state: &None,
+                    },
+                    Some(&pin),
+                    &mut held,
+                )
+                .await
+                .0
+            })
+            .await
+    });
+    reached
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the adoption reaches its blocking section");
+    task.abort();
+    assert!(runtime.block_on(task).unwrap_err().is_cancelled());
+    assert!(
+        !original_could_start(),
+        "the slot must stay closed while the blocking adoption runs"
+    );
+
+    resume.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !original_could_start() {
+        assert!(std::time::Instant::now() < deadline, "the slot must reopen");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let durable = inflight::load_inflight_state(&provider, 5_707_301).unwrap();
+    assert_eq!(
+        durable.effective_relay_owner_kind(),
+        inflight::RelayOwnerKind::Watcher,
+        "the adoption committed inside the closed slot"
+    );
+}
