@@ -1756,6 +1756,10 @@ jobs:
       - name: just fmt-check
         run: just fmt-check
 
+      # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
+      - name: Ensure swap for clippy
+        uses: ./.github/actions/ensure-swap
+
       - name: just lint
         run: just lint
 

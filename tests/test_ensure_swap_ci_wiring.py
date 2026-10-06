@@ -22,18 +22,20 @@ ENSURE_SWAP = REPO_ROOT / ".github/actions/ensure-swap/ensure-swap.sh"
 MEM_MEASURE = REPO_ROOT / "scripts/ci/mem-measure.sh"
 SWAP_ACTION = "./.github/actions/ensure-swap"
 
-# Ubuntu jobs that link the lib test binary, per workflow.
+# Ubuntu jobs that link the lib test binary or run workspace clippy, per workflow.
 EXPECTED_SWAP_JOBS = {
     ".github/workflows/ci-pr.yml": {
         "test_fast",
         "high-risk-recovery",
         "library_sweep",
+        "lint",
         "scripts",
         "relay_authority_targets",
         "relay_authority_mutations",
     },
     ".github/workflows/ci-main.yml": {
         "full_non_pg",
+        "lint",
         "postgres",
         "high-risk-recovery",
         "scripts",
@@ -52,11 +54,12 @@ LIB_BUILD_MARKERS = (
     re.compile(r"run_relay_authority_mutations\.sh"),
     re.compile(r"check_relay_authority_contract\.py"),
 )
+CLIPPY_MARKER = re.compile(r"\bjust lint\b|\bcargo clippy\b")
 
 
-def builds_lib_tests(step: dict, job: dict) -> bool:
+def needs_swap(step: dict, job: dict) -> bool:
     run = str(step.get("run", ""))
-    if any(marker.search(run) for marker in LIB_BUILD_MARKERS):
+    if CLIPPY_MARKER.search(run) or any(marker.search(run) for marker in LIB_BUILD_MARKERS):
         return True
     # The cargo Script checks shard runs --verify-lib-inventory.
     shard = (step.get("env") or {}).get("SCRIPT_CHECK_SHARD")
@@ -88,7 +91,7 @@ class SwapStepWiring(unittest.TestCase):
             discovered = {
                 job_id for job_id, job in jobs.items()
                 if "ubuntu" in str(job.get("runs-on", ""))
-                and any(builds_lib_tests(step, job) for step in job.get("steps", []))
+                and any(needs_swap(step, job) for step in job.get("steps", []))
             }
             self.assertEqual(discovered, expected, relative)
             for job_id in sorted(expected):
@@ -103,11 +106,11 @@ class SwapStepWiring(unittest.TestCase):
                     )
                     first_cargo = min(
                         i for i, s in enumerate(steps)
-                        if "cargo" in str(s.get("run", "")) or builds_lib_tests(s, jobs[job_id])
+                        if "cargo" in str(s.get("run", "")) or needs_swap(s, jobs[job_id])
                     )
                     self.assertLess(checkout, swap, "local action needs the checkout")
                     self.assertLess(swap, first_cargo, "swap must exist before the build")
-                    first_build = next(s for s in steps if builds_lib_tests(s, jobs[job_id]))
+                    first_build = next(s for s in steps if needs_swap(s, jobs[job_id]))
                     self.assertIn(steps[swap].get("if"), (None, first_build.get("if")))
 
     def test_observe_steps_report_memory_without_changing_their_pipeline(self) -> None:
