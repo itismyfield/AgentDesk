@@ -107,15 +107,15 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
         }
         // A delegated channel is placed only where its home gate takes intake, whatever the site.
         if let Some(channel) = channel
-            && delegated(channel).is_some()
+            && let Some(home) = delegated(channel)
         {
-            let Some(adoption) = adoption(snapshot, channel) else {
-                return Err(format!(
-                    "O channel {channel} is delegated and its home does not take intake here"
-                ));
-            };
-            adoption.claim(channel);
-            return Ok(());
+            let adoption = snapshot.candidate(channel).or(snapshot.standby(channel));
+            // Under the gate lock, so a drain's close never falls between the intake check and claim.
+            let claimed =
+                adoption.and_then(|adoption| home.while_intake_open(|| adoption.claim(channel)));
+            return claimed.map(drop).ok_or_else(|| {
+                format!("O channel {channel} is delegated and its home does not take intake here")
+            });
         }
         if let Site::Foreign { home } = snapshot.site() {
             let channel = channel.map_or("an unknown channel".into(), |c| c.to_string());

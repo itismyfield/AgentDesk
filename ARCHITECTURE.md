@@ -672,6 +672,7 @@ src/
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── channel_home.rs
+│   │   ├── channel_home_claim_tests.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
 │   │   ├── channel_home_port.rs

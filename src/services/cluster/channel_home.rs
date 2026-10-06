@@ -315,6 +315,21 @@ impl HomeGate {
         )
     }
 
+    /// Runs `take` under the gate lock only while this home takes intake, so no close falls between
+    /// that check and `take`.
+    pub(crate) fn while_intake_open<T>(&self, take: impl FnOnce() -> T) -> Option<T> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        let open = matches!(
+            self.read(&local),
+            HomeOwnership::Owned {
+                intake: HomeIntake::Open,
+                ..
+            }
+        );
+        open.then(take)
+    }
+
     /// Runs `hand_off` under the gate lock with the row epoch, only while this home is held.
     pub(crate) fn admit<T>(&self, hand_off: impl FnOnce(i64) -> T) -> Option<T> {
         let mut local = self.locked();
@@ -564,3 +579,7 @@ pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
 #[cfg(test)]
 #[path = "channel_home_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "channel_home_claim_tests.rs"]
+mod claim_tests;
