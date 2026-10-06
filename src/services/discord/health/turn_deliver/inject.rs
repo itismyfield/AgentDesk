@@ -128,7 +128,8 @@ async fn resolve(
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
-    // Intake claims, kickoff dequeues and claim handbacks wait on this until the pane effect ends.
+    // Held until the pane effect ends: intake and kickoff fall back to the durable enqueue or the
+    // backstop without waiting, and only a claim handback waits for it, at most 3s.
     let transition = shared
         .session_transition_lock(request.channel_id)
         .try_lock_owned()
@@ -178,19 +179,25 @@ pub(super) async fn attempt(
     };
     let channel = request.channel_id.get();
     let pane = pane(channel, &target.session);
-    let input = Input {
+    let input = Arc::new(Input {
         channel,
         provider: request.provider.as_str().to_string(),
         source: request.source.clone(),
         author: request.author_id.to_string(),
         text: request.text.clone(),
-    };
+        nonce: busy_inject::fresh_nonce(),
+    });
+    let (session, turn_id) = (target.session.clone(), target.turn_id.clone());
     // The effect outlives a cancelled request, so it keeps the transition and records its own alert.
-    let effect = tokio::task::spawn_blocking(move || run(&pane, target, &input));
-    effect.await.unwrap_or(InjectAttempt::Unconfirmed {
-        turn_id: None,
-        detail: "executor_failed",
-    })
+    let effect = tokio::task::spawn_blocking({
+        let input = input.clone();
+        move || run(&pane, target, &input)
+    });
+    match effect.await {
+        Ok(attempt) => attempt,
+        // The effect died outside its guard or never started, so it recorded nothing.
+        Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
+    }
 }
 
 struct Input {
@@ -199,28 +206,31 @@ struct Input {
     source: String,
     author: String,
     text: String,
+    nonce: String,
 }
 
 fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt {
+    #[cfg(test)]
+    test_hook::crash(input.channel);
     let Target {
         session,
         transcript,
         turn_id,
         transition,
     } = target;
-    let nonce = busy_inject::fresh_nonce();
+    let nonce = &input.nonce;
     let request = busy_inject::Request {
         session: &session,
         transcript: &transcript,
         source: &input.source,
         author: &input.author,
-        nonce: &nonce,
+        nonce,
         text: &input.text,
     };
     let inject = || busy_inject::inject(pane, &request, &busy_inject::TIMING);
     // A panic may come after the paste, so it is reported like any later failure.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
-    let alert = |detail| unconfirmed(input, &session, &nonce, turn_id.clone(), detail);
+    let alert = |detail| unconfirmed(input, &session, turn_id.clone(), detail);
     let result = match outcome {
         Ok(Outcome::NotSent(veto)) => InjectAttempt::NotSent(veto_name(veto)),
         Ok(Outcome::Injected) => {
@@ -244,13 +254,12 @@ fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt
 fn unconfirmed(
     input: &Input,
     session: &str,
-    nonce: &str,
     turn_id: Option<String>,
     detail: &'static str,
 ) -> InjectAttempt {
     let payload = serde_json::json!({
         "detail": detail,
-        "nonce": nonce,
+        "nonce": input.nonce,
         "source": input.source,
         "tmux_session": session,
         "turn_id": turn_id,
@@ -318,6 +327,7 @@ pub(crate) mod test_hook {
     use super::InjectMode;
 
     static FORCED: Mutex<Option<HashMap<u64, (InjectMode, PathBuf)>>> = Mutex::new(None);
+    static CRASHING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
     pub(crate) fn forced(channel_id: u64) -> Option<(InjectMode, PathBuf)> {
         let forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
@@ -336,5 +346,20 @@ pub(crate) mod test_hook {
         if let Some(map) = forced.as_mut() {
             map.remove(&channel_id);
         }
+        let mut crashing = CRASHING.lock().unwrap_or_else(|e| e.into_inner());
+        crashing.retain(|channel| *channel != channel_id);
+    }
+
+    /// Makes the channel's effect panic outside its own `catch_unwind`, as a dying executor would.
+    pub(crate) fn crash_effect(channel_id: u64) {
+        let mut crashing = CRASHING.lock().unwrap_or_else(|e| e.into_inner());
+        crashing.push(channel_id);
+    }
+
+    pub(super) fn crash(channel_id: u64) {
+        let crashing = CRASHING.lock().unwrap_or_else(|e| e.into_inner());
+        let crash = crashing.contains(&channel_id);
+        drop(crashing);
+        assert!(!crash, "scripted executor crash");
     }
 }

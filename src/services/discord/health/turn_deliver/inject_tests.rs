@@ -553,3 +553,50 @@ async fn a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_
         (true, true, true, 0)
     );
 }
+
+/// An effect that dies outside its own guard is reported once from the join, while a paste that
+/// fails inside the effect keeps its single alert.
+#[tokio::test(flavor = "current_thread")]
+async fn an_effect_that_dies_outside_its_guard_is_still_reported_once_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (crashed, failed) = (6_245_602, 6_245_603);
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &[crashed, failed], Some(pool)).await;
+    let panes = [crashed, failed].map(|ch| InjectPane::new(ch, "external"));
+    test_hook::crash_effect(crashed);
+    panes[1].set("fail_paste", "");
+    let mut observed = Vec::new();
+    for pane in &panes {
+        let ch = pane.channel;
+        let outcome = deliver(&registry, ch).await;
+        let alerts: Vec<_> = crate::services::observability::events::recent(10_000)
+            .iter()
+            .filter(|event| {
+                event.event_type == "busy_inject_unconfirmed" && event.channel_id == Some(ch)
+            })
+            .map(|event| {
+                event.payload["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        let free = shared
+            .session_transition_lock(ChannelId::new(ch))
+            .try_lock_owned()
+            .is_ok();
+        let queue = queue_texts(&shared, ch).await.len();
+        observed.push(format!(
+            "{outcome} alerts={alerts:?} free={free} queue={queue}"
+        ));
+    }
+    assert_eq!(
+        observed,
+        [
+            "Ok(Unconfirmed { turn_id: None, detail: \"executor_failed\" }) alerts=[\"executor_failed\"] free=true queue=0",
+            "Ok(Unconfirmed { turn_id: None, detail: \"paste_failed\" }) alerts=[\"paste_failed\"] free=true queue=0",
+        ]
+    );
+}
