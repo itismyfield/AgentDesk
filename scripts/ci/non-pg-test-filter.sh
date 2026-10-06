@@ -127,6 +127,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::input_clear::tests
   --skip services::discord::commands::control::native::herdr_tests
+  --skip services::discord::commands::control::native::herdr_tests::e2e
+  --skip services::discord::commands::control::native::herdr_tests::e2e::o_actor
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
@@ -844,6 +846,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::input_clear::tests
   services::discord::commands::control::native::herdr_tests
+  services::discord::commands::control::native::herdr_tests::e2e
+  services::discord::commands::control::native::herdr_tests::e2e::o_actor
   services::discord::commands::control::native::tests
   services::discord::commands::restart::host_guard_tests
   services::discord::commands::tui_passthrough::host_guard_tests

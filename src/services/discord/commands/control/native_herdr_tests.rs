@@ -726,3 +726,6 @@ fn a_clear_waiting_on_the_guard_commits_only_on_its_own_pending_pg() {
         );
     });
 }
+
+#[path = "native_herdr_e2e_tests.rs"]
+mod e2e;

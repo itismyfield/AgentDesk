@@ -223,3 +223,7 @@ async fn consecutive_pending_clears_stay_settled_until_the_latest_resolves() {
     assert_eq!(harness.port.posts(), ["first", "after the clears"]);
     halt(stop, task).await;
 }
+
+#[cfg(unix)]
+#[path = "rotation_unsettled_resume_tests.rs"]
+mod resume;
