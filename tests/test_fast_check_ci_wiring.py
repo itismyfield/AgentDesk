@@ -839,6 +839,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
             if "cargo test --lib " not in command
         ]
         self.assertIn("cargo test --doc ClaudeBinary", non_lib)
+        lint_run = next(step["run"] for step in main_jobs["lint"]["steps"] if step.get("name") == "just lint")
+        observed = next(line.strip().split(" | tee ")[0] for line in lint_run.splitlines() if line.strip().startswith("cargo clippy "))
+        self.assertEqual(observed.replace(" --message-format=json", ""), just_recipe_commands(justfile, "lint")[0])
+        self.assertIn("set -o pipefail", lint_run)
+        self.assertNotIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", lint_run)
         self.assertEqual(
             [
                 line.strip()
@@ -849,7 +854,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [
                 "npm run test:policies",
                 "just fmt-check",
-                "just lint",
+                "set -o pipefail",
+                "mkdir -p target/clippy-observation",
+                "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then",
+                "echo '::warning::Clippy observation invalid; no warning baseline can be derived'",
+                "fi",
                 "source scripts/ci/non-pg-test-filter.sh",
                 *non_lib,
                 "sccache --show-stats || true",
