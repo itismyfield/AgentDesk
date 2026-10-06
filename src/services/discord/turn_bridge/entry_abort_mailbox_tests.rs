@@ -232,6 +232,7 @@ async fn run_abort_case(waiter: bool, successor: bool, caller: &str) {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn c1_actual_spawn_bridge_retains_effect_until_future_disposal() {
     use super::super::input_runtime::fence::{self, Gate, effect};
