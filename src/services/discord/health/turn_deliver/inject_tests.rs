@@ -554,8 +554,8 @@ async fn a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_
     );
 }
 
-/// An effect that dies outside its own guard is reported once from the join, while a paste that
-/// fails inside the effect keeps its single alert.
+/// An effect that panics outside its catch_unwind is reported once from the join, while a paste
+/// that fails inside the effect keeps its single alert.
 #[tokio::test(flavor = "current_thread")]
 async fn an_effect_that_dies_outside_its_guard_is_still_reported_once_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

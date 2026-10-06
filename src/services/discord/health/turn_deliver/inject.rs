@@ -128,8 +128,8 @@ async fn resolve(
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
-    // Held until the pane effect ends: intake and kickoff fall back to the durable enqueue or the
-    // backstop without waiting, and only a claim handback waits for it, at most 3s.
+    // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
+    // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
     let transition = shared
         .session_transition_lock(request.channel_id)
         .try_lock_owned()
@@ -195,7 +195,7 @@ pub(super) async fn attempt(
     });
     match effect.await {
         Ok(attempt) => attempt,
-        // The effect died outside its guard or never started, so it recorded nothing.
+        // The effect panicked outside its catch_unwind or never started, so it recorded nothing.
         Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
     }
 }
