@@ -503,7 +503,7 @@ def run_and_capture(command: list[str], log_path: Path | None) -> tuple[int, Out
 
         for line in process.stdout:
             sys.stdout.write(line)
-            # Keep the relayed stdout in order with the inherited stderr in the log.
+            # Flush per line to cut the relayed stdout's extra buffering delay.
             sys.stdout.flush()
             if sink:
                 sink.write(line)
