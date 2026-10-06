@@ -34,6 +34,12 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/inflight/removal/input_fence_reaper_tests.rs",
+        "src/services/discord/inflight/restart_mark_fence_tests.rs",
+        "src/services/discord/recovery_engine/manual_rebind/live_bridge_guard_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_recovery_fence_tests.rs",
+        "src/services/discord/runtime_bootstrap/shutdown_input_fence_tests.rs",
+        "src/services/discord/tui_direct_pending_start/tests/input_effect_tests.rs",
         "src/services/claude_tui/hook_server/native_clear_fence_tests.rs",
         "src/services/discord/adk_session_selector_checked_tests.rs",
         "src/services/discord/commands/control/native_tests.rs",
@@ -438,6 +444,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/inflight/invariant_test_capture.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs",
+        "src/services/discord/relay_recovery/tests/input_fence.rs",
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs",
         "src/services/discord/relay_recovery/tests/host_deferred.rs",
         "src/services/discord/relay_recovery/tests/incarnation_follow_up.rs",

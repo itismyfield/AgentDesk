@@ -140,37 +140,49 @@ async fn c2_admitted_rebind_holds_the_input_drain_until_it_returns() {
         tmp.path(),
     );
     let provider = ProviderKind::Claude;
-    let channel = 6_325_520_000_000_003_u64;
-    let gate = Gate::protect(provider.clone(), channel).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
-    let shared = make_shared_data_for_tests();
     let http = Arc::new(serenity::Http::new("Bot test-token"));
-    // The rebind is admitted, then parks on the session map this test holds.
-    let core = shared.core.lock().await;
-    let rebind = rebind_inflight_for_channel(
-        &http,
-        &shared,
-        &provider,
-        channel,
-        None,
-        ManualRebindOverrides::default(),
-        None,
-    );
-    tokio::pin!(rebind);
-    assert!(futures::poll!(&mut rebind).is_pending());
-    let closing = gate.close().unwrap();
-    assert!(
-        closing.drain().now_or_never().is_none(),
-        "the admitted rebind holds the drain"
-    );
-    drop(core);
-    let result = rebind.await;
-    assert!(
-        matches!(result, Err(RebindError::ChannelNameMissing)),
-        "{result:?}"
-    );
-    assert!(
-        closing.drain().now_or_never().is_some(),
-        "returning releases the drain"
-    );
+    for from_offset in [false, true] {
+        let channel = 6_325_520_000_000_003_u64 + u64::from(from_offset);
+        let gate = Gate::protect(provider.clone(), channel).unwrap();
+        let _health = input_runtime::fence::test_health::Clear::new(&gate);
+        let shared = make_shared_data_for_tests();
+        // The rebind is admitted, then parks on the session map this test holds.
+        let core = shared.core.lock().await;
+        let rebind = async {
+            if from_offset {
+                rebind_inflight_for_channel_with_minimum_start_offset(
+                    &http, &shared, &provider, channel, None, None, None,
+                )
+                .await
+            } else {
+                rebind_inflight_for_channel(
+                    &http,
+                    &shared,
+                    &provider,
+                    channel,
+                    None,
+                    ManualRebindOverrides::default(),
+                    None,
+                )
+                .await
+            }
+        };
+        tokio::pin!(rebind);
+        assert!(futures::poll!(&mut rebind).is_pending());
+        let closing = gate.close().unwrap();
+        assert!(
+            closing.drain().now_or_never().is_none(),
+            "the admitted rebind holds the drain"
+        );
+        drop(core);
+        let result = rebind.await;
+        assert!(
+            matches!(result, Err(RebindError::ChannelNameMissing)),
+            "{result:?}"
+        );
+        assert!(
+            closing.drain().now_or_never().is_some(),
+            "returning releases the drain"
+        );
+    }
 }
