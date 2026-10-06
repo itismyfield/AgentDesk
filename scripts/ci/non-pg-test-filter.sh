@@ -129,6 +129,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::health::turn_deliver::inject_tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
@@ -395,6 +396,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reachability_warrant_vetoes_transport_unknown_watchdog_branch
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
+  services::discord::health::turn_deliver::inject_tests::only_a_tui_direct_row_or_with_all_a_discord_turn_on_its_own_row_holds_a_pane_for_input
+  services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
   services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
   services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
   services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
@@ -835,6 +838,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
   services::discord::health::recovery::stall_alert::tests
   services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  services::discord::health::turn_deliver::inject_tests
   services::discord::host_defer_gate::tests
   services::discord::host_key_derivation::tests
   services::discord::idle_cleanup_selector_tests
