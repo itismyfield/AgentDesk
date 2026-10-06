@@ -132,21 +132,39 @@ fn delivery_response(
     result: Result<HumanInputDelivery, HumanInputError>,
 ) -> RouteResponse {
     let channel = channel_id.to_string();
-    let ok = |delivery: &str, turn_id: String, reason: Option<String>| {
-        (
-            StatusCode::OK,
-            Json(json!({
-                "ok": true,
-                "delivery": delivery,
-                "turn_id": turn_id,
-                "channel_id": channel,
-                "reason": reason,
-            })),
-        )
+    // `inject_veto` and `detail` are omitted when unset; with injection off only the base fields remain.
+    let ok = |delivery: &str, turn_id: Option<String>, reason: Option<&str>, extra: Value| {
+        let mut body = json!({
+            "ok": true,
+            "delivery": delivery,
+            "turn_id": turn_id,
+            "channel_id": channel,
+            "reason": reason,
+        });
+        if let (Some(body), Value::Object(extra)) = (body.as_object_mut(), extra) {
+            body.extend(extra);
+        }
+        (StatusCode::OK, Json(body))
     };
     match result {
-        Ok(HumanInputDelivery::Started { turn_id }) => ok("started", turn_id, None),
-        Ok(HumanInputDelivery::Queued { turn_id, reason }) => ok("queued", turn_id, Some(reason)),
+        Ok(HumanInputDelivery::Started { turn_id }) => {
+            ok("started", Some(turn_id), None, json!({}))
+        }
+        Ok(HumanInputDelivery::Queued {
+            turn_id,
+            reason,
+            inject_veto,
+        }) => {
+            let extra = inject_veto.map_or_else(|| json!({}), |veto| json!({"inject_veto": veto}));
+            ok("queued", Some(turn_id), Some(&reason), extra)
+        }
+        Ok(HumanInputDelivery::Injected { turn_id }) => ok("injected", turn_id, None, json!({})),
+        Ok(HumanInputDelivery::Unconfirmed { turn_id, detail }) => ok(
+            "unconfirmed",
+            turn_id,
+            Some("inject_unconfirmed"),
+            json!({"detail": detail}),
+        ),
         Err(HumanInputError::AuthorNotAllowed) => {
             failure(StatusCode::FORBIDDEN, "author_not_allowed")
         }
@@ -190,6 +208,34 @@ mod tests {
         );
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body.0["error"], "invalid_target");
+    }
+
+    #[test]
+    fn each_delivery_carries_only_its_documented_fields() {
+        use super::HumanInputDelivery::{Injected, Queued, Started, Unconfirmed};
+        let queued = |veto: Option<&str>| Queued {
+            turn_id: "discord:7:9".into(),
+            reason: "external_turn_active".into(),
+            inject_veto: veto.map(str::to_string),
+        };
+        #[rustfmt::skip]
+        let cases = [
+            (Started { turn_id: "discord:7:9".into() }, json!({"delivery": "started", "turn_id": "discord:7:9", "reason": null})),
+            (queued(None), json!({"delivery": "queued", "turn_id": "discord:7:9", "reason": "external_turn_active"})),
+            (queued(Some("not_busy")), json!({"delivery": "queued", "turn_id": "discord:7:9", "reason": "external_turn_active", "inject_veto": "not_busy"})),
+            (Injected { turn_id: None }, json!({"delivery": "injected", "turn_id": null, "reason": null})),
+            (Unconfirmed { turn_id: Some("discord:7:5".into()), detail: "not_observed".into() },
+                json!({"delivery": "unconfirmed", "turn_id": "discord:7:5", "reason": "inject_unconfirmed", "detail": "not_observed"})),
+        ];
+        for (delivery, fields) in cases {
+            let (status, body) = super::delivery_response(7, Ok(delivery));
+            let mut expected = json!({"ok": true, "channel_id": "7"});
+            expected
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            assert_eq!((status, body.0), (StatusCode::OK, expected));
+        }
     }
 
     pub(super) fn router(
@@ -321,6 +367,81 @@ mod pg_tests {
             ],
             "{started} {delivered}"
         );
+    }
+
+    /// The route reaches a scripted pane only when switched on; a veto queues and names itself.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg() {
+        use crate::services::discord::health::{InjectPane, queue_texts, register_inject_runtime};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let agents = [
+            ("inject-on", 6_245_121_u64, "external"),
+            ("inject-off", 6_245_122, "off"),
+            ("inject-attached", 6_245_123, "external"),
+            ("inject-unconfirmed", 6_245_124, "external"),
+        ];
+        let channels = agents.map(|(_, channel, _)| channel);
+        for (agent, channel, _) in agents {
+            let seed = crate::db::agents::insert_agent_channels_for_tests;
+            seed(&pool, agent, Some(&channel.to_string()), None).await;
+        }
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
+        let [on, off, attached, unconfirmed] =
+            agents.map(|(_, ch, mode)| InjectPane::new(ch, mode));
+        attached.set("attach", "1");
+        unconfirmed.set("fail_paste", "");
+        let app = router(Some(pool), Some(registry));
+
+        let input =
+            json!({"text": "status?", "author_discord_user_id": "200", "source": "imessage"});
+        let mut observed = Vec::new();
+        for ((agent, channel, _), pane) in agents.iter().zip([&on, &off, &attached, &unconfirmed]) {
+            let (status, body) = deliver(&app, agent, &input.to_string()).await;
+            let field = |name: &str| match body.get(name) {
+                None => "-".to_string(),
+                Some(value) => value.as_str().unwrap_or("null").to_string(),
+            };
+            let queued = queue_texts(&shared, *channel).await.len();
+            // A queued reply names a fresh reservation id on this channel.
+            let prefix = format!("discord:{channel}:");
+            let turn = field("turn_id");
+            let turn = if turn.starts_with(&prefix) {
+                format!("{prefix}*")
+            } else {
+                turn
+            };
+            observed.push(format!(
+                "{agent}: {} {} turn={turn} reason={} veto={} detail={} keys={:?} tmux={} queued={queued}",
+                status.as_u16(),
+                field("delivery"),
+                field("reason"),
+                field("inject_veto"),
+                field("detail"),
+                pane.keys(),
+                pane.tmux_calls() > 0,
+            ));
+        }
+        assert_eq!(
+            observed,
+            [
+                "inject-on: 200 injected turn=null reason=null veto=- detail=- keys=[\"paste-buffer\", \"send-keys\"] tmux=true queued=0",
+                "inject-off: 200 queued turn=discord:6245122:* reason=external_turn_active veto=- detail=- keys=[] tmux=false queued=1",
+                "inject-attached: 200 queued turn=discord:6245123:* reason=external_turn_active veto=human_attached detail=- keys=[] tmux=true queued=1",
+                "inject-unconfirmed: 200 unconfirmed turn=null reason=inject_unconfirmed veto=- detail=paste_failed keys=[] tmux=true queued=0",
+            ]
+        );
+        assert!(on.transcript_recorded_the_paste());
+        let alerts = crate::services::observability::events::recent(10_000);
+        let alerted = |channel: u64| {
+            alerts.iter().any(|event| {
+                event.event_type == "busy_inject_unconfirmed" && event.channel_id == Some(channel)
+            })
+        };
+        assert_eq!(channels.map(alerted), [false, false, false, true]);
     }
 
     #[tokio::test(flavor = "current_thread")]

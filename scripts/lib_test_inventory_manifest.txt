@@ -1070,6 +1070,8 @@ server::routes::agents_crud::config_secret_tests::duplicate_metadata_update_keep
 server::routes::agents_setup::config_secret_tests::apply_config_step_keeps_disk_secrets
 server::routes::agents_turn_deliver::pg_tests::an_external_tui_turn_row_is_busy_for_start_and_deliver_pg
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
+server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg
+server::routes::agents_turn_deliver::tests::each_delivery_carries_only_its_documented_fields
 server::routes::agents_turn_deliver::tests::invalid_turn_target_is_422
 server::routes::agents_turn_deliver::tests::malformed_input_is_rejected_before_any_lookup
 server::routes::agents_turn_target::tests::agent_turn_channel_override_selects_its_provider_and_rejects_mismatch
@@ -3613,9 +3615,17 @@ services::discord::health::transcript_turn::tests::retired_residue_degrades_publ
 services::discord::health::transcript_turn::tests::row_observation_tells_a_missing_row_from_a_failed_stat
 services::discord::health::transcript_turn::tests::store_presence_tells_a_missing_store_from_an_unreadable_one
 services::discord::health::transcript_turn::tests::view_goes_stale_after_120_seconds_without_a_push
+services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
+services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
+services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
+services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
+services::discord::health::turn_deliver::inject_tests::only_a_tui_direct_row_or_with_all_a_discord_turn_on_its_own_row_holds_a_pane_for_input
+services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
 services::discord::health::turn_deliver::tests::an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons
 services::discord::health::turn_deliver::tests::each_mailbox_state_reaches_exactly_one_commit_point
 services::discord::health::turn_deliver::tests::only_listed_authors_of_an_owned_bot_pass_even_when_allow_all_is_on
+services::discord::health::turn_deliver::tests::the_switch_off_keeps_every_pr1_answer_and_never_asks_for_an_injection
+services::discord::health::turn_deliver::tests::the_switch_on_asks_only_where_input_would_wait_behind_a_live_turn
 services::discord::health::unpaired_active_token::tests::a_built_snapshot_is_reconfirmed_only_for_a_token_without_a_row
 services::discord::health::unpaired_active_token::tests::completion_between_initial_reads_and_recheck_invalidates_candidate
 services::discord::health::unpaired_active_token::tests::every_identity_coordinate_must_remain_stable

@@ -83,6 +83,8 @@ pub use headless_turn::{
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
+#[cfg(all(test, unix))]
+pub(crate) use turn_deliver::inject_tests::{InjectPane, queue_texts, register_inject_runtime};
 pub use turn_deliver::{
     EXTERNAL_TURN_ACTIVE, HumanInputDelivery, HumanInputError, HumanInputRequest,
     deliver_human_input, external_turn_holds_channel,

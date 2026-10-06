@@ -229,6 +229,12 @@ pub(super) async fn defer_unstarted_turn(
     reason: &'static str,
 ) -> bool {
     let channel = ChannelId::new(state.channel_id);
+    // A busy-turn injection must see the claim or the requeued prompt, never the gap between.
+    let transition = if requeue {
+        fence_handback(shared, channel).await
+    } else {
+        None
+    };
     let finish = super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
         shared, provider, channel, poise::serenity_prelude::MessageId::new(state.user_msg_id),
         state.turn_nonce.clone(), std::time::Instant::now(), Some(cancel.clone()),
@@ -249,8 +255,11 @@ pub(super) async fn defer_unstarted_turn(
         );
         return false;
     }
+    #[cfg(test)]
+    handback_gap::pause(channel).await;
     let queued =
         super::mailbox_requeue_inflight_for_followup_retry(shared, provider, channel, state).await;
+    drop(transition);
     tracing::warn!(
         channel_id = state.channel_id,
         provider = provider.as_str(),
@@ -320,6 +329,54 @@ impl RecoveryRegistration {
             } else {
                 RECOVERY.scope(registration, future).await
             }
+        }
+    }
+}
+
+/// The bounded wait fails open: a handback that cannot take the transition keeps its old order.
+async fn fence_handback(
+    shared: &SharedData,
+    channel: ChannelId,
+) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let guard = shared.acquire_session_transition(channel).await.ok();
+    if guard.is_none() {
+        tracing::warn!(
+            channel_id = channel.get(),
+            "session transition stayed busy; claim handback runs unfenced"
+        );
+    }
+    guard
+}
+
+/// Stops one channel's handback between its claim release and its front requeue.
+#[cfg(test)]
+pub(crate) mod handback_gap {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use poise::serenity_prelude::ChannelId;
+    use tokio::sync::Notify;
+
+    type Gap = (Arc<Notify>, Arc<Notify>);
+    static GAPS: Mutex<Option<HashMap<u64, Gap>>> = Mutex::new(None);
+
+    /// Returns (reached, resume) for the channel's next handback.
+    pub(crate) fn arm(channel: u64) -> Gap {
+        let gap = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let mut gaps = GAPS.lock().unwrap_or_else(|e| e.into_inner());
+        gaps.get_or_insert_with(HashMap::new)
+            .insert(channel, gap.clone());
+        gap
+    }
+
+    pub(super) async fn pause(channel: ChannelId) {
+        let gap = {
+            let mut gaps = GAPS.lock().unwrap_or_else(|e| e.into_inner());
+            gaps.as_mut().and_then(|gaps| gaps.remove(&channel.get()))
+        };
+        if let Some((reached, resume)) = gap {
+            reached.notify_one();
+            resume.notified().await;
         }
     }
 }

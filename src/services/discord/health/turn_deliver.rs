@@ -1,6 +1,10 @@
 //! Human input entry: start a turn when the mailbox is idle, otherwise queue
 //! the input on the channel mailbox with the reason it could not start.
 
+mod inject;
+#[cfg(all(test, unix))]
+pub(crate) mod inject_tests;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +19,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
+use inject::{InjectAttempt, InjectMode};
 
 pub struct HumanInputRequest {
     pub channel_id: ChannelId,
@@ -28,8 +33,24 @@ pub struct HumanInputRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HumanInputDelivery {
-    Started { turn_id: String },
-    Queued { turn_id: String, reason: String },
+    Started {
+        turn_id: String,
+    },
+    /// `inject_veto` names why a busy turn could not take the input; `None` when none was asked.
+    Queued {
+        turn_id: String,
+        reason: String,
+        inject_veto: Option<String>,
+    },
+    /// The busy turn's transcript recorded the input; `turn_id` is null for a TUI-direct turn.
+    Injected {
+        turn_id: Option<String>,
+    },
+    /// A paste was attempted but not confirmed; nothing was queued.
+    Unconfirmed {
+        turn_id: Option<String>,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +106,8 @@ trait DeliveryPorts: Send + Sync {
     async fn try_start(&self) -> StartAttempt;
     async fn mailbox_holder(&self) -> MailboxHolder;
     async fn enqueue(&self) -> Result<String, String>;
+    fn inject_mode(&self) -> InjectMode;
+    async fn try_inject(&self, mode: InjectMode) -> InjectAttempt;
 }
 
 async fn deliver_with_ports<P: DeliveryPorts>(
@@ -119,10 +142,26 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             StartAttempt::Busy => "session_transition",
         },
     };
+    // Only input that would wait behind a live turn may go into it; nothing else changes.
+    let mut inject_veto = None;
+    let mode = ports.inject_mode();
+    if mode != InjectMode::Off && matches!(reason, "turn_active" | EXTERNAL_TURN_ACTIVE) {
+        match ports.try_inject(mode).await {
+            InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
+            InjectAttempt::Injected { turn_id } => {
+                return Ok(HumanInputDelivery::Injected { turn_id });
+            }
+            InjectAttempt::Unconfirmed { turn_id, detail } => {
+                let detail = detail.to_string();
+                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
+            }
+        }
+    }
     match ports.enqueue().await {
         Ok(turn_id) => Ok(HumanInputDelivery::Queued {
             turn_id,
             reason: reason.to_string(),
+            inject_veto,
         }),
         Err(refusal) => Err(HumanInputError::QueueRefused(refusal)),
     }
@@ -223,6 +262,14 @@ impl DeliveryPorts for LivePorts {
         }
         Ok(reservation.turn_id(request.channel_id))
     }
+
+    fn inject_mode(&self) -> InjectMode {
+        inject::mode(self.request.channel_id.get())
+    }
+
+    async fn try_inject(&self, mode: InjectMode) -> InjectAttempt {
+        inject::attempt(&self.shared, &self.request, mode).await
+    }
 }
 
 pub async fn deliver_human_input(
@@ -321,6 +368,9 @@ mod tests {
         holder: MailboxHolder,
         enqueue: Result<String, String>,
         enqueues: AtomicUsize,
+        mode: InjectMode,
+        inject: InjectAttempt,
+        injects: AtomicUsize,
     }
 
     fn ports(starts: Vec<StartAttempt>, holder: MailboxHolder) -> FakePorts {
@@ -331,6 +381,9 @@ mod tests {
             holder,
             enqueue: Ok("discord:7:900".to_string()),
             enqueues: AtomicUsize::new(0),
+            mode: InjectMode::Off,
+            inject: InjectAttempt::Injected { turn_id: None },
+            injects: AtomicUsize::new(0),
         }
     }
 
@@ -351,28 +404,44 @@ mod tests {
             self.enqueues.fetch_add(1, Ordering::SeqCst);
             self.enqueue.clone()
         }
+        fn inject_mode(&self) -> InjectMode {
+            self.mode
+        }
+        async fn try_inject(&self, _mode: InjectMode) -> InjectAttempt {
+            self.injects.fetch_add(1, Ordering::SeqCst);
+            self.inject.clone()
+        }
     }
 
-    /// `<delivery> <turn_id> [reason] enqueue=N` for compact expectations.
+    /// `<delivery> <turn_id> [reason] [veto=..] enqueue=N` for compact expectations.
     async fn run(fake: &FakePorts) -> String {
         let outcome = match deliver_with_ports(fake).await {
             Ok(HumanInputDelivery::Started { turn_id }) => format!("started {turn_id}"),
-            Ok(HumanInputDelivery::Queued { turn_id, reason }) => {
-                format!("queued {turn_id} {reason}")
+            Ok(HumanInputDelivery::Queued {
+                turn_id,
+                reason,
+                inject_veto,
+            }) => {
+                let veto = inject_veto.map(|veto| format!(" veto={veto}"));
+                format!("queued {turn_id} {reason}{}", veto.unwrap_or_default())
+            }
+            Ok(HumanInputDelivery::Injected { turn_id }) => format!("injected {turn_id:?}"),
+            Ok(HumanInputDelivery::Unconfirmed { turn_id, detail }) => {
+                format!("unconfirmed {turn_id:?} {detail}")
             }
             Err(error) => format!("{error:?}"),
         };
         format!("{outcome} enqueue={}", fake.enqueues.load(Ordering::SeqCst))
     }
 
-    #[tokio::test]
-    async fn each_mailbox_state_reaches_exactly_one_commit_point() {
+    /// PR1's mailbox table: each state reaches exactly one commit point.
+    fn mailbox_cases() -> Vec<(FakePorts, &'static str)> {
         use MailboxHolder::{BackgroundTurn, Nothing, Turn};
         let started = || StartAttempt::Started("discord:7:1".into());
         let mut refused = ports(vec![StartAttempt::Busy], Turn);
         refused.enqueue = Err("LastItemDedup".to_string());
         #[rustfmt::skip]
-        let cases = [
+        let cases = vec![
             (ports(vec![started()], Turn), "started discord:7:1 enqueue=0"),
             (ports(vec![StartAttempt::Busy], Turn), "queued discord:7:900 turn_active enqueue=1"),
             (ports(vec![StartAttempt::Busy], BackgroundTurn), "queued discord:7:900 background_turn enqueue=1"),
@@ -384,13 +453,11 @@ mod tests {
             (ports(vec![StartAttempt::Busy, StartAttempt::InvalidTarget("provider mismatch".into())], Nothing), "InvalidTarget(\"provider mismatch\") enqueue=0"),
             (refused, "QueueRefused(\"LastItemDedup\") enqueue=1"),
         ];
-        for (fake, expected) in cases {
-            assert_eq!(run(&fake).await, expected);
-        }
+        cases
     }
 
-    #[tokio::test]
-    async fn an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons() {
+    /// PR1's external-row table, with the start count.
+    fn external_cases() -> Vec<(FakePorts, &'static str)> {
         use MailboxHolder::{BackgroundTurn, Nothing, Turn};
         let started = || StartAttempt::Started("discord:7:1".into());
         let external = |answers: Vec<bool>, starts: Vec<StartAttempt>, holder| {
@@ -399,7 +466,7 @@ mod tests {
             fake
         };
         #[rustfmt::skip]
-        let cases = [
+        let cases = vec![
             // The start a free mailbox would grant is never attempted.
             (external(vec![true, true], vec![started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=0"),
             (external(vec![true], vec![started()], Turn), "queued discord:7:900 turn_active enqueue=1 starts=0"),
@@ -407,15 +474,100 @@ mod tests {
             // A row that appears after a refused start labels the queue and stops the retry.
             (external(vec![false, true], vec![StartAttempt::Busy, started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=1"),
         ];
-        for (fake, expected) in cases {
-            let starts = |outcome: String| {
-                format!(
-                    "{outcome} starts={}",
-                    fake.start_calls.load(Ordering::SeqCst)
-                )
-            };
-            assert_eq!(starts(run(&fake).await), expected);
+        cases
+    }
+
+    async fn run_counting_starts(fake: &FakePorts) -> String {
+        let outcome = run(fake).await;
+        format!(
+            "{outcome} starts={}",
+            fake.start_calls.load(Ordering::SeqCst)
+        )
+    }
+
+    #[tokio::test]
+    async fn each_mailbox_state_reaches_exactly_one_commit_point() {
+        for (fake, expected) in mailbox_cases() {
+            assert_eq!(run(&fake).await, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons() {
+        for (fake, expected) in external_cases() {
+            assert_eq!(run_counting_starts(&fake).await, expected);
+        }
+    }
+
+    /// Off answers exactly as PR1 and never asks the pane, even with an injection on offer.
+    #[tokio::test]
+    async fn the_switch_off_keeps_every_pr1_answer_and_never_asks_for_an_injection() {
+        let mut cases: Vec<_> = mailbox_cases()
+            .into_iter()
+            .map(|(fake, expected)| (fake, expected.to_string(), false))
+            .collect();
+        cases.extend(
+            external_cases()
+                .into_iter()
+                .map(|(fake, expected)| (fake, expected.to_string(), true)),
+        );
+        for (fake, expected, starts) in cases {
+            assert_eq!(fake.mode, InjectMode::Off);
+            let observed = if starts {
+                run_counting_starts(&fake).await
+            } else {
+                run(&fake).await
+            };
+            let asked = fake.injects.load(Ordering::SeqCst);
+            assert_eq!((observed, asked), (expected, 0));
+        }
+    }
+
+    /// On, only a queue behind a live turn asks once; a veto queues as PR1 did, with the veto named.
+    #[tokio::test]
+    async fn the_switch_on_asks_only_where_input_would_wait_behind_a_live_turn() {
+        let answers = [
+            InjectAttempt::NotSent("not_busy"),
+            InjectAttempt::Injected { turn_id: None },
+            InjectAttempt::Unconfirmed {
+                turn_id: Some("discord:7:5".into()),
+                detail: "not_observed",
+            },
+        ];
+        let mut observed = Vec::new();
+        for mode in [InjectMode::External, InjectMode::All] {
+            for answer in &answers {
+                for (mut fake, _) in mailbox_cases().into_iter().chain(external_cases()) {
+                    (fake.mode, fake.inject) = (mode, answer.clone());
+                    let outcome = run_counting_starts(&fake).await;
+                    let asked = fake.injects.load(Ordering::SeqCst);
+                    observed.push(format!("{outcome} asked={asked}"));
+                }
+            }
+        }
+        observed.sort();
+        observed.dedup();
+        #[rustfmt::skip]
+        let expected = [
+            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=1 asked=0",
+            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=2 asked=0",
+            "QueueRefused(\"LastItemDedup\") enqueue=1 starts=1 asked=1",
+            "RuntimeUnavailable(\"no ctx\") enqueue=0 starts=1 asked=0",
+            "injected None enqueue=0 starts=0 asked=1",
+            "injected None enqueue=0 starts=1 asked=1",
+            "queued discord:7:900 background_turn enqueue=1 starts=0 asked=0",
+            "queued discord:7:900 background_turn enqueue=1 starts=1 asked=0",
+            "queued discord:7:900 external_turn_active veto=not_busy enqueue=1 starts=0 asked=1",
+            "queued discord:7:900 external_turn_active veto=not_busy enqueue=1 starts=1 asked=1",
+            "queued discord:7:900 session_transition enqueue=1 starts=2 asked=0",
+            "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=0 asked=1",
+            "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=1 asked=1",
+            "started discord:7:1 enqueue=0 starts=1 asked=0",
+            "started discord:7:1 enqueue=0 starts=2 asked=0",
+            "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=0 asked=1",
+            "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=1 asked=1",
+        ];
+        assert_eq!(observed, expected);
     }
 
     async fn deliver_as(registry: &HealthRegistry, author_id: u64) -> String {
