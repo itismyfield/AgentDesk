@@ -114,6 +114,10 @@ pub(super) fn freeze(
         closing: closing.clone(),
     })
 }
+/// Protected and not LegacyOpen: restart drains and markers leave the channel as it is.
+pub(crate) fn held(provider: &ProviderKind, channel: u64) -> bool {
+    fence::lookup(provider, channel).is_some_and(|gate| gate.mode() != fence::Mode::LegacyOpen)
+}
 pub(super) struct StepGuard {
     _population: Option<fence::PopulationScope>,
     _effect: Option<fence::effect::WorkerScope>,

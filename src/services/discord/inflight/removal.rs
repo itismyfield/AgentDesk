@@ -282,7 +282,10 @@ pub(super) fn invalidate_stale_generation_in_root(
     let states = load_inflight_states_from_root(root, provider);
     let mut removed = Vec::new();
     for state in states {
-        if state.restart_mode.is_some() {
+        // An input-protected channel's row waits for its move or handback.
+        let protected =
+            crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id);
+        if state.restart_mode.is_some() || protected.is_some() {
             continue;
         }
         if state.rebind_origin {

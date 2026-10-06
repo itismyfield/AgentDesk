@@ -88,6 +88,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     // its bound is the next boot that successfully advances the epoch. An allocation-
     // provenance witness belongs to #5482.
     for mut state in states {
+        // An input-protected channel's row waits for its move or handback.
+        if crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id)
+            .is_some()
+        {
+            continue;
+        }
         if matches!(
             crate::services::agent_recovery::channel_recovery_intake(
                 provider,

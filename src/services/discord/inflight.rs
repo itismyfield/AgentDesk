@@ -516,6 +516,10 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     let states = load_inflight_states_from_root(&root, provider);
     let mut updated = 0usize;
     for state in states {
+        // A held input channel's row stays as its transition left it.
+        if crate::services::turn_orchestrator::input_fence::held(provider, state.channel_id) {
+            continue;
+        }
         let path = inflight_state_path(&root, provider, state.channel_id);
         if set_inflight_restart_mode_under_lock(&path, restart_mode) {
             updated += 1;

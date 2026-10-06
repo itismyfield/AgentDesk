@@ -1593,7 +1593,8 @@ pub(super) fn rebind_error_status_and_message(
         | discord::recovery_engine::RebindError::InflightEpisodeChanged
         | discord::recovery_engine::RebindError::StaleOutputPath { .. }
         | discord::recovery_engine::RebindError::RuntimeBindingUnavailable { .. }
-        | discord::recovery_engine::RebindError::WatcherWithheld { .. } => "409 Conflict",
+        | discord::recovery_engine::RebindError::WatcherWithheld { .. }
+        | discord::recovery_engine::RebindError::InputFenced(_) => "409 Conflict",
         discord::recovery_engine::RebindError::ChannelIdZero
         | discord::recovery_engine::RebindError::ChannelNotBound
         | discord::recovery_engine::RebindError::ChannelNameMissing => "400 Bad Request",
