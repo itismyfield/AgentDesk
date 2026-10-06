@@ -100,6 +100,7 @@ src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
 src/services/discord/commands/control/input_clear_tests.rs
+src/services/discord/commands/control/native_herdr_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
 src/services/discord/commands/tui_passthrough.rs
@@ -187,6 +188,7 @@ src/services/routines/session_control.rs
 src/services/scheduled_messages/context_snapshot.rs
 src/services/scheduled_messages/postgres_tests.rs
 src/services/session_forwarding.rs
+src/services/session_host/herdr_clear_adapter_tests.rs
 src/services/session_host/session_record.rs
 src/services/session_resume.rs
 src/services/settings.rs
@@ -305,6 +307,7 @@ services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::input_clear::tests
+services::discord::commands::control::native::herdr_tests
 services::discord::commands::control::native::tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::tui_passthrough::host_guard_tests
@@ -396,6 +399,7 @@ services::routines::session_control::tests
 services::scheduled_messages::context_snapshot::postgres_tests
 services::scheduled_messages::postgres_tests
 services::session_forwarding::tests
+services::session_host::herdr_clear_adapter::tests
 services::session_host::session_record::tests
 services::session_resume::tests
 services::settings::tests
@@ -1068,6 +1072,7 @@ services::discord::admin_host_guard::tests::clear_judges_a_nameless_channel_by_i
 services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
+services::discord::admin_host_guard::tests::the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
@@ -1079,6 +1084,12 @@ services::discord::commands::control::input_clear::tests::a_superseded_ticket_ho
 services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg
 services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
 services::discord::commands::control::input_clear::tests::the_production_adapter_cuts_resets_and_resolves_for_both_providers_pg
+services::discord::commands::control::native::herdr_tests::a_clear_waiting_on_the_guard_commits_only_on_its_own_pending_pg
+services::discord::commands::control::native::herdr_tests::a_configured_channel_clears_its_pane_with_one_line_and_saves_the_pending_session_pg
+services::discord::commands::control::native::herdr_tests::a_configured_clear_without_its_database_or_switch_changes_nothing_pg
+services::discord::commands::control::native::herdr_tests::a_held_herdr_clear_completes_at_admission_without_a_second_line_pg
+services::discord::commands::control::native::herdr_tests::a_running_turn_refuses_the_herdr_clear_before_any_change_pg
+services::discord::commands::control::native::herdr_tests::the_herdr_clear_holds_the_channel_until_its_commit_is_settled_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
 services::discord::commands::control::native::tests::native_clear_marks_completion_before_the_worker_releases_admission_pg
@@ -1158,8 +1169,15 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pe
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_a_paste_then_cancel_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_an_unclear_paste_the_next_prompt_is_held_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_chain_through_another_executions_pending_is_not_restored_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_pending_naming_another_transcript_takes_no_prompt_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_pending_taken_from_another_source_is_not_restored_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r1_a_restart_reconnects_a_matched_bound_pane_and_its_next_turn_prompts_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
@@ -1467,6 +1485,13 @@ services::session_forwarding::tests::cancel_owner_returns_none_when_no_session_e
 services::session_forwarding::tests::cancel_selection_agent_provider_fallback_preserves_remote_owner_pg
 services::session_forwarding::tests::cancel_selection_rejects_overlapping_and_pattern_channel_ids_pg
 services::session_forwarding::tests::cancel_selection_session_key_fallback_preserves_remote_owner_pg
+services::session_host::herdr_clear_adapter::tests::a_draft_in_the_composer_sends_nothing_and_holds_pg
+services::session_host::herdr_clear_adapter::tests::a_pending_clear_commits_with_one_line_and_keeps_the_pane_and_row_pg
+services::session_host::herdr_clear_adapter::tests::an_earlier_or_foreign_clear_event_holds_without_a_second_line_pg
+services::session_host::herdr_clear_adapter::tests::an_input_hold_refuses_the_clear_and_stays_pg
+services::session_host::herdr_clear_adapter::tests::an_unclear_clear_line_holds_without_a_second_and_its_late_pending_settles_pg
+services::session_host::herdr_clear_adapter::tests::an_unsettled_or_unread_rotation_refuses_the_clear_pg
+services::session_host::herdr_clear_adapter::tests::every_failed_check_refuses_before_any_change_pg
 services::session_host::session_record::tests::only_a_found_null_record_admits_the_legacy_clear_pg
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes
 services::session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime

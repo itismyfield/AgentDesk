@@ -123,6 +123,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::catch_up::too_old_notice::tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::input_clear::tests
+  --skip services::discord::commands::control::native::herdr_tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
@@ -214,6 +215,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
   --skip services::session_forwarding::tests
+  --skip services::session_host::herdr_clear_adapter::tests
   --skip services::session_host::session_record::tests
   --skip services::session_resume::tests
   --skip services::settings::tests
@@ -828,6 +830,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::catch_up::too_old_notice::tests
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::input_clear::tests
+  services::discord::commands::control::native::herdr_tests
   services::discord::commands::control::native::tests
   services::discord::commands::restart::host_guard_tests
   services::discord::commands::tui_passthrough::host_guard_tests
@@ -919,6 +922,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::scheduled_messages::context_snapshot::postgres_tests
   services::scheduled_messages::postgres_tests
   services::session_forwarding::tests
+  services::session_host::herdr_clear_adapter::tests
   services::session_host::session_record::tests
   services::session_resume::tests
   services::settings::tests

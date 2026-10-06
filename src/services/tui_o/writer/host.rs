@@ -14,14 +14,16 @@ use super::actor;
 use super::adoption::{self, LegacyView};
 use super::binding::BindingEvents;
 use super::deferred;
-use super::deliver::ChannelWriter;
+use super::deliver::{ChannelWriter, StopCause};
+use super::resume::{self, Backoff};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::ShadowProvider;
-use crate::services::tui_o::store::{ChannelStore, OStore, StoreConfig};
+use crate::services::tui_o::store::ledger::Unsent;
+use crate::services::tui_o::store::{ChannelStore, OStore, StoreConfig, StoreError, transient_io};
 
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
@@ -75,6 +77,7 @@ pub struct Readiness {
 struct Live {
     gate: Arc<OwnershipGate>,
     resumed: watch::Receiver<bool>,
+    unsettled: watch::Receiver<Option<usize>>,
 }
 
 fn locked<T>(set: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -100,8 +103,18 @@ impl Readiness {
         locked(&self.hosted).insert(channel)
     }
 
-    fn track(&self, channel: u64, gate: Arc<OwnershipGate>, resumed: watch::Receiver<bool>) {
-        locked(&self.live).insert(channel, Live { gate, resumed });
+    fn track(
+        &self,
+        channel: u64,
+        gate: Arc<OwnershipGate>,
+        (resumed, unsettled): (watch::Receiver<bool>, watch::Receiver<Option<usize>>),
+    ) {
+        let live = Live {
+            gate,
+            resumed,
+            unsettled,
+        };
+        locked(&self.live).insert(channel, live);
     }
 
     /// Ready and, read now rather than from the published flag that trails them, the gate is Owned
@@ -114,6 +127,15 @@ impl Readiness {
         let owned = matches!(live.gate.current(), GatewayOwnership::Owned { .. });
         owned && live.resumed.has_changed().is_ok() && *live.resumed.borrow()
     }
+
+    /// Rotated-away sources the channel's running actor has not retired, as its last poll read
+    /// them; `None` when no actor runs, its store could not be read or Herdr is not configured.
+    pub fn rotation_unsettled(&self, channel: u64) -> Option<usize> {
+        let live = locked(&self.live);
+        let unsettled = &live.get(&channel)?.unsettled;
+        unsettled.has_changed().ok()?;
+        *unsettled.borrow()
+    }
 }
 
 static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
@@ -125,6 +147,32 @@ pub(crate) fn process_readiness() -> Arc<Readiness> {
 /// Whether this process's writer can take work for `channel`; false for any channel O does not own.
 pub(crate) fn channel_accepts(channel: u64) -> bool {
     PROCESS.accepts(channel)
+}
+
+/// [`Readiness::rotation_unsettled`] of this process's writer.
+pub(crate) fn rotation_unsettled(channel: u64) -> Option<usize> {
+    #[cfg(test)]
+    if let Some(forced) = FORCED_UNSETTLED.with(std::cell::Cell::get) {
+        return forced;
+    }
+    PROCESS.rotation_unsettled(channel)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_UNSETTLED: std::cell::Cell<Option<Option<usize>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Reports `unsettled` for every channel on this thread until dropped, as a running actor would.
+#[cfg(test)]
+pub(crate) fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
+    struct Restore(Option<Option<usize>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCED_UNSETTLED.with(|cell| cell.set(self.0));
+        }
+    }
+    Restore(FORCED_UNSETTLED.with(|cell| cell.replace(Some(unsettled))))
 }
 
 /// What hosting needs once a channel is owned; built only then, so an off or empty writer takes nothing.
@@ -233,7 +281,7 @@ async fn host_channel<I: HostIo>(
 ) {
     let alarms = io.alarms();
     let mut bindings = None;
-    let store = match recover(&runtime_root, channel) {
+    let store = match recover(&runtime_root, channel, None) {
         Ok(Recovered::Store(_)) if !candidate.confirm_store() => {
             return hold(
                 &alarms,
@@ -322,7 +370,7 @@ async fn host_channel<I: HostIo>(
                 let detail = format!("first activation: {detail}");
                 return stop(&candidate, &alarms, channel, &detail);
             }
-            match recover(&runtime_root, channel) {
+            match recover(&runtime_root, channel, None) {
                 Ok(Recovered::Store(store)) => {
                     io.adopted(channel, provider);
                     store
@@ -330,24 +378,170 @@ async fn host_channel<I: HostIo>(
                 Ok(Recovered::Fresh(_)) => {
                     return hold(&alarms, channel, "init missing after activation");
                 }
-                Err(detail) => return hold(&alarms, channel, &detail),
+                Err(error) => return hold(&alarms, channel, &error.detail),
             }
         }
-        Err(detail) => return hold(&alarms, channel, &detail),
+        Err(error) => return hold(&alarms, channel, &error.detail),
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
     super::deliver::seed_last_posted(channel, store.ledger());
     let port = io.port().await;
-    let writer = ChannelWriter::new(store, Arc::clone(&gate), port, io.lease(), alarms);
-    let (stop_tx, stop) = watch::channel(false);
-    let (resumed_tx, resumed) = watch::channel(false);
-    let config = WriterConfig { enabled: true };
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
-    let spawned = actor::spawn_if_enabled(&config, writer, provider, bindings, stop, resumed_tx);
-    let Some(actor) = spawned else { return };
-    readiness.track(channel, Arc::clone(&gate), resumed.clone());
-    publish(channel, &readiness, gate.subscribe(), resumed, actor).await;
-    drop(stop_tx);
+    let hosted = Hosted {
+        io: &*io,
+        channel,
+        provider,
+        runtime_root: &runtime_root,
+        gate: &gate,
+        readiness: &readiness,
+        port,
+        bindings,
+        alarms,
+    };
+    hosted.serve(store).await;
+}
+
+/// A channel's running host: what each start of its actor needs.
+struct Hosted<'a, I: HostIo> {
+    io: &'a I,
+    channel: u64,
+    provider: ShadowProvider,
+    runtime_root: &'a Path,
+    gate: &'a Arc<OwnershipGate>,
+    readiness: &'a Readiness,
+    port: Arc<I::Port>,
+    bindings: Arc<I::Bindings>,
+    alarms: I::Alarms,
+}
+
+impl<I: HostIo> Hosted<'_, I> {
+    /// Runs the actor; after a transient store halt, waits and starts it again from the store as
+    /// a restart recovers it, until it stops for any other reason.
+    async fn serve(self, mut store: ChannelStore) {
+        let (channel, alarms) = (self.channel, &self.alarms);
+        let mut backoff = Backoff::default();
+        let mut attempt = 0u32;
+        // Once a resume was tried, leaving the loop ends the wait for health as well.
+        let settle = |attempt: u32| {
+            if attempt > 0 {
+                alarms.resume_pending(channel, false);
+            }
+        };
+        loop {
+            let started = tokio::time::Instant::now();
+            let Some(cause) = self.run(store, attempt).await else {
+                settle(attempt);
+                return;
+            };
+            if !resume::resumable(&cause) {
+                settle(attempt);
+                let alarm = &cause.alarm;
+                tracing::error!(channel, ?alarm, "[tui_o] writer stopped and stays stopped");
+                return;
+            }
+            if started.elapsed() >= resume::STABLE_RUN {
+                backoff = Backoff::default();
+            }
+            alarms.resume_pending(channel, true);
+            let Some(recovered) = self.recover_after(cause, &mut backoff, &mut attempt).await
+            else {
+                return;
+            };
+            store = recovered;
+            super::deliver::seed_last_posted(channel, store.ledger());
+            // Cleared before the next actor exists, so a halt it raises itself is never cleared.
+            alarms.halt_cleared(channel);
+        }
+    }
+
+    /// Starts one actor and returns how it stopped, once it has ended.
+    async fn run(&self, store: ChannelStore, attempt: u32) -> Option<StopCause> {
+        let (channel, gate) = (self.channel, self.gate);
+        let (port, lease) = (Arc::clone(&self.port), self.io.lease());
+        let writer = ChannelWriter::new(store, Arc::clone(gate), port, lease, self.alarms.clone());
+        let (stop_tx, stop) = watch::channel(false);
+        let (resumed_tx, resumed) = watch::channel(false);
+        // Each start publishes its own count; the ended actor's closed one reads as `None`.
+        let (unsettled_tx, unsettled) = watch::channel(None);
+        let config = WriterConfig { enabled: true };
+        let bindings = Arc::clone(&self.bindings);
+        let watches = (stop, resumed_tx, unsettled_tx);
+        let spawned = actor::spawn_projecting(&config, writer, self.provider, bindings, watches);
+        let actor = spawned?;
+        let watched = (resumed.clone(), unsettled);
+        self.readiness.track(channel, Arc::clone(gate), watched);
+        let on_resumed = || {
+            if attempt > 0 {
+                self.alarms.resume_pending(channel, false);
+                tracing::info!(
+                    channel,
+                    attempt,
+                    "[tui_o] writer resumed in process after a halt"
+                );
+            }
+        };
+        let ended = publish(
+            channel,
+            self.readiness,
+            gate.subscribe(),
+            resumed,
+            actor,
+            on_resumed,
+        );
+        let cause = ended.await;
+        drop(stop_tx);
+        cause
+    }
+
+    /// Waits and recovers the store until it opens; `None` once recovery fails for good. Evidence
+    /// of an unposted piece is offered to every attempt and dropped with the first store it opens.
+    async fn recover_after(
+        &self,
+        cause: StopCause,
+        backoff: &mut Backoff,
+        attempt: &mut u32,
+    ) -> Option<ChannelStore> {
+        let channel = self.channel;
+        let (alarm, io, unsent) = (cause.alarm, cause.io, cause.unsent);
+        let unsent_serial = unsent.as_ref().map(Unsent::serial);
+        loop {
+            let wait = backoff.next_wait();
+            *attempt += 1;
+            let (attempt, wait_secs) = (*attempt, wait.as_secs());
+            tracing::warn!(
+                channel,
+                attempt,
+                wait_secs,
+                ?alarm,
+                ?io,
+                unsent_serial,
+                "[tui_o] writer halted on a transient store error; resuming after a wait"
+            );
+            tokio::time::sleep(wait).await;
+            match recover(self.runtime_root, channel, unsent.as_ref()) {
+                Ok(Recovered::Store(store)) => return Some(store),
+                Err(error) if error.transient => {
+                    let detail = error.detail;
+                    tracing::warn!(
+                        channel,
+                        attempt,
+                        detail,
+                        "[tui_o] writer store recovery failed transiently; waiting again"
+                    );
+                }
+                Ok(Recovered::Fresh(_)) => {
+                    self.alarms.resume_pending(channel, false);
+                    hold(&self.alarms, channel, "init missing on resume");
+                    return None;
+                }
+                Err(error) => {
+                    self.alarms.resume_pending(channel, false);
+                    hold(&self.alarms, channel, &error.detail);
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 /// Returns once the gate is Owned; a gate not yet acquired at startup is waited on, not held.
@@ -366,52 +560,98 @@ enum Recovered {
     Fresh(OStore),
 }
 
-/// Recovers the channel's store. Damage, a foreign init, an era channel without init or an init
-/// without era holds it.
-fn recover(runtime_root: &Path, channel: u64) -> Result<Recovered, String> {
+/// Why a store was not recovered; a transient one may recover on a later attempt.
+struct Unrecovered {
+    detail: String,
+    transient: bool,
+}
+
+impl Unrecovered {
+    fn new(detail: String, io: Option<std::io::ErrorKind>) -> Self {
+        let transient = io.is_some_and(transient_io);
+        Self { detail, transient }
+    }
+
+    fn of_store(context: &str, error: &StoreError) -> Self {
+        let io = match error {
+            StoreError::Io(error) => Some(error.kind()),
+            _ => None,
+        };
+        Self::new(format!("{context}: {error:?}"), io)
+    }
+}
+
+impl From<&str> for Unrecovered {
+    fn from(detail: &str) -> Self {
+        Self::new(detail.into(), None)
+    }
+}
+
+/// Recovers the channel's store, first taking back `unsent` if the ledger still ends with it.
+/// Damage, a foreign init, an era channel without init or an init without era holds it.
+fn recover(
+    runtime_root: &Path,
+    channel: u64,
+    unsent: Option<&Unsent>,
+) -> Result<Recovered, Unrecovered> {
     let config = StoreConfig { enabled: true };
     let store = OStore::open_if_enabled(&config, runtime_root)
-        .map_err(|error| format!("store: {error}"))?
-        .ok_or_else(|| "store disabled".to_string())?;
+        .map_err(|error| Unrecovered::new(format!("store: {error}"), Some(error.kind())))?
+        .ok_or_else(|| Unrecovered::from("store disabled"))?;
     let era = store
         .read_era()
-        .map_err(|error| format!("era: {error:?}"))?;
+        .map_err(|error| Unrecovered::of_store("era", &error))?;
     let Some(era) = era else {
         return match store.read_init(channel) {
             Ok(None) => Ok(Recovered::Fresh(store)),
             Ok(Some(_)) => Err("no writer era".into()),
-            Err(error) => Err(format!("init: {error:?}")),
+            Err(error) => Err(Unrecovered::of_store("init", &error)),
         };
     };
-    let opened = store.open_channel(&era, channel);
-    let opened = opened.map_err(|halt| format!("recovery: {halt:?}"))?;
+    let opened = store.open_channel_withdrawing(&era, channel, unsent);
+    let opened = opened.map_err(|halt| Unrecovered::new(format!("recovery: {halt:?}"), halt.io))?;
     let Some(opened) = opened else {
         return Ok(Recovered::Fresh(store));
     };
     match opened.init().channel {
-        stored if stored != channel => Err(format!("store names channel {stored}")),
+        stored if stored != channel => Err(Unrecovered::new(
+            format!("store names channel {stored}"),
+            None,
+        )),
         _ => Ok(Recovered::Store(opened)),
     }
 }
 
 /// Ready only while the actor has resumed and the gate is Owned; cleared once the actor ends.
+/// Returns how the actor stopped, read from its finished task; `None` when the gate closed first.
 async fn publish(
     channel: u64,
     readiness: &Readiness,
     mut gate: watch::Receiver<GatewayOwnership>,
     mut resumed: watch::Receiver<bool>,
-    mut actor: JoinHandle<()>,
-) {
-    loop {
+    mut actor: JoinHandle<Option<StopCause>>,
+    on_resumed: impl FnOnce(),
+) -> Option<StopCause> {
+    let mut on_resumed = Some(on_resumed);
+    let ended = loop {
         let owned = matches!(*gate.borrow_and_update(), GatewayOwnership::Owned { .. });
-        readiness.set(channel, owned && *resumed.borrow_and_update());
-        tokio::select! {
-            changed = gate.changed() => if changed.is_err() { break },
-            changed = resumed.changed() => if changed.is_err() { break },
-            _ = &mut actor => break,
+        let up = *resumed.borrow_and_update();
+        if up && let Some(on_resumed) = on_resumed.take() {
+            on_resumed();
         }
-    }
+        readiness.set(channel, owned && up);
+        tokio::select! {
+            changed = gate.changed() => if changed.is_err() { break None },
+            // A closed flag means the actor is returning; its task settles right after.
+            changed = resumed.changed() => if changed.is_err() {
+                readiness.set(channel, false);
+                break (&mut actor).await.ok().flatten();
+            },
+            ended = &mut actor => break ended.ok().flatten(),
+        }
+    };
     readiness.set(channel, false);
+    ended
 }
 
 /// A gateway stand-in for tests that drive the real host: every POST is recorded with its

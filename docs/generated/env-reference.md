@@ -31,7 +31,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs:44` (+1 more) | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs:6` (+1 more) |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs:34` (+1 more) | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
-| `ADK_TEST_INPUT_TRANSITION_MUTANT` | `src/services/tui_input/transition.rs:386` |  |
+| `ADK_TEST_INPUT_TRANSITION_MUTANT` | `src/services/tui_input/transition.rs:404` |  |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs:549` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:131` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |

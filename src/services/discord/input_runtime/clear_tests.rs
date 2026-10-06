@@ -327,7 +327,8 @@ async fn a_ticket_left_by_a_crash_is_replayed_before_handback_submits_anything()
     let replayed = resume(&mut ledger, &mut host, guard()).await;
     drop(ledger);
     let mut legacy = Legacy(Vec::new());
-    let outcome = transition::handback(root.path(), channel, &mut legacy).unwrap();
+    let mut lease = crate::services::tui_input::ledger::LedgerLease::new(root.path(), channel);
+    let outcome = transition::handback(&mut lease, &mut legacy).unwrap();
     assert!(
         legacy.0.is_empty(),
         "cut inputs resubmitted: {:?}",

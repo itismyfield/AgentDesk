@@ -739,6 +739,59 @@ async fn a_violation_recorded_while_running_stops_the_writer_before_the_next_pos
     ));
 }
 
+/// The ledger file a channel store appends to.
+fn ledger_path(harness: &Harness) -> PathBuf {
+    let dir = harness
+        ._runtime
+        .path()
+        .join("o_store")
+        .join(CHANNEL.to_string());
+    dir.join("ledger.jsonl")
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_posted_it() {
+    use crate::services::tui_o::store::fault::{self, Keep, Step as At};
+    let full = std::io::ErrorKind::StorageFull;
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let planted = fault::plant(&ledger_path(&harness), At::Append(Keep::All), full, None);
+    assert_eq!(writer.deliver(&piece("m1", "a")).await, Step::Stopped);
+    drop(planted);
+    writer.stop(WriterAlarm::SelectionMissing);
+    let cause = writer.stop_cause().cloned().unwrap();
+    assert!(
+        matches!(cause.alarm, WriterAlarm::Halted { .. }),
+        "{cause:?}"
+    );
+    assert_eq!(cause.io, Some(full), "the first stop keeps its cause");
+    assert_eq!(cause.unsent.as_ref().map(|unsent| unsent.serial()), Some(0));
+    assert!(harness.port.posts().is_empty());
+    assert_eq!(
+        harness.alarms.taken().len(),
+        1,
+        "only the first stop alarms"
+    );
+
+    // A failure after the POST went out names nothing, so recovery settles it from history.
+    for keep in [Keep::Nothing, Keep::Half] {
+        let harness = Harness::new();
+        harness.gate.acquired();
+        let mut writer = harness.writer();
+        let (ledger, slot) = (ledger_path(&harness), Arc::new(Mutex::new(None)));
+        let planting = Arc::clone(&slot);
+        *harness.port.on_post.lock().unwrap() = Some(Box::new(move || {
+            let planted = fault::plant(&ledger, At::Append(keep), full, Some(1));
+            *planting.lock().unwrap() = Some(planted);
+        }));
+        assert_eq!(writer.deliver(&piece("m1", "a")).await, Step::Stopped);
+        let cause = writer.stop_cause().cloned().unwrap();
+        assert_eq!((cause.io, cause.unsent), (Some(full), None), "{keep:?}");
+        assert_eq!(harness.port.posts(), ["a"]);
+    }
+}
+
 #[path = "actor_tests.rs"]
 mod actor;
 

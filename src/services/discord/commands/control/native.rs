@@ -91,6 +91,34 @@ pub(super) fn switch_on_for_tests(effects: Arc<dyn NativeClearEffects>) -> impl 
     Off
 }
 
+/// A host clear's selector effects; it runs whatever the native clear switch says.
+fn host_effects() -> Arc<dyn NativeClearEffects> {
+    #[cfg(test)]
+    if let Some(effects) = HOST_EFFECTS.with(|cell| cell.borrow().clone()) {
+        return effects;
+    }
+    Arc::new(Production)
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_EFFECTS: std::cell::RefCell<Option<Arc<dyn NativeClearEffects>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs `effects` as this thread's host clear effects, the native switch left off.
+#[cfg(test)]
+pub(super) fn host_effects_for_tests(effects: Arc<dyn NativeClearEffects>) -> impl Drop {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            HOST_EFFECTS.with(|cell| cell.borrow_mut().take());
+        }
+    }
+    HOST_EFFECTS.with(|cell| *cell.borrow_mut() = Some(effects));
+    Restore
+}
+
 /// The switch, read before any other native-clear work; `None` keeps main's behavior.
 fn switched_on() -> Option<Arc<dyn NativeClearEffects>> {
     #[cfg(test)]
@@ -107,7 +135,84 @@ fn switched_on() -> Option<Arc<dyn NativeClearEffects>> {
 
 /// A clear whose target, host clearance and canonical baseline were all captured before its
 /// boundary is written.
-pub(super) struct NativeSelection {
+pub(super) enum NativeSelection {
+    Tmux(Box<TmuxSelection>),
+    /// A Herdr pane's planned clear and the session key whose selector it clears and saves.
+    #[cfg(unix)]
+    Herdr(Box<crate::services::session_host::HerdrClearPlan>, String),
+}
+
+impl NativeSelection {
+    fn ticket(&self) -> &ClearTicket {
+        match self {
+            Self::Tmux(selection) => &selection.waiter.ticket,
+            #[cfg(unix)]
+            Self::Herdr(plan, _) => &plan.waiter().ticket,
+        }
+    }
+}
+
+/// A clear's target, judged before it changes anything: a host's planned clear (a pre-check that
+/// [`replan`] takes again), `None` for main's tmux path, or main's refusal message.
+pub(super) async fn target(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    explicit_session_key: Option<&str>,
+) -> anyhow::Result<Option<NativeSelection>> {
+    let key = || async {
+        let resolved = super::resolve_session_key_for_clear(http, shared, channel_id, provider);
+        super::choose_clear_session_key(explicit_session_key, resolved.await)
+    };
+    judged(shared, provider, channel_id, explicit_session_key, key).await
+}
+
+async fn judged<F: std::future::Future<Output = Option<String>>>(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    explicit_session_key: Option<&str>,
+    key: impl FnOnce() -> F,
+) -> anyhow::Result<Option<NativeSelection>> {
+    use super::super::super::admin_host_guard::{HostAdapter, ResetTarget, clear_reset_target};
+    let judged = clear_reset_target(shared, provider, channel_id, explicit_session_key, key);
+    match judged.await {
+        ResetTarget::Refused(reason) => anyhow::bail!("세션을 초기화하지 못했어요: {reason}"),
+        ResetTarget::LegacyTmux => Ok(None),
+        ResetTarget::NativeClear(adapter) => match adapter {
+            #[cfg(unix)]
+            HostAdapter::Herdr(plan, key) => Ok(Some(NativeSelection::Herdr(plan, key))),
+        },
+    }
+}
+
+/// Under the guard, before the queue: a host clear refuses a running turn (an unreadable mailbox is
+/// busy) and plans again, so its baseline follows any clear that held the guard meanwhile.
+pub(super) async fn replan(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    explicit_session_key: Option<&str>,
+    hosted: Option<NativeSelection>,
+) -> anyhow::Result<Option<NativeSelection>> {
+    #[cfg(unix)]
+    if let Some(NativeSelection::Herdr(_, key)) = &hosted {
+        let probe = super::super::super::mailbox_probe::mailbox_has_active_turn_or_unreachable;
+        if probe(shared, channel_id).await {
+            let refusal = crate::services::session_host::HerdrClearRefusal::TurnInProgress;
+            anyhow::bail!("세션을 초기화하지 못했어요: {refusal}");
+        }
+        let key = Some(key.clone());
+        let key = || async { key };
+        return judged(shared, provider, channel_id, explicit_session_key, key).await;
+    }
+    #[cfg(not(unix))]
+    let _ = (shared, provider, channel_id, explicit_session_key);
+    Ok(hosted)
+}
+
+pub(super) struct TmuxSelection {
     effects: Arc<dyn NativeClearEffects>,
     waiter: CanonicalClearWaiter,
     cleared: ClearedHostSession,
@@ -126,7 +231,7 @@ pub(super) async fn finish_boundary(
 ) -> anyhow::Result<Option<ArmedClear>> {
     match (boundary, native) {
         (Some(tx), Some(selection)) => {
-            let ticket = serde_json::to_value(&selection.waiter.ticket)?;
+            let ticket = serde_json::to_value(selection.ticket())?;
             let finish = session_transcripts::finish_native_channel_clear_boundary_tx;
             let generation = finish(tx, channel_key, &ticket).await?;
             Ok(Some(ArmedClear(selection, generation)))
@@ -170,9 +275,10 @@ pub(super) async fn clear_process_reset_pending(
     super::persist_codex_goals_reset_marker(shared, channel_id, false).await;
 }
 
-/// Native clear applies only to an O-owned Claude tmux channel whose running execution is fully
-/// identified; any miss keeps the managed reset with no native column written.
+/// A host's planned clear as it is; otherwise native clear applies only to an O-owned Claude tmux
+/// channel whose running execution is fully identified, and any miss keeps the managed reset.
 pub(super) async fn select(
+    hosted: Option<NativeSelection>,
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -180,6 +286,9 @@ pub(super) async fn select(
     tmux: Option<&str>,
     explicit_session_key: Option<&str>,
 ) -> Option<NativeSelection> {
+    if hosted.is_some() {
+        return hosted;
+    }
     let effects = switched_on()?;
     let tmux = tmux?;
     let owned = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux;
@@ -202,12 +311,12 @@ pub(super) async fn select(
     let cleared = cleared.await?;
     let capture = crate::services::tui_prompt_dedupe::native_clear::capture_live_clear;
     let waiter = capture(channel_id.get(), tmux)?;
-    Some(NativeSelection {
+    Some(NativeSelection::Tmux(Box::new(TmuxSelection {
         effects,
         waiter,
         cleared,
         session_key,
-    })
+    })))
 }
 
 /// Runs the selected clear; the worker owns `guard` until the outcome and its completion mark are
@@ -221,14 +330,32 @@ pub(super) async fn complete(
     let Some(pool) = shared.pg_pool.clone() else {
         anyhow::bail!("postgres pool is required to complete a native clear");
     };
-    let host = LiveClear {
-        shared: shared.clone(),
-        pool,
-        channel_id,
-        generation,
-        selection,
+    let outcome = match selection {
+        NativeSelection::Tmux(selection) => {
+            let host = LiveClear {
+                shared: shared.clone(),
+                pool,
+                channel_id,
+                generation,
+                selection: *selection,
+            };
+            start_native_clear(host, ClearAdmission::Native, guard).await
+        }
+        #[cfg(unix)]
+        NativeSelection::Herdr(plan, session_key) => {
+            let session = HerdrSession {
+                effects: host_effects(),
+                shared: shared.clone(),
+                pool,
+                channel_id,
+                generation,
+                session_key,
+            };
+            let host = crate::services::session_host::HerdrClear::new(*plan, session);
+            start_native_clear(host, ClearAdmission::Native, guard).await
+        }
     };
-    match start_native_clear(host, ClearAdmission::Native, guard).await {
+    match outcome {
         Ok(ClearOutcome::Native(_) | ClearOutcome::Fallback) => Ok(()),
         outcome => anyhow::bail!(
             "세션을 초기화하지 못했어요: clear 결과를 확정하지 못해 다음 입력을 보류했어요 ({outcome:?})"
@@ -241,7 +368,41 @@ struct LiveClear {
     pool: sqlx::PgPool,
     channel_id: serenity::ChannelId,
     generation: NativeClearGeneration,
-    selection: NativeSelection,
+    selection: TmuxSelection,
+}
+
+/// A Herdr clear's channel session: the tmux clear's selector effects and settle.
+#[cfg(unix)]
+struct HerdrSession {
+    effects: Arc<dyn NativeClearEffects>,
+    shared: Arc<SharedData>,
+    pool: sqlx::PgPool,
+    channel_id: serenity::ChannelId,
+    generation: NativeClearGeneration,
+    session_key: String,
+}
+
+#[cfg(unix)]
+impl crate::services::session_host::ClearSession for HerdrSession {
+    fn clear_selector(&mut self) -> Effect<'_> {
+        self.effects.clear_selector(&self.session_key)
+    }
+    fn save(&mut self, commit: ClearCommit) -> Effect<'_> {
+        Box::pin(async move {
+            let (key, channel_id) = (&self.session_key, self.channel_id);
+            let saved = self.effects.save_selector(key, &commit.session, channel_id);
+            let generation = self.generation;
+            saved.await
+                && settle(
+                    &self.shared,
+                    &self.pool,
+                    channel_id,
+                    generation,
+                    Some(&commit),
+                )
+                .await
+        })
+    }
 }
 
 impl NativeClearHost for LiveClear {
@@ -350,7 +511,9 @@ pub(in crate::services::discord) async fn native_clear_admits(
     channel_id: serenity::ChannelId,
     state: &mut (Option<String>, bool, String),
 ) -> bool {
-    let Some(effects) = switched_on() else {
+    // A Herdr channel's clear is native whatever the switch says, so its boundary settles here too.
+    let herdr = || crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some();
+    let Some(effects) = switched_on().or_else(|| herdr().then(host_effects)) else {
         return true;
     };
     let Some(pool) = shared
@@ -440,3 +603,7 @@ pub(in crate::services::discord) async fn native_clear_admits(
 #[cfg(test)]
 #[path = "native_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_herdr_tests.rs"]
+mod herdr_tests;

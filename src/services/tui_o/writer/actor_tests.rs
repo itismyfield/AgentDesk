@@ -54,14 +54,14 @@ async fn polls(count: u32) {
     tokio::time::sleep(POLL_INTERVAL * count).await;
 }
 
-fn spawn(writer: Writer) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+/// A spawned actor; it returns why it stopped.
+type Actor = tokio::task::JoinHandle<Option<super::super::deliver::StopCause>>;
+
+fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
     spawn_as(writer, ShadowProvider::Claude)
 }
 
-fn spawn_as(
-    mut writer: Writer,
-    provider: ShadowProvider,
-) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+fn spawn_as(mut writer: Writer, provider: ShadowProvider) -> (watch::Sender<bool>, Actor) {
     let bindings = startup_log(&mut writer);
     spawn_with(writer, provider, bindings)
 }
@@ -70,7 +70,7 @@ fn spawn_with(
     writer: Writer,
     provider: ShadowProvider,
     bindings: Arc<impl BindingEvents>,
-) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+) -> (watch::Sender<bool>, Actor) {
     let (stop, stopped) = watch::channel(false);
     let resumed = watch::channel(false).0;
     let task = tokio::spawn(run_channel(writer, provider, bindings, stopped, resumed));
@@ -176,7 +176,7 @@ fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
     ChannelWriter::new(store, gate, port, lease, harness.alarms.clone())
 }
 
-async fn halt(stop: watch::Sender<bool>, task: tokio::task::JoinHandle<()>) {
+async fn halt(stop: watch::Sender<bool>, task: Actor) {
     stop.send(true).unwrap();
     task.await.unwrap();
 }

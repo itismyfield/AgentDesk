@@ -410,6 +410,30 @@ mod tests {
         assert_eq!(json["providers"][0]["remint_fence_cells"], 1);
     }
 
+    /// The snapshot with its reasons other than the process-global TUI-O writer alarms read just
+    /// before and after it; a `tui_o:` prefix alone does not make a reason such an alarm.
+    async fn snapshot_apart_from_process_alarms(
+        registry: &HealthRegistry,
+    ) -> (HealthStatus, serde_json::Value, Vec<String>) {
+        let before = crate::services::tui_o::alarm::health_reasons();
+        let snapshot = build_health_snapshot(registry).await;
+        let alarms: std::collections::BTreeSet<String> = before
+            .into_iter()
+            .chain(crate::services::tui_o::alarm::health_reasons())
+            .collect();
+        let status = snapshot.status();
+        let json = serde_json::to_value(snapshot).unwrap();
+        let own = json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reason| reason.as_str())
+            .filter(|reason| !alarms.contains(*reason))
+            .map(str::to_string)
+            .collect();
+        (status, json, own)
+    }
+
     #[tokio::test]
     async fn worker_profile_health_does_not_require_gateway_or_hide_recovery_failure() {
         let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
@@ -419,9 +443,16 @@ mod tests {
             .register_worker("codex".to_string(), shared.clone())
             .await;
         assert!(!registry.all_providers_are_standby().await);
-        let snapshot = build_health_snapshot(&registry).await;
-        assert_eq!(snapshot.status(), HealthStatus::Healthy);
-        let json = serde_json::to_value(snapshot).unwrap();
+        let (status, json, own) = snapshot_apart_from_process_alarms(&registry).await;
+        // Concurrent tests raise process-global writer alarms; only those may degrade this snapshot.
+        assert!(own.is_empty(), "{own:?}");
+        let reasons = json["degraded_reasons"].as_array().unwrap();
+        let expected = if reasons.is_empty() {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded
+        };
+        assert_eq!(status, expected, "{reasons:?}");
         assert_eq!(json["providers"][0]["runtime_role"], "worker");
         assert_eq!(json["providers"][0]["connected"], false);
         shared
@@ -436,6 +467,39 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("provider:codex:restart_pending"))
         );
+    }
+
+    /// A worker's own retired-channel residue is its reason, never a process-global alarm,
+    /// though both are named `tui_o:`.
+    #[tokio::test]
+    async fn worker_own_legacy_residue_is_not_taken_for_a_process_alarm() {
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register_worker("codex".to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(NEXT_STANDBY_TEST_CHANNEL.fetch_add(1, Ordering::Relaxed));
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                shared.as_ref(),
+                channel,
+                Arc::new(CancelToken::new()),
+                UserId::new(1),
+                MessageId::new(2),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        let _retired = crate::services::discord::health::legacy_supervision::RetiredForTest::new(
+            "codex",
+            channel.get(),
+        );
+
+        let (status, _, own) = snapshot_apart_from_process_alarms(&registry).await;
+
+        assert_eq!(own, [format!("tui_o:legacy_residue:{channel}")]);
+        assert_eq!(status, HealthStatus::Degraded);
     }
 
     #[tokio::test]

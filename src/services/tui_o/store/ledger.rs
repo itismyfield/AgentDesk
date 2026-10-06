@@ -268,8 +268,7 @@ pub(super) fn append(
     at: DateTime<Utc>,
     entry: &LedgerEntry,
 ) -> Result<(), StoreError> {
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    append_to(&mut file, at, entry)
+    Ok(super::durable::append_synced(path, &line(at, entry)?)?)
 }
 
 pub(super) fn append_to(
@@ -277,11 +276,15 @@ pub(super) fn append_to(
     at: DateTime<Utc>,
     entry: &LedgerEntry,
 ) -> Result<(), StoreError> {
+    file.write_all(&line(at, entry)?)?;
+    Ok(file.sync_data()?)
+}
+
+fn line(at: DateTime<Utc>, entry: &LedgerEntry) -> Result<Vec<u8>, StoreError> {
     let entry = entry.clone();
     let mut line = serde_json::to_vec(&LedgerLine { at, entry })?;
     line.push(b'\n');
-    file.write_all(&line)?;
-    Ok(file.sync_data()?)
+    Ok(line)
 }
 
 /// The `from` of a durable `BoundaryResolved` for `source`, read without recovering the ledger.
@@ -308,40 +311,110 @@ pub(super) fn resolution(file: &mut File, source: &SourceId) -> Result<Option<u6
     Ok(None)
 }
 
+/// A `Prepared` whose append returned an error before its POST was created, so nothing posted it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsent {
+    serial: u64,
+    entry: LedgerEntry,
+}
+
+impl Unsent {
+    /// Only a `Prepared` can be unsent.
+    pub(crate) fn new(entry: LedgerEntry) -> Option<Self> {
+        match entry {
+            LedgerEntry::Prepared { serial, .. } => Some(Self { serial, entry }),
+            _ => None,
+        }
+    }
+
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+}
+
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
 pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     recover_with_tail(path, initial_anchor, || {})
 }
 
+/// Recovers as `recover` does, and also cuts `unsent` when it is the whole last line and the
+/// next piece to prepare; returns whether it was cut.
+pub(super) fn recover_withdrawing(
+    path: &Path,
+    initial_anchor: u64,
+    unsent: Option<&Unsent>,
+) -> Result<(LedgerState, bool), StoreError> {
+    replay(path, initial_anchor, unsent, || {})
+}
+
+/// The last complete line is the one `unsent` names and nothing it follows is still open.
+fn withdrawable(state: &LedgerState, entry: &LedgerEntry, unsent: Option<&Unsent>) -> bool {
+    let next =
+        matches!(entry, LedgerEntry::Prepared { serial, .. } if *serial == state.next_serial);
+    unsent.is_some_and(|unsent| unsent.entry == *entry) && next && state.open_serial.is_none()
+}
+
 fn recover_with_tail(
     path: &Path,
     initial_anchor: u64,
-    mut before_truncate: impl FnMut(),
+    before_truncate: impl FnMut(),
 ) -> Result<LedgerState, StoreError> {
+    replay(path, initial_anchor, None, before_truncate).map(|(state, _)| state)
+}
+
+fn replay(
+    path: &Path,
+    initial_anchor: u64,
+    unsent: Option<&Unsent>,
+    mut before_truncate: impl FnMut(),
+) -> Result<(LedgerState, bool), StoreError> {
     let mut state = LedgerState {
         anchor: initial_anchor,
         ..LedgerState::default()
     };
     let file = OpenOptions::new().read(true).write(true).open(path)?;
-    // Refuse recovery while an operator is writing; replay and truncation share this handle.
+    // Refuse recovery while an operator is writing; replay, the withdraw check and every cut share
+    // this handle.
     file.try_lock().map_err(io::Error::from)?;
     let mut reader = BufReader::new(file);
     let (mut offset, mut line) = (0u64, Vec::new());
+    // The last complete line waits here until the next read shows whether it ends the file.
+    let mut held: Option<(u64, LedgerLine)> = None;
     loop {
         line.clear();
         let read = reader.read_until(b'\n', &mut line)?;
         if read == 0 {
-            return Ok(state);
+            let Some((start, last)) = held else {
+                return Ok((state, false));
+            };
+            if withdrawable(&state, &last.entry, unsent) {
+                #[cfg(test)]
+                super::durable::fault::strike(path, super::durable::fault::Step::Cut)?;
+                reader.get_ref().set_len(start)?;
+                #[cfg(test)]
+                super::durable::fault::strike(path, super::durable::fault::Step::CutSync)?;
+                reader.get_ref().sync_all()?;
+                #[cfg(test)]
+                super::durable::fault::note_withdrawn(path);
+                return Ok((state, true));
+            }
+            state.apply(last.at, last.entry);
+            return Ok((state, false));
         }
         if line.last() != Some(&b'\n') {
+            if let Some((_, last)) = held {
+                state.apply(last.at, last.entry);
+            }
             before_truncate();
             reader.get_ref().set_len(offset)?;
             reader.get_ref().sync_all()?;
-            return Ok(state);
+            return Ok((state, false));
         }
         let parsed: LedgerLine = serde_json::from_slice(&line)
             .map_err(|error| damage(format!("ledger byte {offset}: {error}")))?;
-        state.apply(parsed.at, parsed.entry);
+        if let Some((_, last)) = held.replace((offset, parsed)) {
+            state.apply(last.at, last.entry);
+        }
         offset += read as u64;
     }
 }
@@ -428,6 +501,105 @@ mod tests {
         for entries in breaks {
             let state = replay(entries.clone());
             assert!(state.violation().is_some(), "no violation for {entries:?}");
+        }
+    }
+
+    /// A ledger file holding `entries`, and its length then.
+    fn written(dir: &Path, name: &str, entries: &[LedgerEntry]) -> (std::path::PathBuf, u64) {
+        let path = dir.join(name);
+        create_empty(&path).unwrap();
+        for entry in entries {
+            append(&path, Utc::now(), entry).unwrap();
+        }
+        let len = std::fs::metadata(&path).unwrap().len();
+        (path, len)
+    }
+
+    #[test]
+    fn recovery_withdraws_only_a_whole_last_prepared_its_evidence_names() {
+        use LedgerEntry::{Excluded, Posted};
+        let dir = tempfile::tempdir().unwrap();
+        let len = |path: &Path| std::fs::metadata(path).unwrap().len();
+        let unsent = |entry: &LedgerEntry| Unsent::new(entry.clone()).unwrap();
+        let (posted, next) = (
+            Posted {
+                serial: 0,
+                msg_id: 20,
+            },
+            prepared(1, 20),
+        );
+        let settled = [prepared(0, 10), posted.clone()];
+
+        let (path, before) = written(dir.path(), "named", &settled);
+        append(&path, Utc::now(), &next).unwrap();
+        let (state, withdrew) = recover_withdrawing(&path, 10, Some(&unsent(&next))).unwrap();
+        assert!(withdrew, "the named last Prepared is taken back");
+        assert_eq!(len(&path), before, "only its own line is cut");
+        assert_eq!(state, recover(&path, 10).unwrap());
+        assert_eq!((state.next_serial(), state.unresolved()), (1, None));
+
+        let mut other_epoch = next.clone();
+        if let LedgerEntry::Prepared { epoch, .. } = &mut other_epoch {
+            *epoch += 1;
+        }
+        let excluded = Excluded {
+            unit_key: match &next {
+                LedgerEntry::Prepared { unit_key, .. } => unit_key.clone(),
+                _ => unreachable!(),
+            },
+            reason: "later".into(),
+        };
+        let (open, open_next) = (prepared(0, 10), prepared(1, 10));
+        let kept: [(&str, Vec<LedgerEntry>, &[u8], LedgerEntry); 6] = [
+            ("another epoch", vec![next.clone()], b"", other_epoch),
+            (
+                "a later line",
+                vec![next.clone(), excluded],
+                b"",
+                next.clone(),
+            ),
+            (
+                "an unfinished tail",
+                vec![next.clone()],
+                br#"{"at""#,
+                next.clone(),
+            ),
+            (
+                "another piece named",
+                vec![next.clone()],
+                b"",
+                prepared(9, 20),
+            ),
+            (
+                "a serial behind",
+                vec![prepared(0, 10)],
+                b"",
+                prepared(0, 10),
+            ),
+            (
+                "an open piece before",
+                vec![open_next.clone()],
+                b"",
+                open_next,
+            ),
+        ];
+        for (case, last, tail, evidence) in kept {
+            let base = match case {
+                "an open piece before" => vec![open.clone()],
+                _ => settled.to_vec(),
+            };
+            let (path, _) = written(dir.path(), case, &[base, last].concat());
+            super::super::durable::append_synced(&path, tail).unwrap();
+            let complete = len(&path) - tail.len() as u64;
+            let (state, withdrew) =
+                recover_withdrawing(&path, 10, Some(&unsent(&evidence))).unwrap();
+            assert!(!withdrew, "{case}: nothing is taken back");
+            assert_eq!(
+                len(&path),
+                complete,
+                "{case}: only an unfinished tail is cut"
+            );
+            assert_eq!(state, recover(&path, 10).unwrap(), "{case}");
         }
     }
 }

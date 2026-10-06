@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -12,7 +11,7 @@ use super::handover::{
     Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, handback_after_enqueue,
     handback_plan, move_disposition,
 };
-use super::ledger::Ledger;
+use super::ledger::{Ledger, LedgerLease};
 use super::rows::{Entry, Owner, Row, Rows};
 
 pub struct Input {
@@ -61,8 +60,6 @@ enum Phase {
 }
 
 pub struct Move {
-    root: PathBuf,
-    channel: u64,
     inputs: Vec<Input>,
     first: u64,
     phase: Phase,
@@ -79,23 +76,17 @@ const DELETIONS: [DeletePhase; 4] = [
 ];
 
 impl Move {
-    pub fn prepare(root: &Path, channel: u64, host: &mut impl Host) -> io::Result<Self> {
-        let ledger = Ledger::open(root, channel)?;
+    pub fn prepare(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Self> {
+        let ledger = lease.get()?;
         let rows = ledger.rows()?;
-        let inputs = match host.collect(&ledger) {
+        let inputs = match host.collect(ledger) {
             Ok(inputs) => inputs,
             Err(error) => {
                 if rows.ledger_owned() || rows.boundary_since(1) {
                     return Err(error);
                 }
                 host.notice(None, "tui_o:turn_mode_refused")?;
-                return Ok(Self::new(
-                    root,
-                    channel,
-                    Vec::new(),
-                    0,
-                    Phase::Finished(Outcome::Legacy),
-                ));
+                return Ok(Self::new(Vec::new(), 0, Phase::Finished(Outcome::Legacy)));
             }
         };
         let mut ids = BTreeSet::new();
@@ -104,6 +95,16 @@ impl Move {
             .any(|input| input.key == 0 || !ids.insert(input.key))
         {
             return Err(io::Error::other("move population has invalid primary ids"));
+        }
+        // An unbound key's Legacy copy is its only content, so no step may delete it.
+        let unbound: Vec<u64> = (inputs.iter().map(|i| i.key))
+            .filter(|key| rows.unbound().contains(key))
+            .collect();
+        if !unbound.is_empty() {
+            for key in unbound {
+                host.notice(Some(key), "move_unbound")?;
+            }
+            return Err(io::Error::other("move population names unbound keys"));
         }
         let claimed = rows.ledger_owned()
             || inputs.iter().any(|i| rows.owner(i.key) != Owner::Legacy)
@@ -157,8 +158,6 @@ impl Move {
             .checked_add(1)
             .ok_or_else(|| io::Error::other("sequence exhausted"))?;
         Ok(Self::new(
-            root,
-            channel,
             inputs,
             first,
             if claimed {
@@ -169,10 +168,8 @@ impl Move {
         ))
     }
 
-    fn new(root: &Path, channel: u64, inputs: Vec<Input>, first: u64, phase: Phase) -> Self {
+    fn new(inputs: Vec<Input>, first: u64, phase: Phase) -> Self {
         Self {
-            root: root.to_owned(),
-            channel,
             inputs,
             first,
             phase,
@@ -180,6 +177,11 @@ impl Move {
             refused_stage: false,
             notice_sent: false,
         }
+    }
+
+    /// True when this move would stage a new population rather than finish a committed one.
+    pub fn is_fresh(&self) -> bool {
+        matches!(self.phase, Phase::Stage)
     }
 
     fn committed(&self, rows: &Rows) -> bool {
@@ -190,10 +192,12 @@ impl Move {
                 .all(|i| rows.row(i.key).is_some_and(|r| r.since_seq >= self.first))
     }
 
-    pub fn advance(&mut self, host: &mut impl Host) -> Outcome {
-        match self.try_advance(host) {
+    pub fn advance(&mut self, lease: &mut LedgerLease, host: &mut impl Host) -> Outcome {
+        match self.try_advance(lease, host) {
             Ok(outcome) => outcome,
             Err(_) => {
+                // Judge the next step only from a fresh read of the durable ledger.
+                lease.needs_reopen = true;
                 if !self.notice_sent && host.notice(None, "tui_o:turn_transition_held").is_ok() {
                     self.notice_sent = true;
                 }
@@ -202,12 +206,15 @@ impl Move {
         }
     }
 
-    fn try_advance(&mut self, host: &mut impl Host) -> io::Result<Outcome> {
+    fn try_advance(
+        &mut self,
+        lease: &mut LedgerLease,
+        host: &mut impl Host,
+    ) -> io::Result<Outcome> {
         if let Phase::Finished(outcome) = self.phase {
             return Ok(outcome);
         }
-        // Every retry reopens, including after the second staging error.
-        let mut ledger = Ledger::open(&self.root, self.channel)?;
+        let ledger = lease.get()?;
         let rows = ledger.rows()?;
         if self.committed(&rows) && matches!(self.phase, Phase::Stage | Phase::Commit) {
             self.phase = Phase::Delete(0);
@@ -234,7 +241,7 @@ impl Move {
                     state = super::rows::RowState::Held(super::rows::HeldReason::Ambiguous);
                 }
                 if !state.is_terminal() {
-                    host.pin_input(&ledger, input)?;
+                    host.pin_input(ledger, input)?;
                 }
                 if matches!(
                     state,
@@ -301,9 +308,14 @@ impl Move {
     // Bounded work per boot; exhausted retries stay held for the next boot.
     // Test-only: advance does blocking IO, so production retries it from a blocking worker.
     #[cfg(test)]
-    pub async fn retry(&mut self, host: &mut impl Host, attempts: u32) -> Outcome {
+    pub async fn retry(
+        &mut self,
+        lease: &mut LedgerLease,
+        host: &mut impl Host,
+        attempts: u32,
+    ) -> Outcome {
         for attempt in 0..attempts.min(8) {
-            let outcome = self.advance(host);
+            let outcome = self.advance(lease, host);
             if outcome != Outcome::Held {
                 return outcome;
             }
@@ -322,8 +334,14 @@ pub fn backoff(attempt: u32) -> Duration {
     )
 }
 
-pub fn handback(root: &Path, channel: u64, host: &mut impl Host) -> io::Result<Outcome> {
-    let mut ledger = Ledger::open(root, channel)?;
+pub fn handback(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Outcome> {
+    let result = return_rows(lease, host);
+    lease.needs_reopen |= result.is_err();
+    result
+}
+
+fn return_rows(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Outcome> {
+    let ledger = lease.get()?;
     let rows = ledger.rows()?;
     if !rows.unbound().is_empty() {
         // No row backs an unbound key, so only a notice naming each one can explain the hold.

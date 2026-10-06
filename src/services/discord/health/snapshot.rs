@@ -1071,7 +1071,7 @@ pub(super) async fn build_health_snapshot_with_options(
         super::transcript_turn::project_retired(&providers, include_mailbox_details).await;
     for reason in crate::services::tui_o::alarm::health_reasons()
         .into_iter()
-        .chain(super::super::input_runtime::fence::health_reasons())
+        .chain(super::super::input_runtime::health_reasons())
         .chain(transcript_reasons)
     {
         status = status.worsen(HealthStatus::Degraded);

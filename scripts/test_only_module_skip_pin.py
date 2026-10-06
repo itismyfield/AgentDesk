@@ -45,6 +45,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_transition_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
         "src/services/discord/input_runtime/effects_tests.rs",
+        "src/services/discord/input_runtime/supervisor_tests.rs",
         "src/services/discord/input_runtime/fence/modes_tests.rs",
         "src/services/turn_orchestrator/input_fence_tests.rs",
         "src/services/tui_input/transition_fixture_tests.rs",
@@ -167,6 +168,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs",
         "src/services/automation_candidate_materializer/allowed_path_tests.rs",
         "src/services/automation_candidate_materializer/iteration_result_tests.rs",
+        "src/services/claude_tui/busy_inject_tests.rs",
         "src/services/claude_tui/hook_output_guard_tests.rs",
         "src/services/claude_tui/hook_payload_fixture_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
@@ -376,6 +378,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/deferred_tests.rs",
         "src/services/tui_o/writer/stall_tests.rs",
         "src/services/tui_o/writer/reclaim_tests.rs",
+        "src/services/tui_o/writer/resume_tests.rs",
         "src/services/tui_o/cutover/channel_gate/tests.rs",
         "src/services/tui_prompt_dedupe/prompt_identity_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
@@ -388,6 +391,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
+        "src/services/session_host/herdr_clear_adapter_tests.rs",
+        "src/services/tui_o/writer/rotation_unsettled_tests.rs",
+        "src/services/discord/commands/control/native_herdr_tests.rs",
     }
 )
 
