@@ -3269,8 +3269,9 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
 // behavioral coverage, so `docs/relay-state-contract.md:41` — "Never use
 // `>= N`, another turn's ACK, timeout-as-success, blind skip, or blind
 // resend" — rested on nothing executable for the timeout case. Driving all
-// four against ONE anchor and COUNTING the acks makes a promoted non-ACK
-// (two `Ok`) or a lost ACK (zero `Ok`) RED on the count, not on one message.
+// four against ONE anchor makes a changed production disposition RED on its
+// per-arm assertion. The expected-table invariant separately guarantees that
+// the table itself names exactly one acknowledgement before any arm runs.
 #[cfg(unix)]
 #[test]
 fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
@@ -3325,8 +3326,7 @@ fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
             );
 
             // The ACK runs LAST: every non-ACK is checked against a live anchor.
-            let mut acknowledgements = 0usize;
-            for (label, completion, expected) in [
+            let dispositions = [
                 (
                     "Err(Elapsed)",
                     timed_out,
@@ -3350,7 +3350,17 @@ fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
                     Ok(Ok(BridgeCompletionSignal::Finalized)),
                     Ok(()),
                 ),
-            ] {
+            ];
+            assert_eq!(
+                dispositions
+                    .iter()
+                    .filter(|(_, _, expected)| expected.is_ok())
+                    .count(),
+                1,
+                "expected table invariant: exactly one disposition must be Ok; production \
+                 detection is handled by the per-arm assertion"
+            );
+            for (label, completion, expected) in dispositions {
                 let is_ack = expected.is_ok();
                 let result = super::claude_idle_bridge::finish_idle_bridge_completion(
                     completion,
@@ -3363,21 +3373,12 @@ fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
                 )
                 .await;
                 assert_eq!(result, expected, "{label}: wrong completion disposition");
-                if result.is_ok() {
-                    acknowledgements += 1;
-                }
                 assert_eq!(
                     prompt_anchor_for_response(provider.as_str(), tmux, channel.get()),
                     if is_ack { None } else { anchor },
                     "{label}: only the acknowledgement may clear the prompt anchor"
                 );
             }
-            assert_eq!(
-                acknowledgements, 1,
-                "EXACTLY ONE disposition may acknowledge delivery: two means a \
-                 non-ACK was promoted (timeout-as-success, forbidden by \
-                 relay-state-contract.md:41); zero means the ACK was lost"
-            );
             assert!(
                 gateway.deleted.lock().unwrap().is_empty(),
                 "no disposition may delete a placeholder this adapter never created"

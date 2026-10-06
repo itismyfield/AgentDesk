@@ -742,6 +742,7 @@ src/
 │   │   │   │   ├── input_clear.rs
 │   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── native.rs
+│   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
@@ -952,7 +953,10 @@ src/
 │   │   │   ├── effects_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
-│   │   │   └── mod.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── reconcile.rs
+│   │   │   ├── supervisor.rs
+│   │   │   └── supervisor_tests.rs
 │   │   ├── live_bridge/
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
@@ -2114,6 +2118,8 @@ src/
 │   │   │   ├── transport_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── consumer_guard.rs
+│   │   ├── herdr_clear_adapter.rs
+│   │   ├── herdr_clear_adapter_tests.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs
@@ -2236,6 +2242,7 @@ src/
 │   │   │   ├── retire_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
+│   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs

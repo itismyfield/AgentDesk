@@ -1,6 +1,7 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod supported {
     use super::super::*;
+    use crate::services::tui_input::ledger::LedgerLease;
     use crate::services::tui_input::rows::{Owner, RowState};
     use crate::services::tui_input::transition::{Move, Outcome, handback};
 
@@ -217,8 +218,9 @@ mod supported {
             &item(8),
         );
         let mut host = files(root.path());
-        let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
-        assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
         let mut ledger = Ledger::open(root.path(), 9).unwrap();
         assert_eq!(
             ledger.rows().unwrap().row(2).unwrap().input["source_text_segments"],
@@ -240,7 +242,7 @@ mod supported {
         );
         host.effects.legacy = vec![99];
         assert_eq!(
-            handback(root.path(), 9, &mut host).unwrap(),
+            handback(&mut LedgerLease::new(root.path(), 9), &mut host).unwrap(),
             Outcome::Legacy
         );
         assert_eq!(host.effects.legacy, vec![99, 8, 2]);
@@ -271,8 +273,9 @@ mod supported {
                 .is_empty()
         );
         drop(ledger);
-        let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
-        assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
         fs::remove_file(upload).unwrap();
         let ledger = Ledger::open(root.path(), 9).unwrap();
         let rows = ledger.rows().unwrap();
@@ -310,15 +313,17 @@ mod supported {
         marker["source_text_segments"] = json!([{"message_id":8,"text":"input"}]);
         save(&marker_path, &marker);
         let mut host = files(root.path());
-        let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
         let mut successor = row.clone();
         successor.user_msg_id = 10;
         save(&path, &serde_json::to_value(successor).unwrap());
-        assert_eq!(movement.advance(&mut host), Outcome::Held);
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Held);
         assert!(!marker_path.exists());
         save(&path, &serde_json::to_value(&row).unwrap());
-        let mut resumed = Move::prepare(root.path(), 9, &mut host).unwrap();
-        assert_eq!(resumed.advance(&mut host), Outcome::Ledger);
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut resumed = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(resumed.advance(&mut lease, &mut host), Outcome::Ledger);
         assert_eq!(
             Ledger::open(root.path(), 9)
                 .unwrap()
@@ -350,8 +355,9 @@ mod supported {
             let original = fs::read(&path).unwrap();
             let mut host = files(root.path());
             host.effects.outbox = outbox;
-            let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
-            assert_eq!(movement.advance(&mut host), Outcome::Legacy);
+            let mut lease = LedgerLease::new(root.path(), 9);
+            let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+            assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Legacy);
             assert_eq!(fs::read(&path).unwrap(), original);
             assert_eq!(host.effects.actor_started, 0);
         }
@@ -376,9 +382,10 @@ mod supported {
             let mut host = files(root.path());
             host.effects.dead = true;
             host.effects.draft = draft;
-            let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+            let mut lease = LedgerLease::new(root.path(), 9);
+            let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
             assert_eq!(
-                movement.advance(&mut host),
+                movement.advance(&mut lease, &mut host),
                 if draft {
                     Outcome::Ledger
                 } else {
@@ -455,8 +462,9 @@ mod supported {
                     files: adapter,
                     stop,
                 };
-                let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
-                assert_eq!(movement.advance(&mut host), Outcome::Held);
+                let mut lease = LedgerLease::new(root.path(), 9);
+                let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+                assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Held);
                 assert!(!marker.exists());
                 assert_eq!(queue.exists(), stop == DeletePhase::Queue);
                 assert!(placeholder.exists() && busy.exists());
@@ -468,9 +476,13 @@ mod supported {
                 }
                 drop(movement);
                 let mut resumed_host = files(root.path());
-                let mut resumed = Move::prepare(root.path(), 9, &mut resumed_host)
+                let mut lease = LedgerLease::new(root.path(), 9);
+                let mut resumed = Move::prepare(&mut lease, &mut resumed_host)
                     .expect("terminal commit must cover surviving accessories on restart");
-                assert_eq!(resumed.advance(&mut resumed_host), Outcome::Ledger);
+                assert_eq!(
+                    resumed.advance(&mut lease, &mut resumed_host),
+                    Outcome::Ledger
+                );
                 assert!(!queue.exists() && !placeholder.exists() && !busy.exists());
                 assert_eq!(resumed_host.effects.actor_started, 1);
             }
@@ -505,9 +517,10 @@ mod supported {
             let mut host = files(root.path());
             host.effects.accepted = accepted;
             host.effects.turn_open = turn_open;
-            let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
+            let mut lease = LedgerLease::new(root.path(), 9);
+            let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
             assert_eq!(
-                movement.advance(&mut host),
+                movement.advance(&mut lease, &mut host),
                 if terminal {
                     Outcome::Ledger
                 } else {
@@ -542,25 +555,26 @@ mod supported {
         save(&path, &serde_json::to_value(row).unwrap());
         let root_path = root.path().to_owned();
         let mut host = files(&root_path);
-        let mut movement = Move::prepare(&root_path, 9, &mut host).unwrap();
+        let mut lease = LedgerLease::new(&root_path, 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
         host.effects.population_root = None; // A different owner holds the sidecar in this contention fixture.
         let guard = inflight::lock_inflight_state_path(&path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let first = movement.advance(&mut host);
-            tx.send((movement, host, first)).unwrap();
+            let first = movement.advance(&mut lease, &mut host);
+            tx.send((movement, lease, host, first)).unwrap();
         });
         let attempted = rx.recv_timeout(std::time::Duration::from_secs(2));
         let stayed = path.exists();
         drop(guard);
         worker.join().unwrap();
-        let (mut movement, mut host, first) =
+        let (mut movement, mut lease, mut host, first) =
             attempted.expect("row lock contention must return Held without waiting for the owner");
         assert_eq!(first, Outcome::Held);
         assert!(stayed, "contended row must not be deleted");
         assert!(host.effects.notices > 0);
         host.effects.population_root = Some(root.path().to_owned());
-        assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
         assert!(!path.exists());
     }
 
@@ -614,8 +628,9 @@ mod supported {
         );
         let original = fs::read(&clear).unwrap();
         let mut host = files(root.path());
-        let mut movement = Move::prepare(root.path(), 9, &mut host).unwrap();
-        assert_eq!(movement.advance(&mut host), Outcome::Ledger);
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
         assert_eq!(fs::read(&clear).unwrap(), original);
         let rows = Ledger::open(root.path(), 9).unwrap().rows().unwrap();
         assert_eq!(rows.owner(8), Owner::Ledger);

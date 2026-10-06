@@ -34,7 +34,7 @@ use crate::services::session_host::{
 use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 use crate::services::tui_prompt_dedupe::binding_context::{PreparedIncarnation, execution_context};
 use crate::services::tui_prompt_dedupe::binding_events::{
-    BindingEvent, BindingTarget, binding_events_since,
+    BindingCause, BindingEvent, BindingTarget, binding_events_since, claude_history,
 };
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
@@ -128,7 +128,8 @@ pub(crate) fn execute(
     prompt_and_read(&turn, &runtime, attached, sender)
 }
 
-/// A Bound execution keeps the source attached when it launched; a restart reattach is not here.
+/// A Bound execution keeps the source attached when it launched, or takes the session its own
+/// clear awaits; a restart reattach is not here.
 fn bound_source(
     turn: &HerdrTurn<'_>,
     ports: &dyn HerdrTurnPorts,
@@ -137,6 +138,9 @@ fn bound_source(
     let target = gate(record)?;
     ports.confirm_bound(&turn.owner, record, &target)?;
     let logical = &turn.owner.logical_key;
+    if let Some(awaited) = awaited_clear(turn.channel_id, logical, &record.execution_nonce) {
+        return cleared_source(turn, record, target, awaited);
+    }
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
         .ok_or_else(|| format!("herdr turn: {logical} has no attached source"))?;
     let session_id = binding
@@ -146,6 +150,85 @@ fn bound_source(
         nonce: record.execution_nonce.clone(),
         session_id,
         transcript: PathBuf::from(binding.output_path),
+        target,
+        bound: true,
+    })
+}
+
+/// The clear Pending a Bound execution's next prompt goes to.
+pub(crate) struct AwaitedClear {
+    pub session_id: String,
+    /// The transcript path the Pending's hook named.
+    pub transcript: Option<String>,
+}
+
+/// Execution `nonce`'s latest own SessionStart(clear) Pending, when every record after the source
+/// it logged last is such a Pending taken from that source and the canonical fold awaits it.
+pub(crate) fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<AwaitedClear> {
+    let events = binding_events_since(channel, 0).unwrap_or_default();
+    let moved = |event: &BindingEvent| !matches!(event.new, BindingTarget::Rejected { .. });
+    let pane = events
+        .into_iter()
+        .filter(|event| event.tmux_session == logical);
+    let records: Vec<BindingEvent> = pane.filter(moved).collect();
+    let own = |event: &BindingEvent| event.execution_nonce.as_deref() == Some(nonce);
+    let clear = |event: &&BindingEvent| {
+        own(event)
+            && matches!(event.new, BindingTarget::Pending { .. })
+            && event.cause == BindingCause::Clear
+            && event.evidence.hook_event.as_deref() == Some("session_start")
+    };
+    let waiting = records.iter().rev().take_while(clear).count();
+    let (earlier, chain) = records.split_at(records.len() - waiting);
+    let from = earlier.last().filter(|event| own(event));
+    let from = from.and_then(|event| match &event.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => Some(source),
+        _ => None,
+    })?;
+    if chain
+        .iter()
+        .any(|pending| pending.old.as_ref() != Some(from))
+    {
+        return None;
+    }
+    let BindingTarget::Pending {
+        payload_session_id,
+        payload_transcript_path,
+    } = &chain.last()?.new
+    else {
+        return None;
+    };
+    // The helper commits a clear only on this same fold's awaited session.
+    let (_, history) = claude_history(channel, logical, Some(nonce)).ok()?;
+    let awaited = history.awaiting.filter(|_| history.complete)?;
+    (awaited.session == *payload_session_id).then(|| AwaitedClear {
+        session_id: payload_session_id.clone(),
+        transcript: payload_transcript_path.clone(),
+    })
+}
+
+/// The cleared session of a Bound execution: nothing is attached until its first prompt writes
+/// the transcript, whose registration then resolves the Pending.
+fn cleared_source(
+    turn: &HerdrTurn<'_>,
+    record: &HostedExecution,
+    target: HerdrTarget,
+    awaited: AwaitedClear,
+) -> Result<Attached, String> {
+    let session_id = awaited.session_id;
+    let transcript = claude_transcript_path(Path::new(turn.working_dir), &session_id, None)?;
+    if awaited.transcript.as_deref().map(Path::new) != Some(transcript.as_path()) {
+        return Err(format!(
+            "herdr turn: the clear Pending of {session_id} names another transcript than {}",
+            transcript.display()
+        ));
+    }
+    let logical = &turn.owner.logical_key;
+    crate::services::tui_prompt_dedupe::register_tmux_channel(logical, turn.channel_id);
+    Ok(Attached {
+        nonce: record.execution_nonce.clone(),
+        session_id,
+        transcript,
         target,
         bound: true,
     })
@@ -273,15 +356,23 @@ pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     Ok(holds)
 }
 
-/// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
-fn not_held(nonce: &str) -> Result<(), String> {
+/// Whether an earlier prompt may sit in execution `nonce`'s composer; `Err` when unreadable.
+pub(crate) fn input_held(nonce: &str) -> Result<bool, String> {
     match std::fs::symlink_metadata(hold_path(nonce)?) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(format!(
-            "herdr turn: input held after an unclear prompt to {nonce}"
-        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(_) => Ok(true),
         Err(error) => Err(format!(
             "herdr turn: input hold of {nonce} unreadable: {error}"
+        )),
+    }
+}
+
+/// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
+fn not_held(nonce: &str) -> Result<(), String> {
+    match input_held(nonce)? {
+        false => Ok(()),
+        true => Err(format!(
+            "herdr turn: input held after an unclear prompt to {nonce}"
         )),
     }
 }

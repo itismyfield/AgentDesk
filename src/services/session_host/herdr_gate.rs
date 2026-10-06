@@ -231,6 +231,22 @@ impl HerdrTarget {
         self.send_text(&format!("{PASTE_START}{text}{PASTE_END}"))
     }
 
+    /// One line and Enter in a single input, so the line never lands without its Enter; a line
+    /// holding a control character is refused unsent.
+    pub(crate) fn send_line(&self, text: &str) -> Result<HostMutation, HostError> {
+        if text.is_empty() || text.chars().any(char::is_control) {
+            self.discard_pin();
+            return Ok(refused("line_not_single"));
+        }
+        let (pane_id, text) = (self.0.pane.clone(), text.to_string());
+        let keys = vec![herdr_key(HostKey::Enter).to_string()];
+        self.send_pinned(HerdrRequest::PaneSendInput {
+            pane_id,
+            text,
+            keys,
+        })
+    }
+
     pub(crate) fn send_keys(&self, keys: &[HostKey]) -> Result<HostMutation, HostError> {
         let pane_id = self.0.pane.clone();
         let keys = keys.iter().map(|key| herdr_key(*key).to_string()).collect();

@@ -422,12 +422,8 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Refused before the clear changes anything: its session is not a legacy tmux one.
-    let refusal = super::super::admin_host_guard::managed_reset_refusal;
-    let target = explicit_session_key;
-    if let Some(reason) = refusal(shared, provider, channel_id, true, false, target).await {
-        anyhow::bail!("세션을 초기화하지 못했어요: {reason}");
-    }
+    // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
+    let hosted = native::target(http, shared, provider, channel_id, explicit_session_key).await?;
     let boundary = match shared.pg_pool.as_ref() {
         Some(pool) => Some(session_transcripts::begin_channel_clear_boundary_tx(pool).await?),
         None => None,
@@ -438,6 +434,7 @@ async fn clear_channel_session_state_fenced(
         .acquire_session_transition(channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
+    let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -468,6 +465,7 @@ async fn clear_channel_session_state_fenced(
     let channel_key = channel_id.get().to_string();
     let tmux = tmux_name.as_deref();
     let native = native::select(
+        hosted,
         http,
         shared,
         provider,
