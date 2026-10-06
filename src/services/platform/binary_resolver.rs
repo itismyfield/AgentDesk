@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 use crate::runtime_layout::expand_user_path;
 
 mod grok;
-mod resolution;
+pub(crate) mod resolution;
 mod runtime_path;
 use resolution::finalize_resolution;
-pub(crate) use runtime_path::prepared_runtime_path;
 use runtime_path::runtime_path_entries;
+pub(crate) use runtime_path::{command_with_path, prepared_runtime_path, runtime_command};
 #[cfg(any(windows, test))]
 mod windows_codex;
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);

@@ -21,6 +21,21 @@ pub(super) fn finalize_resolution(
     } else {
         resolved_path
     };
+    // Launches pair this program with current_dir, so a relative PATH hit is anchored to our cwd.
+    let resolved_path = if resolved_path.is_relative() {
+        match std::path::absolute(&resolved_path) {
+            Ok(path) => path,
+            Err(error) => {
+                return unresolved_provider_binary_with_error(
+                    requested_binary,
+                    attempts,
+                    format!("cwd_unavailable:{error}"),
+                );
+            }
+        }
+    } else {
+        resolved_path
+    };
     let canonical_path = std::fs::canonicalize(&resolved_path).ok();
     BinaryResolution {
         requested_binary,
@@ -33,4 +48,20 @@ pub(super) fn finalize_resolution(
         failure_kind: None,
         exec_path: build_exec_path(&resolved_path, canonical_path.as_deref()),
     }
+}
+
+/// Finalize a provider-specific fallback hit exactly like a PATH or override hit.
+pub(crate) fn finalize_fallback_resolution(
+    unresolved: BinaryResolution,
+    path: PathBuf,
+    source: &str,
+) -> BinaryResolution {
+    let mut attempts = unresolved.attempts;
+    attempts.push(format!("{source}=found:{}", path.display()));
+    finalize_resolution(
+        unresolved.requested_binary,
+        path,
+        source.to_string(),
+        attempts,
+    )
 }

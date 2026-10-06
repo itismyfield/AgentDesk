@@ -868,6 +868,7 @@ engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unknown_b
 engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unsupported_gate_type
 engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unwired_gate
 engine::transition::gate_fail_closed_tests::gated_transition_passes_on_known_check_satisfied
+github::gh_command_tests::relative_gh_override_spawns_by_absolute_path
 github::sync::terminal_open_alert_tests::enqueue_terminal_open_alert_pg_dedupes_within_ttl
 github::sync::terminal_open_alert_tests::format_terminal_open_alert_contains_actionable_context
 github::sync::terminal_open_alert_tests::parses_batched_graphql_issue_response
@@ -9231,6 +9232,7 @@ services::pipeline_routes::tests::stage_json_absent_backoff_is_null
 services::pipeline_routes::tests::stage_json_emits_backoff_field
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::platform::binary_resolver::runtime_path::tests::command_with_path_spawns_only_absolute_programs_and_keeps_path
 services::platform::binary_resolver::tests::codex_app_bundle_candidate_gets_codex_only_priority
 services::platform::binary_resolver::tests::codex_fallback_dirs_include_app_bundle_resources_on_macos
 services::platform::binary_resolver::tests::codex_probe_selects_newest_successful_candidate_not_first_path_hit
@@ -9251,6 +9253,7 @@ services::platform::tmux::availability::availability_cache_tests::probe_error_pr
 services::platform::tmux::availability::availability_cache_tests::spawn_error_classifier_maps_only_not_found_to_missing
 services::platform::tmux::availability::availability_cache_tests::ttl_hit_reuses_cached_state_without_probe
 services::platform::tmux::availability::availability_cache_tests::unknown_spawn_error_without_prior_state_stays_optimistic_until_threshold
+services::platform::tmux::availability::availability_cache_tests::unrunnable_tmux_on_path_stays_unknown_while_absent_tmux_is_missing
 services::platform::tmux::etime_tests::parse_ps_etime_handles_all_field_widths
 services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit
 services::platform::tmux::live_pane_tests::has_live_pane_reports_live_tmux_session
@@ -9269,6 +9272,7 @@ services::platform::tmux::timeout_tests::probe_failure_widens_to_live_or_ambiguo
 services::platform::tmux::timeout_tests::send_keys_timeout_preserves_tmux_stderr_on_fast_failure
 services::platform::tmux::timeout_tests::send_keys_timeout_reports_hung_tmux
 services::platform::tmux::timeout_tests::session_presence_distinguishes_missing_from_probe_failure
+services::platform::tmux::timeout_tests::tmux_command_names_runtime_path_tmux_by_absolute_path
 services::platform::windows_job::tests::forced_runtime_exit_terminates_grandchildren_and_releases_ports
 services::platform::windows_job::tests::runtime_job_descendant_fixture
 services::pr_summary::tests::cache_hit_on_repeated_lookup
@@ -10040,8 +10044,11 @@ services::stream_json_cli::codec::tests::grok_messages_codec_preserves_terminal_
 services::stream_json_cli::codec::tests::grok_messages_codec_rejects_clean_eof_after_init
 services::stream_json_cli::dialects::agy::tests::default_argv_uses_conversation_not_continue
 services::stream_json_cli::dialects::agy::tests::envelope_preserves_lengths
+services::stream_json_cli::dialects::agy::tests::localappdata_fallback_runs_the_found_agy_by_absolute_path_from_another_cwd
+services::stream_json_cli::dialects::agy::tests::prepare_launches_an_agy_found_on_a_relative_path_entry_by_absolute_path
 services::stream_json_cli::dialects::agy::tests::restricted_policy_fails_before_prepare
 services::stream_json_cli::dialects::grok::tests::forwards_configured_reasoning_effort
+services::stream_json_cli::dialects::grok::tests::home_fallback_runs_the_found_grok_by_absolute_path_from_another_cwd
 services::stream_json_cli::dialects::grok::tests::provider_default_argv_has_no_resume_or_session_id
 services::stream_json_cli::dialects::grok::tests::readonly_mapping_is_fail_closed_for_write_tools
 services::stream_json_cli::dialects::grok::tests::resume_requires_uuid
