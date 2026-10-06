@@ -520,7 +520,7 @@ mod tracked {
     use super::super::handover::Reconciliation;
     use super::super::ledger::Ledger;
     use super::super::rows::{
-        AbandonReason, AttemptEvidence, DoneReason, Entry, Owner, Row, RowState,
+        AbandonReason, AttemptEvidence, DoneReason, Entry, HeldReason, Owner, Row, RowState,
     };
     use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId, SourceRange};
 
@@ -811,6 +811,21 @@ mod tracked {
         let mut same_process = meta(2, "n1", 100);
         same_process.queue_end = Some(end(&first, "n1"));
         refused(attempt(&mut ledger, 1, &same_process));
+        // The old exit's EOF must sit on the prior source after every prior-generation record.
+        for broken in [
+            QueueEnd {
+                old_source: SourceId { ino: 2, ..source() },
+                ..end(&first, "n2")
+            },
+            QueueEnd {
+                old_end: 25,
+                ..end(&first, "n2")
+            },
+        ] {
+            let mut early = meta(2, "n2", 100);
+            early.queue_end = Some(broken);
+            refused(attempt(&mut ledger, 1, &early));
+        }
         attempt(&mut ledger, 1, &second).expect("a verified queue end offers once");
         let mut replay = meta(3, "n3", 200);
         replay.queue_end = Some(end(&first, "n3"));
@@ -1056,6 +1071,156 @@ mod tracked {
             drop(ledger);
             assert_eq!(open(root.path()).rows().unwrap(), live);
         }
+    }
+
+    // A close reason never moves an open row anywhere a model record or the actor must decide.
+    #[test]
+    fn a_close_reason_only_settles_or_holds_an_open_row() {
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        received(&mut ledger, 1);
+        let first = meta(1, "n1", 0);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::AwaitTurn);
+        let records = ledger.records().len();
+        let reason = Tracking {
+            disposition: Some(Disposition::Cancelled),
+            ..Tracking::default()
+        };
+        for state in [
+            RowState::Running,
+            RowState::Queued,
+            RowState::Ready,
+            RowState::AwaitTurn,
+        ] {
+            refused(ledger.append_tracked(1, state, None, &reason));
+        }
+        assert_eq!(ledger.records().len(), records);
+        let held = RowState::Held(HeldReason::Ambiguous);
+        ledger.append_tracked(1, held, None, &reason).unwrap();
+        assert_eq!(row(&ledger, 1).dispositions, vec![Disposition::Cancelled]);
+
+        let forged = serde_json::to_value(&reason).unwrap();
+        let payload = json!({ "key": 1, "state": { "state": "running" }, "tracking": forged });
+        ledger.append("transition", payload, &[]).unwrap();
+        assert!(ledger.rows().is_err());
+    }
+
+    // Without a ranged prior record, the queue end alone must name the prior source and a later EOF.
+    #[test]
+    fn a_queue_end_names_the_prior_source_and_an_eof_past_its_anchor() {
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        received(&mut ledger, 1);
+        let first = meta(1, "n1", 40);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::AwaitTurn);
+        let mut queued = witness(&first, WitnessKind::Queued, 0);
+        queued.range = None;
+        ledger.append_witness(1, queued).unwrap();
+        let end = QueueEnd {
+            prior_generation: 1,
+            old_nonce: "n1".into(),
+            new_nonce: "n2".into(),
+            old_source: source(),
+            old_end: 60,
+            stable_reads: 2,
+            settle_profile: "claude-2.1.289".into(),
+        };
+        let records = ledger.records().len();
+        for broken in [
+            QueueEnd {
+                old_source: SourceId { ino: 2, ..source() },
+                ..end.clone()
+            },
+            QueueEnd {
+                old_end: 39,
+                ..end.clone()
+            },
+        ] {
+            let mut next = meta(2, "n2", 100);
+            next.queue_end = Some(broken);
+            refused(attempt(&mut ledger, 1, &next));
+        }
+        assert_eq!(ledger.records().len(), records);
+        let mut next = meta(2, "n2", 100);
+        next.queue_end = Some(end);
+        attempt(&mut ledger, 1, &next).expect("a queue end on the prior source offers once");
+    }
+
+    // A tracked key handed back to Legacy keeps its tombstone; no later move activates it again.
+    #[test]
+    fn a_tracked_handback_key_keeps_its_tombstone_against_reactivation() {
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        received(&mut ledger, 1);
+        received(&mut ledger, 2);
+        let first = meta(1, "n1", 0);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::Ready);
+        let back = RowState::Abandoned(AbandonReason::Handback);
+        set(&mut ledger, 1, back);
+        set(&mut ledger, 2, back);
+        assert!(ledger.rows().unwrap().keeps_tracked_history(1));
+        assert!(!ledger.rows().unwrap().keeps_tracked_history(2));
+
+        received(&mut ledger, 1);
+        received(&mut ledger, 2);
+        let staged = Entry::Staged {
+            key: 1,
+            input: json!({ "text": "again" }),
+            state: RowState::Received,
+        };
+        let first_staged_seq = ledger.append_entry(&staged, &[]).unwrap();
+        let moved = Entry::MoveCommitted {
+            first_staged_seq,
+            ids: vec![1],
+        };
+        ledger.append_entry(&moved, &[]).unwrap();
+        ledger.checkpoint_rows().unwrap();
+        drop(ledger);
+
+        let rows = open(root.path()).rows().unwrap();
+        let kept = rows.row(1).unwrap();
+        let tokens: Vec<&str> = kept.attempts.iter().map(|m| m.token.as_str()).collect();
+        assert_eq!((kept.state, tokens), (back, vec![first.token.as_str()]));
+        assert_eq!(kept.attempts[0].effect, Effect::NotSent);
+        assert_eq!(rows.owner(1), Owner::Legacy);
+        assert_eq!(
+            rows.row(2).unwrap().state,
+            RowState::Received,
+            "an untracked key returns"
+        );
+    }
+
+    // A re-read may name the turn the first copy lacked: one more record, same count and state.
+    #[test]
+    fn a_witness_learns_its_turn_once_and_keeps_the_row_state() {
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        received(&mut ledger, 1);
+        let first = meta(1, "n1", 0);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::AwaitTurn);
+        let user = witness(&first, WitnessKind::User, 10);
+        assert!(ledger.append_witness(1, user.clone()).unwrap().is_some());
+        let held = RowState::Held(HeldReason::Ambiguous);
+        set(&mut ledger, 1, held);
+
+        let named = |turn: &str| Witness {
+            turn_ref: Some(turn.into()),
+            ..user.clone()
+        };
+        assert!(ledger.append_witness(1, named("t1")).unwrap().is_some());
+        for again in [named("t1"), named("t2"), user.clone()] {
+            assert_eq!(ledger.append_witness(1, again).unwrap(), None);
+        }
+        let learned = row(&ledger, 1);
+        assert_eq!(learned.state, held);
+        assert_eq!(learned.witnesses.len(), 1);
+        assert_eq!(learned.witnesses[0].witness.turn_ref.as_deref(), Some("t1"));
+        drop(ledger);
+        assert_eq!(row(&open(root.path()), 1), learned);
     }
 
     // Cuts the last WAL line mid-record, as a power loss during append would.

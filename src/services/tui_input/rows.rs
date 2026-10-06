@@ -387,9 +387,14 @@ impl Rows {
 
     // Settled keys stay as dedup history; only a key handed back to Legacy can return.
     fn can_activate(&self, key: u64) -> bool {
-        self.rows
-            .get(&key)
-            .is_none_or(|row| row.state.released_to_legacy())
+        !self.keeps_tracked_history(key)
+            && (self.rows.get(&key)).is_none_or(|row| row.state.released_to_legacy())
+    }
+
+    /// A key handed back after a tracked attempt; activating it again would erase its tombstone.
+    pub fn keeps_tracked_history(&self, key: u64) -> bool {
+        (self.rows.get(&key))
+            .is_some_and(|row| row.state.released_to_legacy() && !row.attempts.is_empty())
     }
 
     fn activate(&mut self, key: u64, seq: u64, received_seq: u64, input: Value, state: RowState) {
@@ -575,16 +580,23 @@ impl Ledger {
         Ok(self.append(&kind, payload, &[])?.seq)
     }
 
-    /// Records a witness once with the state it implies; a re-read appends nothing.
+    /// Records a witness once with the state it implies. A re-read appends nothing unless it
+    /// names the turn the recorded copy lacked; that record keeps the row's state.
     pub fn append_witness(&mut self, key: u64, witness: Witness) -> io::Result<Option<u64>> {
         let rows = self.rows()?;
         let row = rows
             .row(key)
             .ok_or_else(|| invalid("witness names an unknown row"))?;
-        if (row.witnesses.iter()).any(|seen| seen.witness.same_record(&witness)) {
+        let recorded = (row.witnesses.iter()).find(|seen| seen.witness.same_record(&witness));
+        if recorded
+            .is_some_and(|seen| seen.witness.turn_ref.is_some() || witness.turn_ref.is_none())
+        {
             return Ok(None);
         }
-        let state = witness.kind.next_state(row.state);
+        let state = match recorded {
+            Some(_) => row.state,
+            None => witness.kind.next_state(row.state),
+        };
         let tracking = Tracking {
             witness: Some(witness),
             ..Tracking::default()

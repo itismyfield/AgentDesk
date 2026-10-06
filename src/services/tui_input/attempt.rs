@@ -241,12 +241,22 @@ pub(super) fn admits_attempt(
 }
 
 // Only a durable Q for the prior generation, a new incarnation and no recorded delivery admit it.
+// The old exit's EOF is on the prior source, past its anchor and every prior-generation record.
 fn queue_ended(row: &Row, prior: &AttemptMeta, meta: &AttemptMeta, end: &QueueEnd) -> bool {
+    let before_end = |seen: &Seen| {
+        (seen.witness.range.as_ref())
+            .is_none_or(|range| range.source == end.old_source && range.end <= end.old_end)
+    };
     row.state == RowState::Queued
         && end.prior_generation == prior.generation
         && end.old_nonce == prior.execution_nonce
         && end.new_nonce == meta.execution_nonce
         && end.old_nonce != end.new_nonce
+        && end.old_source == prior.source
+        && end.old_end >= prior.anchor
+        && (row.witnesses.iter())
+            .filter(|seen| seen.witness.generation == prior.generation)
+            .all(before_end)
         && row.witnesses.iter().any(|seen| {
             seen.witness.generation == prior.generation && seen.witness.kind == WitnessKind::Queued
         })
@@ -267,7 +277,13 @@ pub(super) fn admits_witness(
     if attempt.generation != witness.generation {
         return Err("witness generation disagrees with its token");
     }
-    if state != witness.kind.next_state(row.state) {
+    let recorded = (row.witnesses.iter()).any(|seen| seen.witness.same_record(witness));
+    let expected = if recorded {
+        row.state
+    } else {
+        witness.kind.next_state(row.state)
+    };
+    if state != expected {
         return Err("witness and state disagree");
     }
     Ok(())

@@ -232,6 +232,14 @@ impl Move {
             self.phase = Phase::Finished(Outcome::Legacy);
             return Ok(Outcome::Legacy);
         }
+        // A key handed back after a tracked attempt keeps its tombstone, so the channel stays Legacy.
+        if matches!(self.phase, Phase::Stage)
+            && (self.inputs.iter()).any(|input| rows.keeps_tracked_history(input.key))
+        {
+            host.notice(None, "tui_o:turn_mode_refused")?;
+            self.phase = Phase::Finished(Outcome::Legacy);
+            return Ok(Outcome::Legacy);
+        }
         if matches!(self.phase, Phase::Stage) {
             let staged = rows.staged_since(self.first);
             for input in &mut self.inputs {

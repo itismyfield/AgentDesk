@@ -231,6 +231,76 @@ fn handback_holds_an_attempted_row_even_on_an_empty_composer() {
     }
 }
 
+// A key handed back after a tracked attempt keeps its tombstone, so the next move stays Legacy.
+#[test]
+fn a_tracked_handback_key_keeps_the_next_move_legacy() {
+    use super::attempt::{AttemptMeta, Effect, Tracking, fresh_token};
+    use super::rows::{AttemptEvidence, RowState};
+    use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId};
+    let root = sandbox();
+    let mut host = Fixture::new(root.path());
+    let mut lease = LedgerLease::new(root.path(), 9);
+    let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+    assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
+    let source = SourceId {
+        session_id: "session".into(),
+        path: "/nonexistent/session.jsonl".into(),
+        dev: 1,
+        ino: 1,
+    };
+    let meta = AttemptMeta {
+        generation: 1,
+        token: fresh_token(),
+        frame_digest: "ab".repeat(32),
+        frame_profile: None,
+        execution_nonce: "n1".into(),
+        source: source.clone(),
+        anchor: 0,
+        effect: Effect::Intent,
+        incarnation: None,
+        queue_end: None,
+    };
+    let evidence = AttemptEvidence {
+        binding: SourceBinding {
+            channel_id: 9,
+            provider: ShadowProvider::Claude,
+            source,
+        },
+        execution_nonce: "n1".into(),
+        eof: 0,
+        rendered_prompt: "8".into(),
+        source_ids: vec![8],
+        record_end: None,
+        native_turn_id: None,
+    };
+    let tracking = Tracking {
+        attempt: Some(meta),
+        ..Tracking::default()
+    };
+    let ledger = lease.get().unwrap();
+    (ledger.append_tracked(8, RowState::Injecting, Some(evidence), &tracking)).unwrap();
+    let not_sent = Entry::Transition {
+        key: 8,
+        state: RowState::Ready,
+        attempt: None,
+    };
+    ledger.append_entry(&not_sent, &[]).unwrap();
+    assert_eq!(handback(&mut lease, &mut host).unwrap(), Outcome::Legacy);
+    let before = lease.get().unwrap().rows().unwrap();
+    assert!(before.keeps_tracked_history(8));
+
+    let mut host = Fixture::new(root.path());
+    let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+    assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Legacy);
+    assert!(host.noticed.contains(&(None, "tui_o:turn_mode_refused")));
+    assert!(host.events.is_empty(), "the Legacy queue stays whole");
+    let after = lease.get().unwrap().rows().unwrap();
+    assert_eq!(
+        (after.row(8), after.owner(8)),
+        (before.row(8), Owner::Legacy)
+    );
+}
+
 #[test]
 fn retry_backoff_is_bounded() {
     assert_eq!(backoff(0).as_secs(), 5);
