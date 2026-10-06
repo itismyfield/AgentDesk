@@ -219,6 +219,12 @@ pub(super) fn resolve_rebind_runtime_state(
                 rebase_existing_offsets_to_output: false,
             });
         }
+
+        // The wrapper jsonl stays empty for a Claude TUI pane; retry once the transcript binds.
+        return Err(RebindError::RuntimeBindingUnavailable {
+            tmux_session: tmux_session_name.to_string(),
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        });
     }
 
     let (default_output_path, default_input_fifo) = tmux_runtime_paths(tmux_session_name);
@@ -1275,6 +1281,35 @@ mod tests {
             Some("c62c2dc8-0000-4000-8000-000000000000")
         );
         assert_eq!(result.codex_rollout_path, None);
+    }
+
+    #[test]
+    fn claude_tui_rebind_without_a_bound_transcript_fails_instead_of_tailing_the_wrapper() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux_session_name = "AgentDesk-claude-routine-unbound-transcript";
+        write_runtime_kind_marker(tmux_session_name, RuntimeHandoffKind::ClaudeTui);
+        let missing = tmp.path().join("projects/cwd/missing-session.jsonl");
+
+        for saved in [None, Some(missing.to_str().expect("utf8 path"))] {
+            let result = resolve_rebind_runtime_state(
+                &ProviderKind::Claude,
+                tmux_session_name,
+                saved,
+                Some("c62c2dc8-0000-4000-8000-000000000000".to_string()),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(RebindError::RuntimeBindingUnavailable {
+                        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                        ..
+                    })
+                ),
+                "saved={saved:?}"
+            );
+        }
     }
 
     #[test]
