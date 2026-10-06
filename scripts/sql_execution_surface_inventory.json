@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "6bd1e56048a89d01b6ffcc9b3badc6ebb8bf4db7",
+  "measured_at_sha": "0ea8e73c839da128ea461e713d307f5e9a9b8c8f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -18748,6 +18748,24 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:8a4d10f7f4ad38ce51062f19d2a372e896f16bc745cfa2f198c31cd5d502d4bb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/queue_api.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:721cbda315f4642118c57562a99c15e31c335744cab4cc7b53d435028ed5ba6b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/queue_api.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ec734f50328745c30b26744ce6ad35ae1b8ec70d3e1bd219fce9fcd6efebade1"
     },
     {
       "root": "src",
