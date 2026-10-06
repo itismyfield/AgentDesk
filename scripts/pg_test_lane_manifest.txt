@@ -95,6 +95,7 @@ src/services/cluster/intake_router_hook/o_route_tests.rs
 src/services/cluster/intake_router_hook/owner_record.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
+src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
@@ -305,6 +306,7 @@ services::cluster::intake_router_hook::owner_record::tests
 services::cluster::intake_router_hook::pg_tests
 services::cluster::intake_worker::dispatch_stamp_tests
 services::cluster::intake_worker::home_route_tests
+services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
@@ -860,13 +862,15 @@ server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_id
 server::routes::pipeline::stage_save_tests::stage_save_routes_preserve_legacy_settings_only_for_the_same_stage_pg
 server::routes::pipeline::stage_save_tests::stage_save_routes_reject_unsupported_settings_without_writes_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::a_recorded_removal_with_an_unread_post_cancel_queue_reports_no_verdict_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::c1_dispatch_closed_actor_finishes_offline_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::c1_dispatch_observed_idle_hydration_refusals_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_on_a_dead_mailbox_reports_no_loss_verdict_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_cancel_observation_rows_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_cancel_serializes_unknown_pg
-server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_closed_pg
-server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_unreachable_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_closed_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_unreachable_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
@@ -1070,6 +1074,13 @@ services::cluster::intake_router_hook::pg_tests::unmapped_channel_records_no_age
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_dispatched_is_not_a_divergence_pg
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_missing_row_is_a_divergence_pg
 services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_afterclaim_closing_returns_only_own_claim_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_beforeclaim_excludes_closing_population_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_cas_miss_retains_effect_through_classification_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_db_error_releases_effect_after_error_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_done_waits_for_real_db_disposition_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_final_failure_waits_for_real_db_disposition_pg
+services::cluster::intake_worker::input_effect_tests::c1_worker_preaccept_closing_releases_admitted_claim_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg

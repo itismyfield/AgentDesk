@@ -285,7 +285,10 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Cancelled);
     }
 
-    let held = intake_route::held_channels(provider);
+    let mut held = intake_route::held_channels(provider);
+    held.extend(crate::services::discord::input_runtime::fence::held_channels(provider));
+    held.sort_unstable();
+    held.dedup();
     let claimed =
         claim_pending_for_target_except(pool, target_instance_id, provider, claim_owner, &held)
             .await?;
@@ -293,6 +296,9 @@ pub(crate) async fn run_intake_worker_tick(
     let Some(row) = claimed else {
         return Ok(TickOutcome::QueueEmpty);
     };
+
+    #[cfg(test)]
+    test_executor::checkpoint(test_executor::Checkpoint::AfterClaim).await;
 
     // A marker can land while the claim transaction is in flight. Return only
     // this worker's row to pending and stop before payload work or spawning.
@@ -306,6 +312,22 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Cancelled);
     }
 
+    let input_provider = crate::services::provider::ProviderKind::from_str_or_unsupported(provider);
+    let input_channel = row.channel_id.parse::<u64>().ok();
+    let input_permit = match input_channel {
+        Some(channel) => match crate::services::discord::input_runtime::fence::effect::admit(
+            &input_provider,
+            channel,
+        ) {
+            Ok(permit) => permit,
+            Err(_) => {
+                release_cancelled_claim(pool, &row, claim_owner).await?;
+                return Ok(TickOutcome::Held);
+            }
+        },
+        None => None,
+    };
+    crate::services::discord::input_runtime::fence::effect::scope(input_permit, async {
     // Round-2 P0 #2: pre-accept failure (cwd validation, payload
     // conversion) is retryable; post-accept failure is operator-only.
     let request = match intake_request_from_row(&row) {
@@ -399,6 +421,16 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Held);
     }
 
+    #[cfg(test)]
+    test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
+    if input_channel.is_some_and(|channel| {
+        crate::services::discord::input_runtime::fence::lookup(&input_provider, channel)
+            .is_some_and(|gate| gate.mode() != crate::services::discord::input_runtime::fence::Mode::LegacyOpen)
+    }) {
+        release_cancelled_claim(pool, &row, claim_owner).await?;
+        return Ok(TickOutcome::Held);
+    }
+
     // Transition: claimed → accepted. If the sweep beat us to it,
     // ABORT (do not spawn) — Ok(false) means we lost ownership.
     let advanced = mark_accepted(pool, row.id, claim_owner).await?;
@@ -435,7 +467,9 @@ pub(crate) async fn run_intake_worker_tick(
     )
     .await;
 
-    match result {
+    #[cfg(test)]
+    test_executor::checkpoint(test_executor::Checkpoint::FinalDb).await;
+    let outcome = match result {
         Ok(()) => {
             let advanced = mark_done(pool, row.id, claim_owner).await?;
             if !advanced {
@@ -468,7 +502,11 @@ pub(crate) async fn run_intake_worker_tick(
             }
             Ok(TickOutcome::Processed)
         }
-    }
+    };
+    #[cfg(test)]
+    test_executor::checkpoint(test_executor::Checkpoint::FinalDbDone).await;
+    outcome
+    }).await
 }
 
 async fn release_cancelled_claim(
@@ -968,3 +1006,7 @@ mod drain_tests;
 #[cfg(test)]
 #[path = "intake_worker/test_executor.rs"]
 pub(crate) mod test_executor;
+
+#[cfg(test)]
+#[path = "intake_worker/input_effect_tests.rs"]
+mod input_effect_tests;

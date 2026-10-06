@@ -452,7 +452,7 @@ inflight_state: durable.clone(), };
 }
 
 // Per-channel rendezvous: only the real bridge capture site calls this hook.
-static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
+pub(super) static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
     Option<(
         ChannelId,
         tokio::sync::oneshot::Sender<()>,

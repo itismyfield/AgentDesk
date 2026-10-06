@@ -27,24 +27,28 @@ pub(in crate::services::discord) fn spawn_retry_with_history_with_release(
     retry_text: String,
 ) {
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
-    super::super::task_supervisor::spawn_observed("retry_with_history_dispatch", async move {
-        gateway
-            .schedule_retry_with_history_with_completion(
-                channel_id,
-                user_msg_id,
-                &retry_text,
-                completion_tx,
-            )
-            .await;
-    });
-    super::super::task_supervisor::spawn_observed("retry_with_history_release", async move {
-        // 120s safety net: if completion_tx is dropped without a send
-        // (panic, wedged future), the recv resolves with Err and we still
-        // release. If 120s elapses with neither send nor drop, force
-        // release so the lockout cannot leak forever.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
-        release_retry_pending(channel_id);
-    });
+    let permit = super::super::input_runtime::fence::effect::current();
+    super::super::task_supervisor::spawn_observed(
+        "retry_with_history_dispatch",
+        super::super::input_runtime::fence::effect::detached(permit.clone(), async move {
+            gateway
+                .schedule_retry_with_history_with_completion(
+                    channel_id,
+                    user_msg_id,
+                    &retry_text,
+                    completion_tx,
+                )
+                .await;
+        }),
+    );
+    super::super::task_supervisor::spawn_observed(
+        "retry_with_history_release",
+        super::super::input_runtime::fence::effect::detached(permit, async move {
+            // Completion or the safety timeout releases the existing retry reservation.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
+            release_retry_pending(channel_id);
+        }),
+    );
 }
 
 pub(super) fn clear_local_session_state(

@@ -1350,6 +1350,7 @@ async fn runtime_turn_cleanup_by_lookup(
         let judged =
             discord::turn_bridge::ChannelStop::judge(shared, provider, channel, None, false);
         let judged = judged.await;
+        let judged = discord::turn_bridge::ChannelStop::offline_if_closed(judged);
         if !stop_watcher && discord::turn_bridge::keeps_turn(&judged) {
             let (cleanup_path, had_active_turn) = ("host-guard-kept", true);
             let kept = HardStopRuntimeResult::default();

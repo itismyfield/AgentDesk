@@ -300,8 +300,40 @@ fn a_force_kill_keeps_a_superseded_turn() {
     });
 }
 
-// The name-lookup stop leaves a successor admitted after its judgement and keeps a turn whose
-// finish the actor drops; with no actor registered, or one that never answers, it goes on as main.
+#[test]
+fn c1_lookup_stop_keeps_runtime_when_live_receiver_drops_judgement_reply() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    run(async {
+        let fx = Channel::new(6_325_451).await;
+        fx.shared
+            .mailboxes
+            .insert_reply_dropping_for_test(fx.channel);
+        let handle = fx.shared.mailbox_peek(fx.channel).unwrap();
+        assert!(!handle.is_closed());
+        assert!(handle.cancel_token().await.is_err());
+        let target = TurnLifecycleTarget {
+            provider: None,
+            channel_id: Some(fx.channel),
+            tmux_name: String::new(),
+        };
+        let result = crate::services::turn_lifecycle::stop_turn_preserving_queue(
+            Some(&fx.registry),
+            &target,
+            "live-receiver-reply-lost",
+        )
+        .await;
+        fx.assert_runtime_kept("live receiver lost reply").await;
+        assert!(
+            result.host_guard_kept(),
+            "lost judgement reply must not retire the session"
+        );
+        assert!(!fx.judged.cancelled.load(Ordering::SeqCst));
+        fx.shared.mailboxes.remove_fixture_for_test(fx.channel);
+    });
+}
+
+// The name-lookup stop leaves a successor and an unanswered finish in place.
+// A confirmed closed actor or an absent actor takes the existing offline cleanup.
 #[test]
 fn a_lookup_stop_finishes_only_the_turn_it_judged() {
     let _root = crate::config::TestRuntimeRootGuard::new();

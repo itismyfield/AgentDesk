@@ -198,37 +198,43 @@ pub(in crate::services::discord) fn spawn_watcher_orphan_spinner_cleanup_retry(
         std::time::Duration::from_secs(15),
     ];
 
-    super::task_supervisor::spawn_observed("watcher_orphan_spinner_cleanup_retry", async move {
-        for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {
-            tokio::time::sleep(*delay).await;
-            let outcome = match gateway.delete_message(channel_id, message_id).await {
-                Ok(()) => super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
-                Err(error) => super::placeholder_cleanup::classify_delete_error(&error),
-            };
-            let committed = outcome.is_committed();
-            let should_retry = should_retry_watcher_orphan_spinner_cleanup(&outcome);
-            record_watcher_orphan_spinner_cleanup(
-                shared.as_ref(),
-                &provider,
-                channel_id,
-                message_id,
-                tmux_session_name.as_deref(),
-                outcome,
-                "turn_bridge_watcher_orphan_spinner_cleanup_retry",
-            );
-            if committed || !should_retry {
-                return;
-            }
-            if attempt + 1 == RETRY_DELAYS.len() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ watcher orphan spinner cleanup exhausted retries for channel {} msg {}",
-                    channel_id.get(),
-                    message_id.get()
-                );
-            }
-        }
-    });
+    super::task_supervisor::spawn_observed(
+        "watcher_orphan_spinner_cleanup_retry",
+        super::input_runtime::fence::effect::detached(
+            super::input_runtime::fence::effect::current(),
+            async move {
+                for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {
+                    tokio::time::sleep(*delay).await;
+                    let outcome = match gateway.delete_message(channel_id, message_id).await {
+                        Ok(()) => super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
+                        Err(error) => super::placeholder_cleanup::classify_delete_error(&error),
+                    };
+                    let committed = outcome.is_committed();
+                    let should_retry = should_retry_watcher_orphan_spinner_cleanup(&outcome);
+                    record_watcher_orphan_spinner_cleanup(
+                        shared.as_ref(),
+                        &provider,
+                        channel_id,
+                        message_id,
+                        tmux_session_name.as_deref(),
+                        outcome,
+                        "turn_bridge_watcher_orphan_spinner_cleanup_retry",
+                    );
+                    if committed || !should_retry {
+                        return;
+                    }
+                    if attempt + 1 == RETRY_DELAYS.len() {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⚠ watcher orphan spinner cleanup exhausted retries for channel {} msg {}",
+                            channel_id.get(),
+                            message_id.get()
+                        );
+                    }
+                }
+            },
+        ),
+    );
 }
 
 #[cfg(test)]

@@ -34,6 +34,28 @@ struct StatusPanelFallbackGateway {
     deleted_ids: Mutex<Vec<MessageId>>,
     send_id: MessageId,
     can_chain_locally: bool,
+    child: Option<ChildFixture>,
+}
+
+struct ChildFixture {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    completion: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    disposed: Option<tokio::sync::oneshot::Sender<()>>,
+    path: std::path::PathBuf,
+    channel: ChannelId,
+    protected: bool,
+}
+impl Drop for ChildFixture {
+    fn drop(&mut self) {
+        use crate::services::discord::input_runtime::fence::{self, effect};
+        assert_eq!(effect::current().is_some(), self.protected);
+        fence::write(&ProviderKind::Claude, self.channel.get(), || {
+            std::fs::write(&self.path, b"child cleanup").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        let _ = self.disposed.take().unwrap().send(());
+    }
 }
 
 impl StatusPanelFallbackGateway {
@@ -55,6 +77,7 @@ impl Default for StatusPanelFallbackGateway {
             deleted_ids: Mutex::new(Vec::new()),
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
+            child: None,
         }
     }
 }
@@ -103,7 +126,21 @@ impl TurnGateway for StatusPanelFallbackGateway {
         id: MessageId,
     ) -> TestGatewayFuture<'a, Result<(), String>> {
         self.deleted_ids.lock().unwrap().push(id);
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            if let Some(child) = &self.child {
+                let release = child.release.lock().unwrap().take().unwrap();
+                child
+                    .entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                release.await.unwrap();
+            }
+            Ok(())
+        })
     }
 
     fn replace_message_with_outcome<'a>(
@@ -122,6 +159,32 @@ impl TurnGateway for StatusPanelFallbackGateway {
         _user_text: &'a str,
     ) -> TestGatewayFuture<'a, ()> {
         Box::pin(async {})
+    }
+
+    fn schedule_retry_with_history_with_completion<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _user_message_id: MessageId,
+        _user_text: &'a str,
+        completion_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(child) = &self.child {
+                *child.completion.lock().unwrap() = Some(completion_tx);
+                let release = child.release.lock().unwrap().take().unwrap();
+                child
+                    .entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                release.await.unwrap();
+            } else {
+                let _ = completion_tx.send(());
+            }
+        })
     }
 
     fn dispatch_queued_turn<'a>(
@@ -152,6 +215,92 @@ impl TurnGateway for StatusPanelFallbackGateway {
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         Some(ProviderKind::Claude)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_completion() {
+    use crate::services::discord::input_runtime::fence::{self, Gate, effect};
+    use futures::FutureExt;
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    for (n, (protected, retry)) in [(false, false), (false, true), (true, false), (true, true)]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = ChannelId::new(6_325_439 + n as u64);
+        let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel.get()).unwrap());
+        let _health = gate.as_ref().map(fence::test_health::Clear::new);
+        let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (disposed_tx, disposed_rx) = tokio::sync::oneshot::channel();
+        let completion = Arc::new(Mutex::new(None));
+        let path = root.path().join(channel.to_string());
+        let gateway = Arc::new(StatusPanelFallbackGateway {
+            child: Some(ChildFixture {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+                completion: completion.clone(),
+                disposed: Some(disposed_tx),
+                path: path.clone(),
+                channel,
+                protected,
+            }),
+            ..Default::default()
+        });
+        effect::scope(permit, async {
+            if retry {
+                super::super::retry_state::spawn_retry_with_history_with_release(
+                    gateway,
+                    channel,
+                    MessageId::new(7),
+                    "retry".into(),
+                );
+            } else {
+                super::super::watcher_orphan_cleanup::spawn_watcher_orphan_spinner_cleanup_retry(
+                    crate::services::discord::make_shared_data_for_tests(),
+                    ProviderKind::Claude,
+                    gateway,
+                    channel,
+                    MessageId::new(7),
+                    None,
+                );
+            }
+        })
+        .await;
+        let closing = gate.as_ref().map(|gate| gate.close().unwrap());
+        if let Some(closing) = &closing {
+            assert!(closing.drain().now_or_never().is_none());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), disposed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"child cleanup");
+        if retry {
+            if let Some(closing) = &closing {
+                assert!(
+                    closing.drain().now_or_never().is_none(),
+                    "release child outlives dispatch cleanup"
+                );
+            }
+            completion.lock().unwrap().take().unwrap().send(()).unwrap();
+        }
+        if let Some(closing) = closing {
+            tokio::time::timeout(std::time::Duration::from_secs(10), closing.drain())
+                .await
+                .unwrap();
+        }
     }
 }
 

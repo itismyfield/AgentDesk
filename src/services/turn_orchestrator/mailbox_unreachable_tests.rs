@@ -31,12 +31,34 @@ impl ChannelMailboxRegistry {
         snapshot: super::ChannelMailboxSnapshot,
         refusal: super::registry_purge::MailboxRefusal,
     ) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.insert_snapshot_fixture(channel, snapshot, refusal, false)
+    }
+
+    pub(crate) fn insert_idle_snapshot_for_test(
+        &self,
+        channel: ChannelId,
+        snapshot: super::ChannelMailboxSnapshot,
+        refusal: super::registry_purge::MailboxRefusal,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.insert_snapshot_fixture(channel, snapshot, refusal, true)
+    }
+
+    fn insert_snapshot_fixture(
+        &self,
+        channel: ChannelId,
+        snapshot: super::ChannelMailboxSnapshot,
+        refusal: super::registry_purge::MailboxRefusal,
+        observed_idle: bool,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = attempts.clone();
         let (sender, mut receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            while let Some(msg) = receiver.recv().await {
+            while let Some((msg, _input_permit)) = receiver.recv().await {
                 match msg {
+                    super::ChannelMailboxMsg::CancelToken { reply } if observed_idle => {
+                        let _ = reply.send(None);
+                    }
                     super::ChannelMailboxMsg::Snapshot { reply } => {
                         let _ = reply.send(snapshot.clone());
                     }

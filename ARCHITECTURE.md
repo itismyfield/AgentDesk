@@ -645,6 +645,7 @@ src/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_route_tests.rs
+│   │   │   ├── input_effect_tests.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   └── test_executor.rs
 │   │   ├── machine_resources/
@@ -960,6 +961,8 @@ src/
 │   │   │   │   └── drive_tests.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
+│   │   │   ├── effect.rs
+│   │   │   ├── effect_tests.rs
 │   │   │   ├── effects.rs
 │   │   │   ├── effects_tests.rs
 │   │   │   ├── fence.rs
@@ -1077,6 +1080,7 @@ src/
 │   │   │   ├── section_dedupe.rs
 │   │   │   └── session_anchors.rs
 │   │   ├── queue_dispatch/
+│   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── transport/
