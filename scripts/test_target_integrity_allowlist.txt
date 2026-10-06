@@ -4,7 +4,7 @@
 # spaces, exactly as printed in the violation's `command:` field). Add an
 # entry ONLY for lanes that legitimately select zero tests on some platform
 # (e.g. an entire suite behind #[cfg(target_os = "...")]) and document the
-# reason in a nonempty `#` comment directly above the entry (no blank gap).
+# reason with `# reason: <why>` directly above each entry (no blank gap).
 # Duplicate entries and entries matching no extracted command are rejected.
 #
 # Only zero-match and empty-target findings are excused. Wrong target pairing,

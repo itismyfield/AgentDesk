@@ -157,22 +157,23 @@ class Violation:
                 f"(command: {self.command})")
 
 
-def load_allowlist(path: Path) -> set[str]:
+def load_allowlist(path: Path) -> dict[str, int]:
     lines = path.read_text("utf-8").splitlines() if path.is_file() else []
-    entries: set[str] = set()
+    entries: dict[str, int] = {}
     reason = ""
     for lineno, line in enumerate(lines, 1):
         row = line.strip()
         if row.startswith("#"):
-            reason = row[1:].strip()
+            match = re.fullmatch(r"#\s*reason:\s*(\S.*)", row)
+            reason = match.group(1) if match else ""
             continue
         if row:
             if not reason:
                 raise ValueError(f"{path}:{lineno}: allowlist entry needs an "
-                                 "adjacent nonempty reason comment")
+                                 "adjacent nonempty # reason: comment")
             if row in entries:
                 raise ValueError(f"{path}:{lineno}: duplicate allowlist entry")
-            entries.add(row)
+            entries[row] = lineno
         reason = ""
     return entries
 
@@ -1514,11 +1515,12 @@ def evidence_verification_errors(rendered: str) -> list[str]:
     return errors
 
 
-def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
+def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] | dict[str, int],
                     with_list_check: bool,
                     lib_test_ids: frozenset[str] | None = None,
                     source_floors: dict[str, int] | None = None,
-                    diagnostics: list[str] | None = None) \
+                    diagnostics: list[str] | None = None,
+                    allowlist_path: Path | None = None) \
         -> list[Violation]:
     inventories = {
         target: collect_modules(root, repo_root)
@@ -1541,10 +1543,13 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
     violations: list[Violation] = []
     active_commands = {normalized for _, commands in sources
                        for _, _, normalized in commands}
+    allowlist_path = allowlist_path or repo_root / "scripts/test_target_integrity_allowlist.txt"
+    allowlist_source = (str(allowlist_path.relative_to(repo_root))
+                       if allowlist_path.is_relative_to(repo_root) else str(allowlist_path))
     violations.extend(Violation(
-        "scripts/test_target_integrity_allowlist.txt", 0, command,
-        "stale-allowlist", "allowlist entry matches no extracted cargo test command",
-    ) for command in sorted(allowlist - active_commands))
+        allowlist_source, allowlist.get(command, 0) if isinstance(allowlist, dict) else 0,
+        command, "stale-allowlist", "allowlist entry matches no extracted cargo test command",
+    ) for command in sorted(set(allowlist) - active_commands))
     if source_floors is not None:
         extracted = {
             "workflows": sum(len(commands) for _, commands in workflow_sources),
@@ -1822,9 +1827,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"test-target integrity: cannot read source floors: {error}",
               file=sys.stderr)
         return 2
+    allowlist_path = (args.allowlist or (
+        repo_root / "scripts/test_target_integrity_allowlist.txt")).resolve()
     try:
-        allowlist = load_allowlist(args.allowlist or (
-            repo_root / "scripts/test_target_integrity_allowlist.txt"))
+        allowlist = load_allowlist(allowlist_path)
     except (OSError, ValueError) as error:
         print(f"test-target integrity: invalid allowlist: {error}", file=sys.stderr)
         return 2
@@ -1832,7 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
     violations = check_workflows(repo_root,
                                  [Path(w).resolve() for w in workflows],
                                  allowlist, args.run_list_check, lib_test_ids,
-                                 source_floors, diagnostics)
+                                 source_floors, diagnostics, allowlist_path)
     for diagnostic in diagnostics:
         print(f"test-target integrity: {diagnostic}")
     for violation in violations:

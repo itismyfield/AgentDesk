@@ -723,7 +723,7 @@ class AllowlistContract(unittest.TestCase):
     def test_allowlist_cannot_excuse_target_mismatch(self) -> None:
         # A target-mismatch means the command itself is wrong; the allowlist
         # (meant for legitimately-empty platform-cfg lanes) must not hide it.
-        allow = "# attempted excuse\n" + BAD_COMMAND + "\n"
+        allow = "# reason: attempted excuse\n" + BAD_COMMAND + "\n"
         violations = run_fixture(BAD_COMMAND, allowlist=allow)
         self.assertEqual([v.kind for v in violations], ["target-mismatch"])
 
@@ -731,7 +731,7 @@ class AllowlistContract(unittest.TestCase):
         command = "cargo test --lib bogus_module::tests"
         self.assertEqual(
             [v.kind for v in run_fixture(command)], ["zero-match"])
-        allow = "# legitimately-empty on this platform\n" + command + "\n"
+        allow = "# reason: legitimately-empty on this platform\n" + command + "\n"
         self.assertEqual(run_fixture(command, allowlist=allow), [])
 
     def test_comments_and_blanks_do_not_allowlist(self) -> None:
@@ -821,28 +821,30 @@ class ResidualSelectionContract(unittest.TestCase):
 
     def test_allowlist_needs_an_adjacent_nonempty_reason(self) -> None:
         command = "cargo test --lib high_risk_recovry::"
-        for prefix in ("", "#\n", "# platform exception\n\n"):
+        for prefix in ("", "#\n", "# platform exception\n", "# reason:\n",
+                       "# reason: platform exception\n\n",
+                       "# reason: platform exception\n# unrelated comment\n"):
             with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as tmp:
                 allow = Path(tmp) / "allowlist.txt"
                 allow.write_text(prefix + command + "\n", encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "reason"):
                     integrity.load_allowlist(allow)
         self.assertEqual(run_fixture(
-            command, "# suite is cfg-gated on this platform\n" + command + "\n"), [])
+            command, "# reason: suite is cfg-gated on this platform\n" + command + "\n"), [])
 
     def test_stale_and_duplicate_allowlist_entries_are_rejected(self) -> None:
         stale = "cargo test --lib absent::"
-        violations = run_fixture(GOOD_COMMAND, "# platform exception\n" + stale)
+        violations = run_fixture(GOOD_COMMAND, "# reason: platform exception\n" + stale)
         self.assertEqual([v.kind for v in violations], ["stale-allowlist"])
         with tempfile.TemporaryDirectory() as tmp:
             allow = Path(tmp) / "allowlist.txt"
-            allow.write_text(("# platform exception\n" + stale + "\n") * 2)
+            allow.write_text(("# reason: platform exception\n" + stale + "\n") * 2)
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 integrity.load_allowlist(allow)
 
     def test_allowlist_does_not_excuse_bad_target_or_inventory(self) -> None:
         command = "cargo test --bin missing-bin owned::"
-        violations = run_fixture(command, "# platform exception\n" + command)
+        violations = run_fixture(command, "# reason: platform exception\n" + command)
         self.assertEqual([v.kind for v in violations], ["unknown-target", "unknown-module"])
         command = "cargo test --bin agentdesk bin_owned::"
         with tempfile.TemporaryDirectory() as tmp:
@@ -852,6 +854,51 @@ class ResidualSelectionContract(unittest.TestCase):
                 '#[path = "missing.rs"] mod child;\n', encoding="utf-8")
             violations = integrity.check_workflows(root, [workflow], {command}, False)
             self.assertEqual([v.kind for v in violations], ["inventory-error"])
+
+    def test_deployed_header_cannot_supply_an_entry_reason(self) -> None:
+        header = (REPO_ROOT / "scripts/test_target_integrity_allowlist.txt").read_text()
+        command = "cargo test --lib high_risk_recovry::"
+        for reason, expected in (("", 2), ("# reason: cfg-gated platform suite\n", 0)):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_fixture_repo(root, command)
+                (root / "scripts/test_target_integrity_allowlist.txt").write_text(
+                    header + reason + command + "\n", encoding="utf-8")
+                proc = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--repo-root", str(root), "--enforce"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
+                self.assertIn("reason" if expected else "check passed",
+                              proc.stderr if expected else proc.stdout)
+
+    def test_each_allowlist_entry_consumes_its_own_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            allow = Path(tmp) / "allowlist.txt"
+            allow.write_text(
+                "# reason: platform suite\n" + GOOD_COMMAND + "\n" + BAD_COMMAND + "\n")
+            with self.assertRaisesRegex(ValueError, "reason"):
+                integrity.load_allowlist(allow)
+
+    def test_justfile_only_allowlist_entry_is_not_stale(self) -> None:
+        command = "cargo test --lib cfg_owned::"
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND, "# reason: platform suite\n" + command + "\n",
+            just_text="fixture:\n    " + command + "\n"), [])
+
+    def test_stale_cli_reports_override_allowlist_path_and_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            allow = root / "override-allowlist.txt"
+            allow.write_text("# reason: obsolete platform suite\ncargo test --lib absent::\n")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo-root", str(root),
+                 "--allowlist", str(allow), "--enforce"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("override-allowlist.txt:2: [stale-allowlist]", proc.stdout)
 
     def test_cli_residual_triggers_and_clean_control(self) -> None:
         cases = (
@@ -871,7 +918,7 @@ class ResidualSelectionContract(unittest.TestCase):
                 allow = root / "scripts/test_target_integrity_allowlist.txt"
                 allow.write_text(
                     command + "\n" if allow_kind == "missing-reason" else (
-                        "# stale platform exception\ncargo test --lib absent::\n"
+                        "# reason: stale platform exception\ncargo test --lib absent::\n"
                         if allow_kind == "stale" else ""), encoding="utf-8")
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPT), "--repo-root", str(root), "--enforce"],
