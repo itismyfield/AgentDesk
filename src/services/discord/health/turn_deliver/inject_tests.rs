@@ -422,13 +422,14 @@ async fn input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg(
 
 /// Waits until a query on `sessions` queues behind the test's table lock.
 async fn lookup_parked(pool: &sqlx::PgPool) {
-    let waiting = "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
-        AND wait_event_type = 'Lock' AND query ILIKE '%sessions%')";
     let parked = async {
-        while !sqlx::query_scalar::<_, bool>(waiting)
-            .fetch_one(pool)
-            .await
-            .unwrap()
+        while !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND query ILIKE '%sessions%')",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
         {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

@@ -26519,6 +26519,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/health/turn_deliver/inject_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0434868ef5070725c1b5f6c3cd2f621a889edf9cb59c54cd293aa9be3ecbcc4c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/health/turn_deliver/inject_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d069c8d8989c4b214fcc469bcb1a004bcb16d3f23188bce5f89ca9e34b83ef1c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/host_key_derivation_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
