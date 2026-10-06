@@ -167,7 +167,9 @@ mod tests;
 
 pub(crate) async fn io<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     let permit = current();
-    tokio::task::spawn_blocking(move || synchronous(permit, || super::blocking(work)))
-        .await
-        .expect("input effect worker panicked")
+    match tokio::task::spawn_blocking(move || synchronous(permit, || super::blocking(work))).await {
+        Ok(value) => value,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("input effect worker cancelled: {error}"),
+    }
 }

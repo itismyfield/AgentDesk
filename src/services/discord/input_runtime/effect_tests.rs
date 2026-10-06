@@ -404,3 +404,13 @@ async fn c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_
     })
     .await;
 }
+
+#[tokio::test]
+async fn c1_io_worker_preserves_original_panic_payload() {
+    use futures::FutureExt;
+    let panic = std::panic::AssertUnwindSafe(io(|| std::panic::panic_any(6325464u64)))
+        .catch_unwind()
+        .await
+        .unwrap_err();
+    assert_eq!(panic.downcast_ref::<u64>(), Some(&6325464));
+}

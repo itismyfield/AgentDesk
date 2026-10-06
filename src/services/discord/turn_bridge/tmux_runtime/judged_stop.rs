@@ -14,10 +14,18 @@ use crate::services::turn_orchestrator::CancelActiveTurnResult;
 /// The reason the channel cancel records on the token and its tombstone.
 const CANCEL_REASON: &str = "mailbox_cancel_active_turn";
 
-/// The turn could not be judged: its inflight row failed to read or parse. Nothing was written,
-/// and the stop keeps the turn as it keeps a refused host's.
+/// The actor reply or inflight row went unobserved; closed receiver evidence belongs to that handle.
 #[derive(Debug)]
-pub(in crate::services::discord) struct StopUnobserved(String);
+pub(in crate::services::discord) struct StopUnobserved {
+    closed_receiver: bool,
+    reason: &'static str,
+}
+
+impl StopUnobserved {
+    pub(in crate::services::discord) fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
 
 /// A channel's judged stop; `Ok(None)` with no active turn.
 pub(in crate::services::discord) type ChannelJudgement =
@@ -55,11 +63,17 @@ impl ChannelStop {
         let Some(handle) = shared.mailbox_peek(channel) else {
             return Ok(None);
         };
-        let Some(token) = handle
-            .cancel_token()
-            .await
-            .map_err(|_| unobserved(channel, "mailbox actor unreachable".to_string()))?
-        else {
+        let token = match handle.cancel_token().await {
+            Ok(token) => token,
+            Err(_) => {
+                let mut error = unobserved(channel, "mailbox actor unreachable".to_string());
+                // Observe the receiver that failed, never a later registry incarnation.
+                error.closed_receiver = handle.is_closed();
+                error.reason = "actor_unreachable";
+                return Err(error);
+            }
+        };
+        let Some(token) = token else {
             return Ok(None);
         };
         let bound = token.tmux_session_name();
@@ -91,6 +105,16 @@ impl ChannelStop {
                     .find_map(|p| inflight_name(p, channel).ok().flatten())
             });
         Ok(Some(stop))
+    }
+
+    /// Offline consumers may finish a directly observed closed receiver; reply loss stays unknown.
+    pub(in crate::services::discord) fn offline_if_closed(
+        judged: ChannelJudgement,
+    ) -> ChannelJudgement {
+        match judged {
+            Err(error) if error.closed_receiver => Ok(None),
+            other => other,
+        }
     }
 
     /// Judges `token` by `name` alone; [`Self::judge`] adds what the cancel binds and records.
@@ -196,7 +220,10 @@ fn inflight_name(provider: &ProviderKind, channel: ChannelId) -> Result<Option<S
 fn unobserved(channel: ChannelId, error: String) -> StopUnobserved {
     let channel_id = channel.get();
     tracing::warn!(channel_id, %error, "stop keeps a turn it could not judge");
-    StopUnobserved(error)
+    StopUnobserved {
+        closed_receiver: false,
+        reason: "stop_unobserved",
+    }
 }
 
 pub(in crate::services::discord) enum CommandStop {

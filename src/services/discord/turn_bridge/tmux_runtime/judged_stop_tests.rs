@@ -650,3 +650,33 @@ impl Drop for PrivateServer {
         let _ = real_tmux(&self.0, &["kill-server"]);
     }
 }
+
+#[test]
+fn c1_offline_closed_verdict_uses_failed_handle_not_registry_replacement() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_463);
+        for closed in [true, false] {
+            if closed {
+                shared.mailboxes.insert_unreachable_for_test(channel);
+            } else {
+                shared.mailboxes.insert_reply_dropping_for_test(channel);
+            }
+            let judged =
+                ChannelStop::judge(&shared, &ProviderKind::Claude, channel, None, false).await;
+            assert!(judged.is_err());
+            if closed {
+                shared.mailboxes.insert_reply_dropping_for_test(channel);
+            } else {
+                shared.mailboxes.insert_unreachable_for_test(channel);
+            }
+            assert_eq!(
+                ChannelStop::offline_if_closed(judged).is_ok(),
+                closed,
+                "a replacement receiver cannot change the failed handle observation"
+            );
+            shared.mailboxes.remove_fixture_for_test(channel);
+        }
+    });
+}

@@ -218,7 +218,17 @@ pub(super) async fn handle_race_loss_enqueue(
         return race_loss_persistence_failure(channel_id, Some(persistence_error));
     }
 
-    race_loss_input_failure(channel_id, enqueue_outcome.refusal_reason)?;
+    if input_refusal(enqueue_outcome.refusal_reason) {
+        mailbox_reaction::clear_rejected_attempt_pending(
+            shared,
+            http,
+            channel_id,
+            user_msg_id,
+            turn_start_attempt,
+        )
+        .await;
+        return race_loss_input_failure(channel_id, enqueue_outcome.refusal_reason);
+    }
 
     // Enqueue rejected (dedup/duplicate): skip the placeholder POST and
     // mapping insert (a fresh card would orphan) and the `📬` reaction (the

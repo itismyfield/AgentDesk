@@ -1260,13 +1260,15 @@ server::routes::queue_api::cancel_force_tests::empty_body_falls_back_to_query
 server::routes::queue_api::cancel_force_tests::query_force_remains_fallback_when_body_omits_force
 server::routes::queue_api::cancel_force_tests::unparseable_body_falls_back_to_query
 server::routes::queue_api::cancel_queue_preserve_pg_tests::a_recorded_removal_with_an_unread_post_cancel_queue_reports_no_verdict_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::c1_dispatch_closed_actor_finishes_offline_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::c1_dispatch_observed_idle_hydration_refusals_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_on_a_dead_mailbox_reports_no_loss_verdict_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_cancel_observation_rows_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_cancel_serializes_unknown_pg
-server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_closed_pg
-server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_unreachable_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_closed_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_unreachable_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
 server::routes::receipt::tests::concurrent_token_analytics_misses_are_single_flighted
@@ -4157,6 +4159,7 @@ services::discord::input_runtime::effects::tests::unbound_key_holds_the_move_bef
 services::discord::input_runtime::fence::effect::tests::c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop
 services::discord::input_runtime::fence::effect::tests::c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected
 services::discord::input_runtime::fence::effect::tests::c1_detached_worker_holds_effect_until_cleanup_after_caller_returns
+services::discord::input_runtime::fence::effect::tests::c1_io_worker_preserves_original_panic_payload
 services::discord::input_runtime::fence::effect::tests::c1_outer_abort_before_first_poll_disposes_capture_on_worker
 services::discord::input_runtime::fence::effect::tests::c1_scope_rejects_cross_channel_and_cross_provider_without_new_admission
 services::discord::input_runtime::fence::effect::tests::c1_shutdown_disposes_queued_and_rejected_cleanup_with_preclose_effect
@@ -5678,6 +5681,7 @@ services::discord::router::message_handler::intake_turn::race_loss::mailbox_reac
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::stale_start_attempt_repairs_mailbox_from_live_queue_truth
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::standalone_without_start_attempt_adds_mailbox_once
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::busy_transition_is_durable_before_the_guard_is_released
+services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::c1_actor_unreachable_race_loss_clears_only_matching_pending_attempt
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::c1_fenced_race_loss_preserves_dispatch_reservation_and_surfaces_failure
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::persistence_failure_rolls_back_queue_and_clears_dispatch_reservation
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_still_takes_the_immediate_idle_recheck_5170
@@ -7729,6 +7733,7 @@ services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_fro
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
@@ -8298,6 +8303,7 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_preserve_sto
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_keeps_a_turn_it_could_not_read
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_offline_closed_verdict_uses_failed_handle_not_registry_replacement
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_unreachable_mailbox_keeps_confirmed_session_without_fallback_or_interrupt
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_observes_child_termination
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid

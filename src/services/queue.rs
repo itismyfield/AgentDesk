@@ -270,7 +270,7 @@ impl QueueService {
                     .await;
                     // A kept turn changed nothing: the dispatch and its session stay as they are.
                     if lifecycle.host_guard_kept() {
-                        return Err(ServiceError::conflict("session host is not legacy tmux")
+                        return Err(ServiceError::conflict(lifecycle.refusal_reason())
                             .with_code(ErrorCode::Dispatch)
                             .with_context("dispatch_id", dispatch_id));
                     }
@@ -607,7 +607,7 @@ impl QueueService {
         };
         // A refused kill changed nothing: no cancel event, dispatch or session update follows.
         if lifecycle.host_guard_kept() {
-            return Err(ServiceError::conflict("session host is not legacy tmux")
+            return Err(ServiceError::conflict(lifecycle.refusal_reason())
                 .with_context("channel_id", channel_id)
                 .with_context("session_key", session_key.as_deref()));
         }

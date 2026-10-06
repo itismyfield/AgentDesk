@@ -1350,16 +1350,7 @@ async fn runtime_turn_cleanup_by_lookup(
         let judged =
             discord::turn_bridge::ChannelStop::judge(shared, provider, channel, None, false);
         let judged = judged.await;
-        // Only runtime cleanup may retire a confirmed closed receiver; a lost reply stays unknown.
-        let judged = if judged.is_err()
-            && shared
-                .mailbox_peek(channel)
-                .is_some_and(|handle| handle.is_closed())
-        {
-            Ok(None)
-        } else {
-            judged
-        };
+        let judged = discord::turn_bridge::ChannelStop::offline_if_closed(judged);
         if !stop_watcher && discord::turn_bridge::keeps_turn(&judged) {
             let (cleanup_path, had_active_turn) = ("host-guard-kept", true);
             let kept = HardStopRuntimeResult::default();

@@ -388,3 +388,65 @@ async fn race_loss_requeue_still_takes_the_immediate_idle_recheck_5170() {
         "a real race loss against an already-finished opponent keeps its immediate recheck"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn c1_actor_unreachable_race_loss_clears_only_matching_pending_attempt() {
+    use crate::services::discord::turn_view_reconciler::{self, TurnViewIdentity, TurnViewTarget};
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(6_325_461);
+    let message = MessageId::new(100_000_000_632_546);
+    let http = Arc::new(serenity::http::Http::new("fixture"));
+    let target = TurnViewTarget::intake_user_message(channel, message);
+    let attempt = shared
+        .turn_view_reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            turn_view_reconciler::turn_view_owner_for_message(
+                channel,
+                message,
+                shared.restart.current_generation,
+            ),
+            TurnViewIdentity::Test("race-loss"),
+            "seed_pending",
+        )
+        .await
+        .attempt()
+        .unwrap();
+    shared.mailboxes.insert_reply_dropping_for_test(channel);
+    let before = shared.turn_view_reconciler.ops().len();
+    let result = handle_race_loss_enqueue(
+        &http,
+        &shared,
+        "fixture",
+        &ProviderKind::Claude,
+        channel,
+        channel,
+        TurnKind::Foreground,
+        UserId::new(1),
+        message,
+        "requeued",
+        &None,
+        false,
+        false,
+        &[],
+        &None,
+        false,
+        &None,
+        Some(attempt),
+        false,
+        QueuedIntakeCause::RaceLoss,
+    )
+    .await;
+    assert!(result.is_err());
+    let ops = shared.turn_view_reconciler.ops();
+    assert!(
+        ops[before..]
+            .iter()
+            .any(|op| op.target == target && !op.add),
+        "refused intake clears its pending reaction"
+    );
+    shared.mailboxes.remove_fixture_for_test(channel);
+}
