@@ -941,6 +941,10 @@ src/
 │   │   │   ├── fence/
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
+│   │   │   ├── supervisor/
+│   │   │   │   ├── drive.rs
+│   │   │   │   ├── drive_entry_tests.rs
+│   │   │   │   └── drive_tests.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
 │   │   │   ├── effects.rs

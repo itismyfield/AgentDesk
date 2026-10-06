@@ -18,6 +18,8 @@ use crate::services::tui_input::ledger::{Ledger, LedgerLease, LedgerSlot, Presen
 use crate::services::tui_input::transition::{self, Host, Move, Outcome};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 
+pub(crate) mod drive;
+
 /// Retries per boot for a held stage; an exhausted stage stays held until the next boot.
 pub(crate) const BUDGET: u32 = 8;
 pub(crate) const DRAIN_LIMIT: Duration = Duration::from_secs(30);

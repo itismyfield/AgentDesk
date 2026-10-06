@@ -1048,3 +1048,87 @@ async fn optional_attempt_roundtrip_and_terminal_immutability() {
         Some(&evidence)
     );
 }
+
+fn codex_world() -> World {
+    let world = World::new(ShadowProvider::Codex);
+    let meta = json!({"type":"session_meta","payload":{"id":"session","cwd":"/workspace"}});
+    world.append(meta);
+    world
+}
+
+fn codex_turn(world: &World, kind: &str, turn: &str) -> u64 {
+    world.append(json!({"type":"event_msg","payload":{"type":kind,"turn_id":turn}}))
+}
+
+/// Submits key 1 on `world` and records its prompt inside turn `t-ours`, leaving the row Running.
+async fn running(world: &World, channel: u64, pane: &str) -> (Ledger, InputActor<FakePane>) {
+    let mut ledger = world.ledger_for(channel, &[(1, "long task")]);
+    let mut actor = InputActor::new(world.binding.clone(), FakePane::new(pane));
+    let at = Instant::now();
+    let step = actor.step(&mut ledger, Some(&world.idle()), at).await;
+    assert_eq!(step.unwrap(), Step::Moved(1, RowState::AwaitTurn));
+    if world.binding.provider == ShadowProvider::Codex {
+        codex_turn(world, "task_started", "t-ours");
+    }
+    world.user(&actor.pane_submitted()[0]);
+    let opened = world.fact(open_turn());
+    let step = actor.step(&mut ledger, Some(&opened), at).await;
+    assert_eq!(step.unwrap(), Step::Moved(1, RowState::Running));
+    (ledger, actor)
+}
+
+#[tokio::test]
+async fn completion_holds_after_foreign_input_and_closes_on_its_own_named_abort() {
+    let held = Step::Moved(1, RowState::Held(HeldReason::Ambiguous));
+    // A prompt typed before our turn closed: no later closer can be tied to our turn alone.
+    let claude = World::new(ShadowProvider::Claude);
+    let (mut ledger, mut actor) = running(&claude, 1, CLAUDE_READY).await;
+    claude.user("someone else typed this");
+    claude.append(json!({"type":"system","subtype":"turn_duration"}));
+    let step = idle_step(&mut actor, &mut ledger, &claude, Instant::now());
+    assert_eq!(step.await, held);
+
+    let codex = codex_world();
+    let (mut ledger, mut actor) = running(&codex, 2, CODEX_READY).await;
+    codex_turn(&codex, "task_started", "t-other");
+    codex_turn(&codex, "task_complete", "t-other");
+    let step = idle_step(&mut actor, &mut ledger, &codex, Instant::now());
+    assert_eq!(step.await, held);
+
+    // An interrupted turn of ours still ends the input's lifecycle.
+    let (mut ledger, mut actor) = running(&codex, 3, CODEX_READY).await;
+    codex_turn(&codex, "turn_aborted", "t-ours");
+    let step = idle_step(&mut actor, &mut ledger, &codex, Instant::now());
+    let done = Step::Moved(1, RowState::Done(DoneReason::Completed));
+    assert_eq!(step.await, done);
+    assert_eq!(owner_of(&ledger, 1), Owner::Settled);
+}
+
+#[tokio::test]
+async fn a_not_sent_input_is_offered_afresh_under_the_next_binding() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "after rotate")]);
+    let mut pane = FakePane::new(CLAUDE_READY);
+    pane.outcomes = VecDeque::from([SendOutcome::NotSent("load-buffer failed".into())]);
+    let mut actor = InputActor::new(world.binding.clone(), pane);
+    let step = idle_step(&mut actor, &mut ledger, &world, Instant::now());
+    assert_eq!(step.await, Step::Moved(1, RowState::Ready));
+
+    let rotated = world.transcript.with_file_name("rotated.jsonl");
+    fs::write(&rotated, "{\"type\":\"summary\"}\n").unwrap();
+    let binding = SourceBinding {
+        source: source_id_for("rotated", &rotated).unwrap(),
+        ..world.binding.clone()
+    };
+    let idle = ChannelFact {
+        binding: binding.clone(),
+        through: fs::metadata(&rotated).unwrap().len(),
+        state: TurnState::Idle,
+    };
+    let mut next = InputActor::new(binding.clone(), FakePane::new(CLAUDE_READY));
+    let step = next.step(&mut ledger, Some(&idle), Instant::now()).await;
+    assert_eq!(step.unwrap(), Step::Moved(1, RowState::AwaitTurn));
+    assert_eq!(next.pane_submitted(), [frame(1, "after rotate")]);
+    let attempt = ledger.rows().unwrap().row(1).unwrap().attempt.clone();
+    assert_eq!(attempt.map(|attempt| attempt.binding), Some(binding));
+}

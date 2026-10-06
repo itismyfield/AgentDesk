@@ -172,7 +172,7 @@ impl ReadVersion {
 
 /// Whether `later` supersedes `pending` as the writer drops it, never to resolve it: a hook on the
 /// pane adopting another session, a later Pending, or a prompt of its own session it outlived.
-pub(super) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
+pub(crate) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
     #[cfg(test)]
     use crate::services::claude_tui::source_verify::n2b_mutant;
     let same_pane = later.tmux_session == pending.tmux_session;
