@@ -73,6 +73,19 @@ impl std::fmt::Display for HeadlessTurnStartError {
 
 impl std::error::Error for HeadlessTurnStartError {}
 
+const ORIGINAL_START_DEFERRED: &str = "original bridge start deferred; caller retry required";
+
+impl HeadlessTurnStartError {
+    /// A watcher recovery held the channel past the start wait; nothing started, so retry later.
+    pub(crate) fn original_start_deferred() -> Self {
+        Self::Internal(ORIGINAL_START_DEFERRED.into())
+    }
+
+    pub(crate) fn is_original_start_deferred(&self) -> bool {
+        matches!(self, Self::Internal(message) if message == ORIGINAL_START_DEFERRED)
+    }
+}
+
 #[cfg(test)]
 pub(super) const HEADLESS_TURN_MESSAGE_ID_BASE: u64 = 9_100_000_000_000_000_000;
 #[cfg(not(test))]
