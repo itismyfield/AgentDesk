@@ -481,7 +481,7 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # Re-exports; a placement releases a pending adoption by design, with no body.
     "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
     # The writer host's once-per-channel actor slot, not an adoption.
-    "src/services/tui_o/writer/host.rs": ("start",),
+    "src/services/tui_o/writer/host.rs": ("spawn_hosts",),
     # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
     "src/services/discord/health/recovery.rs": ("maybe_recover_completed_stale_leak",),
 }

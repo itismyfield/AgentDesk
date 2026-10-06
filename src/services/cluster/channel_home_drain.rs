@@ -44,6 +44,8 @@ pub(crate) trait DrainPort {
 pub(crate) enum ResetRefused {
     /// No reset path reaches the drain yet.
     NotWired,
+    /// The existing reset path refused to touch the session, for the reason given.
+    Refused(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +180,7 @@ pub(crate) async fn drain_round<P: DrainPort>(
 }
 
 /// Drains until the leaving write lands or the row stops naming this node as a draining
-/// holder; each wait is shown in health as `home_draining`. Not started yet.
+/// holder; each wait is shown in health as `home_draining`.
 pub(crate) async fn run_drain<P: DrainPort>(
     pool: PgPool,
     home: Arc<HomeGate>,
