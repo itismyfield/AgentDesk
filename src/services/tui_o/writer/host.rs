@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::activation::{self, ActivationFacts};
-use super::actor;
+use super::actor::{self, Undelivered};
 use super::adoption::{self, LegacyView};
 use super::binding::BindingEvents;
 use super::deferred;
@@ -78,6 +78,7 @@ struct Live {
     gate: Arc<OwnershipGate>,
     resumed: watch::Receiver<bool>,
     unsettled: watch::Receiver<Option<usize>>,
+    owing: watch::Receiver<Option<Undelivered>>,
 }
 
 fn locked<T>(set: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -103,16 +104,12 @@ impl Readiness {
         locked(&self.hosted).insert(channel)
     }
 
-    fn track(
-        &self,
-        channel: u64,
-        gate: Arc<OwnershipGate>,
-        (resumed, unsettled): (watch::Receiver<bool>, watch::Receiver<Option<usize>>),
-    ) {
+    fn track(&self, channel: u64, gate: Arc<OwnershipGate>, (resumed, unsettled, owing): Watched) {
         let live = Live {
             gate,
             resumed,
             unsettled,
+            owing,
         };
         locked(&self.live).insert(channel, live);
     }
@@ -136,7 +133,21 @@ impl Readiness {
         unsettled.has_changed().ok()?;
         *unsettled.borrow()
     }
+
+    /// The running actor's view of what the channel still owes, to read as it publishes; `None`
+    /// when no actor runs. The map is locked only to clone it.
+    pub fn undelivered(&self, channel: u64) -> Option<watch::Receiver<Option<Undelivered>>> {
+        let live = locked(&self.live);
+        let owing = &live.get(&channel)?.owing;
+        Some(owing.clone())
+    }
 }
+
+type Watched = (
+    watch::Receiver<bool>,
+    watch::Receiver<Option<usize>>,
+    watch::Receiver<Option<Undelivered>>,
+);
 
 static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
 
@@ -463,12 +474,13 @@ impl<I: HostIo> Hosted<'_, I> {
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.
         let (unsettled_tx, unsettled) = watch::channel(None);
+        let (owing_tx, owing) = watch::channel(None);
         let config = WriterConfig { enabled: true };
         let bindings = Arc::clone(&self.bindings);
-        let watches = (stop, resumed_tx, unsettled_tx);
+        let watches = (stop, resumed_tx, unsettled_tx, owing_tx);
         let spawned = actor::spawn_projecting(&config, writer, self.provider, bindings, watches);
         let actor = spawned?;
-        let watched = (resumed.clone(), unsettled);
+        let watched = (resumed.clone(), unsettled, owing);
         self.readiness.track(channel, Arc::clone(gate), watched);
         let on_resumed = || {
             if attempt > 0 {

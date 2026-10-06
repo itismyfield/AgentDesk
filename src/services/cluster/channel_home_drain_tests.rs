@@ -116,7 +116,7 @@ impl DrainPort for Actor {
         Some(self.sink.running(self.node))
     }
 
-    async fn reset_legacy_source(&self) -> Result<(), String> {
+    async fn reset_legacy_source(&self) -> Result<(), ResetRefused> {
         self.resets.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -562,7 +562,7 @@ impl DrainPort for Arc<Actor> {
         self.as_ref().posts_in_flight().await
     }
 
-    async fn reset_legacy_source(&self) -> Result<(), String> {
+    async fn reset_legacy_source(&self) -> Result<(), ResetRefused> {
         self.as_ref().reset_legacy_source().await
     }
 }
