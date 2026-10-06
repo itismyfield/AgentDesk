@@ -160,7 +160,12 @@ pub(crate) enum ForceOutcome {
 #[derive(Debug)]
 pub(crate) enum HomeError {
     Db(sqlx::Error),
-    Undecodable { channel_id: String, detail: String },
+    Undecodable {
+        channel_id: String,
+        detail: String,
+    },
+    /// Refused before any write: not `claude` or `codex`.
+    UnknownProvider(String),
 }
 
 impl std::fmt::Display for HomeError {
@@ -170,6 +175,7 @@ impl std::fmt::Display for HomeError {
             Self::Undecodable { channel_id, detail } => {
                 write!(f, "o_channel_homes row {channel_id} undecodable: {detail}")
             }
+            Self::UnknownProvider(raw) => write!(f, "provider {raw:?} is not claude or codex"),
         }
     }
 }
@@ -224,13 +230,16 @@ pub(crate) async fn read_home(
 }
 
 /// Operator `delegate`: a gateway-owned channel starts releasing to `target` at a fresh epoch.
+/// The provider is stored in its canonical form, the one intake rows carry.
 pub(crate) async fn delegate(
     pool: &PgPool,
     channel_id: &str,
-    provider: HomeProvider,
+    provider: &str,
     gateway: &str,
     target: &str,
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
+    let provider =
+        HomeProvider::parse(provider).ok_or_else(|| HomeError::UnknownProvider(provider.into()))?;
     let row = sqlx::query(&format!(
         "INSERT INTO o_channel_homes (channel_id, provider, state, holder, target, epoch, renewed_at)
          SELECT $1, $2, 'releasing', $3, $4, nextval('o_channel_home_epochs'), NOW()

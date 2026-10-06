@@ -90,3 +90,25 @@ pane kill·close 는 P11 범위다.
 2. drain: 진행 턴이 끝나고 O spool 이 비며 health 의 미전달이 0 인지 확인한다.
 3. 채널 제거: 양 노드 yaml 의 `session_hosts.herdr.channels` 에서 채널을 빼고 재시작한다.
 4. 원복: 5절 retire 로 row 를 Retired 로 만든 뒤에만 tmux 재기동이 된다. 그 전에는 그 채널의 턴이 typed 거절 상태다.
+
+## 7. 위임 home(`agentdesk channel-home`)
+
+- 지금은 휴면이다. lease task 와 drain 드라이버를 기동하는 운영 경로가 없다. 위임 row 가 생겨도 이 빌드는 그 row 를 넘기거나 받지 않는다.
+- `status`: 읽기 전용이다.
+  - row 마다 state·holder·target·epoch·`renewed_at` 을 보여 준다.
+  - `open_intake` 는 그 채널의 열린 intake 를 각인된 home epoch 로 나눈다.
+    - `current_epoch`: row 의 현재 epoch 로 각인된 행. 현재 holder 만 claim 한다.
+    - `other_epoch`: 다른 epoch 로 각인된 행. 어느 holder 도 다시 claim 하지 않는다.
+    - `unrouted`: row 가 생기기 전에 만든 행. row 가 있는 동안 claim 되지 않는다.
+  - intake 원문과 경로는 출력하지 않는다.
+- `delegate <channel> --provider claude|codex --to <node>`, `reclaim <channel>`, `force <channel>`:
+  - `runtime.channel_home_delegation_enabled` 가 true 일 때만 실행한다. 미설정·false 면 DB 에 접속하기 전에 거절한다.
+  - delegate·reclaim 은 이 노드의 `cluster.instance_id` 를 gateway 로 쓴다. gateway 노드에서 실행한다.
+  - provider 는 앞뒤 공백·대소문자를 무시하고 소문자로 저장한다. claude·codex 밖은 거절한다.
+  - force 는 holder 의 lease 가 F(200초 = H 20초 + 조각 lease 180초)보다 오래 갱신되지 않았을 때만 row 를 `orphaned` 로 만든다. 그 뒤 아무 노드도 채널을 받지 않는다. 옛 노드의 store 를 운영자가 확인한다.
+- health `channel_homes` 는 이 프로세스에 위임 home 이 등록됐을 때만 나온다. `homes` 는 home 별 상태(`intake_open`·`draining`·`lost`)이고, `home_draining` 은 drain 이 기다리는 이유(`blocker`)다.
+- retry 복구 계약:
+  - 자동 sweep 과 `intake-outbox force-fail` 의 재시도 행은 원래 행의 `home_epoch` 를 그대로 둔다. 같은 lifecycle 의 같은 holder 일 때만 다시 claim 된다.
+  - holder 나 epoch 가 바뀐 뒤의 재시도 행은 `status` 에 `other_epoch` 로 보이고 claim 되지 않는다. 채널당 열린 route 가 1개뿐이라 그 채널의 다음 intake 도 막힌다.
+  - 지금은 이 행을 현재 home 으로 다시 보내는 도구가 없다. force-fail 도 같은 epoch 로 다시 만든다. 현재 home 을 다시 읽는 재시도가 생기기 전에는 위임을 켜지 않는다.
+  - drain 의 `blocker` 가 `open_intake` 에 오래 머물면 이 경우인지 `status` 로 확인한다.

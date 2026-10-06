@@ -140,6 +140,38 @@ mod tests {
         );
     }
 
+    // With no delegated home registered the body has no channel home key at all; a registered
+    // one shows its state and what its drain waits on, read from memory.
+    #[test]
+    fn health_shows_channel_homes_only_once_one_is_registered() {
+        use crate::db::o_channel_homes::{HeldHome, HomeState};
+        use crate::services::cluster::channel_home::{self, HomeGate};
+        let config = crate::config::Config::default();
+        let mut quiet = json!({});
+        super::attach_runtime_profile(&mut quiet, &config);
+        assert_eq!(quiet.get("channel_homes"), None);
+
+        let home = std::sync::Arc::new(HomeGate::new("77", "mini"));
+        channel_home::register(std::sync::Arc::clone(&home));
+        let mut health = json!({});
+        super::attach_runtime_profile(&mut health, &config);
+        let lost = json!({"homes": [{"channel": "77", "holder": "mini", "home": "lost",
+            "epoch": null}], "home_draining": []});
+        assert_eq!(health["channel_homes"], lost);
+
+        let renewal = HeldHome::for_test("77", "mini", 5, HomeState::Reclaiming);
+        home.confirm(&renewal, tokio::time::Instant::now()).unwrap();
+        home.note_drain(Some("owed"));
+        super::attach_runtime_profile(&mut health, &config);
+        let draining = json!({"homes": [{"channel": "77", "holder": "mini", "home": "draining",
+            "epoch": 5}], "home_draining": [{"channel": "77", "blocker": "owed"}]});
+        assert_eq!(health["channel_homes"], draining);
+        channel_home::unregister("77");
+        let mut after = json!({});
+        super::attach_runtime_profile(&mut after, &config);
+        assert_eq!(after, quiet);
+    }
+
     // A local endpoint adds the latest restart reconnect counts and the held inputs that pass
     // counted, never read here; without one the projection above stays as it was.
     #[cfg(unix)]

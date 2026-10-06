@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 57
-- Commands including nested subcommands: 102
+- Top-level commands: 58
+- Commands including nested subcommands: 107
 
 ## Global options
 
@@ -128,6 +128,11 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk herdr`](#agentdesk-herdr) | Herdr-hosted executions on this node: read-only status, and retire of an ended one |  |
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
+| [`agentdesk channel-home`](#agentdesk-channel-home) | Delegated channel homes: status, and the switched delegate, reclaim and force |  |
+| [`agentdesk channel-home status`](#agentdesk-channel-home-status) | Each home row and its open intake by routed epoch; changes nothing |  |
+| [`agentdesk channel-home delegate`](#agentdesk-channel-home-delegate) | Start releasing a gateway-owned channel from this node to `--to` |  |
+| [`agentdesk channel-home reclaim`](#agentdesk-channel-home-reclaim) | Start draining a worker-owned channel back to this node |  |
+| [`agentdesk channel-home force`](#agentdesk-channel-home-force) | Orphan a holder whose lease has been silent past F; nothing adopts the channel after |  |
 
 ## Commands
 
@@ -1290,3 +1295,54 @@ Usage: `agentdesk herdr retire <CHANNEL>`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `<CHANNEL>` | `u64` |  | Discord channel id of the execution |
+
+## `agentdesk channel-home`
+
+Delegated channel homes: status, and the switched delegate, reclaim and force
+
+Usage: `agentdesk channel-home <COMMAND>`
+
+Subcommands:
+
+- `status` — Each home row and its open intake by routed epoch; changes nothing
+- `delegate` — Start releasing a gateway-owned channel from this node to `--to`
+- `reclaim` — Start draining a worker-owned channel back to this node
+- `force` — Orphan a holder whose lease has been silent past F; nothing adopts the channel after
+
+### `agentdesk channel-home status`
+
+Each home row and its open intake by routed epoch; changes nothing
+
+Usage: `agentdesk channel-home status`
+
+### `agentdesk channel-home delegate`
+
+Start releasing a gateway-owned channel from this node to `--to`
+
+Usage: `agentdesk channel-home delegate [OPTIONS] <CHANNEL>`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `<CHANNEL>` | `u64` |  |  |
+| `--provider <PROVIDER>` (required) | `String` |  | claude or codex |
+| `--to <TO>` (required) | `String` |  |  |
+
+### `agentdesk channel-home reclaim`
+
+Start draining a worker-owned channel back to this node
+
+Usage: `agentdesk channel-home reclaim <CHANNEL>`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `<CHANNEL>` | `u64` |  |  |
+
+### `agentdesk channel-home force`
+
+Orphan a holder whose lease has been silent past F; nothing adopts the channel after
+
+Usage: `agentdesk channel-home force <CHANNEL>`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `<CHANNEL>` | `u64` |  |  |

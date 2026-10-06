@@ -73,26 +73,36 @@ where
     }
     let local = config.cluster.instance_id.as_deref().map(str::trim);
     let local = local.filter(|node| !node.is_empty());
-    let provider = match &command {
-        ChannelHomeCommand::Delegate { provider, .. } => {
-            Some(HomeProvider::parse(provider).ok_or(format!(
-                "channel-home refused: provider {provider:?} is not claude or codex"
-            ))?)
+    let unset = || "channel-home refused: cluster.instance_id is not set".to_string();
+    match &command {
+        ChannelHomeCommand::Delegate { provider, to, .. } => {
+            let local = local.ok_or_else(unset)?;
+            if HomeProvider::parse(provider).is_none() {
+                return Err(format!(
+                    "channel-home refused: provider {provider:?} is not claude or codex"
+                ));
+            }
+            if to.trim().is_empty() || to.trim() == local {
+                return Err(format!(
+                    "channel-home refused: target {to:?} is not another node"
+                ));
+            }
         }
-        _ => None,
-    };
+        ChannelHomeCommand::Reclaim { .. } => {
+            local.ok_or_else(unset)?;
+        }
+        ChannelHomeCommand::Status | ChannelHomeCommand::Force { .. } => {}
+    }
+    let local = local.unwrap_or_default();
     let pool = connect().await?;
     let result = match command {
         ChannelHomeCommand::Status => status(&pool).await,
-        ChannelHomeCommand::Delegate { channel, to, .. } => {
-            let local = local.ok_or("channel-home refused: cluster.instance_id is not set")?;
-            let provider = provider.expect("parsed above");
-            delegate(&pool, channel, provider, local, to.trim()).await
-        }
-        ChannelHomeCommand::Reclaim { channel } => {
-            let local = local.ok_or("channel-home refused: cluster.instance_id is not set")?;
-            reclaim(&pool, channel, local).await
-        }
+        ChannelHomeCommand::Delegate {
+            channel,
+            provider,
+            to,
+        } => delegate(&pool, channel, &provider, local, to.trim()).await,
+        ChannelHomeCommand::Reclaim { channel } => reclaim(&pool, channel, local).await,
         ChannelHomeCommand::Force { channel } => force(&pool, channel).await,
     };
     pool.close().await;
@@ -143,15 +153,10 @@ fn written(command: &str, write: HomeWrite<ChannelHome>) -> Result<String, Strin
 async fn delegate(
     pool: &PgPool,
     channel: u64,
-    provider: HomeProvider,
+    provider: &str,
     gateway: &str,
     to: &str,
 ) -> Result<String, String> {
-    if to.is_empty() || to == gateway {
-        return Err(format!(
-            "channel-home refused: target {to:?} is not another node"
-        ));
-    }
     let channel = channel.to_string();
     let write = o_channel_homes::delegate(pool, &channel, provider, gateway, to).await;
     written("delegate", write.map_err(|e| e.to_string())?)

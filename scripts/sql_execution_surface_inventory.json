@@ -2390,6 +2390,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/cli/channel_home_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7677c58efa7cb09e8409da788cb3731a48e2297979633a6cc41fbea27fbdbbe7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/channel_home_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ad247218e3cc05f7370d25a9f44e955aa3224dbde3aee7bade7c48df034e1fc1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/cli/direct.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -10836,7 +10854,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "UNRESOLVED",
+      "fingerprint": "sha256:8547167c7ac68fe60c7ca1e19e01068395bf9b6eee121169a2fee21d22fedbc8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
       "fingerprint": "sha256:a72c8a3f4491458b4b2622bb3dc9bed1ee6af10ffa7747a4e31534f890a7a6fb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:ac98877c346f576cddcc311ac03fd42df239a1481f43dbcb6da7d9f2286ce161"
     },
     {
       "root": "src",
@@ -24643,6 +24679,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:7fc696aa1908bb2e48525bafeee0eb0c005115731cbdf34ff64d6468106130af"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/channel_home_drain_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7b18c6905d09b24930d3dfa716e2aed4421a4d5679ee253ecdfcef9b0ad7b3d3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/channel_home_drain_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:237060e950dcd5f06c0709f58b24a32278dbf9359c17c906b2697985b8c74ff2"
     },
     {
       "root": "src",
