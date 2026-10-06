@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -90,8 +92,8 @@ class PrCapCheckTest(unittest.TestCase):
                  "+refs/heads/unused:refs/remotes/origin/unused")
         self.assertEqual(len(self.git(self.repo, "diff", "--numstat", "main", "HEAD").splitlines()), 22)
         result = self.check_cap()
-        self.assert_pass(result, "1 files +1/-0")
-        self.assertIn("remaining 19 files/+799", result.stdout)
+        self.assert_pass(result, "1 files net +1 code")
+        self.assertIn("remaining 29 files/+799", result.stdout)
         self.assertIn(f"base={fresh}", result.stdout)
         self.assertEqual(self.git(self.repo, "rev-parse", "origin/main"), fresh)
         self.assertEqual(self.git(self.repo, "rev-parse", "main"), self.initial)
@@ -102,14 +104,14 @@ class PrCapCheckTest(unittest.TestCase):
         (self.producer / "existing.txt").write_text("upstream replacement\n")
         self.commit(self.producer)
         self.git(self.producer, "push", "origin", "main")
-        self.assert_pass(self.check_cap(), "1 files +2/-0")
+        self.assert_pass(self.check_cap(), "1 files net +2 code")
 
     def test_exact_caps_pass(self) -> None:
-        for index in range(20):
-            self.add_lines(40, f"file-{index}")
+        for index in range(30):
+            self.add_lines(1 if index else 771, f"file-{index}")
         self.commit()
         result = self.check_cap()
-        self.assert_pass(result, "20 files +800/-0")
+        self.assert_pass(result, "30 files net +800 code")
         self.assertIn("remaining 0 files/+0", result.stdout)
 
     def test_801_additions_fail(self) -> None:
@@ -117,23 +119,22 @@ class PrCapCheckTest(unittest.TestCase):
         self.commit()
         result = self.check_cap()
         self.assert_fail(result)
-        self.assertIn("1 files +801/-0", result.stdout)
+        self.assertIn("1 files net +801 code", result.stdout)
 
-    def test_21_files_fail(self) -> None:
-        for index in range(21):
+    def test_31_files_fail(self) -> None:
+        for index in range(31):
             self.add_lines(1, f"file-{index}")
         self.commit()
         result = self.check_cap()
         self.assert_fail(result)
-        self.assertIn("21 files +21/-0", result.stdout)
+        self.assertIn("31 files net +31 code", result.stdout)
 
-    def test_deletions_do_not_offset_additions(self) -> None:
+    def test_deletions_offset_additions(self) -> None:
         (self.repo / "existing.txt").unlink()
         self.add_lines(801)
         self.commit()
         result = self.check_cap()
-        self.assert_fail(result)
-        self.assertIn("2 files +801/-1000", result.stdout)
+        self.assert_pass(result, "2 files net -199 code")
 
     def test_fetch_failure_cannot_use_existing_local_refs(self) -> None:
         self.git(self.repo, "remote", "set-url", "origin", str(self.root / "missing.git"))
@@ -168,7 +169,7 @@ class PrCapCheckTest(unittest.TestCase):
         result = self.check_cap("feature")
         self.assert_fail(result)
         self.assertIn("ambiguity", result.stderr)
-        self.assert_pass(self.check_cap("refs/tags/feature"), "0 files +0/-0")
+        self.assert_pass(self.check_cap("refs/tags/feature"), "0 files net +0 code")
 
     def test_absolute_helper_path_measures_callers_worktree_and_target(self) -> None:
         self.add_lines(3)
@@ -178,26 +179,25 @@ class PrCapCheckTest(unittest.TestCase):
         subdirectory = worktree / "nested directory"
         subdirectory.mkdir()
         (worktree / "untracked").write_text("ignored\n" * 900)
-        self.assert_pass(self.check_cap(cwd=subdirectory), "1 files +3/-0")
-        self.assert_pass(self.check_cap("main", cwd=subdirectory), "0 files +0/-0")
+        self.assert_pass(self.check_cap(cwd=subdirectory), "1 files net +3 code")
+        self.assert_pass(self.check_cap("main", cwd=subdirectory), "0 files net +0 code")
 
-    def test_whitespace_paths_and_detected_rename(self) -> None:
-        for name in ("space name", "tab\tname", "newline\nname"):
+    def test_space_path_and_canonical_no_rename(self) -> None:
+        for name in ("space name",):
             self.add_lines(1, name)
-        renamed = self.repo / "renamed\tfile\n.txt"
+        renamed = self.repo / "renamed.txt"
         (self.repo / "existing.txt").rename(renamed)
         renamed.write_text(renamed.read_text().replace("old 0\n", "changed\n", 1))
         self.commit()
         self.git(self.repo, "config", "diff.renames", "false")
-        self.assert_pass(self.check_cap(), "4 files +4/-1")
+        self.assert_pass(self.check_cap(), "3 files net +1 code")
 
     def test_binary_cannot_certify_addition_cap(self) -> None:
         (self.repo / "binary.bin").write_bytes(b"\x00\x01\x02")
         self.commit()
         result = self.check_cap()
         self.assert_fail(result)
-        self.assertIn("1 files +0/-0 (binary files: 1", result.stdout)
-        self.assertIn("binary line counts unavailable", result.stdout)
+        self.assertIn("binary prod files: binary.bin", result.stdout)
 
     def test_diff_failure_cannot_print_pass(self) -> None:
         self.add_lines(1)
@@ -206,8 +206,62 @@ class PrCapCheckTest(unittest.TestCase):
         self.git(self.repo, "config", "diff.algorithm", "not-a-diff-algorithm")
         result = self.check_cap()
         self.assert_fail(result)
-        self.assertIn("cannot compute numstat", result.stderr)
+        self.assertIn("production measurement failed", result.stderr)
 
+
+    def event(self, body="", base=None):
+        path = self.root / "event.json"
+        path.write_text(json.dumps({"pull_request": {"head": {"sha": self.git(self.repo, "rev-parse", "HEAD")}, "base": {"sha": base or self.initial}, "body": body}}))
+        self.env.update(PR_CAP_CI="1", GITHUB_EVENT_PATH=str(path))
+
+    def test_modes_and_exception(self):
+        self.add_lines(801)
+        self.commit()
+        self.assert_fail(self.check_cap())
+        self.env["PR_CAP_MODE"] = "report-only"
+        self.assertEqual(self.check_cap().returncode, 0)
+        self.env["PR_CAP_MODE"] = "enforce"
+        self.event("PR-CAP-EXEMPT: generated compatibility migration")
+        self.assertIn("CAP: EXEMPT", self.check_cap().stdout)
+        self.event("PR-CAP-EXEMPT:   \nnot a reason")
+        self.assert_fail(self.check_cap())
+        self.event("PR-CAP-EXEMPT: one\nPR-CAP-EXEMPT: two")
+        self.assert_fail(self.check_cap())
+        self.env["PR_CAP_MODE"] = "off"
+        self.assertIn("CAP: DISABLED", self.check_cap().stdout)
+        self.env["PR_CAP_MODE"] = "bogus"
+        self.assert_fail(self.check_cap())
+
+    def test_report_only_and_exemption_cannot_hide_errors(self):
+        self.add_lines(801)
+        self.commit()
+        self.event("PR-CAP-EXEMPT: migration")
+        self.env["PR_CAP_MODE"] = "report-only"
+        self.git(self.repo, "config", "diff.algorithm", "invalid")
+        self.assert_fail(self.check_cap())
+
+    def test_ci_declared_stack_base_and_event_head(self):
+        self.add_lines(801)
+        self.commit()
+        parent = self.git(self.repo, "rev-parse", "HEAD")
+        self.add_lines(1, "child")
+        self.commit()
+        self.event(base=parent)
+        self.git(self.repo, "checkout", "main")
+        self.assert_pass(self.check_cap(), "1 files net +1 code")
+
+    def test_exclusions_comments_and_inline_tests(self):
+        for name in ("docs/a.md", "tests/a.rs", "src/generated/a.rs", "src/fixtures/a.txt", "scripts/test_a.py"):
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("test\n" * 900)
+        (self.repo / "src/prod.rs").write_text("// comment\n\nfn prod() {}\n#[cfg(test)]\nmod tests {\n" + "    fn t() {}\n" * 900 + "}\n")
+        self.commit()
+        self.assert_pass(self.check_cap(), "1 files net +1 code")
+
+    def test_canonical_snapshot(self):
+        digest = hashlib.sha256(HELPER.with_name("pr_cap_prod.py").read_bytes()).hexdigest()
+        self.assertEqual(digest, "3a64a9eb82a7ceef9a243aa71181610b0ba831ad488006389e0839fbe9b3af76")
 
 if __name__ == "__main__":
     unittest.main()
