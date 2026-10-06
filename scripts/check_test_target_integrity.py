@@ -1173,7 +1173,7 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                               sorted(declared_in.items()))
             findings.append(("target-mismatch", (
                 f"filter `{filt}` names module `{lead}` declared in {sites}, "
-                f"but the command only selects {'/'.join(spec.targets)}; the "
+                f"but the command only selects {'/'.join(selected_targets)}; the "
                 f"filter matches 0 tests there and cargo still exits 0")))
         elif "::" in filt and not (
                 lib_judged and spec.selection is TargetSelection.EXPLICIT):
