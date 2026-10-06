@@ -2833,6 +2833,7 @@ services::discord::bot_role::tests::utility_bot_role_metadata_is_exhaustive
 services::discord::busy_followup_retry_store::tests::b2_busy_off_delta_zero_and_frozen_sweep_preserves_population
 services::discord::busy_followup_retry_store::tests::c1b_retry_requeues_all_sources_and_updates_binding_after_closing
 services::discord::busy_followup_retry_store::tests::c1b_retry_root_admits_protected_open_without_scheduler_writes
+services::discord::busy_followup_retry_store::tests::c1b_retry_root_cancel_releases_effect_before_any_mailbox_readmission
 services::discord::busy_followup_retry_store::tests::crash_before_first_retry_binding_is_swept_by_file_mtime_4888
 services::discord::busy_followup_retry_store::tests::elapsed_cap_and_identity_guarded_clear_preserve_current_binding_4888
 services::discord::busy_followup_retry_store::tests::merged_head_inherits_source_retry_identity_and_unrelated_head_does_not_4888
@@ -4218,9 +4219,11 @@ services::discord::input_runtime::fence::effect::tests::c1_worker_wake_before_pe
 services::discord::input_runtime::fence::effect::tests::c1b_detached_cross_channel_uses_root_admission_without_lending_capability
 services::discord::input_runtime::fence::effect::tests::c1b_explicit_empty_worker_scope_masks_task_capability
 services::discord::input_runtime::fence::effect::tests::c1b_nested_identity_scope_restores_worker_on_poll_and_cancel
+services::discord::input_runtime::fence::effect::tests::c1b_off_root_run_does_not_create_registration_or_worker_transport
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_before_first_poll_disposes_capture_on_worker
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_during_poll_holds_effect_until_worker_cleanup
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_pending_returns_pool_thread_and_cleans_on_worker
+services::discord::input_runtime::fence::effect::tests::c1b_same_identity_stale_epoch_is_not_replaced_by_root_admission
 services::discord::input_runtime::fence::modes::tests::e1_abort_returns_only_a_history_free_close_and_hold_refuses_both_owners
 services::discord::input_runtime::fence::modes::tests::e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barrier
 services::discord::input_runtime::fence::modes::tests::e1_drain_timeout_holds_closing_and_keeps_the_admitted_permit_valid
@@ -5706,6 +5709,9 @@ services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_are_classified_precisely
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
+services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_actual_start_holds_provider_and_bridge_effect_until_cleanup
+services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_off_and_preclose_empty_prompt_keep_original_error_and_drain
+services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_owner_refuses_closing_before_settings_and_original_registration
 services::discord::router::message_handler::headless_turn::foreign_row_refusal_tests::a_foreign_durable_row_refuses_the_start_and_unwinds_only_this_turn
 services::discord::router::message_handler::headless_turn::foreign_row_refusal_tests::the_row_refusal_returns_before_any_provider_or_bridge_spawn
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_fresh_routine_label_becomes_the_session_key_basis
@@ -5774,6 +5780,9 @@ services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_que
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::turn_start_guard_is_gated_on_preserve_on_cancel
+services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_intake_holds_provider_and_bridge_through_cleanup
+services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_redirect_admits_protected_destination_from_off_root
+services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_role_override_admits_final_provider_from_off_root
 services::discord::router::message_handler::latency_spans::tests::empty_span_renders_all_dashes
 services::discord::router::message_handler::latency_spans::tests::fresh_span_has_only_accept_anchor
 services::discord::router::message_handler::latency_spans::tests::full_span_renders_every_segment

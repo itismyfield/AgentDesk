@@ -17,23 +17,28 @@ pub(super) fn resolve_channel_id(
         })
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct RedirectDispatch<'a> {
+    pub http: &'a Arc<serenity::http::Http>,
+    pub cache: Option<&'a Arc<serenity::cache::Cache>>,
+    pub shared: &'a Arc<SharedData>,
+    pub provider: &'a ProviderKind,
+    pub channel_id: ChannelId,
+    pub original_channel_id: ChannelId,
+    pub dispatch_id_for_thread: &'a Option<String>,
+    pub dispatch_info_cached:
+        &'a Option<crate::services::discord::router::thread_binding::DispatchInfo>,
+    pub dispatch_type_str: Option<&'a str>,
+    pub dispatch_uses_thread_routing: bool,
+    pub is_already_thread: bool,
+    pub user_text: &'a str,
+    pub dispatch_effective_path: &'a str,
+    pub pending_uploads:
+        &'a mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    pub session_was_cleared: Option<bool>,
+}
+
 pub(super) async fn redirect_dispatch(
-    http: &Arc<serenity::http::Http>,
-    cache: Option<&Arc<serenity::cache::Cache>>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    original_channel_id: ChannelId,
-    dispatch_id_for_thread: &Option<String>,
-    dispatch_info_cached: &Option<crate::services::discord::router::thread_binding::DispatchInfo>,
-    dispatch_type_str: Option<&str>,
-    dispatch_uses_thread_routing: bool,
-    is_already_thread: bool,
-    user_text: &str,
-    dispatch_effective_path: &str,
-    pending_uploads: &mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    session_was_cleared: Option<bool>,
+    request: RedirectDispatch<'_>,
 ) -> Result<
     Option<(
         ChannelId,
@@ -42,6 +47,23 @@ pub(super) async fn redirect_dispatch(
     )>,
     Error,
 > {
+    let RedirectDispatch {
+        http,
+        cache,
+        shared,
+        provider,
+        channel_id,
+        original_channel_id,
+        dispatch_id_for_thread,
+        dispatch_info_cached,
+        dispatch_type_str,
+        dispatch_uses_thread_routing,
+        is_already_thread,
+        user_text,
+        dispatch_effective_path,
+        pending_uploads,
+        session_was_cleared,
+    } = request;
     let mut bootstrapped_fresh_thread_session = false;
     let mut redirected_permit = None;
     let channel_id = if let Some(did) = dispatch_id_for_thread {
@@ -353,23 +375,23 @@ mod tests {
             ..Default::default()
         };
         let mut uploads = Vec::new();
-        let result = redirect_dispatch(
-            &http,
-            None,
-            &shared,
-            &shared.provider,
-            original,
-            original,
-            &Some("dispatch-test".into()),
-            &Some(info),
-            None,
-            true,
-            false,
-            "input",
-            "/unreachable",
-            &mut uploads,
-            Some(false),
-        )
+        let result = redirect_dispatch(RedirectDispatch {
+            http: &http,
+            cache: None,
+            shared: &shared,
+            provider: &shared.provider,
+            channel_id: original,
+            original_channel_id: original,
+            dispatch_id_for_thread: &Some("dispatch-test".into()),
+            dispatch_info_cached: &Some(info),
+            dispatch_type_str: None,
+            dispatch_uses_thread_routing: true,
+            is_already_thread: false,
+            user_text: "input",
+            dispatch_effective_path: "/unreachable",
+            pending_uploads: &mut uploads,
+            session_was_cleared: Some(false),
+        })
         .now_or_never()
         .expect("closed thread cannot await network");
         assert!(result.err().unwrap().to_string().contains("Closing"));
