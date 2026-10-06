@@ -174,10 +174,6 @@ pub(crate) struct Pane {
 }
 
 impl Pane {
-    pub(crate) fn new(session: &str) -> Self {
-        Self::with_program(session, PathBuf::from("tmux"))
-    }
-
     pub(crate) fn with_program(session: &str, program: PathBuf) -> Self {
         Self {
             program,

@@ -105,6 +105,7 @@ src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
+src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
 src/services/discord/idle_recap_interaction.rs
@@ -309,6 +310,7 @@ services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
+services::discord::health::turn_deliver::inject_tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
@@ -800,6 +802,7 @@ server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_l
 server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
 server::routes::agents_turn_deliver::pg_tests::an_external_tui_turn_row_is_busy_for_start_and_deliver_pg
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
+server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
@@ -1084,6 +1087,7 @@ services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_ale
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
+services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_with_no_channel_name_pg
