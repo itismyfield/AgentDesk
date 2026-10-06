@@ -381,6 +381,8 @@ impl<P: Ports> Supervisor<P> {
 
     /// S1 to S7. A holding stage reports health and leaves every later stage unrun.
     pub(crate) async fn boot(&mut self) -> Landing {
+        // Each boot must pass every stage again, so an earlier admission never outlives it.
+        self.admitted = false;
         match self.stages().await {
             Ok(landing) => landing,
             Err(cause) => {
@@ -396,6 +398,9 @@ impl<P: Ports> Supervisor<P> {
         let (cursor, _) =
             Cursor::start(binding, channel).map_err(|_| HoldCause::BindingUnreadable)?;
         self.cursor = Some(cursor);
+        // A cause leaves health only where its own check passed; other held causes stay.
+        self.registration
+            .report(&HoldCause::BindingUnreadable, false);
         let history = match Ledger::probe(&self.config.root, channel) {
             Presence::Unreadable => return Err(HoldCause::LedgerUnreadable),
             presence => presence == Presence::Present,
@@ -427,6 +432,8 @@ impl<P: Ports> Supervisor<P> {
         .await
         .ok_or(held("supervisor_lost"))?
         .map_err(|_| HoldCause::LedgerUnreadable)?;
+        self.registration
+            .report(&HoldCause::LedgerUnreadable, false);
         if !unbound.is_empty() {
             let keys: Vec<u64> = unbound.into_iter().collect();
             self.registration

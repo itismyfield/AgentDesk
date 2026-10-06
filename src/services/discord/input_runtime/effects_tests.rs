@@ -421,16 +421,56 @@ fn e1_production_effects_take_the_runtime_root_and_reject_a_foreign_capability()
     );
 }
 
+// Every file under the runtime root outside the ledger, with its bytes and inode.
+fn legacy_files(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let (mut files, mut dirs) = (std::collections::BTreeMap::new(), vec![root.to_owned()]);
+    while let Some(dir) = dirs.pop() {
+        for path in fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+        {
+            match (path.ends_with("input_ledger"), path.is_dir()) {
+                (true, _) => {}
+                (false, true) => dirs.push(path),
+                (false, false) => {
+                    let inode = fs::metadata(&path).unwrap().ino();
+                    files.insert(path.clone(), (fs::read(&path).unwrap(), inode));
+                }
+            }
+        }
+    }
+    files
+}
+
 #[test]
 fn unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired() {
-    use std::os::unix::fs::MetadataExt;
     let (unbound, bound) = (31, 32);
     let rt = runtime();
     let root = sandbox();
+    // U survives only as a dispatch marker and its turn row; V is still queued.
     let queue = root
         .path()
         .join("discord_pending_queue/claude/token/9.json");
-    save(&queue, &json!([item(unbound), item(bound)]));
+    save(&queue, &json!([item(bound)]));
+    let marker = queue.with_extension("dispatch");
+    save(&marker, &item(unbound));
+    let row = InflightTurnState::new(
+        ProviderKind::Claude,
+        CHANNEL,
+        None,
+        7,
+        unbound,
+        0,
+        format!("input {unbound}"),
+        None,
+        Some("fixture".into()),
+        None,
+        None,
+        0,
+    );
+    let turn = root.path().join("discord_inflight/claude/9.json");
+    save(&turn, &serde_json::to_value(&row).unwrap());
     let mut ledger = Ledger::open(root.path(), CHANNEL).unwrap();
     let staged = Entry::Staged {
         key: bound,
@@ -444,9 +484,11 @@ fn unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired() {
     };
     ledger.append_entry(&commit, &[]).unwrap();
     drop(ledger);
-    let (bytes, inode) = (
-        fs::read(&queue).unwrap(),
-        fs::metadata(&queue).unwrap().ino(),
+    let before = legacy_files(root.path());
+    assert!(
+        [&queue, &marker, &turn]
+            .iter()
+            .all(|p| before.contains_key(*p))
     );
     let mut host = files(root.path(), effects(root.path(), frozen(), &rt));
     let mut lease = LedgerLease::new(root.path(), CHANNEL);
@@ -458,11 +500,16 @@ fn unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired() {
         [unbound, bound],
         "no other guard refuses this population"
     );
-    if let Ok(mut movement) = Move::prepare(&mut lease, &mut host) {
+    let prepared = Move::prepare(&mut lease, &mut host);
+    let held = prepared.is_err();
+    if let Ok(mut movement) = prepared {
         movement.advance(&mut lease, &mut host);
     }
-    assert_eq!(fs::read(&queue).unwrap(), bytes);
-    assert_eq!(fs::metadata(&queue).unwrap().ino(), inode);
+    let after = legacy_files(root.path());
+    for (path, file) in &before {
+        assert_eq!(after.get(path), Some(file), "{} changed", path.display());
+    }
+    assert!(held, "prepare holds the move");
     let rows = Ledger::open(root.path(), CHANNEL).unwrap().rows().unwrap();
     assert_eq!(
         rows.unbound().iter().copied().collect::<Vec<_>>(),

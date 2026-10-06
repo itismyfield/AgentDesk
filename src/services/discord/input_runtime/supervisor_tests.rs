@@ -62,6 +62,9 @@ struct World {
     undelivered: AtomicUsize,
     failing_delivery: AtomicBool,
     enqueued: Mutex<Vec<u64>>,
+    // The next supervisor clear worker signals `entered`, then waits on `latch`.
+    latch: Mutex<Option<mpsc::Receiver<()>>>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl World {
@@ -152,6 +155,9 @@ impl ClearHost for ClearFake {
     }
     fn record(&mut self) -> Step<'_, anyhow::Result<Option<NativeClearRecord>>> {
         if let Some(latch) = self.latch.take() {
+            if let Some(entered) = self.world.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
             let _ = latch.recv();
         }
         let record = self.world.record.lock().unwrap().clone();
@@ -277,7 +283,7 @@ impl Ports for Fake {
         let host = ClearFake {
             channel: self.channel,
             world: self.world.clone(),
-            latch: None,
+            latch: self.world.latch.lock().unwrap().take(),
             _alive: None,
         };
         Box::pin(async move {
@@ -329,6 +335,7 @@ struct Binding {
     events: Mutex<Vec<BindingEvent>>,
     tx: Mutex<watch::Sender<u64>>,
     append_on_subscribe: AtomicUsize,
+    unreadable: AtomicBool,
 }
 
 impl Binding {
@@ -339,6 +346,7 @@ impl Binding {
             events: Mutex::default(),
             tx: Mutex::new(watch::channel(0).0),
             append_on_subscribe: AtomicUsize::new(0),
+            unreadable: AtomicBool::new(false),
         })
     }
     fn seq(&self) -> u64 {
@@ -368,6 +376,9 @@ impl Binding {
 
 impl BindingEvents for Binding {
     fn binding_events_since(&self, _: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        if self.unreadable.load(Ordering::SeqCst) {
+            return Err("binding log unreadable".into());
+        }
         let events = self.events.lock().unwrap();
         Ok(events.iter().filter(|e| e.seq > after).cloned().collect())
     }
@@ -491,6 +502,24 @@ impl Rig {
     }
     fn health(&self) -> Vec<String> {
         super::super::reasons_with(self.registry)
+    }
+    // Puts a plain file where the ledger directory belongs, or puts the directory back.
+    fn break_ledger(&self, broken: bool) {
+        let dir = self.root.join(format!("input_ledger/{}", self.channel));
+        let aside = dir.with_extension("aside");
+        if broken {
+            std::fs::rename(&dir, &aside).unwrap();
+            std::fs::write(&dir, b"").unwrap();
+        } else {
+            std::fs::remove_file(&dir).unwrap();
+            std::fs::rename(&aside, &dir).unwrap();
+        }
+    }
+    // Every clear reset from here on is unconfirmed, through the whole boot budget.
+    fn unconfirmed_resets(&self) {
+        for _ in 0..=BUDGET {
+            self.world.reset(false, None);
+        }
     }
 }
 
@@ -766,6 +795,124 @@ async fn held_move_never_enters_handback_while_a_finished_one_does() {
         !supervisor.admission_open(),
         "a Legacy request never admits ledger input"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_boot_closes_admission_until_its_own_clear_and_move_pass() {
+    let rig = Rig::new(6_325_718);
+    drop(rig.received(11));
+    let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
+    assert_eq!(supervisor.boot().await, Landing::Admitted);
+    assert!(supervisor.admission_open());
+    let ledger = supervisor.slot().get().unwrap();
+    rig.world.durable_ticket(rig.channel, ledger, &[11]);
+    rig.unconfirmed_resets();
+    assert_eq!(
+        supervisor.boot().await,
+        Landing::Held(HoldCause::TransitionHeld("clear_retry_exhausted"))
+    );
+    assert!(
+        !supervisor.admission_open(),
+        "a held clear closes admission"
+    );
+    assert_eq!(supervisor.boot().await, Landing::Admitted);
+    assert!(supervisor.admission_open());
+    assert_eq!(rig.gate.mode(), Mode::Frozen);
+    rig.break_ledger(true);
+    assert_eq!(
+        supervisor.boot().await,
+        Landing::Held(HoldCause::LedgerUnreadable)
+    );
+    assert!(
+        !supervisor.admission_open(),
+        "an unreadable ledger closes admission"
+    );
+    rig.break_ledger(false);
+    assert!(supervisor.release());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cause_leaves_health_once_rechecked_while_an_unsettled_clear_stays() {
+    let rig = Rig::new(6_325_719);
+    let ledger = rig.received(11);
+    rig.world.durable_ticket(rig.channel, &ledger, &[11]);
+    drop(ledger);
+    rig.unconfirmed_resets();
+    let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
+    let at = format!("provider=claude channel={}", rig.channel);
+    let lines = |rig: &Rig| -> Vec<String> {
+        (rig.health().into_iter())
+            .filter(|r| r.contains(&at))
+            .collect()
+    };
+    let unresolved = format!("clear_unresolved {at} reason=ResetUnconfirmed");
+    let clear = format!("turn_transition_held {at} reason=clear_retry_exhausted");
+    let binding = format!("input_reconcile_required {at} reason=binding_unreadable");
+    let ledger = format!("ledger_unreadable {at}");
+    assert_eq!(
+        supervisor.boot().await,
+        Landing::Held(HoldCause::TransitionHeld("clear_retry_exhausted"))
+    );
+    rig.binding.unreadable.store(true, Ordering::SeqCst);
+    assert_eq!(
+        supervisor.boot().await,
+        Landing::Held(HoldCause::BindingUnreadable)
+    );
+    assert_eq!(lines(&rig), [&*unresolved, &*binding, &*clear]);
+    rig.binding.unreadable.store(false, Ordering::SeqCst);
+    rig.break_ledger(true);
+    assert_eq!(
+        supervisor.boot().await,
+        Landing::Held(HoldCause::LedgerUnreadable)
+    );
+    assert_eq!(
+        lines(&rig),
+        [&*unresolved, &*ledger, &*clear],
+        "a reread binding leaves; the unsettled clear stays"
+    );
+    rig.break_ledger(false);
+    assert_eq!(supervisor.boot().await, Landing::Admitted);
+    assert_eq!(lines(&rig), Vec::<String>::new());
+    assert!(supervisor.release());
+}
+
+#[tokio::test(start_paused = true)]
+async fn unbound_keys_are_reported_before_a_crash_left_clear_resumes() {
+    let (unbound, bound) = (31, 32);
+    let rig = Rig::new(6_325_720);
+    rig.unbound_commit(unbound, bound);
+    rig.world
+        .durable_ticket(rig.channel, &rig.ledger(), &[bound]);
+    let (release, latch) = mpsc::channel();
+    let (entered, latched) = tokio::sync::oneshot::channel();
+    *rig.world.latch.lock().unwrap() = Some(latch);
+    *rig.world.entered.lock().unwrap() = Some(entered);
+    let mut supervisor = rig.supervisor(Request::Ledger, vec![unbound, bound]);
+    let landing = {
+        let mut boot = std::pin::pin!(supervisor.boot());
+        tokio::select! {
+            landing = &mut boot => panic!("the clear never ran: {landing:?}"),
+            entered = latched => entered.unwrap(),
+        }
+        let at = format!("provider=claude channel={}", rig.channel);
+        assert!(rig.health().contains(&format!(
+            "input_reconcile_required {at} reason=unbound keys={unbound}"
+        )));
+        assert_eq!(rig.world.notices().len(), 1);
+        assert_eq!(
+            rig.world.log(),
+            ["subscribe", "freeze", "clear"],
+            "no move or handback while the clear worker runs"
+        );
+        release.send(()).unwrap();
+        boot.await
+    };
+    assert_eq!(
+        landing,
+        Landing::Held(HoldCause::TransitionHeld("move_held"))
+    );
+    assert_eq!(supervisor.handbacks, 0);
+    assert!(supervisor.release());
 }
 
 #[tokio::test]
