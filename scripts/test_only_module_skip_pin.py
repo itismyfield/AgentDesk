@@ -398,7 +398,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/channel_home_port_tests.rs",
         "src/services/tui_o/writer/drain_projection_tests.rs",
         "src/services/discord/commands/control/native_herdr_e2e_tests.rs",
-        "src/services/discord/commands/control/native_herdr_e2e_o_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
     }
 )
