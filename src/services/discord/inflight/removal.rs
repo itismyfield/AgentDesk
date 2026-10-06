@@ -746,6 +746,8 @@ pub(in crate::services::discord) use custody_notice::custody_notice_text;
 mod boot_custody_tests;
 #[cfg(test)]
 mod custody_notice_tests;
+#[cfg(test)]
+mod input_fence_reaper_tests;
 
 #[cfg(test)]
 mod loader_gate_observation_tests {

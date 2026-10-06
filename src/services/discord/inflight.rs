@@ -21,6 +21,9 @@ pub(in crate::services::discord) use host_recovery_guard::{
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+#[cfg(test)]
+#[path = "inflight/restart_mark_fence_tests.rs"]
+mod restart_mark_fence_tests;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 
 // #3479: the pure domain model moved to `model.rs`; re-export every public

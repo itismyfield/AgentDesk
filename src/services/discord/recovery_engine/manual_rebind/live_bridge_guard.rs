@@ -69,3 +69,7 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
         }))
         .await
 }
+
+#[cfg(test)]
+#[path = "live_bridge_guard_tests.rs"]
+mod tests;

@@ -265,3 +265,7 @@ pub(super) async fn restore_queued_and_inflight_work(
 
     stale_cards_to_delete
 }
+
+#[cfg(test)]
+#[path = "queued_recovery_fence_tests.rs"]
+mod fence_tests;
