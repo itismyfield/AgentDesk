@@ -119,6 +119,7 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::OShadow(..)
         | Commands::O(..)
         | Commands::Herdr(..)
+        | Commands::ChannelHome(..)
         | Commands::Show { .. } => false,
 
         Commands::TmuxWrapper { .. }
@@ -708,6 +709,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         Commands::OShadow(command) => exit_for_cli(super::o_shadow::run(command)),
         Commands::O(command) => exit_for_cli(super::o::run(command)),
         Commands::Herdr(command) => exit_for_cli(super::herdr::run(command)),
+        Commands::ChannelHome(command) => exit_for_cli(super::channel_home::run(command)),
         Commands::Health => exit_for_cli(super::client::cmd_health(json)),
         Commands::MachineCompare => exit_for_cli(super::client::cmd_machine_compare(json)),
         Commands::Activity {

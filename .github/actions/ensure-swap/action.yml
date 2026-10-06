@@ -1,7 +1,7 @@
 name: Ensure swap
 description: >-
-  Add a swapfile on Linux runners before a lib test build so memory overflow
-  pages instead of killing the runner. Problems are warnings, never failures.
+  Add a swapfile on Linux runners before a lib test build or workspace clippy so
+  memory overflow pages instead of killing the runner. Problems are warnings, never failures.
 inputs:
   size-gb:
     description: Swapfile size in GiB; skipped when active swap already reaches it.

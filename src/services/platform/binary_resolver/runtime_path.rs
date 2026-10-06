@@ -22,3 +22,119 @@ pub(super) fn runtime_path_entries() -> Vec<PathBuf> {
     }
     entries
 }
+
+/// Build a `Command` for `program` that runs with the merged runtime PATH.
+pub(crate) fn runtime_command(program: impl AsRef<OsStr>) -> std::io::Result<Command> {
+    let path = merged_runtime_path().map(OsString::from);
+    command_with_path(program.as_ref(), path.as_deref())
+}
+
+/// Build a `Command` for `program` with `path` as its PATH. A bare name must resolve to an
+/// absolute path first: std forks instead of posix_spawn when PATH changes for a bare name.
+pub(crate) fn command_with_path(program: &OsStr, path: Option<&OsStr>) -> std::io::Result<Command> {
+    let mut command = Command::new(spawn_program(program, path)?);
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    Ok(command)
+}
+
+#[cfg(unix)]
+fn spawn_program(program: &OsStr, path: Option<&OsStr>) -> std::io::Result<OsString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(path) = path else {
+        return Ok(program.to_os_string());
+    };
+    // A relative program or PATH entry names a path under the cwd the child inherits from us.
+    if program.as_bytes().contains(&b'/') {
+        return Ok(std::path::absolute(program)?.into_os_string());
+    }
+    let Some(resolved) =
+        resolve_in_paths(program, Some(path.to_os_string()), &current_dir_fallback())
+    else {
+        // Like execvp: a present but unrunnable match fails as EACCES, no match as ENOENT.
+        let present = std::env::split_paths(path).any(|dir| dir.join(program).exists());
+        return Err(std::io::Error::new(
+            if present {
+                std::io::ErrorKind::PermissionDenied
+            } else {
+                std::io::ErrorKind::NotFound
+            },
+            format!(
+                "{} has no runnable match on the runtime PATH",
+                program.to_string_lossy()
+            ),
+        ));
+    };
+    Ok(std::path::absolute(resolved)?.into_os_string())
+}
+
+// Windows has no fork, so the bare name keeps its existing lookup there.
+#[cfg(not(unix))]
+fn spawn_program(program: &OsStr, _path: Option<&OsStr>) -> std::io::Result<OsString> {
+    Ok(program.to_os_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn command_path_env(command: &Command) -> Option<&OsStr> {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+    }
+
+    #[test]
+    fn command_with_path_spawns_only_absolute_programs_and_keeps_path() {
+        let bin = tempfile::TempDir::new().expect("temp dir");
+        let tool = bin.path().join("adk-runtime-path-probe");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("write stub");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = bin.path().as_os_str().to_os_string();
+
+        let command =
+            command_with_path(OsStr::new("adk-runtime-path-probe"), Some(&path)).expect("resolved");
+        assert_eq!(command.get_program(), tool.as_os_str());
+        assert!(Path::new(command.get_program()).is_absolute());
+        assert_eq!(command_path_env(&command), Some(path.as_os_str()));
+
+        let missing = command_with_path(OsStr::new("adk-runtime-path-missing"), Some(&path))
+            .expect_err("an unresolved bare name must not yield a spawnable command");
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+
+        let cwd = std::env::current_dir().expect("cwd");
+        let relative: PathBuf = cwd
+            .components()
+            .skip(1)
+            .map(|_| Path::new(".."))
+            .chain(
+                bin.path()
+                    .components()
+                    .skip(1)
+                    .map(|part| Path::new(part.as_os_str())),
+            )
+            .collect();
+        let relative_path = relative.as_os_str().to_os_string();
+        let command = command_with_path(OsStr::new("adk-runtime-path-probe"), Some(&relative_path))
+            .expect("resolved from a relative entry");
+        assert_eq!(
+            command.get_program(),
+            cwd.join(&relative)
+                .join("adk-runtime-path-probe")
+                .as_os_str()
+        );
+        assert!(Path::new(command.get_program()).is_absolute());
+        assert_eq!(command_path_env(&command), Some(relative_path.as_os_str()));
+
+        let command = command_with_path(OsStr::new("./adk-probe-dir/tool"), Some(&path))
+            .expect("relative program");
+        assert_eq!(
+            command.get_program(),
+            cwd.join("adk-probe-dir/tool").as_os_str()
+        );
+    }
+}

@@ -6,7 +6,7 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 
 const C: &str = "1490141479707086938";
-const F: Duration = Duration::from_secs(200);
+const F: ForceWindow = ForceWindow::MIN;
 
 async fn home(pool: &PgPool) -> Option<ChannelHome> {
     read_home(pool, C).await.expect("read home")
@@ -228,6 +228,66 @@ async fn force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_p
     let force = force_orphan(&pool, C, 3, F, "op").await.expect("force");
     assert_eq!(force, ForceOutcome::Stale);
 
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// T-H9 and the F floor: no window shorter than F exists, the floor sits exactly at F, and an
+/// orphaned home is adopted by nobody and never reads as released.
+#[tokio::test]
+async fn force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg() {
+    let second = Duration::from_secs(1);
+    assert_eq!(ForceWindow::at_least(FORCE_AFTER - second), None);
+    assert_eq!(ForceWindow::at_least(FORCE_AFTER), Some(ForceWindow::MIN));
+    assert!(ForceWindow::at_least(FORCE_AFTER + second).is_some());
+
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    applied(delegate(&pool, C, "claude", "gw", "mini").await);
+    applied(finish_release(&pool, C, "gw", 1).await);
+    applied(adopt(&pool, C, "mini", 2).await);
+    age_lease(&pool, 150).await;
+    let held = home(&pool).await;
+    if let Some(short) = ForceWindow::at_least(Duration::from_secs(100)) {
+        let _ = force_orphan(&pool, C, 2, short, "op").await;
+    }
+    age_lease(&pool, 199).await;
+    let before = home(&pool).await;
+    assert_eq!(
+        before.as_ref().map(|h| (h.state, h.epoch)),
+        held.map(|h| (h.state, h.epoch))
+    );
+    let force = force_orphan(&pool, C, 2, F, "op").await.expect("force");
+    assert_eq!(force, ForceOutcome::Fresh, "inside F");
+    assert_eq!(home(&pool).await, before);
+
+    age_lease(&pool, 201).await;
+    let force = force_orphan(&pool, C, 2, F, "op").await.expect("force");
+    assert!(matches!(force, ForceOutcome::Orphaned(_)), "{force:?}");
+    let orphan = home(&pool).await.expect("row");
+    assert_eq!(
+        (orphan.state, orphan.holder.as_deref()),
+        (HomeState::Orphaned, None)
+    );
+    for (node, epoch) in [("mini", 2), ("mini", 3), ("gw", 2), ("gw", 3)] {
+        refused(&pool, "adopt orphan", adopt(&pool, C, node, epoch)).await;
+        refused(
+            &pool,
+            "release orphan",
+            finish_release(&pool, C, node, epoch),
+        )
+        .await;
+        refused(
+            &pool,
+            "reclaim orphan",
+            finish_reclaim(&pool, C, node, epoch),
+        )
+        .await;
+    }
+    assert_eq!(
+        home(&pool).await.map(|h| h.state),
+        Some(HomeState::Orphaned)
+    );
     pool.close().await;
     pg_db.drop().await;
 }

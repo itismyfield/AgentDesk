@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Adds a swapfile on Linux runners so a lib test build that outgrows RAM pages
+# Adds a swapfile on Linux runners so a lib test build or clippy that outgrows RAM pages
 # instead of being OOM-killed. Every problem is a warning; the job never fails here.
 set -uo pipefail
 

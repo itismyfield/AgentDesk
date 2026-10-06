@@ -93,7 +93,10 @@ pub(in crate::services::discord) async fn cmd_receipt(
         let png_path = tmp_dir.join(format!("adk_receipt_{unique_id}_{i}.png"));
         std::fs::write(&html_path, &html).map_err(|e| format!("failed to write HTML: {e}"))?;
 
-        let mut cmd = tokio::process::Command::new(&playwright_bin);
+        let mut cmd = tokio::process::Command::from(
+            platform::binary_resolver::runtime_command(&playwright_bin)
+                .map_err(|e| format!("playwright failed: {e}"))?,
+        );
         cmd.args([
             "screenshot",
             "--browser",
@@ -103,9 +106,6 @@ pub(in crate::services::discord) async fn cmd_receipt(
             &format!("file://{}", html_path.display()),
             &png_path.display().to_string(),
         ]);
-        if let Some(merged) = platform::merged_runtime_path() {
-            cmd.env("PATH", merged);
-        }
         let output = cmd
             .output()
             .await

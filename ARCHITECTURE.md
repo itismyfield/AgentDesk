@@ -55,6 +55,8 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
+│   ├── channel_home.rs
+│   ├── channel_home_tests.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -668,6 +670,8 @@ src/
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── channel_home.rs
+│   │   ├── channel_home_drain.rs
+│   │   ├── channel_home_drain_tests.rs
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs

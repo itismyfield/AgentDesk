@@ -5,7 +5,7 @@ pub mod triage;
 pub(crate) mod warn_dedupe;
 
 use crate::services::platform::binary_resolver::{
-    apply_runtime_path, resolve_binary_with_login_shell,
+    resolve_binary_with_login_shell, runtime_command,
 };
 use regex::Regex;
 use sqlx::{PgPool, Row};
@@ -62,40 +62,17 @@ fn gh_path() -> Option<String> {
 
 fn gh_command() -> Result<std::process::Command, String> {
     let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
-    let mut command = if cfg!(windows) && is_powershell_script(&gh) {
-        let mut command = std::process::Command::new("pwsh");
-        command
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&gh);
-        command
-    } else {
-        std::process::Command::new(&gh)
-    };
-    apply_runtime_path(&mut command);
+    let powershell = cfg!(windows) && is_powershell_script(&gh);
+    let mut command = runtime_command(if powershell { "pwsh" } else { gh.as_str() })
+        .map_err(|e| format!("gh CLI is not available: {e}"))?;
+    if powershell {
+        command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &gh]);
+    }
     Ok(command)
 }
 
 fn tokio_gh_command() -> Result<tokio::process::Command, String> {
-    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
-    let mut command = if cfg!(windows) && is_powershell_script(&gh) {
-        let mut command = tokio::process::Command::new("pwsh");
-        command
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&gh);
-        command
-    } else {
-        tokio::process::Command::new(&gh)
-    };
-    if let Some(path) = crate::services::platform::merged_runtime_path() {
-        command.env("PATH", path);
-    }
-    Ok(command)
+    gh_command().map(tokio::process::Command::from)
 }
 
 impl GitHubAdapter for GhCliAdapter {
@@ -667,4 +644,23 @@ pub struct RepoRow {
     pub display_name: Option<String>,
     pub sync_enabled: bool,
     pub last_synced_at: Option<String>,
+}
+
+#[cfg(all(test, unix))]
+mod gh_command_tests {
+    use super::*;
+
+    #[test]
+    fn relative_gh_override_spawns_by_absolute_path() {
+        let _gh = crate::config::TestEnvVarGuard::set_path(
+            GH_PATH_OVERRIDE_ENV,
+            std::path::Path::new("./adk-gh-probe/gh"),
+        );
+        let command = gh_command().expect("gh command");
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            command.get_program(),
+            cwd.join("adk-gh-probe/gh").as_os_str()
+        );
+    }
 }

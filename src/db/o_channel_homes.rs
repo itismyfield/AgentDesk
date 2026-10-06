@@ -9,6 +9,9 @@ use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
+use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
+use crate::services::cluster::channel_home::FORCE_AFTER;
+
 const COLUMNS: &str =
     "channel_id, provider, state, holder, target, epoch, renewed_at, updated_at, detail";
 
@@ -45,6 +48,44 @@ impl HomeState {
         ]
         .into_iter()
         .find(|state| state.as_str() == raw)
+    }
+}
+
+/// A delegated channel's provider in the form the router stamps on intake rows, which claims
+/// compare exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HomeProvider {
+    Claude,
+    Codex,
+}
+
+impl HomeProvider {
+    /// Accepts `claude` or `codex` in any case and surrounding space; anything else is refused.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+/// How long a holder's lease must have been silent before `force`; never shorter than F.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ForceWindow(Duration);
+
+impl ForceWindow {
+    pub(crate) const MIN: Self = Self(FORCE_AFTER);
+
+    pub(crate) fn at_least(after: Duration) -> Option<Self> {
+        (after >= FORCE_AFTER).then_some(Self(after))
     }
 }
 
@@ -119,7 +160,12 @@ pub(crate) enum ForceOutcome {
 #[derive(Debug)]
 pub(crate) enum HomeError {
     Db(sqlx::Error),
-    Undecodable { channel_id: String, detail: String },
+    Undecodable {
+        channel_id: String,
+        detail: String,
+    },
+    /// Refused before any write: not `claude` or `codex`.
+    UnknownProvider(String),
 }
 
 impl std::fmt::Display for HomeError {
@@ -129,6 +175,7 @@ impl std::fmt::Display for HomeError {
             Self::Undecodable { channel_id, detail } => {
                 write!(f, "o_channel_homes row {channel_id} undecodable: {detail}")
             }
+            Self::UnknownProvider(raw) => write!(f, "provider {raw:?} is not claude or codex"),
         }
     }
 }
@@ -183,6 +230,7 @@ pub(crate) async fn read_home(
 }
 
 /// Operator `delegate`: a gateway-owned channel starts releasing to `target` at a fresh epoch.
+/// The provider is stored in its canonical form, the one intake rows carry.
 pub(crate) async fn delegate(
     pool: &PgPool,
     channel_id: &str,
@@ -190,6 +238,8 @@ pub(crate) async fn delegate(
     gateway: &str,
     target: &str,
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
+    let provider =
+        HomeProvider::parse(provider).ok_or_else(|| HomeError::UnknownProvider(provider.into()))?;
     let row = sqlx::query(&format!(
         "INSERT INTO o_channel_homes (channel_id, provider, state, holder, target, epoch, renewed_at)
          SELECT $1, $2, 'releasing', $3, $4, nextval('o_channel_home_epochs'), NOW()
@@ -198,7 +248,7 @@ pub(crate) async fn delegate(
          RETURNING {COLUMNS}"
     ))
     .bind(channel_id)
-    .bind(provider)
+    .bind(provider.as_str())
     .bind(gateway)
     .bind(target)
     .fetch_optional(pool)
@@ -348,13 +398,13 @@ pub(crate) async fn renew(
     })
 }
 
-/// Operator `force`: a holder silent longer than `after` drops to `orphaned`. The window is
+/// Operator `force`: a holder silent longer than `window` drops to `orphaned`. The window is
 /// checked on the locked row, so a renewal that commits first keeps the holder.
 pub(crate) async fn force_orphan(
     pool: &PgPool,
     channel_id: &str,
     epoch: i64,
-    after: Duration,
+    window: ForceWindow,
     detail: &str,
 ) -> Result<ForceOutcome, HomeError> {
     let row = sqlx::query(&format!(
@@ -367,7 +417,7 @@ pub(crate) async fn force_orphan(
     ))
     .bind(channel_id)
     .bind(epoch)
-    .bind(after.as_secs_f64())
+    .bind(window.0.as_secs_f64())
     .bind(detail)
     .fetch_optional(pool)
     .await?;
@@ -382,6 +432,51 @@ pub(crate) async fn force_orphan(
         ForceOutcome::Fresh
     } else {
         ForceOutcome::Stale
+    })
+}
+
+/// Every home row, by channel.
+pub(crate) async fn list_homes(pool: &PgPool) -> Result<Vec<ChannelHome>, HomeError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM o_channel_homes ORDER BY channel_id"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(decode).collect()
+}
+
+/// A channel's open intake rows by the home epoch they were routed at, against the row's
+/// current `epoch`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct OpenIntake {
+    /// Claimable by the current holder.
+    pub(crate) current: i64,
+    /// Routed at another epoch; no holder claims them again.
+    pub(crate) other_epoch: i64,
+    /// Routed before the channel had a row; no holder claims them while one exists.
+    pub(crate) unrouted: i64,
+}
+
+pub(crate) async fn open_intake_by_epoch(
+    pool: &PgPool,
+    channel_id: &str,
+    epoch: i64,
+) -> Result<OpenIntake, HomeError> {
+    let row = sqlx::query(&format!(
+        "SELECT COUNT(*) FILTER (WHERE home_epoch = $2) AS current,
+                COUNT(*) FILTER (WHERE home_epoch <> $2) AS other_epoch,
+                COUNT(*) FILTER (WHERE home_epoch IS NULL) AS unrouted
+           FROM intake_outbox
+          WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
+    ))
+    .bind(channel_id)
+    .bind(epoch)
+    .fetch_one(pool)
+    .await?;
+    Ok(OpenIntake {
+        current: row.try_get("current")?,
+        other_epoch: row.try_get("other_epoch")?,
+        unrouted: row.try_get("unrouted")?,
     })
 }
 

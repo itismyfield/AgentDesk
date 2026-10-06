@@ -30,6 +30,8 @@ cli::args::tests::send_to_agent_requires_expect_reply
 cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
 cli::args::tests::turn_lease_cli_parses_read_and_exact_release
 cli::args::tests::turn_lease_cli_rejects_unpinned_release_and_zero_channel
+cli::channel_home::tests::mutations_are_refused_before_any_database_access_while_the_switch_is_off_pg
+cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoch_pg
 cli::channel_provider::tests::onboarding_routing_cli_reads_config_and_rejects_unknown_keys
 cli::client::activity_tests::activity_counts_buckets_by_kind
 cli::client::activity_tests::parse_duration_suffix_handles_each_unit
@@ -572,6 +574,7 @@ db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
+db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
 db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_create_boundaries_protect_live_owner
 db::postgres::test_db_reclaim::tests::pg_reclaim_dead_owner_young_database_is_reclaimed_immediately
@@ -868,6 +871,7 @@ engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unknown_b
 engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unsupported_gate_type
 engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unwired_gate
 engine::transition::gate_fail_closed_tests::gated_transition_passes_on_known_check_satisfied
+github::gh_command_tests::relative_gh_override_spawns_by_absolute_path
 github::sync::terminal_open_alert_tests::enqueue_terminal_open_alert_pg_dedupes_within_ttl
 github::sync::terminal_open_alert_tests::format_terminal_open_alert_contains_actionable_context
 github::sync::terminal_open_alert_tests::parses_batched_graphql_issue_response
@@ -1173,6 +1177,7 @@ server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_rec
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
 server::routes::health_api::runtime_profile::tests::health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint
 server::routes::health_api::runtime_profile::tests::health_projects_the_boot_session_hosts_and_admission
+server::routes::health_api::runtime_profile::tests::health_shows_channel_homes_only_once_one_is_registered
 server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
 server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
@@ -2152,9 +2157,16 @@ services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_n
 services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
+services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
 services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
+services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
+services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
+services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
+services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
+services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
@@ -9215,6 +9227,7 @@ services::pipeline_routes::tests::stage_json_absent_backoff_is_null
 services::pipeline_routes::tests::stage_json_emits_backoff_field
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::platform::binary_resolver::runtime_path::tests::command_with_path_spawns_only_absolute_programs_and_keeps_path
 services::platform::binary_resolver::tests::codex_app_bundle_candidate_gets_codex_only_priority
 services::platform::binary_resolver::tests::codex_fallback_dirs_include_app_bundle_resources_on_macos
 services::platform::binary_resolver::tests::codex_probe_selects_newest_successful_candidate_not_first_path_hit
@@ -9235,6 +9248,7 @@ services::platform::tmux::availability::availability_cache_tests::probe_error_pr
 services::platform::tmux::availability::availability_cache_tests::spawn_error_classifier_maps_only_not_found_to_missing
 services::platform::tmux::availability::availability_cache_tests::ttl_hit_reuses_cached_state_without_probe
 services::platform::tmux::availability::availability_cache_tests::unknown_spawn_error_without_prior_state_stays_optimistic_until_threshold
+services::platform::tmux::availability::availability_cache_tests::unrunnable_tmux_on_path_stays_unknown_while_absent_tmux_is_missing
 services::platform::tmux::etime_tests::parse_ps_etime_handles_all_field_widths
 services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit
 services::platform::tmux::live_pane_tests::has_live_pane_reports_live_tmux_session
@@ -9253,6 +9267,7 @@ services::platform::tmux::timeout_tests::probe_failure_widens_to_live_or_ambiguo
 services::platform::tmux::timeout_tests::send_keys_timeout_preserves_tmux_stderr_on_fast_failure
 services::platform::tmux::timeout_tests::send_keys_timeout_reports_hung_tmux
 services::platform::tmux::timeout_tests::session_presence_distinguishes_missing_from_probe_failure
+services::platform::tmux::timeout_tests::tmux_command_names_runtime_path_tmux_by_absolute_path
 services::platform::windows_job::tests::forced_runtime_exit_terminates_grandchildren_and_releases_ports
 services::platform::windows_job::tests::runtime_job_descendant_fixture
 services::pr_summary::tests::cache_hit_on_repeated_lookup
@@ -10024,8 +10039,11 @@ services::stream_json_cli::codec::tests::grok_messages_codec_preserves_terminal_
 services::stream_json_cli::codec::tests::grok_messages_codec_rejects_clean_eof_after_init
 services::stream_json_cli::dialects::agy::tests::default_argv_uses_conversation_not_continue
 services::stream_json_cli::dialects::agy::tests::envelope_preserves_lengths
+services::stream_json_cli::dialects::agy::tests::localappdata_fallback_runs_the_found_agy_by_absolute_path_from_another_cwd
+services::stream_json_cli::dialects::agy::tests::prepare_launches_an_agy_found_on_a_relative_path_entry_by_absolute_path
 services::stream_json_cli::dialects::agy::tests::restricted_policy_fails_before_prepare
 services::stream_json_cli::dialects::grok::tests::forwards_configured_reasoning_effort
+services::stream_json_cli::dialects::grok::tests::home_fallback_runs_the_found_grok_by_absolute_path_from_another_cwd
 services::stream_json_cli::dialects::grok::tests::provider_default_argv_has_no_resume_or_session_id
 services::stream_json_cli::dialects::grok::tests::readonly_mapping_is_fail_closed_for_write_tools
 services::stream_json_cli::dialects::grok::tests::resume_requires_uuid

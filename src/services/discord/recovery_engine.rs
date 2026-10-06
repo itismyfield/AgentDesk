@@ -24,8 +24,6 @@ use crate::utils::format::tail_with_ellipsis;
 use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::path::Path;
-#[cfg(unix)]
-use std::process::Command;
 
 // Settlement is shared with restart recovery on every platform; only the
 // pane/source capture entry points inside this module require Unix.

@@ -30,12 +30,17 @@ fn is_blank_session_name(session_name: &str) -> bool {
     session_name.trim().is_empty()
 }
 
-fn tmux_command() -> Command {
-    let mut cmd = Command::new("tmux");
+fn tmux_command() -> std::io::Result<Command> {
+    let mut cmd = binary_resolver::runtime_command("tmux")?;
     // -u forces UTF-8 mode so non-ASCII session names are not masked in output.
     cmd.arg("-u");
-    binary_resolver::apply_runtime_path(&mut cmd);
-    cmd
+    Ok(cmd)
+}
+
+fn tmux_output<S: AsRef<std::ffi::OsStr>>(
+    args: impl IntoIterator<Item = S>,
+) -> std::io::Result<Output> {
+    tmux_command()?.args(args).output()
 }
 
 #[cfg(unix)]
@@ -82,10 +87,7 @@ pub use availability::{
 
 /// Get tmux version string (e.g. "tmux 3.4").
 pub fn version() -> Result<String, String> {
-    let out = tmux_command()
-        .arg("-V")
-        .output()
-        .map_err(|e| format!("tmux not found: {e}"))?;
+    let out = tmux_output(["-V"]).map_err(|e| format!("tmux not found: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -125,7 +127,9 @@ pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
         return SessionPresence::ProbeFailed;
     }
 
-    let mut command = tmux_command();
+    let Ok(mut command) = tmux_command() else {
+        return SessionPresence::ProbeFailed;
+    };
     command.args(["has-session", "-t", &exact_target(session_name)]);
     let Ok(output) = wait_for_tmux_output(command, Duration::from_secs(3), "tmux has-session")
     else {
@@ -149,7 +153,7 @@ pub fn create_session(
     working_dir: Option<&str>,
     shell_command: &str,
 ) -> Result<Output, String> {
-    let mut cmd = tmux_command();
+    let mut cmd = tmux_command().map_err(|e| format!("Failed to create tmux session: {e}"))?;
     cmd.args(["new-session", "-d", "-s", session_name]);
     if let Some(dir) = working_dir {
         cmd.args(["-c", dir]);
@@ -208,28 +212,24 @@ fn dead_marker_global_hook_index(session_name: &str) -> u64 {
 }
 
 fn active_pane_id(session_name: &str) -> Option<String> {
-    tmux_command()
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &exact_target(session_name),
-            "#{pane_id}",
-        ])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|pane_id| !pane_id.is_empty())
+    tmux_output([
+        "display-message",
+        "-p",
+        "-t",
+        &exact_target(session_name),
+        "#{pane_id}",
+    ])
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    .filter(|pane_id| !pane_id.is_empty())
 }
 
 fn install_dead_marker_hooks(session_name: &str) {
     let target = exact_target(session_name);
     let command = dead_marker_hook_command(session_name, None);
     for hook in ["pane-exited", "session-closed"] {
-        let output = tmux_command()
-            .args(["set-hook", "-a", "-t", &target, hook, &command])
-            .output();
+        let output = tmux_output(["set-hook", "-a", "-t", &target, hook, &command]);
         match output {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
@@ -269,9 +269,7 @@ fn install_dead_marker_hooks(session_name: &str) {
             sh_single_quote(&condition),
             tmux_double_quote(&command)
         );
-        let output = tmux_command()
-            .args(["set-hook", "-g", &hook_name, &guarded_command])
-            .output();
+        let output = tmux_output(["set-hook", "-g", &hook_name, &guarded_command]);
         match output {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
@@ -353,9 +351,7 @@ fn kill_session_output_internal(session_name: &str, reason: &str) -> std::io::Re
         return Ok(failed_output("refusing tmux kill for blank session name\n"));
     }
     log_kill_request(session_name, reason);
-    let output = tmux_command()
-        .args(["kill-session", "-t", &exact_target(session_name)])
-        .output();
+    let output = tmux_output(["kill-session", "-t", &exact_target(session_name)]);
     match &output {
         Ok(output) => log_kill_result(session_name, reason, output),
         Err(error) => {
@@ -379,9 +375,12 @@ fn kill_session_output_internal_with_timeout(
         return Err("refusing tmux kill for blank session name".to_string());
     }
     log_kill_request(session_name, reason);
-    let mut command = tmux_command();
-    command.args(["kill-session", "-t", &exact_target(session_name)]);
-    let output = wait_for_tmux_output(command, timeout, "tmux kill-session");
+    let output = tmux_command()
+        .map_err(|e| format!("tmux kill-session spawn failed: {e}"))
+        .and_then(|mut command| {
+            command.args(["kill-session", "-t", &exact_target(session_name)]);
+            wait_for_tmux_output(command, timeout, "tmux kill-session")
+        });
     match &output {
         Ok(output) => log_kill_result(session_name, reason, output),
         Err(error) => {
@@ -441,10 +440,7 @@ pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
-    tmux_command()
-        .args(&args)
-        .output()
-        .map_err(|e| format!("tmux send-keys failed: {e}"))
+    tmux_output(&args).map_err(|e| format!("tmux send-keys failed: {e}"))
 }
 
 /// Send keys to a tmux session, enforcing a caller-supplied timeout.
@@ -456,7 +452,7 @@ pub fn send_keys_timeout(
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
-    let mut command = tmux_command();
+    let mut command = tmux_command().map_err(|e| format!("tmux send-keys spawn failed: {e}"))?;
     command.args(&args);
     wait_for_tmux_output(command, timeout, "tmux send-keys")
 }
@@ -464,15 +460,14 @@ pub fn send_keys_timeout(
 /// Send literal text to a tmux session without interpreting tmux key names.
 pub fn send_literal(session_name: &str, text: &str) -> Result<Output, String> {
     let target = exact_target(session_name);
-    tmux_command()
-        .args(["send-keys", "-t", &target, "-l", "--", text])
-        .output()
+    tmux_output(["send-keys", "-t", &target, "-l", "--", text])
         .map_err(|e| format!("tmux send-keys -l failed: {e}"))
 }
 
 /// Load literal text into a named tmux buffer via stdin.
 pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
     let mut child = tmux_command()
+        .map_err(|e| format!("tmux load-buffer failed: {e}"))?
         .args(["load-buffer", "-b", buffer_name, "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -493,10 +488,7 @@ pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
 pub fn paste_buffer(session_name: &str, buffer_name: &str, delete: bool) -> Result<Output, String> {
     let target = exact_target(session_name);
     let args = paste_buffer_args(buffer_name, &target, delete);
-    tmux_command()
-        .args(&args)
-        .output()
-        .map_err(|e| format!("tmux paste-buffer failed: {e}"))
+    tmux_output(&args).map_err(|e| format!("tmux paste-buffer failed: {e}"))
 }
 
 fn paste_buffer_args<'a>(buffer_name: &'a str, target: &'a str, delete: bool) -> Vec<&'a str> {
@@ -525,16 +517,14 @@ fn paste_buffer_raw_args<'a>(buffer_name: &'a str, target: &'a str, delete: bool
 /// Return the PID of the active pane process for a tmux session.
 #[cfg(unix)]
 pub fn pane_pid(session_name: &str) -> Option<u32> {
-    let output = tmux_command()
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &exact_target(session_name),
-            "#{pane_pid}",
-        ])
-        .output()
-        .ok()?;
+    let output = tmux_output([
+        "display-message",
+        "-p",
+        "-t",
+        &exact_target(session_name),
+        "#{pane_pid}",
+    ])
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -567,16 +557,14 @@ pub fn pane_current_path(session_name: &str) -> Option<String> {
     if is_blank_session_name(session_name) {
         return None;
     }
-    let output = tmux_command()
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &exact_target(session_name),
-            "#{pane_current_path}",
-        ])
-        .output()
-        .ok()?;
+    let output = tmux_output([
+        "display-message",
+        "-p",
+        "-t",
+        &exact_target(session_name),
+        "#{pane_current_path}",
+    ])
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -589,7 +577,7 @@ pub fn pane_current_path(session_name: &str) -> Option<String> {
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane(session_name: &str, scroll_back: i32) -> Option<String> {
     capture_pane_command(session_name, scroll_back, false)
-        .output()
+        .and_then(|mut command| command.output())
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -602,7 +590,7 @@ pub fn capture_pane_timeout(
     timeout: Duration,
 ) -> Option<String> {
     wait_for_tmux_output(
-        capture_pane_command(session_name, scroll_back, false),
+        capture_pane_command(session_name, scroll_back, false).ok()?,
         timeout,
         "tmux capture-pane",
     )
@@ -611,9 +599,13 @@ pub fn capture_pane_timeout(
     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
 }
 
-fn capture_pane_command(session_name: &str, scroll_back: i32, preserve_escapes: bool) -> Command {
+fn capture_pane_command(
+    session_name: &str,
+    scroll_back: i32,
+    preserve_escapes: bool,
+) -> std::io::Result<Command> {
     let scroll = scroll_back.to_string();
-    let mut command = tmux_command();
+    let mut command = tmux_command()?;
     command.arg("capture-pane");
     if preserve_escapes {
         command.arg("-e");
@@ -627,7 +619,7 @@ fn capture_pane_command(session_name: &str, scroll_back: i32, preserve_escapes: 
         "-S",
         &scroll,
     ]);
-    command
+    Ok(command)
 }
 
 /// Capture pane content from a tmux session while preserving ANSI attributes.
@@ -635,7 +627,7 @@ fn capture_pane_command(session_name: &str, scroll_back: i32, preserve_escapes: 
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane_with_escapes(session_name: &str, scroll_back: i32) -> Option<String> {
     capture_pane_command(session_name, scroll_back, true)
-        .output()
+        .and_then(|mut command| command.output())
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -643,9 +635,7 @@ pub fn capture_pane_with_escapes(session_name: &str, scroll_back: i32) -> Option
 
 /// List all tmux session names.
 pub fn list_session_names() -> Result<Vec<String>, String> {
-    let out = tmux_command()
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()
+    let out = tmux_output(["list-sessions", "-F", "#{session_name}"])
         .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
     if !out.status.success() {
         return Err("tmux list-sessions returned non-zero".to_string());
@@ -693,14 +683,12 @@ pub struct SessionServer {
 /// nonetheless `splitn(2, '|')` to avoid surprises from operator-created
 /// sessions.
 pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, String> {
-    let out = tmux_command()
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}|#{pane_current_command}|#{pane_pid}",
-        ])
-        .output()
-        .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
+    let out = tmux_output([
+        "list-sessions",
+        "-F",
+        "#{session_name}|#{pane_current_command}|#{pane_pid}",
+    ])
+    .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
     if !out.status.success() {
         return Err("tmux list-sessions returned non-zero".to_string());
     }
@@ -733,7 +721,7 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
 
 /// List every tmux session along with its owning tmux server PID.
 pub fn list_sessions_with_server_pid() -> Result<Vec<SessionServer>, String> {
-    let mut command = tmux_command();
+    let mut command = tmux_command().map_err(|e| format!("tmux list-sessions failed: {e}"))?;
     command.env_remove("TMUX");
     let out = command
         .args(["list-sessions", "-F", "#{session_name}|#{pid}"])
@@ -906,23 +894,21 @@ pub fn has_live_pane(session_name: &str) -> bool {
     if !has_session(session_name) {
         return false;
     }
-    tmux_command()
-        .args([
-            "list-panes",
-            "-t",
-            &exact_target(session_name),
-            "-F",
-            "#{pane_dead}",
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .any(|line| line.trim() == "0")
-        })
-        .unwrap_or(false)
+    tmux_output([
+        "list-panes",
+        "-t",
+        &exact_target(session_name),
+        "-F",
+        "#{pane_dead}",
+    ])
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|line| line.trim() == "0")
+    })
+    .unwrap_or(false)
 }
 
 /// #4489 introduced three-state liveness of a tmux session's panes and the
@@ -956,7 +942,7 @@ pub fn pane_liveness(session_name: &str) -> PaneLiveness {
     if is_blank_session_name(session_name) {
         return PaneLiveness::DeadOrAbsent;
     }
-    liveness::pane_liveness_using(session_name, tmux_command, wait_for_tmux_output)
+    liveness::pane_liveness_using(session_name, || tmux_command().ok(), wait_for_tmux_output)
 }
 
 /// Observe pane liveness within one shared budget, using only a ready PATH.
@@ -971,9 +957,7 @@ pub(crate) fn pane_liveness_within(session_name: &str, budget: Duration) -> Pane
 
 /// Set a tmux session option. Errors are silently ignored (fire-and-forget).
 pub fn set_option(session_name: &str, key: &str, value: &str) {
-    let _ = tmux_command()
-        .args(["set-option", "-t", &exact_target(session_name), key, value])
-        .output();
+    let _ = tmux_output(["set-option", "-t", &exact_target(session_name), key, value]);
 }
 
 /// Read one tmux session option without treating a missing session/option as a
@@ -984,16 +968,14 @@ pub fn get_option(session_name: &str, key: &str) -> Option<String> {
     if is_blank_session_name(session_name) || key.trim().is_empty() {
         return None;
     }
-    let output = tmux_command()
-        .args([
-            "show-options",
-            "-qv",
-            "-t",
-            &exact_target(session_name),
-            key,
-        ])
-        .output()
-        .ok()?;
+    let output = tmux_output([
+        "show-options",
+        "-qv",
+        "-t",
+        &exact_target(session_name),
+        key,
+    ])
+    .ok()?;
     output
         .status
         .success()
@@ -1008,7 +990,7 @@ mod target_safety_tests {
     #[test]
     fn tmux_command_enables_utf8_mode() {
         assert_eq!(
-            tmux_command().get_args().next(),
+            tmux_command().expect("tmux on PATH").get_args().next(),
             Some(std::ffi::OsStr::new("-u")),
             "every tmux invocation must request UTF-8 output",
         );
@@ -1178,6 +1160,7 @@ mod live_pane_tests {
         // run-shell hook can execute. Keep the server alive for this assertion.
         let keeper = unique_test_session_name();
         let output = tmux_command()
+            .expect("tmux on PATH")
             .args(["new-session", "-d", "-s", &keeper, "sleep 60"])
             .output()
             .expect("hook keeper session should be created");
@@ -1402,6 +1385,22 @@ mod timeout_tests {
             probe_failed,
             IndependentTmuxReadiness::ReadyForInput,
             "probe failure must not authorize zombie mailbox release"
+        );
+    }
+
+    #[test]
+    fn tmux_command_names_runtime_path_tmux_by_absolute_path() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        write_fake_tmux(temp.path(), "exit 0");
+        let _path = PathOverride::prepend(temp.path());
+
+        let command = tmux_command().expect("fake tmux on PATH");
+        assert_eq!(command.get_program(), temp.path().join("tmux").as_os_str());
+        assert!(std::path::Path::new(command.get_program()).is_absolute());
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "PATH" && value.is_some())
         );
     }
 

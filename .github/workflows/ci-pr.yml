@@ -213,6 +213,7 @@ jobs:
               #   python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths
               # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
               # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
+              - 'src/cli/channel_home_tests.rs'
               - 'src/cli/herdr_tests.rs'
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
@@ -292,6 +293,7 @@ jobs:
               - 'src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs'
               - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
               - 'src/services/cluster/attachment_transfer/storage_tests.rs'
+              - 'src/services/cluster/channel_home_drain_tests.rs'
               - 'src/services/cluster/channel_home_tests.rs'
               - 'src/services/cluster/execution_capacity/tests.rs'
               - 'src/services/cluster/intake_preflight.rs'
@@ -1756,6 +1758,10 @@ jobs:
 
       - name: just fmt-check
         run: just fmt-check
+
+      # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
+      - name: Ensure swap for clippy
+        uses: ./.github/actions/ensure-swap
 
       - name: just lint
         run: just lint

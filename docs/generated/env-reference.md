@@ -115,7 +115,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs:22` (+1 more) | Test seam: a child process stops at this create stage until stdin yields a line. |
 | `AGENTDESK_TEST_PG_RECLAIM_SERVER` | `src/db/postgres/test_db_reclaim.rs:18` |  |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1015` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `AGENTDESK_TOKEN` | `src/cli/run.rs:145` |  |
+| `AGENTDESK_TOKEN` | `src/cli/run.rs:146` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs:309` (+1 more) |  |
 

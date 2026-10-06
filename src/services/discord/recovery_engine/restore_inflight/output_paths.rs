@@ -4,8 +4,7 @@ use super::*;
 
 #[cfg(unix)]
 fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
-    let mut cmd = Command::new("tmux");
-    binary_resolver::apply_runtime_path(&mut cmd);
+    let mut cmd = binary_resolver::runtime_command("tmux").ok()?;
     let output = cmd
         .args([
             "display-message",
@@ -34,8 +33,9 @@ pub(in crate::services::discord::recovery_engine) fn detect_live_tmux_output_pat
     let Some(pane_pid) = tmux_pane_pid(tmux_session_name) else {
         return Ok(None);
     };
-    let mut cmd = Command::new("lsof");
-    binary_resolver::apply_runtime_path(&mut cmd);
+    let Ok(mut cmd) = binary_resolver::runtime_command("lsof") else {
+        return Ok(None);
+    };
     let output = match cmd.args(["-Fn", "-p", &pane_pid.to_string()]).output() {
         Ok(output) => output,
         Err(_) => return Ok(None),
