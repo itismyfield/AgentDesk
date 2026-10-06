@@ -232,7 +232,10 @@ mod population_tests {
         assert_eq!(lock_inflight_state_path(&path).err().unwrap(), expected);
         assert_eq!(try_lock_inflight_state_path(&path).err().unwrap(), expected);
         let mkdir_error = fs::create_dir_all(path.parent().unwrap()).unwrap_err();
+        #[cfg(not(windows))]
         assert_eq!(mkdir_error.kind(), std::io::ErrorKind::NotADirectory);
+        #[cfg(windows)]
+        assert_eq!(mkdir_error.kind(), std::io::ErrorKind::AlreadyExists);
         let state = InflightTurnState::new(
             ProviderKind::Claude,
             channel,
