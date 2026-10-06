@@ -229,8 +229,8 @@ async fn a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner() {
     drop(hooks);
 }
 
-/// Claude sends input queued into a running prompt with that prompt's id: the queued
-/// input is announced once and the opening prompt's late row is not re-announced.
+/// Separate queued submissions are announced even when they repeat the opening text;
+/// only the opening prompt's late transcript row is suppressed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn input_queued_into_a_running_prompt_does_not_reannounce_its_opening() {
     const QUEUED: &str = "같은 턴에 큐로 넣은 다음 입력";
@@ -240,14 +240,23 @@ async fn input_queued_into_a_running_prompt_does_not_reannounce_its_opening() {
     let (harness, _) = start(tmux, &[session], hooks.subscribe(), READY).await;
     post_hook(&hooks, session, PROMPT).await;
     wait_for_announcement(&harness).await;
+    dedupe::age_observed_prompt_records_for_tests(PROVIDER_KEY, tmux, Duration::from_secs(31));
     post_hook(&hooks, session, QUEUED).await;
     wait_for_announcement_of(&harness, QUEUED, 2).await;
+    dedupe::age_observed_prompt_records_for_tests(PROVIDER_KEY, tmux, Duration::from_secs(31));
+    post_hook(&hooks, session, PROMPT).await;
+    wait_for_announcement_of(&harness, PROMPT, 3).await;
+    assert_eq!(
+        announcements(&harness),
+        2,
+        "the third A submission is announced"
+    );
 
     assert_eq!(
         scanner_sees_the_row(tmux),
         dedupe::PromptObservation::SuppressedReplayedEntry
     );
-    assert_eq!(settled_counts(&harness).await, (2, 1, 2));
+    assert_eq!(settled_counts(&harness).await, (3, 2, 3));
     assert_eq!(announcements_of(&harness, QUEUED), 1);
     drop(hooks);
 }

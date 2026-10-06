@@ -452,30 +452,47 @@ fn hooks_sharing_a_running_prompt_id_are_each_announced_and_the_opening_row_is_n
     }
 }
 
-/// A queued hook's POST result settles only its own submission, so a refused opening
-/// stays the scanner's to announce.
+/// A queued hook's POST result settles only its own submission, including when
+/// either POST is refused or the queued POST settles before the opening POST.
 #[test]
 fn a_queued_hook_settles_only_its_own_submission() {
-    let mut pane = Pane::new("queued-settle");
-    pane.hook_before_its_post(Some("P"), "opening");
-    pane.hook_before_its_post(Some("P"), "queued");
-    let mut events = Vec::new();
-    while let Ok(event) = pane.rx.try_recv() {
-        if event.tmux_session_name == pane.tmux {
-            events.push(event);
+    for (opening_sent, queued_sent) in [(true, true), (true, false), (false, true)] {
+        let mut pane = Pane::new(&format!("queued-settle-{opening_sent}-{queued_sent}"));
+        pane.hook_before_its_post(Some("P"), "opening");
+        pane.hook_before_its_post(Some("P"), "queued");
+        let mut events = Vec::new();
+        while let Ok(event) = pane.rx.try_recv() {
+            if event.tmux_session_name == pane.tmux {
+                events.push(event);
+            }
         }
+        let [opening, queued] = events.as_slice() else {
+            panic!("both hooks publish: {events:?}");
+        };
+        if queued_sent {
+            record_announced_prompt_id(queued);
+        } else {
+            withdraw_unannounced_prompt_id(queued);
+        }
+        pane.age(RECENT_PLUS);
+        if opening_sent {
+            record_announced_prompt_id(opening);
+        } else {
+            withdraw_unannounced_prompt_id(opening);
+        }
+        let expected = if opening_sent {
+            PromptObservation::SuppressedReplayedEntry
+        } else {
+            PromptObservation::PublishedSshDirect
+        };
+        assert_eq!(pane.scan("U", Some("P"), "opening"), expected);
+        let rows = if opening_sent {
+            vec![]
+        } else {
+            vec![row_event("U", "opening")]
+        };
+        assert_eq!(pane.published(), rows);
     }
-    let [opening, queued] = events.as_slice() else {
-        panic!("both hooks publish: {events:?}");
-    };
-    record_announced_prompt_id(queued);
-    withdraw_unannounced_prompt_id(opening);
-    pane.age(RECENT_PLUS);
-    assert_eq!(
-        pane.scan("U", Some("P"), "opening"),
-        PromptObservation::PublishedSshDirect
-    );
-    assert_eq!(pane.published(), vec![row_event("U", "opening")]);
 }
 
 #[test]

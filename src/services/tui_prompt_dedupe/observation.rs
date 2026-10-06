@@ -247,9 +247,8 @@ fn observe_prompt_candidates_by_tmux_inner(
         let _ = OBSERVED_PROMPTS.send(event);
         return PromptObservation::PublishedTaskNotification;
     }
-    // The prompt_id text check runs before the uuid return so a known row that
-    // pairs the id with other text still marks the id ambiguous.
-    // Hooks skip it: input queued into a running Claude prompt arrives with that prompt's id.
+    // Check rows before uuid dedupe so rewritten rows still mark conflicting ids ambiguous.
+    // Hooks skip this check: separate queued submissions share the running prompt's id.
     let prompt_id_match = match prompt_id {
         Some(ClaudePromptId::TranscriptRow(prompt_id)) => {
             let prompt_id = prompt_id.trim();
