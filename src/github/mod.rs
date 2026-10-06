@@ -645,3 +645,22 @@ pub struct RepoRow {
     pub sync_enabled: bool,
     pub last_synced_at: Option<String>,
 }
+
+#[cfg(all(test, unix))]
+mod gh_command_tests {
+    use super::*;
+
+    #[test]
+    fn relative_gh_override_spawns_by_absolute_path() {
+        let _gh = crate::config::TestEnvVarGuard::set_path(
+            GH_PATH_OVERRIDE_ENV,
+            std::path::Path::new("./adk-gh-probe/gh"),
+        );
+        let command = gh_command().expect("gh command");
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            command.get_program(),
+            cwd.join("adk-gh-probe/gh").as_os_str()
+        );
+    }
+}

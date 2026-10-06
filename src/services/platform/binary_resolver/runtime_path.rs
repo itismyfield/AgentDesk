@@ -46,21 +46,28 @@ fn spawn_program(program: &OsStr, path: Option<&OsStr>) -> std::io::Result<OsStr
     let Some(path) = path else {
         return Ok(program.to_os_string());
     };
+    // A relative program or PATH entry names a path under the cwd the child inherits from us.
     if program.as_bytes().contains(&b'/') {
-        return Ok(program.to_os_string());
+        return Ok(std::path::absolute(program)?.into_os_string());
     }
-    let resolved = resolve_in_paths(program, Some(path.to_os_string()), &current_dir_fallback())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} is not on the runtime PATH", program.to_string_lossy()),
-            )
-        })?;
-    if resolved.is_absolute() {
-        return Ok(resolved.into_os_string());
-    }
-    // A relative PATH entry is searched from the cwd the child inherits from this process.
-    Ok(std::env::current_dir()?.join(resolved).into_os_string())
+    let Some(resolved) =
+        resolve_in_paths(program, Some(path.to_os_string()), &current_dir_fallback())
+    else {
+        // Like execvp: a present but unrunnable match fails as EACCES, no match as ENOENT.
+        let present = std::env::split_paths(path).any(|dir| dir.join(program).exists());
+        return Err(std::io::Error::new(
+            if present {
+                std::io::ErrorKind::PermissionDenied
+            } else {
+                std::io::ErrorKind::NotFound
+            },
+            format!(
+                "{} has no runnable match on the runtime PATH",
+                program.to_string_lossy()
+            ),
+        ));
+    };
+    Ok(std::path::absolute(resolved)?.into_os_string())
 }
 
 // Windows has no fork, so the bare name keeps its existing lookup there.
@@ -122,5 +129,12 @@ mod tests {
         );
         assert!(Path::new(command.get_program()).is_absolute());
         assert_eq!(command_path_env(&command), Some(relative_path.as_os_str()));
+
+        let command = command_with_path(OsStr::new("./adk-probe-dir/tool"), Some(&path))
+            .expect("relative program");
+        assert_eq!(
+            command.get_program(),
+            cwd.join("adk-probe-dir/tool").as_os_str()
+        );
     }
 }

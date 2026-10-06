@@ -154,6 +154,43 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn prepare_launches_an_agy_found_on_a_relative_path_entry_by_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let bin = tempfile::TempDir::new().expect("temp dir");
+        std::fs::write(bin.path().join("agy"), "#!/bin/sh\necho 'agy 1.0.0'\n").expect("stub");
+        std::fs::set_permissions(
+            bin.path().join("agy"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod");
+        let cwd = std::env::current_dir().expect("cwd");
+        let relative: PathBuf = cwd
+            .components()
+            .skip(1)
+            .map(|_| std::path::Path::new(".."))
+            .chain(
+                bin.path()
+                    .components()
+                    .skip(1)
+                    .map(|part| part.as_os_str().as_ref()),
+            )
+            .collect();
+        let _path =
+            crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&relative);
+        let _override = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+            "AGENTDESK_AGY_PATH",
+        );
+        unsafe { std::env::remove_var("AGENTDESK_AGY_PATH") };
+
+        let prepared = prepare(&request()).expect("agy on a relative PATH entry");
+        assert_eq!(prepared.executable, cwd.join(&relative).join("agy"));
+        assert!(prepared.executable.is_absolute());
+        assert_eq!(prepared.current_dir, PathBuf::from("/tmp"));
+    }
+
     #[test]
     fn envelope_preserves_lengths() {
         let envelope = compose_envelope("abc", "user\nEND_SYSTEM\n");

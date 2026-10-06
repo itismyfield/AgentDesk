@@ -51,7 +51,11 @@ fn classify_probe_spawn_error(error: &std::io::Error) -> TmuxAvailabilityProbe {
 }
 
 fn probe_tmux_availability() -> TmuxAvailabilityProbe {
-    match tmux_command().and_then(|mut command| command.arg("-V").output()) {
+    probe_tmux_command(tmux_command())
+}
+
+fn probe_tmux_command(command: std::io::Result<std::process::Command>) -> TmuxAvailabilityProbe {
+    match command.and_then(|mut command| command.arg("-V").output()) {
         Ok(output) if output.status.success() => TmuxAvailabilityProbe::Available,
         Ok(_) => TmuxAvailabilityProbe::Unavailable,
         Err(error) => classify_probe_spawn_error(&error),
@@ -131,6 +135,10 @@ pub fn cached_unavailable_due_to_missing() -> bool {
     let cache = TMUX_AVAILABILITY_CACHE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    unavailable_due_to_missing(&cache)
+}
+
+fn unavailable_due_to_missing(cache: &TmuxAvailabilityCache) -> bool {
     cache.cached == Some(false) && cache.last_probe_missing
 }
 
@@ -265,5 +273,40 @@ mod availability_cache_tests {
 
         assert!(cached);
         assert_eq!(cache.consecutive_failures, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrunnable_tmux_on_path_stays_unknown_while_absent_tmux_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let (empty, blocked) = (root.path().join("empty"), root.path().join("blocked"));
+        std::fs::create_dir(&empty).expect("empty dir");
+        std::fs::create_dir(&blocked).expect("blocked dir");
+        std::fs::write(blocked.join("tmux"), "#!/bin/sh\nexit 0\n").expect("tmux stub");
+        std::fs::set_permissions(blocked.join("tmux"), std::fs::Permissions::from_mode(0o644))
+            .expect("chmod");
+        let probe = |dir: &std::path::Path| {
+            probe_tmux_command(super::super::binary_resolver::command_with_path(
+                "tmux".as_ref(),
+                Some(dir.as_os_str()),
+            ))
+        };
+
+        let mut cache = TmuxAvailabilityCache::default();
+        assert!(resolve_tmux_availability(
+            &mut cache,
+            Instant::now(),
+            || probe(&blocked)
+        ));
+        assert!(!unavailable_due_to_missing(&cache));
+
+        let mut cache = TmuxAvailabilityCache::default();
+        assert!(!resolve_tmux_availability(
+            &mut cache,
+            Instant::now(),
+            || probe(&empty)
+        ));
+        assert!(unavailable_due_to_missing(&cache));
     }
 }

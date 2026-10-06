@@ -868,6 +868,7 @@ engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unknown_b
 engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unsupported_gate_type
 engine::transition::gate_fail_closed_tests::gated_transition_blocks_on_unwired_gate
 engine::transition::gate_fail_closed_tests::gated_transition_passes_on_known_check_satisfied
+github::gh_command_tests::relative_gh_override_spawns_by_absolute_path
 github::sync::terminal_open_alert_tests::enqueue_terminal_open_alert_pg_dedupes_within_ttl
 github::sync::terminal_open_alert_tests::format_terminal_open_alert_contains_actionable_context
 github::sync::terminal_open_alert_tests::parses_batched_graphql_issue_response
@@ -9186,6 +9187,7 @@ services::platform::tmux::availability::availability_cache_tests::probe_error_pr
 services::platform::tmux::availability::availability_cache_tests::spawn_error_classifier_maps_only_not_found_to_missing
 services::platform::tmux::availability::availability_cache_tests::ttl_hit_reuses_cached_state_without_probe
 services::platform::tmux::availability::availability_cache_tests::unknown_spawn_error_without_prior_state_stays_optimistic_until_threshold
+services::platform::tmux::availability::availability_cache_tests::unrunnable_tmux_on_path_stays_unknown_while_absent_tmux_is_missing
 services::platform::tmux::etime_tests::parse_ps_etime_handles_all_field_widths
 services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit
 services::platform::tmux::live_pane_tests::has_live_pane_reports_live_tmux_session
@@ -9969,6 +9971,7 @@ services::stream_json_cli::codec::tests::grok_messages_codec_preserves_terminal_
 services::stream_json_cli::codec::tests::grok_messages_codec_rejects_clean_eof_after_init
 services::stream_json_cli::dialects::agy::tests::default_argv_uses_conversation_not_continue
 services::stream_json_cli::dialects::agy::tests::envelope_preserves_lengths
+services::stream_json_cli::dialects::agy::tests::prepare_launches_an_agy_found_on_a_relative_path_entry_by_absolute_path
 services::stream_json_cli::dialects::agy::tests::restricted_policy_fails_before_prepare
 services::stream_json_cli::dialects::grok::tests::forwards_configured_reasoning_effort
 services::stream_json_cli::dialects::grok::tests::provider_default_argv_has_no_resume_or_session_id
