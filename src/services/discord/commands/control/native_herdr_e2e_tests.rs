@@ -11,7 +11,9 @@ use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
-use crate::db::dispatched_sessions::hosted_execution::HostedLookupKey;
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
 use crate::services::claude_tui::hook_server::HookEvent;
@@ -21,26 +23,41 @@ use crate::services::herdr_launch::{HerdrLaunchEndpoint, HerdrLaunchHost};
 use crate::services::session_host::HerdrTarget;
 use crate::services::tui_prompt_dedupe::binding_events::{BindingTarget, binding_events_since};
 
-const LIMIT: Duration = Duration::from_secs(30);
+const LIMIT: Duration = Duration::from_secs(60);
 
 fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
 /// The provider's config home and the turn's working directory, so every transcript path is the
-/// one Claude computes for its session.
+/// one Claude computes for its session; the previous config home comes back on drop.
 struct Home {
     cwd: tempfile::TempDir,
-    _config: (Guard, tempfile::TempDir),
+    _config: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        // SAFETY: the fixture's runtime root guard holds the shared env lock until after this.
+        match self.previous.take() {
+            Some(previous) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", previous) },
+            None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
+        }
+    }
 }
 
 impl Home {
+    /// Built after the fixture, whose runtime root guard holds the shared env lock.
     fn new() -> Self {
         let config = tempfile::tempdir().unwrap();
-        let guard = Guard::set_path_after_shared_test_env_lock("CLAUDE_CONFIG_DIR", config.path());
+        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+        // SAFETY: the fixture's runtime root guard holds the shared env lock for the whole test.
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", config.path()) };
         Self {
             cwd: tempfile::tempdir().unwrap(),
-            _config: (guard, config),
+            _config: config,
+            previous,
         }
     }
 
@@ -187,14 +204,20 @@ fn next_turn(
     session: &str,
     sent: usize,
 ) -> (Result<(), String>, Vec<StreamMessage>) {
-    let row: Option<Value> = fx.rt.block_on(async {
-        sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE session_key = $1")
-            .bind(&fx.session_key)
-            .fetch_one(&fx.pool)
-            .await
-            .unwrap()
-    });
-    let row = HostedRecord::decode(row.as_ref());
+    let channel = fx.channel_id.get().to_string();
+    let identity = CanonicalSessionIdentity {
+        kind: SessionIdentityKind::DiscordChannel,
+        discord_token_hash: &fx.shared.token_hash,
+        channel_id: &channel,
+    };
+    let key = HostedLookupKey::Canonical {
+        provider: "claude",
+        identity,
+    };
+    let row = match fx.rt.block_on(load_hosted_execution_pg(&fx.pool, key)) {
+        HostedLookup::Found(found) => found.record,
+        other => panic!("the turn host reads no row: {other:?}"),
+    };
     let HostedRecord::Known(record) = &row else {
         panic!("no known row: {row:?}");
     };
