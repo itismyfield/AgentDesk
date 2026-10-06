@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use serde_json::json;
+
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::o_channel_homes::{ForceOutcome, ForceWindow};
@@ -519,6 +521,71 @@ async fn a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_p
     assert_eq!(row(&pool).await, None);
     assert!(channel_home::registered(C).is_none() && gw.withdrawn());
     assert_eq!(intake_hold(C, None), None, "the gateway rules again");
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+impl DrainPort for Arc<Actor> {
+    async fn turn_running(&self) -> Option<bool> {
+        self.as_ref().turn_running().await
+    }
+
+    async fn owed(&self) -> Option<Owed> {
+        self.as_ref().owed().await
+    }
+
+    async fn posts_in_flight(&self) -> Option<usize> {
+        self.as_ref().posts_in_flight().await
+    }
+
+    async fn reset_legacy_source(&self) -> Result<(), String> {
+        self.as_ref().reset_legacy_source().await
+    }
+}
+
+/// The drain loop shows what it waits on in health while it waits, and nothing once it leaves.
+#[tokio::test]
+async fn the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (mini, epoch) = worker_home(&pool).await;
+    applied(o_channel_homes::begin_reclaim(&pool, C, epoch, "gw").await);
+    register(Arc::clone(&mini));
+    let actor = Arc::new(Actor::new("mini", &Arc::new(Sink::default()), &[]));
+    actor.unreadable.store(true, Ordering::SeqCst);
+    let drain = tokio::spawn(run_drain(
+        pool.clone(),
+        Arc::clone(&mini),
+        Arc::clone(&actor),
+    ));
+    let waiting = json!([{"channel": C, "blocker": "owed_unreadable"}]);
+    for _ in 0..250 {
+        if channel_home::health().is_some_and(|health| health["home_draining"] == waiting) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let health = channel_home::health().expect("registered");
+    assert_eq!(
+        (&health["home_draining"], &health["homes"][0]["home"]),
+        (&waiting, &json!("draining"))
+    );
+    let reclaiming = Some((HomeState::Reclaiming, Some("mini".to_string()), epoch));
+    assert_eq!(row(&pool).await, reclaiming);
+
+    actor.unreadable.store(false, Ordering::SeqCst);
+    let left = tokio::time::timeout(RENEW_EVERY * 3, drain).await;
+    let left = left
+        .expect("the drain ends")
+        .expect("drain task")
+        .expect("left");
+    assert_eq!(left.state, HomeState::Reclaimed);
+    let health = channel_home::health().expect("registered");
+    assert_eq!(
+        (&health["home_draining"], &health["homes"][0]["home"]),
+        (&json!([]), &json!("lost"))
+    );
+    channel_home::unregister(C);
     pool.close().await;
     pg_db.drop().await;
 }
