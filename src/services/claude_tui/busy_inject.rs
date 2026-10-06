@@ -428,6 +428,9 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
     if !owned {
         return Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
     }
+    // The server does not report when it applied the key, so the window starts just before
+    // the request; a slow reply (an after-send-keys hook) only shortens it.
+    let deadline = Instant::now() + timing.confirm_window;
     // A person may still type after the last capture; an attach by then withholds the Enter.
     match pane.guarded(&format!("send-keys -t '{}' Enter", pane.target)) {
         Guard::Applied => {}
@@ -435,7 +438,6 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
         Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
     }
     // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
-    let deadline = Instant::now() + timing.confirm_window;
     loop {
         if Instant::now() >= deadline {
             return Outcome::Unconfirmed(Unconfirmed::NotObserved);
