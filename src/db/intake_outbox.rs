@@ -719,7 +719,7 @@ pub(crate) async fn return_claimed_to_pending(
 ///
 /// Returns `Ok(true)` when the row was updated; `Ok(false)` when the
 /// row was no longer in `claimed` (e.g., a stale-claim sweep beat the
-/// worker to it, or the claim_owner no longer matches). Workers MUST
+/// worker to it, or the claim_owner no longer matches) or its home moved. Workers MUST
 /// abort the turn on `Ok(false)` rather than spawning — proceeding past
 /// a lost claim is the only path that double-emits a Discord turn.
 pub(crate) async fn mark_accepted(
@@ -727,11 +727,13 @@ pub(crate) async fn mark_accepted(
     id: i64,
     claim_owner: &str,
 ) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE intake_outbox
+    // The claim's home fence in the same UPDATE: a home moved after the worker's last check refuses.
+    let result = sqlx::query(&format!(
+        "UPDATE intake_outbox io
          SET status = $3, accepted_at = NOW()
-         WHERE id = $1 AND status = $4 AND claim_owner = $2",
-    )
+         WHERE io.id = $1 AND io.status = $4 AND io.claim_owner = $2
+           AND {HOME_CLAIM_FENCE}"
+    ))
     .bind(id)
     .bind(claim_owner)
     .bind(IntakeOutboxStatus::Accepted)

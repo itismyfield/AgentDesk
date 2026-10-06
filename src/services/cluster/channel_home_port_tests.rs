@@ -5,6 +5,11 @@ use crate::services::tui_o::writer::actor::{Owing, Undelivered};
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
 
+/// A provider runtime that already put its persisted turns back into mailboxes.
+fn restored() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(true))
+}
+
 // The turn comes from the channel's mailbox: none runs where no mailbox exists, a queued one counts,
 // and an unreachable mailbox is unknown. Without an actor or writer nothing reads as zero.
 #[tokio::test]
@@ -13,7 +18,7 @@ async fn the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero() {
     const QUEUED: u64 = 9_100_000_000_000_002;
     const QUIET: u64 = 9_100_000_000_000_003;
     const GONE: u64 = 9_100_000_000_000_004;
-    let port = |channel| ChannelHomePort::new(channel, Arc::new(Readiness::default()));
+    let port = |channel| ChannelHomePort::new(channel, Arc::default(), restored());
     let registry = ChannelMailboxRegistry::default();
     let queued = ChannelMailboxSnapshot {
         intervention_queue: vec![ChannelMailboxRegistry::queued_for_test(1)],
@@ -60,14 +65,19 @@ async fn a_last_send_from_an_ending_actor_reads_as_unknown() {
     const ENDING: u64 = 9_100_000_000_000_005;
     const RUNNING: u64 = 9_100_000_000_000_006;
     let ready = Arc::new(Readiness::default());
-    let port = |channel| ChannelHomePort::new(channel, Arc::clone(&ready));
+    let port = |channel| ChannelHomePort::new(channel, Arc::clone(&ready), restored());
 
     let owing = hosted_owing(&ready, ENDING);
     let reader = port(ENDING);
     let read = tokio::spawn(async move { reader.owed().await });
     settle().await;
     assert!(owing.demand.wanted(), "the waiting read wants it");
-    owing.published.send_replace(Some(Undelivered::default()));
+    let asked = owing.demand.asked();
+    let clear = Undelivered {
+        asked,
+        ..Undelivered::default()
+    };
+    owing.published.send_replace(Some(clear));
     let demand = owing.demand.clone();
     drop(owing);
     assert_eq!(
@@ -83,6 +93,7 @@ async fn a_last_send_from_an_ending_actor_reads_as_unknown() {
     settle().await;
     let one = Undelivered {
         owed: 1,
+        asked: owing.demand.asked(),
         ..Undelivered::default()
     };
     owing.published.send_replace(Some(one));
@@ -92,6 +103,78 @@ async fn a_last_send_from_an_ending_actor_reads_as_unknown() {
     };
     assert_eq!(read.await.unwrap(), Some(expected));
     assert!(!owing.demand.wanted(), "the read ended");
+}
+
+// A read cancelled while the actor computes is followed by another: the answer stamped before the
+// new read asked is not taken, and the next poll's answer is.
+#[tokio::test]
+async fn a_poll_begun_before_a_read_asked_does_not_answer_it() {
+    const RACED: u64 = 9_100_000_000_000_007;
+    let ready = Arc::new(Readiness::default());
+    let owing = hosted_owing(&ready, RACED);
+    let port = || ChannelHomePort::new(RACED, Arc::clone(&ready), restored());
+
+    let first = port();
+    let cancelled = tokio::spawn(async move { first.owed().await });
+    settle().await;
+    let began = owing.demand.asked();
+    cancelled.abort();
+    let _ = cancelled.await;
+    let second = port();
+    let read = tokio::spawn(async move { second.owed().await });
+    settle().await;
+    let stale = Undelivered {
+        asked: began,
+        ..Undelivered::default()
+    };
+    owing.published.send_replace(Some(stale));
+    settle().await;
+    assert!(!read.is_finished(), "an answer from before it asked");
+    let fresh = Undelivered {
+        owed: 1,
+        asked: owing.demand.asked(),
+        ..Undelivered::default()
+    };
+    owing.published.send_replace(Some(fresh));
+    let expected = Owed {
+        owed: 1,
+        ..Owed::default()
+    };
+    assert_eq!(read.await.unwrap(), Some(expected));
+}
+
+// Until this process put its persisted turns back into mailboxes a channel without one is unknown,
+// not idle; after that, a turn only its inflight row still names runs and a quiet channel is idle.
+#[tokio::test]
+async fn no_mailbox_is_unknown_until_restored_and_an_inflight_row_alone_still_runs() {
+    const SIDECAR: u64 = 9_100_000_000_000_008;
+    const IDLE: u64 = 9_100_000_000_000_009;
+    const QUIET: u64 = 9_100_000_000_000_010;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let inflight = root.path().join("runtime/discord_inflight/claude");
+    std::fs::create_dir_all(&inflight).unwrap();
+    let row = |channel: u64, at: chrono::DateTime<chrono::Local>| {
+        let at = at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let row = serde_json::json!({"version": 9, "provider": "claude", "channel_id": channel,
+            "request_owner_user_id": 1, "user_msg_id": 2, "current_msg_id": 3, "current_msg_len": 0,
+            "user_text": "", "last_offset": 0, "full_response": "", "response_sent_offset": 0,
+            "started_at": at, "updated_at": at});
+        let path = inflight.join(format!("{channel}.json"));
+        std::fs::write(path, row.to_string()).unwrap();
+    };
+    row(SIDECAR, chrono::Local::now());
+    // The same row an hour quiet reads as no turn, so the fresh one runs as a parsed row.
+    row(QUIET, chrono::Local::now() - chrono::Duration::hours(1));
+    let restored = Arc::new(AtomicBool::new(false));
+    let port = |channel| ChannelHomePort::new(channel, Arc::default(), Arc::clone(&restored));
+
+    assert_eq!(port(SIDECAR).turn_running().await, None, "before restore");
+    assert_eq!(port(IDLE).turn_running().await, None, "before restore");
+    restored.store(true, Ordering::Release);
+    assert_eq!(port(SIDECAR).turn_running().await, Some(true));
+    assert_eq!(port(IDLE).turn_running().await, Some(false));
+    assert_eq!(port(QUIET).turn_running().await, Some(false));
 }
 
 /// The writer host needs the O store, which only a platform with directory fsync enables.
@@ -210,7 +293,7 @@ mod hosted {
         let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
         let _pending = test_override::force_candidates(&[(O, ClaudeTui)]);
         let scene = Scene::hosted().await;
-        let port = ChannelHomePort::new(O, Arc::clone(&scene.ready));
+        let port = ChannelHomePort::new(O, Arc::clone(&scene.ready), restored());
         assert_eq!(port.owed().await, owed(0));
         assert_eq!(scene.ready.rotation_unsettled(O), Some(0));
         assert_eq!(port.posts_in_flight().await, Some(0));
@@ -252,7 +335,7 @@ mod hosted {
         assert_eq!(scene.io.posts.to(O), ["one"]);
         assert_eq!(undelivered_reads_for_test(), 0, "no drain asks");
 
-        let port = ChannelHomePort::new(O, Arc::clone(&scene.ready));
+        let port = ChannelHomePort::new(O, Arc::clone(&scene.ready), restored());
         assert_eq!(port.owed().await, owed(0));
         let read = undelivered_reads_for_test();
         assert!(read >= 1, "read while the drain waited");

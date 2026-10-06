@@ -2157,6 +2157,7 @@ services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_an
 services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
+services::cluster::channel_home::claim_tests::a_drain_close_never_lands_between_the_placement_check_and_the_adoption_claim
 services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
 services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
@@ -2174,8 +2175,10 @@ services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_f
 services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
 services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::channel_home_port::tests::a_last_send_from_an_ending_actor_reads_as_unknown
+services::cluster::channel_home_port::tests::a_poll_begun_before_a_read_asked_does_not_answer_it
 services::cluster::channel_home_port::tests::hosted::a_halted_writer_reads_as_unknown_until_its_resume_publishes_its_real_projection
 services::cluster::channel_home_port::tests::hosted::a_hosted_herdr_actor_reads_what_it_owes_only_while_a_drain_waits
+services::cluster::channel_home_port::tests::no_mailbox_is_unknown_until_restored_and_an_inflight_row_alone_still_runs
 services::cluster::channel_home_port::tests::the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
@@ -2285,6 +2288,7 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
+services::cluster::intake_worker::home_accept_tests::a_home_moved_after_the_last_check_refuses_the_accept_and_keeps_the_row_open_pg
 services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
 services::cluster::intake_worker::input_effect_tests::c1_worker_afterclaim_closing_returns_only_own_claim_pg
 services::cluster::intake_worker::input_effect_tests::c1_worker_beforeclaim_excludes_closing_population_pg
@@ -5597,6 +5601,7 @@ services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
 services::discord::router::intake_dispatch::attachment::tests::local_attachment_admission_runs_materialization_once
 services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachment_admission_never_runs_local_materialization
+services::discord::router::intake_dispatch::home_order_tests::only_a_registered_delegated_channel_skips_the_placement_hold_and_reaches_its_holder_pg
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
 services::discord::router::intake_dispatch::queued::tests::actual_merge_persistence_restores_canonical_retry_lineage_4888
 services::discord::router::intake_dispatch::queued::tests::queued_admission_carries_every_absorbed_source_message_id

@@ -644,6 +644,7 @@ src/
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
+│   │   │   ├── home_accept_tests.rs
 │   │   │   ├── home_route_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   ├── o_route_tests.rs
@@ -671,6 +672,7 @@ src/
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── channel_home.rs
+│   │   ├── channel_home_claim_tests.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
 │   │   ├── channel_home_port.rs
@@ -1176,6 +1178,7 @@ src/
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── attachment.rs
+│   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
