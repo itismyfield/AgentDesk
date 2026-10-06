@@ -949,6 +949,9 @@ async fn unused_registry_leaves_health_to_the_fence() {
     assert_eq!(cleared, clear::Outcome::Cleared);
 }
 
+#[path = "supervisor/drive_entry_tests.rs"]
+mod drive_entry;
+
 #[test]
 fn registered_holds_join_fence_health_and_leave_on_release() {
     let registry = registry();

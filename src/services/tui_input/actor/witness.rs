@@ -106,10 +106,11 @@ pub(crate) fn scan(
             for fact in classify(evidence.binding.provider, &value) {
                 match fact {
                     RecordFact::TurnStart(id) if accepted.is_none() => native = id,
+                    // Input after ours, before its closer, leaves our turn's end unprovable.
+                    RecordFact::Prompt(..) | RecordFact::TurnStart(_) if accepted.is_some() => {
+                        return Err("foreign turn before the accepted one closed".into());
+                    }
                     RecordFact::Prompt(_, text) => {
-                        if accepted.is_some() {
-                            return Ok(None);
-                        }
                         if text != evidence.rendered_prompt {
                             continue;
                         }
@@ -137,7 +138,6 @@ pub(crate) fn scan(
                             return Ok(Some((accepted.unwrap(), native)));
                         }
                     }
-                    RecordFact::TurnStart(_) if accepted.is_some() => return Ok(None),
                     RecordFact::Blocked(reason) => return Err(reason),
                     _ => {}
                 }
