@@ -79,12 +79,35 @@ async fn wait_for_relays(relayed: &Arc<AtomicUsize>, count: usize) {
 }
 
 fn user_prompt_submit_payload(session: &str) -> serde_json::Value {
+    prompt_submit_payload(session, PROMPT)
+}
+
+fn prompt_submit_payload(session: &str, prompt: &str) -> serde_json::Value {
     serde_json::json!({
         "hook_event_name": "UserPromptSubmit",
         "session_id": session,
-        "prompt": PROMPT,
+        "prompt": prompt,
         "prompt_id": PROMPT_ID,
     })
+}
+
+/// Delivers a UserPromptSubmit through the hook server's HTTP route.
+async fn post_hook(hooks: &HookServerState, session: &str, prompt: &str) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/hooks/claude/UserPromptSubmit?session_id={session}"
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            prompt_submit_payload(session, prompt).to_string(),
+        ))
+        .expect("hook request");
+    let response = hook_receiver_router_with_state(hooks.clone())
+        .oneshot(request)
+        .await
+        .expect("hook response");
+    assert!(response.status().is_success(), "{}", response.status());
 }
 
 fn hook_event(session: &str) -> HookEvent {
@@ -99,23 +122,33 @@ fn hook_event(session: &str) -> HookEvent {
 
 /// Announcements Discord created (`...` placeholders are counted apart).
 fn announcements(harness: &RelayE2eHarness) -> usize {
+    announcements_of(harness, PROMPT)
+}
+
+fn announcements_of(harness: &RelayE2eHarness, prompt: &str) -> usize {
     harness
         .messages()
         .iter()
-        .filter(|(_, content)| content != "..." && content.contains(PROMPT))
+        .filter(|(_, content)| content != "..." && content.contains(prompt))
         .count()
 }
 
 async fn wait_for_announcement(harness: &RelayE2eHarness) {
+    wait_for_announcement_of(harness, PROMPT, 1).await;
+}
+
+/// Waits for `prompt`'s announcement and the `placeholders`-th `...` placeholder.
+async fn wait_for_announcement_of(harness: &RelayE2eHarness, prompt: &str, placeholders: usize) {
     let messages = harness.mock.messages.clone();
+    let wanted = prompt.to_string();
     let announced = wait_until(WAIT, move || {
-        let messages = messages.clone();
+        let (messages, wanted) = (messages.clone(), wanted.clone());
         Box::pin(async move {
             messages
                 .lock()
                 .expect("mock messages")
                 .values()
-                .any(|(_, content)| content != "..." && content.contains(PROMPT))
+                .any(|(_, content)| content != "..." && content.contains(&wanted))
         })
     })
     .await;
@@ -125,7 +158,7 @@ async fn wait_for_announcement(harness: &RelayE2eHarness) {
         harness.messages(),
         harness.unhandled_requests()
     );
-    assert!(harness.wait_for_placeholder_posts(1, WAIT).await);
+    assert!(harness.wait_for_placeholder_posts(placeholders, WAIT).await);
 }
 
 /// Returns once the relay has POSTed `attempts` announcements and dropped its lease.
@@ -185,19 +218,7 @@ async fn a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner() {
     let session = "5845e2e0-0000-0000-0000-0000000000c1";
     let hooks = HookServerState::new();
     let (harness, _) = start(tmux, &[session], hooks.subscribe(), READY).await;
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(format!(
-            "/hooks/claude/UserPromptSubmit?session_id={session}"
-        ))
-        .header("content-type", "application/json")
-        .body(Body::from(user_prompt_submit_payload(session).to_string()))
-        .expect("hook request");
-    let response = hook_receiver_router_with_state(hooks.clone())
-        .oneshot(request)
-        .await
-        .expect("hook response");
-    assert!(response.status().is_success(), "{}", response.status());
+    post_hook(&hooks, session, PROMPT).await;
 
     wait_for_announcement(&harness).await;
     assert_eq!(
@@ -205,6 +226,29 @@ async fn a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner() {
         dedupe::PromptObservation::SuppressedReplayedEntry
     );
     assert_eq!(settled_counts(&harness).await, (1, 1, 1));
+    drop(hooks);
+}
+
+/// Claude sends input queued into a running prompt with that prompt's id: the queued
+/// input is announced once and the opening prompt's late row is not re-announced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_queued_into_a_running_prompt_does_not_reannounce_its_opening() {
+    const QUEUED: &str = "같은 턴에 큐로 넣은 다음 입력";
+    let tmux = "AgentDesk-claude-echo-dup-queued";
+    let session = "5845e2e0-0000-0000-0000-0000000000ca";
+    let hooks = HookServerState::new();
+    let (harness, _) = start(tmux, &[session], hooks.subscribe(), READY).await;
+    post_hook(&hooks, session, PROMPT).await;
+    wait_for_announcement(&harness).await;
+    post_hook(&hooks, session, QUEUED).await;
+    wait_for_announcement_of(&harness, QUEUED, 2).await;
+
+    assert_eq!(
+        scanner_sees_the_row(tmux),
+        dedupe::PromptObservation::SuppressedReplayedEntry
+    );
+    assert_eq!(settled_counts(&harness).await, (2, 1, 2));
+    assert_eq!(announcements_of(&harness, QUEUED), 1);
     drop(hooks);
 }
 

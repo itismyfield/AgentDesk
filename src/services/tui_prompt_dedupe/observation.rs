@@ -249,12 +249,16 @@ fn observe_prompt_candidates_by_tmux_inner(
     }
     // The prompt_id text check runs before the uuid return so a known row that
     // pairs the id with other text still marks the id ambiguous.
-    let prompt_id_match = prompt_id.map(|prompt_id| {
-        let prompt_id = prompt_id.value().trim();
-        let found =
-            check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]);
-        (prompt_id, found)
-    });
+    // Hooks skip it: input queued into a running Claude prompt arrives with that prompt's id.
+    let prompt_id_match = match prompt_id {
+        Some(ClaudePromptId::TranscriptRow(prompt_id)) => {
+            let prompt_id = prompt_id.trim();
+            let found =
+                check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]);
+            Some((prompt_id, found))
+        }
+        _ => None,
+    };
     // #3540 (root cause): suppress by STABLE entry identity BEFORE any pending /
     // recent / lease bookkeeping or synthetic-turn mint. If this JSONL entry
     // `uuid` was already relayed for this `(provider, tmux)` pair it is a

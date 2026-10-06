@@ -401,12 +401,12 @@ fn prompt_ids_outlive_the_uuid_window_until_the_four_hour_budget() {
 fn a_repeated_hook_for_the_same_prompt_id_does_not_extend_its_lifetime() {
     let mut pane = Pane::new("no-refresh");
     pane.hook(Some("P"), "input");
-    pane.age(PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(1));
+    pane.age(PROMPT_ANCHOR_SUBMIT_TTL - RECENT_PLUS);
     assert_eq!(
         pane.hook(Some("P"), "input"),
-        PromptObservation::SuppressedReplayedEntry
+        PromptObservation::PublishedSshDirect
     );
-    pane.age(Duration::from_secs(2));
+    pane.age(RECENT_PLUS + Duration::from_secs(1));
     assert_eq!(
         pane.scan("U", Some("P"), "input"),
         PromptObservation::PublishedSshDirect,
@@ -414,8 +414,68 @@ fn a_repeated_hook_for_the_same_prompt_id_does_not_extend_its_lifetime() {
     );
     assert_eq!(
         pane.published(),
-        vec![hook_event("input"), row_event("U", "input")]
+        vec![
+            hook_event("input"),
+            hook_event("input"),
+            row_event("U", "input")
+        ]
     );
+}
+
+/// Claude sends input queued into a running prompt with that prompt's id: every hook
+/// is its own submission, and only the opening row replays an announcement.
+#[test]
+fn hooks_sharing_a_running_prompt_id_are_each_announced_and_the_opening_row_is_not() {
+    let (go, tests) = ("keep going", "check the tests too");
+    for (tag, hooks) in [
+        ("a-b-a", vec![("P", go), ("P", tests), ("P", go)]),
+        ("a-a", vec![("P", go), ("P", go)]),
+        ("a-b-b", vec![("P", go), ("P", tests), ("P", tests)]),
+        ("a-then-new-id-a", vec![("P", go), ("P2", go)]),
+    ] {
+        let mut pane = Pane::new(&format!("shared-id-{tag}"));
+        for (prompt_id, text) in &hooks {
+            assert_eq!(
+                pane.hook(Some(prompt_id), text),
+                PromptObservation::PublishedSshDirect,
+                "{tag}: {prompt_id} {text}"
+            );
+            pane.age(RECENT_PLUS);
+        }
+        assert_eq!(
+            pane.scan("U", Some("P"), go),
+            PromptObservation::SuppressedReplayedEntry,
+            "{tag}: the opening row"
+        );
+        let announced: Vec<_> = hooks.iter().map(|(_, text)| hook_event(text)).collect();
+        assert_eq!(pane.published(), announced, "{tag}");
+    }
+}
+
+/// A queued hook's POST result settles only its own submission, so a refused opening
+/// stays the scanner's to announce.
+#[test]
+fn a_queued_hook_settles_only_its_own_submission() {
+    let mut pane = Pane::new("queued-settle");
+    pane.hook_before_its_post(Some("P"), "opening");
+    pane.hook_before_its_post(Some("P"), "queued");
+    let mut events = Vec::new();
+    while let Ok(event) = pane.rx.try_recv() {
+        if event.tmux_session_name == pane.tmux {
+            events.push(event);
+        }
+    }
+    let [opening, queued] = events.as_slice() else {
+        panic!("both hooks publish: {events:?}");
+    };
+    record_announced_prompt_id(queued);
+    withdraw_unannounced_prompt_id(opening);
+    pane.age(RECENT_PLUS);
+    assert_eq!(
+        pane.scan("U", Some("P"), "opening"),
+        PromptObservation::PublishedSshDirect
+    );
+    assert_eq!(pane.published(), vec![row_event("U", "opening")]);
 }
 
 #[test]
