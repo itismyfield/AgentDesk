@@ -7,6 +7,7 @@ use super::intake_queue_transaction::{
 };
 
 mod busy_duplicate_notice;
+mod busy_inject;
 mod component_events;
 mod gate;
 mod queue_effects;
@@ -1229,6 +1230,16 @@ pub(in crate::services::discord) async fn handle_event(
                     return Ok(());
                 }
                 // No active turn — fall through to normal processing below
+            }
+
+            // A busy Claude TUI pane takes a person's text before intake queues or starts it.
+            let more = !upload_records.is_empty()
+                || admitted_attachment_submission.is_some()
+                || resolved_voice_announcement.is_some();
+            let live =
+                busy_inject::LiveText::new(new_message, text, reply_context.as_deref(), more);
+            if busy_inject::offered(&ctx.http, &data.shared, &data.provider, &live).await {
+                return Ok(());
             }
 
             // Queue messages while AI is in progress (executed as next turn after current finishes)

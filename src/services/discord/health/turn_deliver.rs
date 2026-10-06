@@ -42,7 +42,8 @@ pub enum HumanInputDelivery {
         reason: String,
         inject_veto: Option<String>,
     },
-    /// The busy turn's transcript recorded the input; `turn_id` is null for a TUI-direct turn.
+    /// The busy turn's transcript recorded the input; `turn_id` is null unless the turn's durable
+    /// row names a Discord message.
     Injected {
         turn_id: Option<String>,
     },
@@ -107,12 +108,26 @@ trait DeliveryPorts: Send + Sync {
     async fn mailbox_holder(&self) -> MailboxHolder;
     async fn enqueue(&self) -> Result<String, String>;
     fn inject_mode(&self) -> InjectMode;
-    async fn try_inject(&self, mode: InjectMode) -> InjectAttempt;
+    async fn try_inject(&self) -> InjectAttempt;
 }
 
 async fn deliver_with_ports<P: DeliveryPorts>(
     ports: &P,
 ) -> Result<HumanInputDelivery, HumanInputError> {
+    // A busy TUI pane takes the input whoever holds it; a veto keeps the start-or-queue below.
+    let mut inject_veto = None;
+    if ports.inject_mode() != InjectMode::Off {
+        match ports.try_inject().await {
+            InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
+            InjectAttempt::Injected { turn_id } => {
+                return Ok(HumanInputDelivery::Injected { turn_id });
+            }
+            InjectAttempt::Unconfirmed { turn_id, detail } => {
+                let detail = detail.to_string();
+                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
+            }
+        }
+    }
     if !ports.external_turn_active().await {
         match ports.try_start().await {
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
@@ -142,21 +157,6 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             StartAttempt::Busy => "session_transition",
         },
     };
-    // Only input that would wait behind a live turn may go into it; nothing else changes.
-    let mut inject_veto = None;
-    let mode = ports.inject_mode();
-    if mode != InjectMode::Off && matches!(reason, "turn_active" | EXTERNAL_TURN_ACTIVE) {
-        match ports.try_inject(mode).await {
-            InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
-            InjectAttempt::Injected { turn_id } => {
-                return Ok(HumanInputDelivery::Injected { turn_id });
-            }
-            InjectAttempt::Unconfirmed { turn_id, detail } => {
-                let detail = detail.to_string();
-                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
-            }
-        }
-    }
     match ports.enqueue().await {
         Ok(turn_id) => Ok(HumanInputDelivery::Queued {
             turn_id,
@@ -267,8 +267,29 @@ impl DeliveryPorts for LivePorts {
         inject::mode(self.request.channel_id.get())
     }
 
-    async fn try_inject(&self, mode: InjectMode) -> InjectAttempt {
-        inject::attempt(&self.shared, &self.request, mode).await
+    async fn try_inject(&self) -> InjectAttempt {
+        inject::attempt(&self.shared, &self.request).await
+    }
+}
+
+impl HumanInputRequest {
+    /// The deliver route's injection for input from any other source: `Ok` when the pane took it
+    /// or may have, `Err` naming why not, so the caller keeps its own start or queue.
+    pub(crate) async fn offer_to_busy_turn(
+        &self,
+        shared: &Arc<SharedData>,
+    ) -> Result<HumanInputDelivery, &'static str> {
+        if inject::mode(self.channel_id.get()) == InjectMode::Off {
+            return Err("switch_off");
+        }
+        match inject::attempt(shared, self).await {
+            InjectAttempt::NotSent(veto) => Err(veto),
+            InjectAttempt::Injected { turn_id } => Ok(HumanInputDelivery::Injected { turn_id }),
+            InjectAttempt::Unconfirmed { turn_id, detail } => {
+                let detail = detail.to_string();
+                Ok(HumanInputDelivery::Unconfirmed { turn_id, detail })
+            }
+        }
     }
 }
 
@@ -407,7 +428,7 @@ mod tests {
         fn inject_mode(&self) -> InjectMode {
             self.mode
         }
-        async fn try_inject(&self, _mode: InjectMode) -> InjectAttempt {
+        async fn try_inject(&self) -> InjectAttempt {
             self.injects.fetch_add(1, Ordering::SeqCst);
             self.inject.clone()
         }
@@ -523,9 +544,9 @@ mod tests {
         }
     }
 
-    /// On, only a queue behind a live turn asks once; a veto queues as PR1 did, with the veto named.
+    /// On, every delivery asks once before any start; a veto keeps PR1's answer with the veto named.
     #[tokio::test]
-    async fn the_switch_on_asks_only_where_input_would_wait_behind_a_live_turn() {
+    async fn the_switch_on_asks_once_before_any_start_whoever_holds_the_channel() {
         let answers = [
             InjectAttempt::NotSent("not_busy"),
             InjectAttempt::Injected { turn_id: None },
@@ -549,23 +570,21 @@ mod tests {
         observed.dedup();
         #[rustfmt::skip]
         let expected = [
-            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=1 asked=0",
-            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=2 asked=0",
+            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=1 asked=1",
+            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=2 asked=1",
             "QueueRefused(\"LastItemDedup\") enqueue=1 starts=1 asked=1",
-            "RuntimeUnavailable(\"no ctx\") enqueue=0 starts=1 asked=0",
+            "RuntimeUnavailable(\"no ctx\") enqueue=0 starts=1 asked=1",
             "injected None enqueue=0 starts=0 asked=1",
-            "injected None enqueue=0 starts=1 asked=1",
-            "queued discord:7:900 background_turn enqueue=1 starts=0 asked=0",
-            "queued discord:7:900 background_turn enqueue=1 starts=1 asked=0",
+            "queued discord:7:900 background_turn veto=not_busy enqueue=1 starts=0 asked=1",
+            "queued discord:7:900 background_turn veto=not_busy enqueue=1 starts=1 asked=1",
             "queued discord:7:900 external_turn_active veto=not_busy enqueue=1 starts=0 asked=1",
             "queued discord:7:900 external_turn_active veto=not_busy enqueue=1 starts=1 asked=1",
-            "queued discord:7:900 session_transition enqueue=1 starts=2 asked=0",
+            "queued discord:7:900 session_transition veto=not_busy enqueue=1 starts=2 asked=1",
             "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=0 asked=1",
             "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=1 asked=1",
-            "started discord:7:1 enqueue=0 starts=1 asked=0",
-            "started discord:7:1 enqueue=0 starts=2 asked=0",
+            "started discord:7:1 enqueue=0 starts=1 asked=1",
+            "started discord:7:1 enqueue=0 starts=2 asked=1",
             "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=0 asked=1",
-            "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=1 asked=1",
         ];
         assert_eq!(observed, expected);
     }

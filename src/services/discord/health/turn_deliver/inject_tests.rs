@@ -70,11 +70,7 @@ impl InjectPane {
             "cap.before",
             &format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}"),
         );
-        let folded = "[Pasted text #1 +1 lines]";
-        pane.set(
-            "cap.pasted",
-            &format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ {folded}\n{BORDER}\n{FOOTER}"),
-        );
+        pane.fold_paste(1);
         let program = pane.path("tmux");
         pane.set(
             "tmux",
@@ -113,8 +109,29 @@ impl InjectPane {
         pane
     }
 
+    /// The tmux name the channel name `inject-<channel>` resolves to.
     pub(crate) fn session(&self) -> String {
-        format!("AgentDesk-claude-inject-{}", self.channel)
+        ProviderKind::Claude.build_tmux_session_name(&format!("inject-{}", self.channel))
+    }
+
+    /// Rewrites the channel's row with another source and user message id.
+    fn reseat_row(&self, source: TurnSource, message: u64) {
+        let provider = ProviderKind::Claude;
+        let load = crate::services::discord::inflight::load_inflight_state_read_only;
+        let mut row = load(&provider, self.channel).expect("seeded row");
+        (row.turn_source, row.user_msg_id) = (source, message);
+        crate::services::discord::inflight::save_inflight_state(&row).expect("reseated row");
+    }
+
+    /// Leaves only the channel name to name the pane.
+    async fn drop_row(&self, shared: &SharedData) {
+        crate::services::discord::inflight::clear_inflight_state(
+            &ProviderKind::Claude,
+            self.channel,
+        );
+        let name = format!("inject-{}", self.channel);
+        let map = crate::services::discord::host_defer_gate::tests::map_channel;
+        map(shared, ChannelId::new(self.channel), &name).await;
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -128,6 +145,19 @@ impl InjectPane {
     fn lines(&self, name: &str) -> Vec<String> {
         let text = fs::read_to_string(self.path(name)).unwrap_or_default();
         text.lines().map(str::to_string).collect()
+    }
+
+    /// The composer after the paste shows a folded placeholder of `lines` line breaks.
+    pub(crate) fn fold_paste(&self, lines: usize) {
+        let folded = format!("[Pasted text #1 +{lines} lines]");
+        let pane =
+            format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ {folded}\n{BORDER}\n{FOOTER}");
+        self.set("cap.pasted", &pane);
+    }
+
+    /// The frame the last paste carried.
+    pub(crate) fn pasted(&self) -> String {
+        fs::read_to_string(self.path("buffer")).unwrap_or_default()
     }
 
     pub(crate) fn tmux_calls(&self) -> usize {
@@ -228,20 +258,16 @@ fn intake_state(channel: u64, message: u64, token: Option<&CancelToken>) -> Infl
 
 /// Intake's claim of its head, with the user id and message the requeue later names.
 async fn claim(shared: &SharedData, channel: u64) -> Arc<CancelToken> {
+    claim_kinded(shared, channel, ActiveTurnKind::UserOrAgent).await
+}
+
+/// A claim of `kind` on message `channel + 10`, as intake, a TUI-direct relay or a monitor takes it.
+async fn claim_kinded(shared: &SharedData, channel: u64, kind: ActiveTurnKind) -> Arc<CancelToken> {
     let token = Arc::new(CancelToken::new());
-    let message = MessageId::new(channel + 10);
-    let start = crate::services::discord::mailbox_try_start_turn;
-    let user = UserId::new(7);
-    assert!(
-        start(
-            shared,
-            ChannelId::new(channel),
-            token.clone(),
-            user,
-            message
-        )
-        .await
-    );
+    let (user, message) = (UserId::new(7), MessageId::new(channel + 10));
+    let start = crate::services::discord::mailbox_try_start_turn_kinded;
+    let channel = ChannelId::new(channel);
+    assert!(start(shared, channel, token.clone(), user, message, kind).await);
     token
 }
 
@@ -284,7 +310,7 @@ fn the_switch_opens_only_on_external_or_all() {
 }
 
 #[test]
-fn only_a_tui_direct_row_or_with_all_a_discord_turn_on_its_own_row_holds_a_pane_for_input() {
+fn any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row() {
     let row = |source, message| {
         let mut row = intake_state(9, message, None);
         row.turn_source = source;
@@ -309,31 +335,32 @@ fn only_a_tui_direct_row_or_with_all_a_discord_turn_on_its_own_row_holds_a_pane_
         ChannelMailboxSnapshot::default(),
         claim(ActiveTurnKind::UserOrAgent),
     );
-    let background = claim(ActiveTurnKind::Background);
-    let (ext, all) = (InjectMode::External, InjectMode::All);
-    let held = || Err(inject::HOLDER_UNSUPPORTED);
+    let (background, monitor_turn) = (
+        claim(ActiveTurnKind::Background),
+        claim(ActiveTurnKind::MonitorAutoTurn),
+    );
+    let discord = || Ok(Some("discord:9:5".to_string()));
+    let in_flight = || Err(inject::INPUT_IN_FLIGHT);
     #[rustfmt::skip]
     let cases = [
-        (ext, &idle, Some(&external), Ok(None)),
-        (all, &idle, Some(&external), Ok(None)),
-        (ext, &turn, Some(&managed), held()),
-        (all, &turn, Some(&managed), Ok(Some("discord:9:5".to_string()))),
-        // An intake holding the claim over the TUI-direct row is mid-transition, not a holder.
-        (all, &turn, Some(&external), held()),
-        (all, &background, Some(&managed), held()),
-        (all, &turn, Some(&stale), held()),
-        (all, &turn, None, held()),
-        (all, &idle, None, held()),
-        (all, &idle, Some(&managed), held()),
-        (all, &idle, Some(&monitor), held()),
-        (all, &idle, Some(&adopted), held()),
+        (&idle, Some(&external), Ok(None)),
+        (&idle, Some(&monitor), Ok(None)),
+        (&idle, Some(&adopted), Ok(None)),
+        (&idle, Some(&managed), discord()),
+        (&idle, None, Ok(None)),
+        (&turn, Some(&managed), discord()),
+        (&background, Some(&external), Ok(None)),
+        (&background, Some(&managed), discord()),
+        (&background, None, Ok(None)),
+        (&monitor_turn, Some(&monitor), Ok(None)),
+        // A claimed input whose own row is not on disk has not reached the pane yet.
+        (&turn, Some(&external), in_flight()),
+        (&turn, Some(&stale), in_flight()),
+        (&turn, None, in_flight()),
     ];
-    for (index, (mode, snapshot, row, expected)) in cases.into_iter().enumerate() {
-        assert_eq!(
-            inject::holder(mode, snapshot, row, 9),
-            expected,
-            "case {index}"
-        );
+    for (index, (snapshot, row, expected)) in cases.into_iter().enumerate() {
+        let holder = inject::holder(snapshot, row, 9).map(|holder| holder.turn_id);
+        assert_eq!(holder, expected, "case {index}");
     }
     let queued_item = ChannelMailboxSnapshot {
         intervention_queue: vec![queued(11)],
@@ -414,10 +441,61 @@ async fn input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg(
         [
             "queued external_turn_active veto=queue_nonempty [earlier input,status?] tmux=0 keys=0",
             "queued external_turn_active veto=queue_nonempty [status?] tmux=0 keys=0",
-            "queued turn_active veto=holder_unsupported [status?] tmux=0 keys=0",
+            "queued turn_active veto=input_in_flight [status?] tmux=0 keys=0",
             "queued external_turn_active veto=transition_busy [earlier input,status?] tmux=0 keys=0",
         ]
     );
+}
+
+/// Background, monitor, adopted and row-less holders of a busy pane all take the input through
+/// the real deliver entry, with nothing queued.
+#[tokio::test(flavor = "current_thread")]
+async fn a_busy_pane_takes_the_input_whoever_holds_the_channel_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channels = [6_245_701, 6_245_702, 6_245_703, 6_245_704];
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
+    let [background, monitor, adopted, rowless] = channels.map(|ch| InjectPane::new(ch, "all"));
+    claim_kinded(&shared, background.channel, ActiveTurnKind::Background).await;
+    monitor.reseat_row(TurnSource::MonitorTriggered, 0);
+    claim_kinded(&shared, monitor.channel, ActiveTurnKind::MonitorAutoTurn).await;
+    adopted.reseat_row(TurnSource::ExternalAdopted, 0);
+    rowless.drop_row(&shared).await;
+    let mut observed = Vec::new();
+    for pane in [&background, &monitor, &adopted, &rowless] {
+        let outcome = deliver(&registry, pane.channel).await;
+        let queue = queue_texts(&shared, pane.channel).await.join(",");
+        let (keys, seen) = (pane.keys().join("+"), pane.transcript_recorded_the_paste());
+        observed.push(format!("{outcome} keys={keys} seen={seen} [{queue}]"));
+    }
+    let injected = "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true []";
+    assert_eq!(observed, [injected; 4]);
+}
+
+/// A channel whose input moved to the input runtime keeps its pane untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn a_channel_closed_to_legacy_input_takes_no_paste() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ch = 6_245_801;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let pane = InjectPane::new(ch, "all");
+    let fence = crate::services::discord::input_runtime::fence::Gate::protect;
+    let gate = fence(ProviderKind::Claude, ch).expect("gate");
+    let _closing = gate.close().expect("closing");
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(ch),
+        provider: ProviderKind::Claude,
+        text: "status?".to_string(),
+        author_id: 200,
+        source: "imessage".to_string(),
+        metadata: None,
+        channel_name_hint: None,
+    };
+    let outcome = inject::attempt(&shared, &request).await;
+    let refused = inject::InjectAttempt::NotSent("input_runtime_owned");
+    assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
 
 /// Waits until a query on `sessions` queues behind the test's table lock.
@@ -439,14 +517,14 @@ async fn lookup_parked(pool: &sqlx::PgPool) {
         .expect("host lookup parked");
 }
 
-/// The host lookup awaits PostgreSQL inside the transition: intake cannot claim, and input queued
-/// or claimed around the transition while it waits still vetoes the paste.
+/// The host lookup awaits PostgreSQL inside the transition: intake cannot claim, and input queued,
+/// claimed or a new holder installed around the transition while it waits still vetoes the paste.
 #[tokio::test(flavor = "current_thread")]
 async fn input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
-    let channels = [6_245_501, 6_245_502];
+    let channels = [6_245_501, 6_245_502, 6_245_503];
     let registry = HealthRegistry::new();
     let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
     let mut observed = Vec::new();
@@ -467,17 +545,16 @@ async fn input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
         let fenced = intake(&shared, ChannelId::new(ch), (None, false, String::new()))
             .await
             .is_err();
-        let _claim = if index == 0 {
-            let enqueue = crate::services::discord::mailbox_enqueue_intervention;
-            let channel = ChannelId::new(ch);
-            assert!(
-                enqueue(&shared, &ProviderKind::Claude, channel, queued(ch + 10))
-                    .await
-                    .enqueued
-            );
-            None
-        } else {
-            Some(claim(&shared, ch).await)
+        let _claim = match index {
+            0 => {
+                let enqueue = crate::services::discord::mailbox_enqueue_intervention;
+                let channel = ChannelId::new(ch);
+                let earlier = enqueue(&shared, &ProviderKind::Claude, channel, queued(ch + 10));
+                assert!(earlier.await.enqueued);
+                None
+            }
+            1 => Some(claim(&shared, ch).await),
+            _ => Some(claim_kinded(&shared, ch, ActiveTurnKind::Background).await),
         };
         let parked_calls = pane.tmux_calls();
         lock.rollback().await.unwrap();
@@ -492,7 +569,8 @@ async fn input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
         observed,
         [
             "queued external_turn_active veto=queue_nonempty fenced=true parked_tmux=0 keys=0 [earlier input,status?]",
-            "queued external_turn_active veto=holder_unsupported fenced=true parked_tmux=0 keys=0 [status?]",
+            "queued turn_active veto=input_in_flight fenced=true parked_tmux=0 keys=0 [status?]",
+            "queued background_turn veto=holder_changed fenced=true parked_tmux=0 keys=0 [status?]",
         ]
     );
 }

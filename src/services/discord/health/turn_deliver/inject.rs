@@ -1,23 +1,28 @@
 //! Busy-turn injection for human input: the kill switch, the vetoes read before any pane call,
-//! and the hand-off of one deliver to `claude_tui::busy_inject`.
+//! and the hand-off of one input to `claude_tui::busy_inject`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use poise::serenity_prelude::MessageId;
 
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Outcome, Unconfirmed, Veto};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
-use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
+use crate::services::discord::input_runtime::fence;
+use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::{ActiveTurnKind, ChannelMailboxSnapshot};
 use tokio::sync::OwnedMutexGuard;
 
-/// `ADK_BUSY_INJECT` turns on busy-turn injection for turn/deliver, read once per process: `external`
-/// for TUI-direct turns, `all` for Discord turns too; unset or any other value keeps it off.
+/// `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read
+/// once per process: `external` or `all` opens it for any turn holder; anything else keeps it off.
 pub(crate) const INJECT_ENV: &str = "ADK_BUSY_INJECT";
 
-pub(super) const HOLDER_UNSUPPORTED: &str = "holder_unsupported";
+pub(super) const HOLDER_CHANGED: &str = "holder_changed";
+pub(super) const INPUT_IN_FLIGHT: &str = "input_in_flight";
+const INPUT_RUNTIME_OWNED: &str = "input_runtime_owned";
 pub(super) const QUEUE_NONEMPTY: &str = "queue_nonempty";
 const SESSION_UNRESOLVED: &str = "session_unresolved";
 pub(super) const TRANSITION_BUSY: &str = "transition_busy";
@@ -63,30 +68,61 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
     }
 }
 
-/// Holder vetoes on one mailbox snapshot and the channel's durable row; `Ok` names the busy turn.
+/// Who holds the channel at one read: the mailbox claim and the durable row.
+pub(super) struct Holder {
+    claim: Option<(Arc<CancelToken>, ActiveTurnKind, Option<MessageId>)>,
+    row: Option<(TurnSource, u64, String, Option<u64>)>,
+    pub(super) turn_id: Option<String>,
+}
+
+impl PartialEq for Holder {
+    fn eq(&self, other: &Self) -> bool {
+        let claim = match (&self.claim, &other.claim) {
+            (None, None) => true,
+            (Some((token, kind, message)), Some((other_token, other_kind, other_message))) => {
+                Arc::ptr_eq(token, other_token) && kind == other_kind && message == other_message
+            }
+            _ => false,
+        };
+        claim && self.row == other.row
+    }
+}
+
+/// Any holder takes input, except a claimed input whose own row is not on disk: that input has not
+/// reached the pane, so later input waits behind it. `turn_id` names a row's Discord message.
 pub(super) fn holder(
-    mode: InjectMode,
     snapshot: &ChannelMailboxSnapshot,
     row: Option<&InflightTurnState>,
     channel_id: u64,
-) -> Result<Option<String>, &'static str> {
-    let row = row.ok_or(HOLDER_UNSUPPORTED)?;
-    match (&snapshot.cancel_token, row.turn_source) {
-        // A TUI-direct turn holds the channel through its row alone.
-        (None, TurnSource::ExternalInput) => Ok(None),
-        // A Discord turn whose own row is on disk.
-        (Some(_), TurnSource::Managed)
-            if mode == InjectMode::All
-                && !snapshot.active_turn_kind.is_background()
-                && snapshot
-                    .active_user_message_id
-                    .is_some_and(|id| id.get() == row.user_msg_id) =>
-        {
-            Ok(Some(format!("discord:{channel_id}:{}", row.user_msg_id)))
-        }
-        // Background, monitor and adopted holders, and a claim taken over a foreign row.
-        _ => Err(HOLDER_UNSUPPORTED),
+) -> Result<Holder, &'static str> {
+    let message = snapshot.active_user_message_id;
+    let claim = snapshot
+        .cancel_token
+        .clone()
+        .map(|token| (token, snapshot.active_turn_kind, message));
+    let own_row = row
+        .zip(message)
+        .is_some_and(|(row, message)| row.user_msg_id == message.get());
+    if claim.is_some() && snapshot.active_turn_kind == ActiveTurnKind::UserOrAgent && !own_row {
+        return Err(INPUT_IN_FLIGHT);
     }
+    let turn_id = row
+        .filter(|row| row.turn_source != TurnSource::ExternalInput && row.user_msg_id != 0)
+        .map(|row| format!("discord:{channel_id}:{}", row.user_msg_id));
+    let row = row.map(|row| {
+        let started = row.started_at.clone();
+        (
+            row.turn_source,
+            row.user_msg_id,
+            started,
+            row.turn_start_offset,
+        )
+    });
+    Ok(Holder {
+        claim,
+        row,
+        turn_id,
+    })
 }
 
 /// Queued input, or a head dequeued but not yet claimed, must run before this one.
@@ -104,6 +140,8 @@ struct Target {
     turn_id: Option<String>,
     /// Held from the first mailbox read until the pane effect ends.
     transition: OwnedMutexGuard<()>,
+    /// Keeps an input-runtime gate from closing on the channel until the pane effect ends.
+    input: Option<fence::Permit>,
 }
 
 async fn observe(
@@ -118,16 +156,58 @@ async fn observe(
     (snapshot, row)
 }
 
+/// The channel's Claude TUI pane and its transcript: its watcher's session, then the durable row's,
+/// then the one its channel name builds. Any other session is not a TUI one.
+async fn tui_session(
+    shared: &SharedData,
+    request: &HumanInputRequest,
+    row: Option<&InflightTurnState>,
+) -> Option<(String, PathBuf)> {
+    let channel = request.channel_id;
+    let named = {
+        let data = shared.core.lock().await;
+        let session = data.sessions.get(&channel);
+        session.and_then(|session| session.channel_name.clone())
+    };
+    let candidates = [
+        shared
+            .tmux_watchers
+            .channel_binding(&channel)
+            .map(|binding| binding.tmux_session_name),
+        row.and_then(|row| row.tmux_session_name.clone()),
+        named.map(|name| request.provider.build_tmux_session_name(&name)),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|name| !name.trim().is_empty())
+        .find_map(|session| {
+            let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
+            let binding = binding(&session)
+                .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)?;
+            Some((session, PathBuf::from(binding.relay_output_path())))
+        })
+}
+
 /// Every veto that needs no pane call, in the documented order.
 async fn resolve(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
-    mode: InjectMode,
 ) -> Result<Target, &'static str> {
     let channel = request.channel_id.get();
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
+    // Headless sessions stop here, before any lock.
+    let read = crate::services::discord::inflight::load_inflight_state_read_only;
+    let row = read(&request.provider, channel);
+    let (session, transcript) = tui_session(shared, request, row.as_ref())
+        .await
+        .ok_or(SESSION_UNRESOLVED)?;
+    let input = match fence::lookup(&request.provider, channel) {
+        Some(gate) => Some(gate.admit().map_err(|_| INPUT_RUNTIME_OWNED)?),
+        None => None,
+    };
     // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
     // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
     let transition = shared
@@ -135,45 +215,36 @@ async fn resolve(
         .try_lock_owned()
         .map_err(|_| TRANSITION_BUSY)?;
     let (snapshot, row) = observe(shared, request).await;
-    let turn_id = holder(mode, &snapshot, row.as_ref(), channel)?;
-    if crate::services::tui_o::turn_mode::transcript_turns(channel) {
-        return Err("turn_mode_unsupported");
-    }
+    let first = holder(&snapshot, row.as_ref(), channel)?;
     backlog(&snapshot)?;
-    let session = row
-        .and_then(|row| row.tmux_session_name)
-        .filter(|name| !name.trim().is_empty())
-        .ok_or(SESSION_UNRESOLVED)?;
-    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
-        .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
-        .ok_or(SESSION_UNRESOLVED)?;
     let deferred = crate::services::discord::host_defer_gate::channel_session_deferred;
     if deferred(shared, &request.provider, channel, &session).await {
         return Err(SESSION_UNRESOLVED);
     }
     // Paths that skip the transition may have queued or claimed while the lookup awaited.
     let (snapshot, row) = observe(shared, request).await;
-    if holder(mode, &snapshot, row.as_ref(), channel)? != turn_id {
-        return Err(HOLDER_UNSUPPORTED);
+    if holder(&snapshot, row.as_ref(), channel)? != first {
+        return Err(HOLDER_CHANGED);
     }
     backlog(&snapshot)?;
-    if row.and_then(|row| row.tmux_session_name).as_deref() != Some(session.as_str()) {
+    let now = tui_session(shared, request, row.as_ref()).await;
+    if now.map(|(name, _)| name).as_deref() != Some(session.as_str()) {
         return Err(SESSION_UNRESOLVED);
     }
     Ok(Target {
-        transcript: PathBuf::from(binding.relay_output_path()),
         session,
-        turn_id,
+        transcript,
+        turn_id: first.turn_id,
         transition,
+        input,
     })
 }
 
 pub(super) async fn attempt(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
-    mode: InjectMode,
 ) -> InjectAttempt {
-    let target = match resolve(shared, request, mode).await {
+    let target = match resolve(shared, request).await {
         Ok(target) => target,
         Err(veto) => return InjectAttempt::NotSent(veto),
     };
@@ -217,6 +288,7 @@ fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt
         transcript,
         turn_id,
         transition,
+        input: input_permit,
     } = target;
     let nonce = &input.nonce;
     let request = busy_inject::Request {
@@ -248,6 +320,7 @@ fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt
         Err(_) => alert("executor_failed"),
     };
     drop(transition);
+    drop(input_permit);
     result
 }
 
