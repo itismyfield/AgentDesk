@@ -250,7 +250,15 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             &ids,
                         );
                     }
-                    let inflight_states_qe = inflight::load_inflight_states(&provider_for_deferred);
+                    let inflight_states_qe = inflight::load_inflight_states_excluding(
+                        &provider_for_deferred,
+                        |channel| {
+                            crate::services::turn_orchestrator::input_fence::held(
+                                &provider_for_deferred,
+                                channel,
+                            )
+                        },
+                    );
                     if !inflight_states_qe.is_empty() {
                         let ts2 = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(

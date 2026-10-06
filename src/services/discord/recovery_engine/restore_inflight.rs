@@ -67,7 +67,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    let states = load_inflight_states(provider);
+    let states = inflight::load_inflight_states_excluding(provider, |channel| {
+        crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
+    });
     observe_restore_inflight_snapshot(
         provider,
         &states,

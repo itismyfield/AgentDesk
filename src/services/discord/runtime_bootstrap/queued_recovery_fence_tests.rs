@@ -64,13 +64,34 @@ fn files_mentioning(root: &std::path::Path, channel: u64) -> Vec<(std::path::Pat
 #[test]
 fn c2_boot_restore_installs_nothing_for_an_input_protected_channel() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let failures: Vec<_> = [false, true]
+        .into_iter()
+        .filter_map(|closed| {
+            eprintln!("old-format boot matrix: closed={closed}");
+            std::panic::catch_unwind(|| boot_restore_old_format_case(closed))
+                .err()
+                .map(|_| closed)
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "old-format boot failures: {failures:?}"
+    );
+}
+
+fn boot_restore_old_format_case(closed: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
         tmp.path(),
     );
     let provider = ProviderKind::Claude;
-    let (protected, legacy, rebind) = (6_325_580_u64, 6_325_581_u64, 6_325_582_u64);
+    let offset = if closed { 100 } else { 0 };
+    let (protected, legacy, rebind) = (
+        6_325_580_u64 + offset,
+        6_325_581_u64 + offset,
+        6_325_582_u64 + offset,
+    );
     bind_channels(tmp.path(), [protected, legacy]);
     let shared = make_shared_data_for_tests();
     let token = shared.token_hash.clone();
@@ -133,6 +154,14 @@ fn c2_boot_restore_installs_nothing_for_an_input_protected_channel() {
     );
     rebound.rebind_origin = true;
     assert!(inflight::save_inflight_state_if_absent(&rebound).unwrap());
+    let inflight_root = inflight::inflight_runtime_root().unwrap();
+    for channel in [protected, rebind] {
+        let path = inflight::inflight_state_path(&inflight_root, &provider, channel);
+        let mut row: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        row.as_object_mut().unwrap().remove("finalizer_turn_id");
+        std::fs::write(path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+    }
     let root = input_runtime::fence::population_root().unwrap();
     let before = [protected, rebind].map(|channel| files_mentioning(&root, channel));
     let names: Vec<_> = before[0]
@@ -150,6 +179,7 @@ fn c2_boot_restore_installs_nothing_for_an_input_protected_channel() {
         .each_ref()
         .map(input_runtime::fence::test_health::Clear::new);
 
+    let _closing_before = closed.then(|| gates.each_ref().map(|gate| gate.close().unwrap()));
     let http = Arc::new(serenity::Http::new("Bot test-token"));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -157,7 +187,7 @@ fn c2_boot_restore_installs_nothing_for_an_input_protected_channel() {
         .unwrap();
     let (stale_cards, live) = runtime.block_on(async {
         let cards = restore_queued_and_inflight_work(&http, &shared, &provider).await;
-        let _closing = gates[0].close().unwrap();
+        let _closing = (!closed).then(|| gates[0].close().unwrap());
         let settings = shared.settings.write().await;
         let deps = super::super::router::IntakeDeps {
             http: &http,
