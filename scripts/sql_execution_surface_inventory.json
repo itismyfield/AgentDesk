@@ -26330,6 +26330,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/commands/control/native_herdr_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:79dcf1064b333d94de07569606717f91d4b5490e271c2ab254d330c40c37e5f6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/control/native_herdr_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fafab6ef12a5580ee764819c0dfbb3fcc2e8fd30618ed894995f52335c671f18"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/commands/inspect/query.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -34903,6 +34921,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:b8d4d569b8576a52ccade72cbdddd30af9314eb76554c10d7e7693514564db91"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_clear_adapter_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:52b1efa6b9e2eb90854a9717c6207b2ee4ea03e68a8d7a4721b3af02ec996478"
     },
     {
       "root": "src",

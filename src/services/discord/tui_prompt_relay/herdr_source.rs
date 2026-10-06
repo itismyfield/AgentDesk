@@ -22,7 +22,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
 use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_events::{
-    self, BindingCause, BindingEvent, BindingTarget, SourceId,
+    self, BindingEvent, BindingTarget, SourceId,
 };
 use crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane_under_source_authority;
 use crate::services::tui_prompt_dedupe::{self as dedupe, Persisted, Record, TuiRuntimeBinding};
@@ -124,19 +124,16 @@ fn nonce_baseline(channel: u64, logical: &str, nonce: &str) -> Option<SourceId> 
     source_of(pane_records(channel, logical).last()?, nonce)
 }
 
-/// Whether the pane's latest record is execution `nonce`'s own SessionStart(clear) Pending, taken
-/// from the source that execution logged just before it.
+/// Whether execution `nonce`'s own clear Pending awaits its next prompt; no Herdr pane is off unix.
 fn awaits_own_clear(channel: u64, logical: &str, nonce: &str) -> bool {
-    let records = pane_records(channel, logical);
-    let Some((pending, earlier)) = records.split_last() else {
-        return false;
+    #[cfg(unix)]
+    let awaits = crate::services::claude::herdr_turn::awaited_clear(channel, logical, nonce);
+    #[cfg(not(unix))]
+    let awaits = {
+        let _ = (channel, logical, nonce);
+        None::<()>
     };
-    let canonical = matches!(pending.new, BindingTarget::Pending { .. })
-        && pending.execution_nonce.as_deref() == Some(nonce)
-        && pending.cause == BindingCause::Clear
-        && pending.evidence.hook_event.as_deref() == Some("session_start");
-    let from = earlier.last().and_then(|event| source_of(event, nonce));
-    canonical && from.is_some_and(|source| pending.old.as_ref() == Some(&source))
+    awaits.is_some()
 }
 
 fn live_is(live: &TuiRuntimeBinding, source: &SourceId) -> bool {

@@ -1162,3 +1162,6 @@ mod herdr_resume;
 #[cfg(unix)]
 #[path = "clear_launch_tests.rs"]
 mod clear_launch;
+
+#[path = "rotation_unsettled_tests.rs"]
+mod rotation_unsettled;

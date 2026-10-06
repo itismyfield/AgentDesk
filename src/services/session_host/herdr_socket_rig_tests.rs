@@ -61,6 +61,9 @@ impl ProcessOs for LateOs {
 /// Results a test put in place of the default reply, by method.
 type Answers = Arc<Mutex<HashMap<String, Value>>>;
 
+/// Prefixes an answer that takes its method's place once a pane write arrives.
+const AFTER_SEND: &str = "after-send:";
+
 pub(crate) struct HerdrRig {
     path: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -138,6 +141,16 @@ impl HerdrRig {
                 let send = request["method"]
                     .as_str()
                     .is_some_and(|m| m.starts_with("pane.send"));
+                if send {
+                    let mut answers = scripted.lock().unwrap();
+                    let later: Vec<String> = answers.keys().cloned().collect();
+                    for key in later {
+                        if let Some(method) = key.strip_prefix(AFTER_SEND) {
+                            let result = answers.remove(&key).unwrap();
+                            answers.insert(method.to_owned(), result);
+                        }
+                    }
+                }
                 if !(send && unanswered.load(Ordering::SeqCst)) {
                     let _ =
                         writer.write_all(format!("{}\n", reply(&request, &scripted)).as_bytes());
@@ -214,6 +227,11 @@ impl HerdrRig {
     /// Replies with `result` to every later `method` request.
     pub(crate) fn answer(&self, method: &str, result: Value) {
         self.answers.lock().unwrap().insert(method.into(), result);
+    }
+
+    /// Replies with `result` to every `method` request after the next pane write.
+    pub(crate) fn answer_after_send(&self, method: &str, result: Value) {
+        self.answer(&format!("{AFTER_SEND}{method}"), result);
     }
 
     /// Every later snapshot is complete and lists exactly `panes`.

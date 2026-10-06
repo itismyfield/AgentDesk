@@ -1,7 +1,7 @@
 //! One channel's O actor: replays the spool, follows source binds, spools captured bytes and
 //! delivers owed pieces in order. Capture goes on while the gateway is not Owned.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use super::pieces::{Derived, UnitDeriver};
 use super::rotation::Sources;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::store::spool::source_key;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -32,7 +33,39 @@ where
     A: AlarmSink + 'static,
     B: BindingEvents,
 {
-    let run = || tokio::spawn(run_channel(writer, provider, bindings, stop, resumed));
+    let unsettled = watch::channel(None).0;
+    spawn_projecting(
+        config,
+        writer,
+        provider,
+        bindings,
+        (stop, resumed, unsettled),
+    )
+}
+
+/// After each poll the actor of a Herdr-configured channel publishes how many rotated-away
+/// sources it has not retired yet; `None` while its store cannot be read, or for other channels.
+pub type Unsettled = watch::Sender<Option<usize>>;
+
+/// [`spawn_if_enabled`] that also publishes the channel's [`Unsettled`] count.
+pub fn spawn_projecting<P, L, A, B>(
+    config: &WriterConfig,
+    writer: ChannelWriter<P, L, A>,
+    provider: ShadowProvider,
+    bindings: Arc<B>,
+    (stop, resumed, unsettled): (watch::Receiver<bool>, watch::Sender<bool>, Unsettled),
+) -> Option<JoinHandle<Option<StopCause>>>
+where
+    P: DiscordPort,
+    L: DeliveryLease + 'static,
+    A: AlarmSink + 'static,
+    B: BindingEvents,
+{
+    let run = || {
+        tokio::spawn(run_projecting(
+            writer, provider, bindings, stop, resumed, unsettled,
+        ))
+    };
     config.enabled.then(run)
 }
 
@@ -49,8 +82,27 @@ pub async fn run_channel<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
+    stop: watch::Receiver<bool>,
+    resumed: watch::Sender<bool>,
+) -> Option<StopCause>
+where
+    P: DiscordPort,
+    L: DeliveryLease,
+    A: AlarmSink,
+    B: BindingEvents,
+{
+    let unsettled = watch::channel(None).0;
+    run_projecting(writer, provider, bindings, stop, resumed, unsettled).await
+}
+
+/// [`run_channel`] publishing its [`Unsettled`] count once each poll's sources are tended.
+pub async fn run_projecting<P, L, A, B>(
+    writer: ChannelWriter<P, L, A>,
+    provider: ShadowProvider,
+    bindings: Arc<B>,
     mut stop: watch::Receiver<bool>,
     resumed: watch::Sender<bool>,
+    unsettled: Unsettled,
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -81,6 +133,10 @@ where
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
             break;
+        }
+        // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
+        if crate::config::session_hosts::herdr_endpoint(actor.writer.channel()).is_some() {
+            unsettled.send_replace(actor.unsettled());
         }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -125,6 +181,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 }
             }
         }
+    }
+
+    /// Sources rotated away from whose cursor is not retired yet: O still reads each of them.
+    fn unsettled(&mut self) -> Option<usize> {
+        let store = self.writer.store();
+        let rotation = store.rotation().ok()?;
+        let retired = store.cursors().filter(|cursor| cursor.retired);
+        let retired: HashSet<String> = retired.map(|cursor| source_key(&cursor.source)).collect();
+        let old = rotation.successors.keys();
+        Some(old.filter(|key| !retired.contains(*key)).count())
     }
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
