@@ -393,6 +393,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/commands/control/native_herdr_tests.rs",
         "src/services/cluster/channel_home_drain_tests.rs",
         "src/cli/channel_home_tests.rs",
+        "src/services/cluster/channel_home_port_tests.rs",
     }
 )
 

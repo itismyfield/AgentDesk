@@ -672,6 +672,8 @@ src/
 │   │   ├── channel_home.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
+│   │   ├── channel_home_port.rs
+│   │   ├── channel_home_port_tests.rs
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
