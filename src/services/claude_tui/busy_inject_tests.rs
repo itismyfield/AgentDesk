@@ -66,13 +66,14 @@ next() { n=$(cat "$d/$1.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/$1.
 effects() {
   [ "$1" = send-keys ] || return 0
   if [ ! -f "$d/on_enter" ]; then :
+  elif [ -f "$d/reply_gap" ]; then
+    # A slow after-send-keys hook: the key is applied, the record lands, then the reply follows.
+    sleep "$(cat "$d/on_enter_delay")"; cat "$d/on_enter" >> '@T@'; sleep "$(cat "$d/reply_gap")"
   elif [ -f "$d/on_enter_delay" ]; then
     (sleep "$(cat "$d/on_enter_delay")"; cat "$d/on_enter" >> '@T@') </dev/null >/dev/null 2>&1 &
   else
     cat "$d/on_enter" >> '@T@'
   fi
-  # A slow after-send-keys hook delays the reply, not the key.
-  [ -f "$d/reply_delay" ] && sleep "$(cat "$d/reply_delay")"
   return 0
 }
 echo "$*" >> "$d/log"
@@ -153,9 +154,9 @@ impl Fake {
         fs::write(self.dir.path().join("on_enter_delay"), seconds).unwrap();
     }
 
-    /// The Enter command replies `seconds` after the key took effect.
-    fn reply_after(&self, seconds: &str) {
-        fs::write(self.dir.path().join("reply_delay"), seconds).unwrap();
+    /// The Enter command replies `seconds` after the delayed record has landed.
+    fn reply_after_record(&self, seconds: &str) {
+        fs::write(self.dir.path().join("reply_gap"), seconds).unwrap();
     }
 
     fn session(&self) -> String {
@@ -468,8 +469,8 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         ),
         "late transcript"
     );
-    // Production window. The Enter takes effect at once, the input is recorded 4s later and
-    // the Enter command replies at 4.3s; the window must not start from the reply.
+    // Production window: 3s window < record at 3.2s <= reply at 3.3s < 5s tmux call budget.
+    // The Enter takes effect at once; the window must not start from the late reply.
     let production = Timing {
         confirm_window: TIMING.confirm_window,
         confirm_poll: TIMING.confirm_poll,
@@ -477,8 +478,8 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
     };
     let fake = Fake::new();
     fake.caps(&[busy_empty(), screen(&text(), "")]);
-    fake.accept_on_enter_after("4");
-    fake.reply_after("4.3");
+    fake.accept_on_enter_after("3.2");
+    fake.reply_after_record("0.1");
     let outcome = fake.run(&production);
     assert_eq!(
         (
