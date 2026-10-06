@@ -96,7 +96,9 @@ async fn persist_sigterm_state_with_boundaries(
     after_initial();
 
     // Preserve inflight state for silent re-attach.
-    let inflight_states = inflight::load_inflight_states(provider);
+    let inflight_states = inflight::load_inflight_states_excluding(provider, |channel| {
+        crate::services::turn_orchestrator::input_fence::held(provider, channel)
+    });
     if !inflight_states.is_empty() {
         let ts2 = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(

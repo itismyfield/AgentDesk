@@ -102,7 +102,6 @@ mod removal;
 #[cfg(test)]
 pub(in crate::services::discord) use self::removal::custody_notice_text;
 pub(crate) use self::removal::invalidate_stale_generation;
-use self::removal::load_inflight_states_from_root;
 pub(in crate::services::discord) use self::removal::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use self::removal::{
@@ -111,6 +110,7 @@ use self::removal::{
 pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
+use self::removal::{load_inflight_states_from_root, load_inflight_states_from_root_excluding};
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 
 mod watcher_state;
@@ -516,7 +516,9 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     // would retire stay hidden and unmarked); the mutation re-reads the FRESH on-disk
     // row under the advisory lock and sets ONLY restart_mode / restart_generation,
     // never the frontier, so it can no longer regress a concurrent writer.
-    let states = load_inflight_states_from_root(&root, provider);
+    let states = load_inflight_states_from_root_excluding(&root, provider, |channel| {
+        crate::services::turn_orchestrator::input_fence::held(provider, channel)
+    });
     let mut updated = 0usize;
     for state in states {
         // A held input channel's row stays as its transition left it.
@@ -612,6 +614,16 @@ pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnS
         return Vec::new();
     };
     load_inflight_states_from_root(&root, provider)
+}
+
+pub(super) fn load_inflight_states_excluding(
+    provider: &ProviderKind,
+    exclude_channel: impl Fn(u64) -> bool,
+) -> Vec<InflightTurnState> {
+    let Some(root) = inflight_runtime_root() else {
+        return Vec::new();
+    };
+    load_inflight_states_from_root_excluding(&root, provider, exclude_channel)
 }
 
 pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {

@@ -71,6 +71,10 @@ async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_sav
     };
     let held_queue = std::fs::read(queue_path(held)).unwrap();
     let held_row_path = inflight::inflight_state_path(&root, &provider, held.get());
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&held_row_path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("finalizer_turn_id");
+    std::fs::write(&held_row_path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
     let held_row = std::fs::read(&held_row_path).unwrap();
     let legacy_row_path = inflight::inflight_state_path(&root, &provider, legacy.get());
     let checkpoint = runtime_store::last_message_root()

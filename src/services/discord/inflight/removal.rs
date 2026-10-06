@@ -279,7 +279,9 @@ pub(super) fn invalidate_stale_generation_in_root(
     provider: &ProviderKind,
     current_generation: u64,
 ) -> Vec<(u64, Option<u64>)> {
-    let states = load_inflight_states_from_root(root, provider);
+    let states = load_inflight_states_from_root_excluding(root, provider, |channel| {
+        crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
+    });
     let mut removed = Vec::new();
     for state in states {
         // An input-protected channel's row waits for its move or handback.
@@ -658,11 +660,27 @@ pub(super) fn load_inflight_states_from_root(
     load_inflight_states_for_probe_from_root(root, provider).states
 }
 
+pub(super) fn load_inflight_states_from_root_excluding(
+    root: &Path,
+    provider: &ProviderKind,
+    exclude_channel: impl Fn(u64) -> bool,
+) -> Vec<InflightTurnState> {
+    load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel).states
+}
+
 /// Rows the loader's verdict would retire are hidden, never unlinked or
 /// renamed: `boot_reaper` is their only retirement path.
 pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     root: &Path,
     provider: &ProviderKind,
+) -> InflightProbeLoad {
+    load_inflight_states_for_probe_from_root_excluding(root, provider, |_| false)
+}
+
+fn load_inflight_states_for_probe_from_root_excluding(
+    root: &Path,
+    provider: &ProviderKind,
+    exclude_channel: impl Fn(u64) -> bool,
 ) -> InflightProbeLoad {
     let dir = inflight_provider_dir(root, provider);
     let entries = match fs::read_dir(dir) {
@@ -687,6 +705,15 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
             }
         };
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        // Exclude by canonical filename before classification can lock or backfill an old row.
+        if let Some(channel) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<u64>().ok())
+            && exclude_channel(channel)
+        {
             continue;
         }
         let state = match classify_inflight_row(&path, provider, allocation) {

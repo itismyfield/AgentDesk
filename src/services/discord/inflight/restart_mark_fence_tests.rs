@@ -35,6 +35,10 @@ fn c2_restart_marking_skips_a_held_row_and_marks_the_rest() {
     save_inflight_state_in_root(&root, &held).unwrap();
     save_inflight_state_in_root(&root, &legacy).unwrap();
     let held_path = inflight_state_path(&root, &ProviderKind::Codex, held.channel_id);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&held_path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("finalizer_turn_id");
+    std::fs::write(&held_path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
     let before = std::fs::read(&held_path).unwrap();
     let gate = Gate::protect(ProviderKind::Codex, held.channel_id).unwrap();
     let _health = fence::test_health::Clear::new(&gate);
@@ -44,6 +48,12 @@ fn c2_restart_marking_skips_a_held_row_and_marks_the_rest() {
     let marked = mark_all_inflight_states_restart_mode_checked(
         &ProviderKind::Codex,
         InflightRestartMode::DrainRestart,
+    );
+    assert!(
+        !crate::services::discord::input_runtime::health_reasons()
+            .iter()
+            .any(|reason| reason.contains(&format!("channel={}", held.channel_id))),
+        "old-format Held row must not attempt a compatibility writer"
     );
     assert_eq!(marked, Ok(1));
     assert_eq!(
