@@ -11,6 +11,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
+use tokio::sync::OwnedMutexGuard;
 
 /// `ADK_BUSY_INJECT` turns on busy-turn injection for turn/deliver, read once per process: `external`
 /// for TUI-direct turns, `all` for Discord turns too; unset or any other value keeps it off.
@@ -19,6 +20,7 @@ pub(crate) const INJECT_ENV: &str = "ADK_BUSY_INJECT";
 pub(super) const HOLDER_UNSUPPORTED: &str = "holder_unsupported";
 pub(super) const QUEUE_NONEMPTY: &str = "queue_nonempty";
 const SESSION_UNRESOLVED: &str = "session_unresolved";
+pub(super) const TRANSITION_BUSY: &str = "transition_busy";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InjectMode {
@@ -100,6 +102,20 @@ struct Target {
     session: String,
     transcript: PathBuf,
     turn_id: Option<String>,
+    /// Held from the first mailbox read until the pane effect ends.
+    transition: OwnedMutexGuard<()>,
+}
+
+async fn observe(
+    shared: &SharedData,
+    request: &HumanInputRequest,
+) -> (ChannelMailboxSnapshot, Option<InflightTurnState>) {
+    let snapshot = crate::services::discord::mailbox_snapshot(shared, request.channel_id).await;
+    let row = crate::services::discord::inflight::load_inflight_state_read_only(
+        &request.provider,
+        request.channel_id.get(),
+    );
+    (snapshot, row)
 }
 
 /// Every veto that needs no pane call, in the documented order.
@@ -112,11 +128,12 @@ async fn resolve(
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
-    let snapshot = crate::services::discord::mailbox_snapshot(shared, request.channel_id).await;
-    let row = crate::services::discord::inflight::load_inflight_state_read_only(
-        &request.provider,
-        channel,
-    );
+    // Intake claims, kickoff dequeues and claim handbacks wait on this until the pane effect ends.
+    let transition = shared
+        .session_transition_lock(request.channel_id)
+        .try_lock_owned()
+        .map_err(|_| TRANSITION_BUSY)?;
+    let (snapshot, row) = observe(shared, request).await;
     let turn_id = holder(mode, &snapshot, row.as_ref(), channel)?;
     if crate::services::tui_o::turn_mode::transcript_turns(channel) {
         return Err("turn_mode_unsupported");
@@ -133,10 +150,20 @@ async fn resolve(
     if deferred(shared, &request.provider, channel, &session).await {
         return Err(SESSION_UNRESOLVED);
     }
+    // Paths that skip the transition may have queued or claimed while the lookup awaited.
+    let (snapshot, row) = observe(shared, request).await;
+    if holder(mode, &snapshot, row.as_ref(), channel)? != turn_id {
+        return Err(HOLDER_UNSUPPORTED);
+    }
+    backlog(&snapshot)?;
+    if row.and_then(|row| row.tmux_session_name).as_deref() != Some(session.as_str()) {
+        return Err(SESSION_UNRESOLVED);
+    }
     Ok(Target {
         transcript: PathBuf::from(binding.relay_output_path()),
         session,
         turn_id,
+        transition,
     })
 }
 
@@ -150,55 +177,93 @@ pub(super) async fn attempt(
         Err(veto) => return InjectAttempt::NotSent(veto),
     };
     let channel = request.channel_id.get();
-    let nonce = busy_inject::fresh_nonce();
     let pane = pane(channel, &target.session);
-    let (session, transcript) = (target.session.clone(), target.transcript);
-    let (source, author) = (request.source.clone(), request.author_id.to_string());
-    let (text, task_nonce) = (request.text.clone(), nonce.clone());
-    let outcome = tokio::task::spawn_blocking(move || {
-        let request = busy_inject::Request {
-            session: &session,
-            transcript: &transcript,
-            source: &source,
-            author: &author,
-            nonce: &task_nonce,
-            text: &text,
-        };
-        busy_inject::inject(&pane, &request, &busy_inject::TIMING)
+    let input = Input {
+        channel,
+        provider: request.provider.as_str().to_string(),
+        source: request.source.clone(),
+        author: request.author_id.to_string(),
+        text: request.text.clone(),
+    };
+    // The effect outlives a cancelled request, so it keeps the transition and records its own alert.
+    let effect = tokio::task::spawn_blocking(move || run(&pane, target, &input));
+    effect.await.unwrap_or(InjectAttempt::Unconfirmed {
+        turn_id: None,
+        detail: "executor_failed",
     })
-    .await;
-    let turn_id = target.turn_id;
-    // A panicked executor may have pasted already, so it is reported like any later failure.
-    let detail = match outcome {
-        Ok(Outcome::NotSent(veto)) => return InjectAttempt::NotSent(veto_name(veto)),
+}
+
+struct Input {
+    channel: u64,
+    provider: String,
+    source: String,
+    author: String,
+    text: String,
+}
+
+fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt {
+    let Target {
+        session,
+        transcript,
+        turn_id,
+        transition,
+    } = target;
+    let nonce = busy_inject::fresh_nonce();
+    let request = busy_inject::Request {
+        session: &session,
+        transcript: &transcript,
+        source: &input.source,
+        author: &input.author,
+        nonce: &nonce,
+        text: &input.text,
+    };
+    let inject = || busy_inject::inject(pane, &request, &busy_inject::TIMING);
+    // A panic may come after the paste, so it is reported like any later failure.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+    let alert = |detail| unconfirmed(input, &session, &nonce, turn_id.clone(), detail);
+    let result = match outcome {
+        Ok(Outcome::NotSent(veto)) => InjectAttempt::NotSent(veto_name(veto)),
         Ok(Outcome::Injected) => {
             tracing::info!(
-                channel_id = channel,
-                tmux_session = %target.session,
+                channel_id = input.channel,
+                tmux_session = %session,
                 nonce = %nonce,
                 "busy turn took the human input"
             );
-            return InjectAttempt::Injected { turn_id };
+            InjectAttempt::Injected {
+                turn_id: turn_id.clone(),
+            }
         }
-        Ok(Outcome::Unconfirmed(detail)) => unconfirmed_name(detail),
-        Err(_) => "executor_failed",
+        Ok(Outcome::Unconfirmed(detail)) => alert(unconfirmed_name(detail)),
+        Err(_) => alert("executor_failed"),
     };
+    drop(transition);
+    result
+}
+
+fn unconfirmed(
+    input: &Input,
+    session: &str,
+    nonce: &str,
+    turn_id: Option<String>,
+    detail: &'static str,
+) -> InjectAttempt {
     let payload = serde_json::json!({
         "detail": detail,
         "nonce": nonce,
-        "source": request.source,
-        "tmux_session": target.session,
+        "source": input.source,
+        "tmux_session": session,
         "turn_id": turn_id,
     });
     tracing::warn!(
-        channel_id = channel,
+        channel_id = input.channel,
         %payload,
         "busy turn injection unconfirmed; nothing was queued"
     );
     crate::services::observability::events::record_simple(
         "busy_inject_unconfirmed",
-        Some(channel),
-        Some(request.provider.as_str()),
+        Some(input.channel),
+        Some(&input.provider),
         payload,
     );
     InjectAttempt::Unconfirmed { turn_id, detail }

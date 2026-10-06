@@ -24,7 +24,7 @@ const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"con
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
 /// A scripted `tmux`: the composer folds the paste, and the Enter makes the transcript record
-/// the pasted header the way Claude queues input typed during a turn.
+/// the pasted header the way Claude queues input typed during a turn. `gate` holds keys until `go`.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -35,6 +35,10 @@ load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
 if-shell)
   a=$(cat "$d/attach")
   if [ "$a" != 0 ]; then echo "agentdesk-busy-inject-vetoed $a"; exit 0; fi
+  if [ -f "$d/gate" ]; then
+    touch "$d/at_gate"; i=0
+    while [ ! -f "$d/go" ] && [ $i -lt 80 ]; do sleep 0.05; i=$((i+1)); done
+  fi
   [ -f "$d/fail_paste" ] && exit 1
   echo "$7" >> "$d/keys"
   case "$7" in
@@ -119,14 +123,6 @@ impl InjectPane {
 
     pub(crate) fn set(&self, name: &str, value: &str) {
         fs::write(self.path(name), value).unwrap();
-    }
-
-    /// An idle pane: what the kickoff's readiness gate saw before it promoted a queued head.
-    pub(crate) fn idle(&self) {
-        self.set(
-            "cap.before",
-            &format!("⏺ Done.\n\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}"),
-        );
     }
 
     fn lines(&self, name: &str) -> Vec<String> {
@@ -353,7 +349,7 @@ fn only_a_tui_direct_row_or_with_all_a_discord_turn_on_its_own_row_holds_a_pane_
 }
 
 /// Each schedule leaves earlier input ahead: queued, dequeued before its claim, claimed over the
-/// row, or released before its front requeue while the pane is idle, as its promotion required.
+/// row, or paused between the handback's claim release and its front requeue on a busy pane.
 #[tokio::test(flavor = "current_thread")]
 async fn input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -387,14 +383,20 @@ async fn input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg(
     let _held = claim(&shared, channels[2]).await;
     let while_claimed = deliver(&registry, channels[2]).await;
 
-    let channel = ChannelId::new(channels[3]);
     let token = claim(&shared, channels[3]).await;
     let state = intake_state(channels[3], channels[3] + 10, Some(&token));
-    let defer = crate::services::discord::live_bridge::defer_unstarted_turn;
-    assert!(!defer(&shared, &provider, &state, &token, false, "test_release").await);
-    released.idle();
+    let (reached, resume) = crate::services::discord::live_bridge::handback_gap::arm(channels[3]);
+    let handback = tokio::spawn({
+        let (shared, provider) = (shared.clone(), provider.clone());
+        async move {
+            let defer = crate::services::discord::live_bridge::defer_unstarted_turn;
+            defer(&shared, &provider, &state, &token, true, "test_handback").await
+        }
+    });
+    reached.notified().await;
     let after_release = deliver(&registry, channels[3]).await;
-    assert!(requeue(&shared, &provider, channel, &state).await.enqueued);
+    resume.notify_one();
+    assert!(handback.await.expect("handback"));
 
     let mut observed = Vec::new();
     for (pane, outcome) in [
@@ -413,7 +415,140 @@ async fn input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg(
             "queued external_turn_active veto=queue_nonempty [earlier input,status?] tmux=0 keys=0",
             "queued external_turn_active veto=queue_nonempty [status?] tmux=0 keys=0",
             "queued turn_active veto=holder_unsupported [status?] tmux=0 keys=0",
-            "queued external_turn_active veto=not_busy [earlier input,status?] tmux=2 keys=0",
+            "queued external_turn_active veto=transition_busy [earlier input,status?] tmux=0 keys=0",
         ]
+    );
+}
+
+/// Waits until a query on `sessions` queues behind the test's table lock.
+async fn lookup_parked(pool: &sqlx::PgPool) {
+    let waiting = "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
+        AND wait_event_type = 'Lock' AND query ILIKE '%sessions%')";
+    let parked = async {
+        while !sqlx::query_scalar::<_, bool>(waiting)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), parked)
+        .await
+        .expect("host lookup parked");
+}
+
+/// The host lookup awaits PostgreSQL inside the transition: intake cannot claim, and input queued
+/// or claimed around the transition while it waits still vetoes the paste.
+#[tokio::test(flavor = "current_thread")]
+async fn input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channels = [6_245_501, 6_245_502];
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
+    let mut observed = Vec::new();
+    for (index, ch) in channels.into_iter().enumerate() {
+        let pane = InjectPane::new(ch, "all");
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let input = deliver(&registry, ch);
+        tokio::pin!(input);
+        tokio::select! {
+            outcome = &mut input => panic!("deliver finished before its host lookup: {outcome}"),
+            () = lookup_parked(&pool) => {}
+        }
+        let intake = crate::services::discord::try_intake_runtime_transition_after_redirect;
+        let fenced = intake(&shared, ChannelId::new(ch), (None, false, String::new()))
+            .await
+            .is_err();
+        let _claim = if index == 0 {
+            let enqueue = crate::services::discord::mailbox_enqueue_intervention;
+            let channel = ChannelId::new(ch);
+            assert!(
+                enqueue(&shared, &ProviderKind::Claude, channel, queued(ch + 10))
+                    .await
+                    .enqueued
+            );
+            None
+        } else {
+            Some(claim(&shared, ch).await)
+        };
+        let parked_calls = pane.tmux_calls();
+        lock.rollback().await.unwrap();
+        let outcome = input.await;
+        let queue = queue_texts(&shared, ch).await.join(",");
+        let keys = pane.keys().len();
+        observed.push(format!(
+            "{outcome} fenced={fenced} parked_tmux={parked_calls} keys={keys} [{queue}]"
+        ));
+    }
+    assert_eq!(
+        observed,
+        [
+            "queued external_turn_active veto=queue_nonempty fenced=true parked_tmux=0 keys=0 [earlier input,status?]",
+            "queued external_turn_active veto=holder_unsupported fenced=true parked_tmux=0 keys=0 [status?]",
+        ]
+    );
+}
+
+/// A cancelled request leaves its paste running: the transition stays held until the effect ends,
+/// and the unconfirmed alert is still recorded.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let ch = 6_245_601;
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
+    let pane = InjectPane::new(ch, "external");
+    pane.set("gate", "");
+    pane.set("fail_paste", "");
+    let request = tokio::spawn({
+        let registry = registry.clone();
+        async move { deliver(&registry, ch).await }
+    });
+    let at_gate = async {
+        while !pane.path("at_gate").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), at_gate)
+        .await
+        .expect("paste reached the scripted tmux");
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    let held = |shared: &SharedData| {
+        shared
+            .session_transition_lock(ChannelId::new(ch))
+            .try_lock_owned()
+            .is_err()
+    };
+    let held_while_pasting = held(&shared);
+    pane.set("go", "");
+    let released = async {
+        while held(&shared) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let released = tokio::time::timeout(std::time::Duration::from_secs(10), released)
+        .await
+        .is_ok();
+    let alerted = crate::services::observability::events::recent(10_000)
+        .iter()
+        .any(|event| {
+            event.event_type == "busy_inject_unconfirmed"
+                && event.channel_id == Some(ch)
+                && event.payload["detail"] == "paste_failed"
+        });
+    let queue = queue_texts(&shared, ch).await;
+    assert_eq!(
+        (held_while_pasting, released, alerted, queue.len()),
+        (true, true, true, 0)
     );
 }
