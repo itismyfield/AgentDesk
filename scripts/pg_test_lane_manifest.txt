@@ -413,6 +413,7 @@ voice::announce_meta::tests
 voice::turn_link::tests
 [tests]
 cli::channel_home::tests::mutations_are_refused_before_any_database_access_while_the_switch_is_off_pg
+cli::channel_home::tests::reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg
 cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoch_pg
 cli::herdr::tests::a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg
 cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
@@ -650,6 +651,7 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
+db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
 db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
@@ -979,7 +981,9 @@ services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_le
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
+services::cluster::channel_home_drain::tests::a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
 services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
+services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg
 services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
 services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg

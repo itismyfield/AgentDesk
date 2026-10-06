@@ -228,6 +228,7 @@ NON_PG_SKIP_ARGS=(
   --skip voice::turn_link::tests
 )
 NON_PG_FILTER_REPLAY=(
+  cli::channel_home::tests::reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg
   cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
   cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
   cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
@@ -266,6 +267,7 @@ NON_PG_FILTER_REPLAY=(
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_malformed_json
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_non_object_context
   db::intake_outbox_delivery_proof::tests::stale_reader_projects_exactly_id
+  db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
   db::postgres::test_db_reclaim::tests::reclaim_audit_log_appends_stay_whole_across_processes
   db::postgres::test_db_reclaim::tests::reclaim_audit_log_closes_a_torn_tail
   db::postgres::test_db_reclaim::tests::reclaim_classify_owner_identity
@@ -373,6 +375,8 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+  services::cluster::channel_home_drain::tests::a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
+  services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg
   services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed

@@ -2403,6 +2403,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:a84f5536efe0b604036ab70ffc6c231495ef4afb8a974d2aa3344363173a332c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/channel_home_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:ad247218e3cc05f7370d25a9f44e955aa3224dbde3aee7bade7c48df034e1fc1"
     },
     {
@@ -24715,6 +24724,15 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:237060e950dcd5f06c0709f58b24a32278dbf9359c17c906b2697985b8c74ff2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/channel_home_drain_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:b1cde4d80bbd4c5033f37201d0fc69fe847087168f2878b5fefb57a40921af54"
     },
     {
       "root": "src",
