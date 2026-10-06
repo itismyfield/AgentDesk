@@ -3639,6 +3639,10 @@ services::discord::health::turn_deliver::tests::the_switch_on_asks_only_where_in
 services::discord::health::unpaired_active_token::tests::a_built_snapshot_is_reconfirmed_only_for_a_token_without_a_row
 services::discord::health::unpaired_active_token::tests::completion_between_initial_reads_and_recheck_invalidates_candidate
 services::discord::health::unpaired_active_token::tests::every_identity_coordinate_must_remain_stable
+services::discord::health::watcher_respawn::claude_original_tests::a_bridge_panic_keeps_the_original_live_until_its_real_reader_ends
+services::discord::health::watcher_respawn::claude_original_tests::a_concurrent_respawn_leaves_the_absence_and_its_budget_alone
+services::discord::health::watcher_respawn::claude_original_tests::a_registered_claude_original_keeps_the_watchdog_tick_from_respawning
+services::discord::health::watcher_respawn::claude_original_tests::a_respawn_admitted_first_holds_the_original_start_until_it_ends
 services::discord::health::watcher_respawn::idle_relay_absence::tests::a_binding_of_the_wrong_runtime_kind_is_not_armed
 services::discord::health::watcher_respawn::idle_relay_absence::tests::a_channel_the_caller_already_covered_is_not_armed_twice
 services::discord::health::watcher_respawn::idle_relay_absence::tests::a_foreign_provider_session_is_not_armed
@@ -4263,6 +4267,7 @@ services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_c
 services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
 services::discord::last_message_checkpoint_tests::advance_last_message_checkpoint_interleaved_advances_keep_max
+services::discord::live_bridge::tests::a_claude_original_blocks_only_watcher_respawn
 services::discord::live_bridge::tests::actual_dead_original_retains_existing_handoff_and_exact_successor_cleanup_fence
 services::discord::live_bridge::tests::canonical_root_alias_keeps_the_slot_before_and_after_first_row_creation
 services::discord::live_bridge::tests::confirmed_original_registers_and_blocks_death_while_n1_rejects_synthetic_birth
@@ -5168,6 +5173,7 @@ services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::code
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::codex_tui_rebind_uses_rollout_resume_offset_with_existing_inflight
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::managed_rebind_anchors_first_matching_prompt_after_row_birth
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::normalized_rebind_detects_later_rollout_user_prompt
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::a_cancelled_respawn_keeps_the_slot_until_its_blocking_adoption_returns
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_caller_wires_adoption_before_guarded_handoff
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_orders_episode_authority_before_hold_and_return
 services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_preserves_normal_adoption_and_rollback_coordinates
@@ -5230,6 +5236,7 @@ services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_with_se
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_without_runtime_marker_does_not_promote_transcript_to_claude_tui
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_without_transcript_candidate_uses_default_wrapper_output_path
 services::discord::recovery_engine::rebind_runtime::tests::claude_terminal_is_not_normalized_into_codex_rebind_success
+services::discord::recovery_engine::rebind_runtime::tests::claude_tui_rebind_without_a_bound_transcript_fails_instead_of_tailing_the_wrapper
 services::discord::recovery_engine::rebind_runtime::tests::codex_rebind_relay_generation_fences_superseded_same_path_writer
 services::discord::recovery_engine::rebind_runtime::tests::codex_rebind_rollout_cursor_does_not_move_backward_for_same_rollout
 services::discord::recovery_engine::rebind_runtime::tests::codex_rebind_rollout_cursor_persists_explicit_monotonic_offset
@@ -6779,6 +6786,8 @@ services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppre
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::synthetic_tui_mirror_emits_prose_without_tui_chrome_3964
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::synthetic_tui_mirror_finalize_strips_live_status_footer_to_prose_3964
 services::discord::tmux::tmux_watcher::panel_decisions::redrive_placeholder_shield_tests::redrive_placeholder_shield_truth_table_4299
+services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
+services::discord::tmux::tmux_watcher::path_b_record::tests::path_b_records_the_late_row_else_only_the_pin_of_this_committed_range
 services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests::live_tmux_redrive_reclaim_cycle_terminates_4299
 services::discord::tmux::tmux_watcher::post_stream_exit::tests::post_stream_exit_releases_its_own_registry_entry
 services::discord::tmux::tmux_watcher::post_stream_exit::tests::stale_post_stream_exit_preserves_a_rebound_channel_entry
@@ -9562,6 +9571,7 @@ services::routines::agent_executor::reliability::tests::fresh_provider_session_p
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence
+services::routines::agent_executor::start_deferral::tests::a_start_held_back_by_a_watcher_recovery_is_deferred_not_failed
 services::routines::agent_executor::start_deferral::tests::busy_mailbox_and_unready_runtime_starts_are_deferred_not_failed
 services::routines::agent_executor::tests::assistant_preview_caps_long_messages
 services::routines::agent_executor::tests::attempts_include_fallback_detects_kind

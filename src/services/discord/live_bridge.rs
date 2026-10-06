@@ -51,6 +51,30 @@ fn configured_enabled() -> bool {
     std::env::var("AGENTDESK_CODEX_LIVE_BRIDGE_GUARD").as_deref() != Ok("0")
 }
 
+fn claude_enabled() -> bool {
+    #[cfg(not(test))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(configured_claude_enabled)
+    }
+    #[cfg(test)]
+    configured_claude_enabled()
+}
+
+fn configured_claude_enabled() -> bool {
+    // `0` lets watcher respawn take over a live Claude original again.
+    std::env::var("AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD").as_deref() != Ok("0")
+}
+
+/// Claude originals register too, but only watcher respawn waits for them (see `try_respawn_recovery`).
+fn registers(provider: &ProviderKind) -> bool {
+    match provider {
+        ProviderKind::Codex => enabled(),
+        ProviderKind::Claude => claude_enabled(),
+        _ => false,
+    }
+}
+
 fn key(provider: &ProviderKind, channel_id: u64) -> Key {
     let root = super::inflight::inflight_runtime_root().unwrap_or_default();
     let mut ancestor = root.as_path();
@@ -91,7 +115,7 @@ fn slot(provider: &ProviderKind, channel_id: u64) -> Arc<Slot> {
 }
 
 pub(super) fn is_live(provider: &ProviderKind, channel_id: u64) -> bool {
-    if !matches!(provider, ProviderKind::Codex) || !enabled() {
+    if !registers(provider) {
         return false;
     }
     let slot = slot(provider, channel_id);
@@ -108,7 +132,7 @@ pub(super) fn retain_original(
     channel_id: u64,
     cancel: &Arc<CancelToken>,
 ) -> Option<Arc<OriginalRegistration>> {
-    if !matches!(provider, ProviderKind::Codex) || !enabled() {
+    if !registers(provider) {
         return None;
     }
     let slot = slot(provider, channel_id);
@@ -129,7 +153,7 @@ async fn register_original(
     channel_id: u64,
     cancel: &Arc<CancelToken>,
 ) -> Result<Option<Arc<OriginalRegistration>>, ()> {
-    if !matches!(provider, ProviderKind::Codex) || !enabled() {
+    if !registers(provider) {
         return Ok(None);
     }
     let slot = slot(provider, channel_id);
@@ -286,7 +310,32 @@ pub(super) fn try_recovery(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Result<RecoveryRegistration, ()> {
-    if !matches!(provider, ProviderKind::Codex) || !enabled() {
+    admit_recovery(
+        provider,
+        channel_id,
+        matches!(provider, ProviderKind::Codex) && enabled(),
+    )
+}
+
+/// Watcher respawn yields to every registered original, Claude included.
+pub(super) fn try_respawn_recovery(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<RecoveryRegistration, ()> {
+    admit_recovery(provider, channel_id, registers(provider))
+}
+
+/// The calling task's recovery admission, for blocking work that must finish inside it.
+pub(super) fn held_recovery() -> Option<RecoveryRegistration> {
+    RECOVERY.try_with(Clone::clone).ok()
+}
+
+fn admit_recovery(
+    provider: &ProviderKind,
+    channel_id: u64,
+    gated: bool,
+) -> Result<RecoveryRegistration, ()> {
+    if !gated {
         return Ok(RecoveryRegistration {
             slot: None,
             _permit: None,

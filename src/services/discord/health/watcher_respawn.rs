@@ -52,6 +52,8 @@ use super::snapshot::WatcherStateSnapshot;
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
+#[cfg(all(test, unix))]
+mod claude_original_tests;
 mod idle_relay_absence;
 mod live_bridge_guard;
 pub(super) use live_bridge_guard::complete_force_clean_watcher_recovery;
@@ -751,6 +753,8 @@ async fn retry_pending_watcher_respawn_admitted(
     if !respawn_attempt_due(provider, channel_id, now_unix_secs) {
         return false;
     }
+    #[cfg(all(test, unix))]
+    claude_original_tests::respawn_gap::pause(channel_id).await;
     // No owner: snapshot from any runtime to read the provider+channel-global
     // inflight/tmux liveness. A `None` snapshot does NOT clear the absence — it
     // is "not yet resolvable", and the channel-aware respawn below still runs.

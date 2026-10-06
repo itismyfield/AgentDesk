@@ -59,6 +59,7 @@ pub(crate) fn classify_headless_start_error(
 ) -> Option<TransientStartKind> {
     match error {
         HeadlessTurnStartError::Conflict(_) => Some(TransientStartKind::MailboxBusy),
+        error if error.is_original_start_deferred() => Some(TransientStartKind::MailboxBusy),
         HeadlessTurnStartError::Internal(message)
             if crate::services::scheduled_messages::is_runtime_unavailable_message(message) =>
         {
@@ -249,5 +250,15 @@ mod tests {
             error.to_string().contains("agent mailbox is busy"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_start_held_back_by_a_watcher_recovery_is_deferred_not_failed() {
+        let error =
+            headless_start_error("agent-a", HeadlessTurnStartError::original_start_deferred());
+        let transient = error
+            .downcast_ref::<TransientStartError>()
+            .expect("a deferred original start must stay retryable");
+        assert_eq!(transient.kind, TransientStartKind::MailboxBusy);
     }
 }

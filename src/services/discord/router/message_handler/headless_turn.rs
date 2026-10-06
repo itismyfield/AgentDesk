@@ -910,11 +910,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     let original_registration =
         register_headless_original(shared, &provider, &inflight_state, &cancel_token)
             .await
-            .map_err(|_| {
-                HeadlessTurnStartError::Internal(
-                    "original bridge start deferred; caller retry required".into(),
-                )
-            })?;
+            .map_err(|_| HeadlessTurnStartError::original_start_deferred())?;
     let created =
         crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state);
     super::foreign_row::admit_headless(shared, &provider, &inflight_state, &cancel_token, created)

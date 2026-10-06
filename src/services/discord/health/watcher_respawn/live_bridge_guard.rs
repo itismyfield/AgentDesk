@@ -9,7 +9,8 @@ pub(in crate::services::discord) async fn complete_force_clean_watcher_recovery(
     now_unix_secs: i64,
     repair_started_at: Instant,
 ) {
-    let Ok(recovery) = discord::live_bridge::try_recovery(provider, channel_id.get()) else {
+    let Ok(recovery) = discord::live_bridge::try_respawn_recovery(provider, channel_id.get())
+    else {
         return;
     };
     recovery
@@ -32,7 +33,14 @@ pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
     channel_id: ChannelId,
     now_unix_secs: i64,
 ) -> bool {
-    let Ok(recovery) = discord::live_bridge::try_recovery(provider, channel_id.get()) else {
+    let Ok(recovery) = discord::live_bridge::try_respawn_recovery(provider, channel_id.get())
+    else {
+        // A live Claude original owns the turn; a concurrent recovery keeps this entry's budget.
+        if matches!(provider, ProviderKind::Claude)
+            && discord::live_bridge::is_live(provider, channel_id.get())
+        {
+            clear_watcher_absence(provider, channel_id);
+        }
         return false;
     };
     recovery

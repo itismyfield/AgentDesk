@@ -857,6 +857,7 @@ src/
 │   │   │   │   ├── inject.rs
 │   │   │   │   └── inject_tests.rs
 │   │   │   ├── watcher_respawn/
+│   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   └── live_bridge_guard.rs
 │   │   │   ├── headless_turn.rs
@@ -1418,6 +1419,8 @@ src/
 │   │   │   ├── owed_range_baseline_tests.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
+│   │   │   ├── path_b_record.rs
+│   │   │   ├── path_b_record_tests.rs
 │   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── post_stream_exit.rs
 │   │   │   ├── post_stream_exit_host_tests.rs

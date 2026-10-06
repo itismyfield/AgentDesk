@@ -150,6 +150,7 @@ src/services/discord/terminal_delivery_custody/pg_tests.rs
 src/services/discord/terminal_ui_obligation.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
+src/services/discord/tmux_watcher/path_b_record_tests.rs
 src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
 src/services/discord/tmux_watcher/streaming_baseline_tests.rs
 src/services/discord/tui_prompt_relay/herdr_source_tests.rs
@@ -359,6 +360,7 @@ services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::tests
+services::discord::tmux::tmux_watcher::path_b_record::tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
@@ -1287,6 +1289,7 @@ services::discord::task_notification_delivery::tests::watcher_primary_key_blocks
 services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
+services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg

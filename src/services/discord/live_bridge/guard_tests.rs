@@ -1026,14 +1026,63 @@ async fn recovery_first_release_revalidates_actor_and_preserves_successor() {
 async fn other_providers_do_not_register_or_block_recovery() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let token = Arc::new(CancelToken::new());
-    for provider in [ProviderKind::Claude, ProviderKind::Gemini] {
-        assert!(
-            register_original(&provider, 655_213_001, &token)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(try_recovery(&provider, 655_213_001).unwrap().slot.is_none());
-        assert!(!is_live(&provider, 655_213_001));
-    }
+    let provider = ProviderKind::Gemini;
+    assert!(
+        register_original(&provider, 655_213_001, &token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(try_recovery(&provider, 655_213_001).unwrap().slot.is_none());
+    assert!(
+        try_respawn_recovery(&provider, 655_213_001)
+            .unwrap()
+            .slot
+            .is_none()
+    );
+    assert!(!is_live(&provider, 655_213_001));
+}
+
+#[tokio::test]
+async fn a_claude_original_blocks_only_watcher_respawn() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Claude;
+    let token = Arc::new(CancelToken::new());
+    let original = register_original(&provider, 655_213_002, &token)
+        .await
+        .unwrap()
+        .expect("a Claude original registers");
+    assert!(is_live(&provider, 655_213_002));
+    assert!(retain_original(&provider, 655_213_002, &token).is_some());
+    assert!(try_recovery(&provider, 655_213_002).unwrap().slot.is_none());
+    assert!(try_respawn_recovery(&provider, 655_213_002).is_err());
+    drop(original);
+    assert!(!is_live(&provider, 655_213_002));
+    assert!(
+        try_respawn_recovery(&provider, 655_213_002)
+            .unwrap()
+            .is_guarded()
+    );
+    let _off = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD",
+        std::ffi::OsStr::new("0"),
+    );
+    let held = slot(&provider, 655_213_002)
+        .gate
+        .clone()
+        .write_owned()
+        .await;
+    assert!(
+        register_original(&provider, 655_213_002, &token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        try_respawn_recovery(&provider, 655_213_002)
+            .unwrap()
+            .slot
+            .is_none()
+    );
+    drop(held);
 }
