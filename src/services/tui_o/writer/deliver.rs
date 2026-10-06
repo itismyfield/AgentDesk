@@ -1,13 +1,15 @@
 //! One channel's delivery. For each piece: take the delivery lease, then under the ownership gate
 //! fsync `Prepared` and start the POST, record the result, and settle unclear ones.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
+use futures::FutureExt;
 use tokio::sync::oneshot;
 
 use super::confirm::{self, Verdict};
@@ -79,6 +81,52 @@ fn note_posted(channel: u64, msg_id: u64) {
     *last = (*last).max(msg_id);
 }
 
+type Counts = Mutex<BTreeMap<u64, Arc<AtomicUsize>>>;
+
+/// POSTs started per Herdr-configured channel in this process and not ended yet. A channel's
+/// writers share one count, so a POST that outlives its writer still counts. Tests keep one per thread.
+#[cfg(not(test))]
+static IN_FLIGHT: Counts = Mutex::new(BTreeMap::new());
+#[cfg(test)]
+thread_local! {
+    static IN_FLIGHT: Counts = const { Mutex::new(BTreeMap::new()) };
+}
+
+fn with_in_flight<R>(use_counts: impl FnOnce(&mut BTreeMap<u64, Arc<AtomicUsize>>) -> R) -> R {
+    let locked =
+        |counts: &Counts| use_counts(&mut counts.lock().unwrap_or_else(PoisonError::into_inner));
+    #[cfg(not(test))]
+    return locked(&IN_FLIGHT);
+    #[cfg(test)]
+    IN_FLIGHT.with(locked)
+}
+
+/// The POSTs of `channel` started and not ended in this process; `None` until a writer of the
+/// channel counted them.
+pub fn posts_in_flight(channel: u64) -> Option<usize> {
+    with_in_flight(|counts| {
+        counts
+            .get(&channel)
+            .map(|count| count.load(Ordering::SeqCst))
+    })
+}
+
+/// Counts one POST from before its request exists until the request is dropped, ended or aborted.
+struct Running(Arc<AtomicUsize>);
+
+impl Running {
+    fn start(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 type Request = Pin<Box<dyn Future<Output = PostOutcome> + Send>>;
 
 /// A POST admitted under the gate: finished on its first poll, or still running.
@@ -128,6 +176,8 @@ pub struct ChannelWriter<P, L, A> {
     alarms: A,
     stopped: Option<StopCause>,
     paused: bool,
+    /// The channel's shared POST count; only a Herdr-configured channel keeps one.
+    posts: Option<Arc<AtomicUsize>>,
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
@@ -141,6 +191,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     ) -> Self {
         let channel = store.init().channel;
         let (stopped, paused) = (None, false);
+        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
+        let shared = |counts: &mut BTreeMap<_, Arc<AtomicUsize>>| {
+            Arc::clone(counts.entry(channel).or_default())
+        };
+        let posts = herdr.then(|| with_in_flight(shared));
         let mut writer = Self {
             channel,
             store,
@@ -150,6 +205,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             alarms,
             stopped,
             paused,
+            posts,
         };
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
@@ -276,6 +332,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             return Step::LeaseBusy;
         };
         let (gate, port, channel) = (Arc::clone(&self.gate), Arc::clone(&self.port), self.channel);
+        let mut posts = self.posts.clone();
         let store = &mut self.store;
         // The first poll of the request runs under the gate, so no request starts after a
         // transition; the rest runs outside the lock.
@@ -299,7 +356,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 if let Some(detail) = store.ledger().violation() {
                     return Err(Refusal::Violation(detail.to_string()));
                 }
-                let mut request: Request = Box::pin(port.post(channel, piece.payload.clone()));
+                let running = posts.take().map(Running::start);
+                let post = port.post(channel, piece.payload.clone());
+                // `map` forwards each poll to the request; the count ends when it is ready or dropped.
+                let mut request: Request = match running {
+                    Some(running) => Box::pin(post.map(move |outcome| {
+                        drop(running);
+                        outcome
+                    })),
+                    None => Box::pin(post),
+                };
                 Ok(match request.as_mut().poll(cx) {
                     Poll::Ready(outcome) => Started::Done(outcome),
                     Poll::Pending => Started::Running(request),

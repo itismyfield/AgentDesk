@@ -31,6 +31,7 @@ cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
 cli::args::tests::turn_lease_cli_parses_read_and_exact_release
 cli::args::tests::turn_lease_cli_rejects_unpinned_release_and_zero_channel
 cli::channel_home::tests::mutations_are_refused_before_any_database_access_while_the_switch_is_off_pg
+cli::channel_home::tests::reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg
 cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoch_pg
 cli::channel_provider::tests::onboarding_routing_cli_reads_config_and_rejects_unknown_keys
 cli::client::activity_tests::activity_counts_buckets_by_kind
@@ -572,6 +573,7 @@ db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
+db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
 db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
@@ -2162,9 +2164,15 @@ services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
+services::cluster::channel_home_drain::tests::a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
 services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
+services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg
 services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
 services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
+services::cluster::channel_home_port::tests::a_last_send_from_an_ending_actor_reads_as_unknown
+services::cluster::channel_home_port::tests::hosted::a_halted_writer_reads_as_unknown_until_its_resume_publishes_its_real_projection
+services::cluster::channel_home_port::tests::hosted::a_hosted_herdr_actor_reads_what_it_owes_only_while_a_drain_waits
+services::cluster::channel_home_port::tests::the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
@@ -10397,6 +10405,10 @@ services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_deliver
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
+services::tui_o::writer::tests::actor::drain_projection::a_channel_without_herdr_publishes_nothing_and_counts_no_posts
+services::tui_o::writer::tests::actor::drain_projection::a_post_counts_as_running_from_its_start_until_its_request_is_gone
+services::tui_o::writer::tests::actor::drain_projection::an_announced_unit_counts_as_unsealed_until_its_record_seals_it
+services::tui_o::writer::tests::actor::drain_projection::the_actor_publishes_each_undelivered_responsibility_until_it_clears
 services::tui_o::writer::tests::actor::host_start::a_channel_binding_log_carries_each_production_event_of_its_channel_and_provider_only
 services::tui_o::writer::tests::actor::host_start::a_channel_that_is_not_new_and_empty_is_held_without_any_store
 services::tui_o::writer::tests::actor::host_start::a_channel_without_its_own_recovered_store_is_held_without_an_actor

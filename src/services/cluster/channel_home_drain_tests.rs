@@ -116,7 +116,7 @@ impl DrainPort for Actor {
         Some(self.sink.running(self.node))
     }
 
-    async fn reset_legacy_source(&self) -> Result<(), String> {
+    async fn reset_legacy_source(&self) -> Result<(), ResetRefused> {
         self.resets.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -562,7 +562,7 @@ impl DrainPort for Arc<Actor> {
         self.as_ref().posts_in_flight().await
     }
 
-    async fn reset_legacy_source(&self) -> Result<(), String> {
+    async fn reset_legacy_source(&self) -> Result<(), ResetRefused> {
         self.as_ref().reset_legacy_source().await
     }
 }
@@ -610,6 +610,109 @@ async fn the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg() {
         (&json!([]), &json!("lost"))
     );
     channel_home::unregister(C);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+async fn ddl(pool: &PgPool, statement: &str) {
+    sqlx::query(statement).execute(pool).await.expect(statement);
+}
+
+/// A home row or intake that cannot be read, and a leaving write that fails, each keep the drain
+/// waiting with the row and gate as they were; once the write lands the drain leaves.
+#[tokio::test]
+async fn an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (mini, epoch) = worker_home(&pool).await;
+    applied(o_channel_homes::begin_reclaim(&pool, C, epoch, "gw").await);
+    let actor = Actor::new("mini", &Arc::new(Sink::default()), &[]);
+    let reclaiming = Some((HomeState::Reclaiming, Some("mini".to_string()), epoch));
+
+    ddl(&pool, "ALTER TABLE o_channel_homes RENAME TO homes_away").await;
+    let step = drain_round(&pool, &mini, &actor).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::RowUnreadable)),
+        "{step:?}"
+    );
+    assert_eq!(
+        owned(&mini),
+        Some((epoch, HomeIntake::Open)),
+        "nothing closed"
+    );
+    ddl(&pool, "ALTER TABLE homes_away RENAME TO o_channel_homes").await;
+
+    ddl(&pool, "ALTER TABLE intake_outbox RENAME TO intake_away").await;
+    let step = drain_round(&pool, &mini, &actor).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::IntakeUnreadable)),
+        "{step:?}"
+    );
+    assert_eq!(row(&pool).await, reclaiming);
+    assert_eq!(
+        owned(&mini),
+        Some((epoch, HomeIntake::Closed)),
+        "not finally closed"
+    );
+    ddl(&pool, "ALTER TABLE intake_away RENAME TO intake_outbox").await;
+
+    ddl(
+        &pool,
+        "CREATE FUNCTION refuse_leave() RETURNS trigger LANGUAGE plpgsql AS
+         $$ BEGIN RAISE EXCEPTION 'leave refused'; END $$",
+    )
+    .await;
+    ddl(
+        &pool,
+        "CREATE TRIGGER refuse_leave BEFORE UPDATE ON o_channel_homes FOR EACH ROW
+         WHEN (NEW.state = 'reclaimed') EXECUTE FUNCTION refuse_leave()",
+    )
+    .await;
+    let step = drain_round(&pool, &mini, &actor).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::LeaveFailed)),
+        "{step:?}"
+    );
+    assert_eq!(row(&pool).await, reclaiming);
+    assert_eq!(
+        (owned(&mini), mini.admit(|e| e)),
+        (None, None),
+        "stays closed"
+    );
+    ddl(&pool, "DROP TRIGGER refuse_leave ON o_channel_homes").await;
+    let step = drain_round(&pool, &mini, &actor).await;
+    let DrainStep::Left(left) = step else {
+        panic!("expected left: {step:?}");
+    };
+    assert_eq!(left.state, HomeState::Reclaimed);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// The gateway's cleanup of a gate that was replaced deletes the reclaimed row but leaves the
+/// gate that replaced it registered and open; the current gate's cleanup unregisters it.
+#[tokio::test]
+async fn a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (mini, epoch) = worker_home(&pool).await;
+    applied(o_channel_homes::begin_reclaim(&pool, C, epoch, "gw").await);
+    let reclaimed = o_channel_homes::finish_reclaim(&pool, C, mini.holder(), epoch).await;
+    let returned = applied(reclaimed).epoch;
+    let old = Arc::new(HomeGate::new(C, "gw"));
+    register(Arc::clone(&old));
+    let new = Arc::new(HomeGate::new(C, "gw"));
+    register(Arc::clone(&new));
+    assert!(old.withdrawn() && !new.withdrawn());
+
+    let removed = finish_return(&pool, &old, returned).await.expect("cleanup");
+    assert!(!removed, "the replaced gate unregisters nothing");
+    assert_eq!(row(&pool).await, None, "the reclaimed row is gone");
+    let current = channel_home::registered(C).expect("still registered");
+    assert!(Arc::ptr_eq(&current, &new) && !new.withdrawn());
+
+    assert!(finish_return(&pool, &new, returned).await.expect("cleanup"));
+    assert!(channel_home::registered(C).is_none() && new.withdrawn());
     pool.close().await;
     pg_db.drop().await;
 }

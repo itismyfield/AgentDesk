@@ -322,13 +322,14 @@ fn production_text(text: &str) -> String {
 }
 
 // Dormant guard: outside the owners, production only reads rows and consults gates; the switched
-// operator CLI may also start a delegate, a reclaim or a force.
+// operator CLI may also start a delegate, a reclaim or a force. Nothing builds the drain port.
 #[test]
 fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     const OWNERS: &[&str] = &[
         "src/db/o_channel_homes.rs",
         "src/services/cluster/channel_home.rs",
         "src/services/cluster/channel_home_drain.rs",
+        "src/services/cluster/channel_home_port.rs",
     ];
     const OPERATOR: (&str, &[&str]) = (
         "src/cli/channel_home.rs",
@@ -352,15 +353,55 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
         "resume_drain",
         "note_drain",
         "unregister",
+        "unregister_if_same",
         "run_drain",
         "drain_round",
         "finish_return",
+        "ChannelHomePort",
     ];
     let probe = production_text(concat!(
         "fn a() {}\n#[cfg(test)]\nmod t { fn b() { c(\"{\", '{', r#\"}\"#); } // }\n }",
         "\nfn d<'x>(_: &'x str) { e('}') }"
     ));
     assert!(probe.contains("fn a()") && probe.contains("fn d<") && !probe.contains("fn b()"));
+    // A non-owner reading the home table: the words it may not name, or `None` when it reads none.
+    let outside = |relative: &str, code: &str| {
+        let tokens: Vec<&str> = code
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .collect();
+        let readers = [
+            "o_channel_homes",
+            "channel_home",
+            "channel_home_drain",
+            "channel_home_port",
+        ];
+        if !readers.iter().any(|reader| tokens.contains(reader)) {
+            return None;
+        }
+        let allowed = match OPERATOR {
+            (operator, allowed) if relative == operator => allowed,
+            _ => &[][..],
+        };
+        let mut found = Vec::new();
+        if code.contains("HomeGate::new") {
+            found.push(format!("{relative}: HomeGate::new"));
+        }
+        let named = FORBIDDEN
+            .iter()
+            .filter(|word| tokens.contains(word) && !allowed.contains(word));
+        found.extend(named.map(|word| format!("{relative}: {word}")));
+        Some(found)
+    };
+    let built = "use crate::services::cluster::channel_home_port::ChannelHomePort;\n\
+                 fn boot(r: R) { let _ = ChannelHomePort::new(1, r); }";
+    let built = outside("src/services/discord/runtime_bootstrap.rs", built);
+    assert_eq!(
+        built,
+        Some(vec![
+            "src/services/discord/runtime_bootstrap.rs: ChannelHomePort".to_string()
+        ]),
+        "the scan catches a production build of the drain port"
+    );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut stack = vec![root.join("src")];
@@ -389,38 +430,24 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
             let tokens: Vec<&str> = code
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .collect();
-            if OWNERS.contains(&relative.as_str()) {
-                // Each loop is named once, at its definition: nothing in the owners starts one.
-                for (owner, start) in [
-                    ("src/services/cluster/channel_home.rs", "run_lease"),
-                    ("src/services/cluster/channel_home_drain.rs", "run_drain"),
-                ] {
-                    let expected = usize::from(relative == owner);
-                    let named = tokens.iter().filter(|token| **token == start).count();
-                    if named != expected {
-                        violations.push(format!("{relative}: {start} x{named}"));
-                    }
+            if !OWNERS.contains(&relative.as_str()) {
+                if let Some(found) = outside(&relative, &code) {
+                    users += 1;
+                    violations.extend(found);
                 }
                 continue;
             }
-            let readers = ["o_channel_homes", "channel_home", "channel_home_drain"];
-            if !readers.iter().any(|reader| tokens.contains(reader)) {
-                continue;
+            // Each loop is named once, at its definition: nothing in the owners starts one.
+            for (owner, start) in [
+                ("src/services/cluster/channel_home.rs", "run_lease"),
+                ("src/services/cluster/channel_home_drain.rs", "run_drain"),
+            ] {
+                let expected = usize::from(relative == owner);
+                let named = tokens.iter().filter(|token| **token == start).count();
+                if named != expected {
+                    violations.push(format!("{relative}: {start} x{named}"));
+                }
             }
-            let allowed = match OPERATOR {
-                (operator, allowed) if relative == operator => allowed,
-                _ => &[][..],
-            };
-            users += 1;
-            if code.contains("HomeGate::new") {
-                violations.push(format!("{relative}: HomeGate::new"));
-            }
-            violations.extend(
-                FORBIDDEN
-                    .iter()
-                    .filter(|word| tokens.contains(word) && !allowed.contains(word))
-                    .map(|word| format!("{relative}: {word}")),
-            );
         }
     }
     assert!(users > 0, "the scan found no reader of the home table");

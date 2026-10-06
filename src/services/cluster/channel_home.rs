@@ -377,6 +377,23 @@ pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
     removed
 }
 
+/// [`unregister`] only while `home` is still its channel's gate, decided under the registry
+/// lock, so the cleanup of a replaced gate never removes the gate that replaced it.
+pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
+    let removed = with_homes(|homes| {
+        let mut homes = lock_homes(homes.get()?);
+        let current = homes.get(&home.channel_id)?;
+        if !std::ptr::eq(Arc::as_ptr(current), home) {
+            return None;
+        }
+        homes.remove(&home.channel_id)
+    });
+    if let Some(removed) = &removed {
+        removed.withdraw();
+    }
+    removed.is_some()
+}
+
 /// The gate of a channel this process takes part in; none means the gateway rules apply.
 pub(crate) fn registered(channel_id: &str) -> Option<Arc<HomeGate>> {
     read_homes(|homes| homes.get(channel_id).cloned()).flatten()

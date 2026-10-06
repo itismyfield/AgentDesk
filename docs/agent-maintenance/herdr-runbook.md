@@ -94,6 +94,7 @@ pane kill·close 는 P11 범위다.
 ## 7. 위임 home(`agentdesk channel-home`)
 
 - 지금은 휴면이다. lease task 와 drain 드라이버를 기동하는 운영 경로가 없다. 위임 row 가 생겨도 이 빌드는 그 row 를 넘기거나 받지 않는다.
+- drain 이 읽는 운영 포트(턴·미전달 책임·진행 중 POST)는 있지만 만드는 운영 경로가 없다. gateway 쪽 Legacy reset 은 아직 연결되지 않아 releasing drain 은 `source_reset` 에서 기다린다.
 - `status`: 읽기 전용이다.
   - row 마다 state·holder·target·epoch·`renewed_at` 을 보여 준다.
   - `open_intake` 는 그 채널의 열린 intake 를 각인된 home epoch 로 나눈다.
@@ -104,6 +105,7 @@ pane kill·close 는 P11 범위다.
 - `delegate <channel> --provider claude|codex --to <node>`, `reclaim <channel>`, `force <channel>`:
   - `runtime.channel_home_delegation_enabled` 가 true 일 때만 실행한다. 미설정·false 면 DB 에 접속하기 전에 거절한다.
   - delegate·reclaim 은 이 노드의 `cluster.instance_id` 를 gateway 로 쓴다. gateway 노드에서 실행한다.
+  - 출력의 `run_on` 은 실행한 노드, `planned` 는 적은 holder·target 이다. 의도한 노드인지 확인한다.
   - provider 는 앞뒤 공백·대소문자를 무시하고 소문자로 저장한다. claude·codex 밖은 거절한다.
   - force 는 holder 의 lease 가 F(200초 = H 20초 + 조각 lease 180초)보다 오래 갱신되지 않았을 때만 row 를 `orphaned` 로 만든다. 그 뒤 아무 노드도 채널을 받지 않는다. 옛 노드의 store 를 운영자가 확인한다.
 - health `channel_homes` 는 이 프로세스에 위임 home 이 등록됐을 때만 나온다. `homes` 는 home 별 상태(`intake_open`·`draining`·`lost`)이고, `home_draining` 은 drain 이 기다리는 이유(`blocker`)다.

@@ -36,7 +36,14 @@ pub(crate) trait DrainPort {
     /// POSTs admitted before the final close that have not ended.
     fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send;
     /// The gateway side's existing session reset; the worker side keeps its pane and row.
-    fn reset_legacy_source(&self) -> impl Future<Output = Result<(), String>> + Send;
+    fn reset_legacy_source(&self) -> impl Future<Output = Result<(), ResetRefused>> + Send;
+}
+
+/// Why the gateway side's session was not reset; the drain waits on it and never leaves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ResetRefused {
+    /// No reset path reaches the drain yet.
+    NotWired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,7 +201,7 @@ pub(crate) async fn run_drain<P: DrainPort>(
 }
 
 /// The gateway's last step of a reclaim: it drops the reclaimed row, and once no row is left the
-/// channel leaves the registry and follows the gateway rules again.
+/// channel leaves the registry and follows the gateway rules again, unless `home` was replaced.
 pub(crate) async fn finish_return(
     pool: &PgPool,
     home: &HomeGate,
@@ -205,7 +212,7 @@ pub(crate) async fn finish_return(
     if o_channel_homes::read_home(pool, channel).await?.is_some() {
         return Ok(false);
     }
-    Ok(channel_home::unregister(channel).is_some())
+    Ok(channel_home::unregister_if_same(home))
 }
 
 #[cfg(test)]

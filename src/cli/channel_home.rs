@@ -143,11 +143,18 @@ async fn current(pool: &PgPool, channel: &str) -> Result<ChannelHome, String> {
     ))
 }
 
-fn written(command: &str, write: HomeWrite<ChannelHome>) -> Result<String, String> {
+fn written(command: &str, write: HomeWrite<ChannelHome>) -> Result<ChannelHome, String> {
     match write {
-        HomeWrite::Applied(home) => Ok(row_view(&home).to_string()),
+        HomeWrite::Applied(home) => Ok(home),
         HomeWrite::Stale => Err(format!("channel-home {command} refused: the row changed")),
     }
+}
+
+/// The written row with the node that ran the command and the holder and target it named; both
+/// come from this node's `cluster.instance_id`, never from the gateway preference.
+fn planned(node: &str, holder: Option<&str>, target: &str, home: &ChannelHome) -> String {
+    let planned = json!({"holder": holder, "target": target});
+    json!({"run_on": node, "planned": planned, "row": row_view(home)}).to_string()
 }
 
 async fn delegate(
@@ -159,7 +166,8 @@ async fn delegate(
 ) -> Result<String, String> {
     let channel = channel.to_string();
     let write = o_channel_homes::delegate(pool, &channel, provider, gateway, to).await;
-    written("delegate", write.map_err(|e| e.to_string())?)
+    let home = written("delegate", write.map_err(|e| e.to_string())?)?;
+    Ok(planned(gateway, Some(gateway), to, &home))
 }
 
 async fn reclaim(pool: &PgPool, channel: u64, gateway: &str) -> Result<String, String> {
@@ -172,7 +180,13 @@ async fn reclaim(pool: &PgPool, channel: u64, gateway: &str) -> Result<String, S
         ));
     }
     let write = o_channel_homes::begin_reclaim(pool, &channel, home.epoch, gateway).await;
-    written("reclaim", write.map_err(|e| e.to_string())?)
+    let reclaiming = written("reclaim", write.map_err(|e| e.to_string())?)?;
+    Ok(planned(
+        gateway,
+        home.holder.as_deref(),
+        gateway,
+        &reclaiming,
+    ))
 }
 
 async fn force(pool: &PgPool, channel: u64) -> Result<String, String> {

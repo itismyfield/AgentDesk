@@ -672,6 +672,8 @@ src/
 │   │   ├── channel_home.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
+│   │   ├── channel_home_port.rs
+│   │   ├── channel_home_port_tests.rs
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
@@ -2231,6 +2233,7 @@ src/
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_tests.rs
 │   │   │   ├── deliver.rs
+│   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
