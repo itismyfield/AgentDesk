@@ -25,8 +25,8 @@ pub(crate) struct ChannelHomePort {
 }
 
 impl ChannelHomePort {
-    /// `readiness` is the writer host's map the channel's actor publishes to; `restored` is the
-    /// provider runtime's `reconcile_done`, set once its persisted turns are back in mailboxes.
+    /// `readiness` is the writer host's map the channel's actor publishes to; `restored` must turn
+    /// true only once this role restored its persisted turns, which not every role's marker means.
     pub(crate) fn new(channel: u64, readiness: Arc<Readiness>, restored: Arc<AtomicBool>) -> Self {
         Self {
             channel,

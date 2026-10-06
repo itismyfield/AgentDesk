@@ -2,9 +2,12 @@
 //! with the gate held from that check through the claim, so a drain's close comes before or after.
 
 use std::sync::mpsc;
+use std::sync::{Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio::time::Instant;
+use tracing_subscriber::layer::{Context, SubscriberExt};
 
 use super::*;
 use crate::db::o_channel_homes::HomeState;
@@ -32,8 +35,73 @@ fn open_gate(channel: u64) -> Arc<HomeGate> {
     gate
 }
 
-// A close that comes first holds the placement and leaves the adoption pending; a close sent
-// while a placement is between its check and its claim waits until that claim is made.
+/// The channel and message of an adoption's log line.
+#[derive(Default)]
+struct Fields {
+    channel: Option<u64>,
+    message: String,
+}
+
+impl tracing::field::Visit for Fields {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "channel" {
+            self.channel = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
+/// What a claim of the raced channel saw while it was being made.
+struct DuringClaim {
+    gate_held: bool,
+    closed: bool,
+    closer: JoinHandle<()>,
+}
+
+/// Runs inside the claim of `gate`'s channel, on the claiming thread, from the claim's own log
+/// line: it reads whether the gate lock is held, then starts a drain close and waits for it.
+struct ClaimProbe {
+    gate: Arc<HomeGate>,
+    seen: Arc<Mutex<Option<DuringClaim>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ClaimProbe {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        let raced = fields.channel == Some(RACED);
+        if !raced || !fields.message.contains("Legacy took the channel") {
+            return;
+        }
+        // The lock a close takes; the claiming thread holds it when the claim is under the gate.
+        let gate_held = self.gate.local.try_lock().is_err();
+        let (started_tx, started) = mpsc::channel();
+        let (closed_tx, closed) = mpsc::channel();
+        let gate = Arc::clone(&self.gate);
+        let closer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            gate.close_intake();
+            gate.close();
+            let _ = closed_tx.send(());
+        });
+        started.recv().unwrap();
+        let closed = closed.recv_timeout(Duration::from_millis(100)).is_ok();
+        let during = DuringClaim {
+            gate_held,
+            closed,
+            closer,
+        };
+        *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(during);
+    }
+}
+
+// A close that comes first holds the placement and leaves the adoption pending; a close started
+// while a placement is making its claim waits until that claim is made and the gate let go.
 #[test]
 fn a_drain_close_never_lands_between_the_placement_check_and_the_adoption_claim() {
     let _ready = test_probe::answer_with(|_| true);
@@ -50,29 +118,22 @@ fn a_drain_close_never_lands_between_the_placement_check_and_the_adoption_claim(
     assert!(matches!(held, IntakeRoute::Hold(_)), "{held:?}");
     assert_eq!(candidate(CLOSED).peek(), Adoption::Pending);
 
-    // The adoption's own lock stands in for a claim that takes a moment to be made.
     let raced = open_gate(RACED);
-    let adoption = candidate(RACED);
-    let (locked_tx, locked) = mpsc::channel();
-    let (closed_tx, closed_rx) = mpsc::channel();
-    let holder = std::thread::spawn(move || {
-        let _claiming = adoption.lock();
-        locked_tx.send(()).unwrap();
-        closed_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+    let seen = Arc::new(Mutex::new(None));
+    let probe = ClaimProbe {
+        gate: Arc::clone(&raced),
+        seen: Arc::clone(&seen),
+    };
+    crate::logging::test_capture::pin_callsite_interest();
+    let subscriber = tracing_subscriber::registry().with(probe);
+    let placed = tracing::subscriber::with_default(subscriber, || {
+        intake_route::route_for_placement("claude", RACED)
     });
-    locked.recv().unwrap();
-    let closer = Arc::clone(&raced);
-    let drain = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        closer.close_intake();
-        closer.close();
-        let _ = closed_tx.send(());
-    });
-    let placed = intake_route::route_for_placement("claude", RACED);
+    let during = seen.lock().unwrap().take().expect("the claim was made");
+    during.closer.join().unwrap();
+    assert!(during.gate_held, "the claim runs under the gate lock");
+    assert!(!during.closed, "the close waited for the claim");
     assert!(matches!(placed, IntakeRoute::Hold(_)), "{placed:?}");
-    let closed_while_claiming = holder.join().unwrap();
-    drain.join().unwrap();
-    assert!(!closed_while_claiming, "the close waited for the claim");
     let claimed = candidate(RACED).peek();
     assert_eq!(claimed, Adoption::Released, "intake was open at its check");
     let after = intake_route::route_for_placement("claude", RACED);
