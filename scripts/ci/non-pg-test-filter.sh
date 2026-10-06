@@ -157,6 +157,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::home_order_tests
   --skip services::discord::router::intake_dispatch::tests
+  --skip services::discord::router::intake_gate::busy_inject::tests
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
@@ -405,7 +406,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reachability_warrant_vetoes_transport_unknown_watchdog_branch
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
-  services::discord::health::turn_deliver::inject_tests::only_a_tui_direct_row_or_with_all_a_discord_turn_on_its_own_row_holds_a_pane_for_input
+  services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
+  services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
   services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
   services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
   services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
@@ -520,6 +522,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_local_accepted_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
+  services::discord::router::intake_gate::busy_inject::tests::intake_offers_typed_text_before_its_busy_queue
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
   services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
@@ -876,6 +879,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   services::discord::router::intake_dispatch::home_order_tests
   services::discord::router::intake_dispatch::tests
+  services::discord::router::intake_gate::busy_inject::tests
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests

@@ -132,6 +132,7 @@ src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
+src/services/discord/router/intake_gate/busy_inject.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
@@ -348,6 +349,7 @@ services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::home_order_tests
 services::discord::router::intake_dispatch::tests
+services::discord::router::intake_gate::busy_inject::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
@@ -1140,6 +1142,7 @@ services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_ale
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
+services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
@@ -1193,6 +1196,7 @@ services::discord::router::intake_dispatch::tests::obligation_window_facade_rest
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
+services::discord::router::intake_gate::busy_inject::tests::typed_text_goes_into_a_busy_pane_and_anything_else_keeps_intake_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
