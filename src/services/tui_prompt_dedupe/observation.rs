@@ -115,9 +115,25 @@ pub fn observe_prompt_by_provider_session_with_prompt_id_at(
 ) -> PromptObservation {
     let tmux_session_name = resolve_tmux_session_name(provider, provider_session_id)
         .unwrap_or_else(|| provider_session_id.trim().to_string());
-    observe_prompt_candidates_by_tmux_inner(
+    observe_hook_prompt_by_tmux_with_prompt_id_at(
         provider,
         &tmux_session_name,
+        prompt,
+        prompt_id,
+        observed_at,
+    )
+}
+
+pub(crate) fn observe_hook_prompt_by_tmux_with_prompt_id_at(
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+    prompt_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
         &[prompt.to_string()],
         None,
         prompt_id.map(ClaudePromptId::HookSubmit),

@@ -20,7 +20,8 @@ use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::tui_prompt_dedupe::{
     ExternalInputRelayLease, ExternalInputRelayOwner, ObservedTuiPrompt,
     extract_prompt_from_hook_payload, extract_prompt_id_from_hook_payload,
-    observe_prompt_by_provider_session_with_prompt_id_at, subscribe_observed_prompts,
+    observe_hook_prompt_by_tmux_with_prompt_id_at, resolve_tmux_session_name,
+    subscribe_observed_prompts,
 };
 use tracing::Instrument;
 
@@ -289,11 +290,50 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
     );
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct HookObserverProbe {
+    pause_after_first: AtomicBool,
+    paused: AtomicBool,
+    release: tokio::sync::Notify,
+    dequeued: std::sync::atomic::AtomicUsize,
+    alias_dequeued: std::sync::atomic::AtomicUsize,
+    observation_calls: std::sync::atomic::AtomicUsize,
+    processed: std::sync::atomic::AtomicUsize,
+}
+
+fn hook_observation_target(event: &HookEvent) -> Option<String> {
+    let target = resolve_tmux_session_name(&event.provider, &event.session_id);
+    if let Some(fanout) = event.fanout.as_ref()
+        && !fanout.primary_discarded
+        && let Some(origin) = resolve_tmux_session_name(&event.provider, &fanout.origin_session_id)
+        && target.as_ref() == Some(&origin)
+    {
+        return None;
+    }
+    Some(target.unwrap_or_else(|| event.session_id.trim().to_string()))
+}
+
 /// Hook prompts and observed-prompt relay share one loop; tests pass their own hooks and relay.
 fn spawn_tui_prompt_relay_observer(
     provider_name: String,
+    hook_rx: tokio::sync::broadcast::Receiver<HookEvent>,
+    relay: impl FnMut(ObservedTuiPrompt) -> futures::future::BoxFuture<'static, ()> + Send + 'static,
+) {
+    spawn_tui_prompt_relay_observer_inner(
+        provider_name,
+        hook_rx,
+        relay,
+        #[cfg(test)]
+        None,
+    );
+}
+
+fn spawn_tui_prompt_relay_observer_inner(
+    provider_name: String,
     mut hook_rx: tokio::sync::broadcast::Receiver<HookEvent>,
     mut relay: impl FnMut(ObservedTuiPrompt) -> futures::future::BoxFuture<'static, ()> + Send + 'static,
+    #[cfg(test)] probe: Option<Arc<HookObserverProbe>>,
 ) {
     let observer_span = tracing::info_span!(
         "tui_prompt_relay_observer",
@@ -305,18 +345,41 @@ fn spawn_tui_prompt_relay_observer(
     super::task_supervisor::spawn_observed("tui_prompt_relay_observer", async move {
         loop {
             tokio::select! {
-                hook_event = hook_rx.recv() => {
+                hook_event = async {
+                    #[cfg(test)]
+                    if let Some(probe) = probe.as_ref()
+                        && probe.pause_after_first.load(Ordering::SeqCst)
+                        && probe.dequeued.load(Ordering::SeqCst) > 0
+                    {
+                        probe.paused.store(true, Ordering::SeqCst);
+                        probe.release.notified().await;
+                    }
+                    hook_rx.recv().await
+                } => {
+                    #[cfg(test)]
+                    if let (Some(probe), Ok(event)) = (probe.as_ref(), &hook_event) {
+                        probe.dequeued.fetch_add(1, Ordering::SeqCst);
+                        if event.fanout.is_some() {
+                            probe.alias_dequeued.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
                     match hook_event {
                         Ok(event) if event.provider == provider_name
                             && event.kind == HookEventKind::UserPromptSubmit =>
                         {
-                            if let Some(prompt) = extract_prompt_from_hook_payload(&event.payload) {
+                            if let Some(target) = hook_observation_target(&event)
+                                && let Some(prompt) = extract_prompt_from_hook_payload(&event.payload)
+                            {
+                                #[cfg(test)]
+                                if let Some(probe) = probe.as_ref() {
+                                    probe.observation_calls.fetch_add(1, Ordering::SeqCst);
+                                }
                                 let prompt_id = (event.provider == "claude")
                                     .then(|| extract_prompt_id_from_hook_payload(&event.payload))
                                     .flatten();
-                                let observation = observe_prompt_by_provider_session_with_prompt_id_at(
+                                let observation = observe_hook_prompt_by_tmux_with_prompt_id_at(
                                     &event.provider,
-                                    &event.session_id,
+                                    &target,
                                     &prompt,
                                     prompt_id.as_deref(),
                                     event.received_at,
@@ -339,6 +402,10 @@ fn spawn_tui_prompt_relay_observer(
                             );
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                    #[cfg(test)]
+                    if let Some(probe) = probe.as_ref() {
+                        probe.processed.fetch_add(1, Ordering::SeqCst);
                     }
                 }
                 observed = observed_rx.recv() => {

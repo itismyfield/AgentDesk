@@ -652,6 +652,10 @@ fn stop_is_qualifying(event: &HookEvent) -> bool {
 fn buffered_event_bytes(event: &HookEvent) -> usize {
     event.provider.len()
         + event.session_id.len()
+        + event
+            .fanout
+            .as_ref()
+            .map_or(0, |fanout| fanout.origin_session_id.len())
         + event.kind.as_str().len()
         + event.payload.to_string().len()
 }
@@ -738,6 +742,7 @@ mod tests {
             kind,
             received_at: Utc::now(),
             payload,
+            fanout: None,
         }
     }
 

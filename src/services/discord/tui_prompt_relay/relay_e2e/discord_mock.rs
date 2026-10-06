@@ -64,6 +64,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     pub(super) history_queries: Arc<Mutex<Vec<HistoryQuery>>>,
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
+    pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
     next_response_id: Arc<AtomicU64>,
 }
 
@@ -83,6 +84,7 @@ impl DiscordMockState {
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            channel_posts: Arc::new(Mutex::new(Vec::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
@@ -266,11 +268,18 @@ fn history_page_returns_the_ids_nearest_the_cursor_newest_first() {
     }
 }
 
-async fn get_channel(Path(_channel_id): Path<u64>) -> Json<Value> {
-    Json(private_channel_json())
+async fn get_channel(Path(channel_id): Path<u64>) -> Json<Value> {
+    let mut channel = private_channel_json();
+    channel["id"] = json!(channel_id.to_string());
+    Json(channel)
 }
 
-fn mint_message(state: &DiscordMockState, payload: &Value, content: &str) -> Response {
+fn mint_message(
+    state: &DiscordMockState,
+    payload: &Value,
+    content: &str,
+    channel_id: u64,
+) -> Response {
     let id = state.next_response_id.fetch_add(1, Ordering::SeqCst);
     let reply_to = payload
         .pointer("/message_reference/message_id")
@@ -281,7 +290,9 @@ fn mint_message(state: &DiscordMockState, payload: &Value, content: &str) -> Res
         .lock()
         .expect("mock messages")
         .insert(id, (reply_to, content.to_string()));
-    (StatusCode::OK, Json(discord_message_json(id, content))).into_response()
+    let mut message = discord_message_json(id, content);
+    message["channel_id"] = json!(channel_id.to_string());
+    (StatusCode::OK, Json(message)).into_response()
 }
 
 async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Body>) -> Response {
@@ -290,7 +301,13 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     if method == Method::GET && path == format!("/api/v10/channels/{CHANNEL_ID}") {
         return Json(private_channel_json()).into_response();
     }
-    if method == Method::POST && path == format!("/api/v10/channels/{CHANNEL_ID}/messages") {
+    let message_channel = path
+        .strip_prefix("/api/v10/channels/")
+        .and_then(|rest| rest.strip_suffix("/messages"))
+        .and_then(|id| id.parse::<u64>().ok());
+    if method == Method::POST
+        && let Some(channel_id) = message_channel
+    {
         let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
             Ok(body) => body,
             Err(error) => {
@@ -307,6 +324,11 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        state
+            .channel_posts
+            .lock()
+            .expect("channel posts")
+            .push((channel_id, content.clone()));
         if content == "..." {
             let index = state.placeholder_posts.fetch_add(1, Ordering::SeqCst);
             if index == 0 && state.park_first_placeholder.load(Ordering::SeqCst) {
@@ -330,12 +352,12 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
                 return (StatusCode::FORBIDDEN, Json(refusal)).into_response();
             }
             if answer == NoteAnswer::Stall {
-                let created = mint_message(&state, &payload, &content);
+                let created = mint_message(&state, &payload, &content, channel_id);
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 return created;
             }
         }
-        return mint_message(&state, &payload, &content);
+        return mint_message(&state, &payload, &content, channel_id);
     }
 
     // `catch_up` reads this before it can reach its dedup branch; an unseeded
@@ -354,7 +376,8 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         }
     }
     if method == Method::PATCH
-        && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
+        && path.starts_with("/api/v10/channels/")
+        && path.contains("/messages/")
     {
         let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
             .await
@@ -381,13 +404,15 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     }
 
     if (method == Method::PUT || method == Method::DELETE)
-        && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
+        && path.starts_with("/api/v10/channels/")
+        && path.contains("/messages/")
         && path.contains("/reactions/")
     {
         return StatusCode::NO_CONTENT.into_response();
     }
     if method == Method::DELETE
-        && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
+        && path.starts_with("/api/v10/channels/")
+        && path.contains("/messages/")
     {
         return StatusCode::NO_CONTENT.into_response();
     }
