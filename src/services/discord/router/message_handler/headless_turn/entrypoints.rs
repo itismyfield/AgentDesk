@@ -160,6 +160,7 @@ pub(in crate::services::discord) async fn start_voice_headless_turn(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod input_effect_tests {
     use super::*;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
