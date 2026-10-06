@@ -1,6 +1,6 @@
 use super::handover::{
-    Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, handback_after_enqueue,
-    handback_plan, move_disposition,
+    Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, Reconciliation,
+    handback_after_enqueue, handback_plan, move_disposition,
 };
 use super::rows::{AbandonReason, DoneReason, HeldReason, RowState};
 
@@ -14,8 +14,8 @@ mod supported {
     use tempfile::TempDir;
 
     use super::super::handover::{
-        Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, handback_after_enqueue,
-        handback_plan, move_disposition,
+        Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, Reconciliation,
+        handback_after_enqueue, handback_plan, move_disposition,
     };
     use super::super::ledger::Ledger;
     use super::super::rows::{AbandonReason, DoneReason, Entry, Owner, RowState, Rows};
@@ -109,7 +109,7 @@ mod supported {
     fn hand_back_all(ledger: &mut Ledger, legacy: &mut BTreeSet<u64>, outcome: EnqueueOutcome) {
         let rows = ledger.rows().unwrap();
         for (key, row) in rows.open_rows() {
-            match handback_plan(row.state, false, Composer::Empty) {
+            match handback_plan(row.state, Reconciliation::from_legacy(row.state, false)) {
                 Handback::Enqueue => {
                     if let Some(closed) = handback_after_enqueue(outcome) {
                         legacy.insert(key);
@@ -119,7 +119,7 @@ mod supported {
                 Handback::Close(closed) | Handback::NoticeThenClose(closed) => {
                     set(ledger, key, closed)
                 }
-                Handback::Settled => {}
+                Handback::Hold | Handback::Settled => {}
             }
         }
     }
@@ -444,46 +444,53 @@ fn move_disposition_follows_the_move_table() {
 
 #[test]
 fn handback_plan_follows_the_revert_table() {
+    use Reconciliation::{Ambiguous, Consumed, ModelConfirmed, NeverSent, QueueOnly};
     let running_done = Handback::Close(RowState::Done(DoneReason::HandbackRunning));
     let ambiguous = Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous));
-    for state in [
+    let consumed = Handback::NoticeThenClose(RowState::Done(DoneReason::HandbackRunning));
+    let before_paste = [
         RowState::Received,
         RowState::Ready,
         RowState::Held(HeldReason::Modal),
         RowState::Held(HeldReason::NotReady),
-    ] {
-        assert_eq!(
-            handback_plan(state, false, Composer::Draft),
-            Handback::Enqueue
-        );
-    }
-    for state in [
+    ];
+    let attempted = [
         RowState::Held(HeldReason::Ambiguous),
         RowState::Unaccepted,
         RowState::Injecting,
         RowState::AwaitTurn,
-    ] {
-        assert_eq!(handback_plan(state, true, Composer::Draft), running_done);
-        assert_eq!(
-            handback_plan(state, false, Composer::Empty),
-            Handback::Enqueue
-        );
-        assert_eq!(handback_plan(state, false, Composer::Draft), ambiguous);
+        RowState::Running,
+    ];
+    for state in before_paste {
+        assert_eq!(Reconciliation::from_legacy(state, false), NeverSent);
+        assert_eq!(handback_plan(state, NeverSent), Handback::Enqueue);
     }
-    assert_eq!(
-        handback_plan(RowState::Running, false, Composer::Draft),
-        ambiguous
-    );
+    for state in attempted {
+        assert_eq!(
+            Reconciliation::from_legacy(state, false),
+            Ambiguous,
+            "an empty composer is not evidence for {state:?}"
+        );
+        assert_eq!(handback_plan(state, Ambiguous), ambiguous);
+    }
+    for state in before_paste.into_iter().chain(attempted) {
+        assert_eq!(handback_plan(state, ModelConfirmed), running_done);
+        assert_eq!(handback_plan(state, Consumed), consumed);
+        assert_eq!(handback_plan(state, QueueOnly), Handback::Hold);
+    }
+    for evidence in [QueueOnly, Ambiguous, NeverSent] {
+        assert_eq!(handback_plan(RowState::Queued, evidence), Handback::Hold);
+    }
+    assert_eq!(handback_plan(RowState::Running, NeverSent), ambiguous);
     for state in [
         RowState::Done(DoneReason::Completed),
         RowState::Abandoned(AbandonReason::UserClear),
         RowState::Abandoned(AbandonReason::Handback),
     ] {
-        assert_eq!(
-            handback_plan(state, false, Composer::Empty),
-            Handback::Settled
-        );
+        assert_eq!(handback_plan(state, ModelConfirmed), Handback::Settled);
     }
+    assert!(ModelConfirmed < Consumed && Consumed < QueueOnly);
+    assert!(QueueOnly < Ambiguous && Ambiguous < NeverSent);
     let handed_back = Some(RowState::Abandoned(AbandonReason::Handback));
     assert_eq!(
         handback_after_enqueue(EnqueueOutcome::Persisted),

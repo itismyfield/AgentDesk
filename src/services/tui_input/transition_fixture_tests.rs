@@ -202,6 +202,35 @@ fn old_snapshot_without_received_order_holds_without_enqueue() {
     assert_eq!(host.enqueued, vec![99]);
 }
 
+// A pasted row's queued copy may still reach the model, so an empty composer is not "never sent".
+#[test]
+fn handback_holds_an_attempted_row_even_on_an_empty_composer() {
+    use super::rows::{HeldReason, RowState};
+    for state in [
+        RowState::Injecting,
+        RowState::AwaitTurn,
+        RowState::Unaccepted,
+        RowState::Held(HeldReason::Ambiguous),
+    ] {
+        let root = sandbox();
+        let mut host = Fixture::new(root.path());
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Ledger);
+        let transition = Entry::Transition {
+            key: 8,
+            state,
+            attempt: None,
+        };
+        lease.get().unwrap().append_entry(&transition, &[]).unwrap();
+        assert_eq!(handback(&mut lease, &mut host).unwrap(), Outcome::Held);
+        assert_eq!(host.enqueued, vec![99], "{state:?} went back to Legacy");
+        let rows = lease.get().unwrap().rows().unwrap();
+        assert_eq!(rows.owner(8), Owner::Ledger, "{state:?}");
+        assert!(host.noticed.contains(&(Some(8), "handback_ambiguous")));
+    }
+}
+
 #[test]
 fn retry_backoff_is_bounded() {
     assert_eq!(backoff(0).as_secs(), 5);

@@ -6,6 +6,10 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::attempt::{
+    self, AttemptMeta, Disposition, Keep, Retention, Retire, Seen, TOMBSTONE_HORIZON_MS, Tracking,
+    Witness,
+};
 use super::blob::BlobPin;
 use super::durable::invalid;
 use super::ledger::{Ledger, Record, Snapshot};
@@ -41,6 +45,8 @@ pub enum RowState {
     Ready,
     Injecting,
     AwaitTurn,
+    /// A provider queue holds the input; no model record confirms it yet.
+    Queued,
     Running,
     Unaccepted,
     Held(HeldReason),
@@ -139,6 +145,31 @@ pub struct Row {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptEvidence>,
     pub input: Value,
+    // Tracked generations and witnesses outlive the input text as the row's tombstone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<AttemptMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witnesses: Vec<Seen>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispositions: Vec<Disposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+}
+
+impl Row {
+    /// Two distinct model records carried this input.
+    pub fn duplicate_delivery(&self) -> bool {
+        (self.witnesses.iter())
+            .filter(|seen| seen.witness.kind.confirms_input())
+            .count()
+            > 1
+    }
+
+    /// A model record arrived after a user clear had already cut the input.
+    pub fn delivered_after_clear(&self) -> bool {
+        self.state == RowState::Abandoned(AbandonReason::UserClear)
+            && (self.witnesses.iter()).any(|seen| seen.late && seen.witness.kind.confirms_input())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -208,23 +239,102 @@ impl Rows {
                 key,
                 state,
                 attempt,
-            } => {
-                let writable = self
-                    .rows
-                    .get(&key)
-                    .is_some_and(|row| !row.state.is_terminal());
-                self.transition(seq, key, state);
-                if writable
-                    && let Some(attempt) = attempt
-                    && let Some(row) = self.rows.get_mut(&key)
-                    && row.state == state
-                {
-                    row.attempt = Some(attempt);
+            } => match record.payload.get("tracking") {
+                None => self.legacy_transition(seq, key, state, attempt),
+                Some(tracking) => {
+                    let tracking: Tracking = serde_json::from_value(tracking.clone())
+                        .map_err(|_| invalid("unrecognized input ledger tracking"))?;
+                    self.admit(key, state, attempt.as_ref(), &tracking)
+                        .map_err(invalid)?;
+                    self.track(seq, key, state, attempt, tracking);
                 }
-            }
+            },
         }
         self.folded_seq = seq;
         Ok(())
+    }
+
+    fn legacy_transition(
+        &mut self,
+        seq: u64,
+        key: u64,
+        state: RowState,
+        attempt: Option<AttemptEvidence>,
+    ) {
+        let writable = self
+            .rows
+            .get(&key)
+            .is_some_and(|row| !row.state.is_terminal());
+        self.transition(seq, key, state);
+        if writable
+            && let Some(attempt) = attempt
+            && let Some(row) = self.rows.get_mut(&key)
+            && row.state == state
+        {
+            row.attempt = Some(attempt);
+        }
+    }
+
+    // The writer and the fold apply the same check, so a violating record never lands silently.
+    fn admit(
+        &self,
+        key: u64,
+        state: RowState,
+        evidence: Option<&AttemptEvidence>,
+        tracking: &Tracking,
+    ) -> Result<(), &'static str> {
+        let row = self.rows.get(&key).ok_or("tracking names an unknown row")?;
+        match (&tracking.attempt, &tracking.witness, tracking.disposition) {
+            (Some(meta), None, None) => {
+                let tokens = self.rows.values().flat_map(|row| &row.attempts);
+                if tokens.into_iter().any(|other| other.token == meta.token) {
+                    return Err("attempt token is not unique");
+                }
+                attempt::admits_attempt(row, state, evidence, meta)
+            }
+            (None, Some(witness), None) if evidence.is_none() => {
+                attempt::admits_witness(row, state, witness)
+            }
+            (None, None, Some(_)) if !row.state.is_terminal() || state == row.state => Ok(()),
+            _ => Err("tracking must carry exactly one consistent fact"),
+        }
+    }
+
+    fn track(
+        &mut self,
+        seq: u64,
+        key: u64,
+        state: RowState,
+        evidence: Option<AttemptEvidence>,
+        tracking: Tracking,
+    ) {
+        let Some(row) = self.rows.get_mut(&key) else {
+            return;
+        };
+        if let Some(witness) = tracking.witness {
+            let late = row.state.is_terminal();
+            match (row.witnesses.iter_mut()).find(|seen| seen.witness.same_record(&witness)) {
+                Some(seen) if seen.witness.turn_ref.is_none() => {
+                    seen.witness.turn_ref = witness.turn_ref;
+                }
+                Some(_) => {}
+                None => row.witnesses.push(Seen { witness, late }),
+            }
+            if !late {
+                attempt::settle_effect(row, state);
+                row.state = state;
+            }
+            return;
+        }
+        if let Some(meta) = tracking.attempt {
+            row.attempts.push(meta);
+        }
+        if let Some(disposition) = tracking.disposition
+            && !row.dispositions.contains(&disposition)
+        {
+            row.dispositions.push(disposition);
+        }
+        self.legacy_transition(seq, key, state, evidence);
     }
 
     fn commit(&mut self, seq: u64, first: u64, ids: &[u64]) {
@@ -257,7 +367,10 @@ impl Rows {
             self.boundary_seq = seq;
         }
         match self.rows.get_mut(&key) {
-            Some(row) if !row.state.is_terminal() => row.state = state,
+            Some(row) if !row.state.is_terminal() => {
+                attempt::settle_effect(row, state);
+                row.state = state;
+            }
             _ => self.ignored += 1,
         }
     }
@@ -290,6 +403,10 @@ impl Rows {
                 state,
                 attempt: serde_json::from_value(input["move_attempt"].clone()).ok(),
                 input,
+                attempts: Vec::new(),
+                witnesses: Vec::new(),
+                dispositions: Vec::new(),
+                retention: None,
             },
         );
     }
@@ -355,12 +472,50 @@ impl Rows {
         self.ignored
     }
 
-    // Settled rows keep only their key and state; open rows and pending Staged keep everything.
+    // Settled rows drop their input but keep attempt detail; open rows and Staged keep everything.
     pub fn compact(&self) -> io::Result<Value> {
+        self.compact_with(&Keep, 0)
+    }
+
+    /// Drops a settled row's attempt detail only once two checkpoints found it collectable.
+    pub fn compact_with(&self, facts: &impl Retire, generation: u64) -> io::Result<Value> {
         let mut compacted = self.clone();
-        for row in compacted.rows.values_mut() {
-            if row.state.is_terminal() {
-                row.input = Value::Null;
+        let shared: Vec<_> = (self.open_rows())
+            .flat_map(|(_, row)| {
+                row.witnesses
+                    .iter()
+                    .filter_map(|seen| seen.witness.range.as_ref())
+            })
+            .collect();
+        for (key, row) in compacted.rows.iter_mut() {
+            if !row.state.is_terminal() {
+                continue;
+            }
+            row.input = Value::Null;
+            let Some(now) = facts.now_ms().filter(|_| !row.attempts.is_empty()) else {
+                continue;
+            };
+            let seen = row.retention.as_ref().map_or(now, |r| r.settled_seen_ms);
+            let collectable = now
+                .checked_sub(seen)
+                .is_some_and(|age| age >= TOMBSTONE_HORIZON_MS)
+                && !facts.obligated(*key)
+                && row.attempts.iter().all(|attempt| facts.retired(attempt))
+                && !(row.witnesses.iter())
+                    .any(|seen| (seen.witness.range.as_ref()).is_some_and(|r| shared.contains(&r)));
+            let retention = row.retention.get_or_insert(Retention {
+                settled_seen_ms: now,
+                collectable_since: None,
+            });
+            match retention.collectable_since {
+                _ if !collectable => retention.collectable_since = None,
+                None => retention.collectable_since = Some(generation),
+                Some(marked) if marked < generation => {
+                    row.attempts.clear();
+                    row.witnesses.clear();
+                    row.attempt = None;
+                }
+                Some(_) => {}
             }
         }
         Ok(serde_json::to_value(compacted)?)
@@ -378,7 +533,52 @@ impl Ledger {
     }
 
     pub fn checkpoint_rows(&mut self) -> io::Result<()> {
-        let state = self.rows()?.compact()?;
+        self.checkpoint_rows_with(&Keep)
+    }
+
+    pub fn checkpoint_rows_with(&mut self, facts: &impl Retire) -> io::Result<()> {
+        let generation = (self.snapshot().map_or(0, |s| s.generation))
+            .checked_add(1)
+            .ok_or_else(|| invalid("generation exhausted"))?;
+        let state = self.rows()?.compact_with(facts, generation)?;
         self.checkpoint(state)
+    }
+
+    /// Appends a Transition carrying `tracking` only if the current fold admits it.
+    pub fn append_tracked(
+        &mut self,
+        key: u64,
+        state: RowState,
+        attempt: Option<AttemptEvidence>,
+        tracking: &Tracking,
+    ) -> io::Result<u64> {
+        (self.rows()?)
+            .admit(key, state, attempt.as_ref(), tracking)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
+        let (kind, mut payload) = Entry::Transition {
+            key,
+            state,
+            attempt,
+        }
+        .encode()?;
+        payload["tracking"] = serde_json::to_value(tracking)?;
+        Ok(self.append(&kind, payload, &[])?.seq)
+    }
+
+    /// Records a witness once with the state it implies; a re-read appends nothing.
+    pub fn append_witness(&mut self, key: u64, witness: Witness) -> io::Result<Option<u64>> {
+        let rows = self.rows()?;
+        let row = rows
+            .row(key)
+            .ok_or_else(|| invalid("witness names an unknown row"))?;
+        if (row.witnesses.iter()).any(|seen| seen.witness.same_record(&witness)) {
+            return Ok(None);
+        }
+        let state = witness.kind.next_state(row.state);
+        let tracking = Tracking {
+            witness: Some(witness),
+            ..Tracking::default()
+        };
+        self.append_tracked(key, state, None, &tracking).map(Some)
     }
 }
