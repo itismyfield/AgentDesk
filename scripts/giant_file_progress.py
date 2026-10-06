@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import contextlib
 import hashlib
 import io
 import json
@@ -421,6 +422,16 @@ def progress_errors(base: dict[str, object], candidate: dict[str, object],
         errors.append("registry changed during partial progress")
     return errors
 
+@contextlib.contextmanager
+def base_age_unchecked():
+    # A stale base is healed only by a PR that carries a fresh snapshot; the candidate stays checked.
+    inventory.ENFORCE_ISSUE_SNAPSHOT_FRESHNESS = False
+    try:
+        yield
+    finally:
+        inventory.ENFORCE_ISSUE_SNAPSHOT_FRESHNESS = True
+
+
 def load_ledger(root: Path, *, snapshot: str = "snapshot") -> dict[str, object]:
     """Reuse the offline inventory and audit parsers for ledger evidence."""
     try:
@@ -689,11 +700,14 @@ def main() -> int:
             if event == "pull_request":
                 base_root = Path(temporary) / "base"
                 base_root.mkdir(); archive(base_sha, base_root)
-                base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
+                with base_age_unchecked():
+                    base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
                 base["pins"] = base_pins(base_root)
                 facts = diff_facts(base_sha, candidate_sha)
                 if facts["changed"] and facts["changed"] <= LEDGER:
-                    facts.update(ledger_base=load_ledger(base_root, snapshot="base"),
+                    with base_age_unchecked():
+                        ledger_base = load_ledger(base_root, snapshot="base")
+                    facts.update(ledger_base=ledger_base,
                                  ledger_candidate=load_ledger(candidate_root, snapshot="candidate"))
                 facts["bootstrap"] = not (base_root / EVALUATOR).exists()
                 before, after = set(base["overdue"]), set(candidate["overdue"])
