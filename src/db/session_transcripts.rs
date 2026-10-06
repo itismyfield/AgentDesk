@@ -703,7 +703,7 @@ where
             channel_id = EXCLUDED.channel_id,
             agent_id = COALESCE(EXCLUDED.agent_id, session_transcripts.agent_id),
             provider = EXCLUDED.provider,
-            dispatch_id = EXCLUDED.dispatch_id,
+            dispatch_id = COALESCE(EXCLUDED.dispatch_id, session_transcripts.dispatch_id),
             user_message = EXCLUDED.user_message,
             assistant_message = EXCLUDED.assistant_message,
             events_json = EXCLUDED.events_json,
