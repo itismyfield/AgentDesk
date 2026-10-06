@@ -696,13 +696,13 @@ async fn failed_row_notice_keeps_health_and_retries_until_the_row_is_settled() {
     assert_eq!(state(&rig, REAL), RowState::Held(HeldReason::NotReady));
     assert_eq!(driven.sent(), 0);
     let line = held_line(&rig, "row_held", REAL, 2);
-    assert_eq!(input_lines(&rig), [line.clone()], "reported at once");
+    assert_eq!(input_lines(&rig), [line.as_str()], "reported at once");
     driven.wait(2 * HOLD_GRACE).await;
     assert!(
         rig.world.undelivered.load(Ordering::SeqCst) > 1,
         "each pass retries"
     );
-    assert_eq!(input_lines(&rig), [line.clone()]);
+    assert_eq!(input_lines(&rig), [line.as_str()]);
     rig.world.failing_delivery.store(false, Ordering::SeqCst);
     driven.idle(3).await;
     let notices = rig.world.notices();
