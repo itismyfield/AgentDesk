@@ -64,7 +64,8 @@ impl<P: Pane> InputActor<P> {
         &self.pane
     }
 
-    /// One decision for the head row; every effect follows its durable intent record.
+    /// One decision for the head row; every effect follows its durable intent record. It does
+    /// blocking tmux and file IO, so callers run it on a blocking worker.
     pub async fn step(
         &mut self,
         ledger: &mut Ledger,
@@ -72,10 +73,14 @@ impl<P: Pane> InputActor<P> {
         now: Instant,
     ) -> io::Result<Step> {
         let rows = ledger.rows()?;
-        let Some((key, row)) = head(&rows) else {
+        let Some((key, mut row)) = head(&rows) else {
             self.attempt = None;
             return Ok(Step::Idle);
         };
+        // Ready follows only NotSent, which left the pane untouched: the next attempt replaces it.
+        if row.state == RowState::Ready {
+            row.attempt = None;
+        }
         if self
             .attempt
             .as_ref()
@@ -310,7 +315,8 @@ impl<P: Pane> InputActor<P> {
     }
 }
 
-fn head(rows: &Rows) -> Option<(u64, Row)> {
+/// The open row with the oldest arrival.
+pub(crate) fn head(rows: &Rows) -> Option<(u64, Row)> {
     #[cfg(test)]
     if super::transition::mutant("head_key") {
         return rows
