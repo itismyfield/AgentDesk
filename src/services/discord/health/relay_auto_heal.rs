@@ -821,6 +821,20 @@ async fn apply_orphan_pending_token_cleanup(
         }
     }
 
+    #[cfg(test)]
+    orphan_token_tests::snapshot_barrier(channel_id).await;
+    // The helper snapshot can suspend after the sweep admitted this channel.
+    if matches!(
+        source,
+        RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog
+    ) && super::legacy_supervision::legacy_retired(
+        provider.as_str(),
+        channel_id.get(),
+        "orphan_token_before_auto_apply",
+    ) {
+        return Ok(false);
+    }
+
     let watchdog_watcher = (source == RelayRecoveryApplySource::StallWatchdog)
         .then(|| {
             shared.tmux_watchers.get(&channel_id).map(|watcher| {

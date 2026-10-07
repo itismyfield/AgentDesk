@@ -123,6 +123,7 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
+src/services/discord/placeholder_sweeper/retirement_tests.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
 src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs
 src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs
@@ -343,6 +344,7 @@ services::discord::inflight::host_recovery_guard::keyed_tests
 services::discord::inflight::rebind_reap::tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::placeholder_sweeper::abandon_guard::tests
+services::discord::placeholder_sweeper::retirement_tests
 services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -1184,6 +1186,7 @@ services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_star
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
+services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg

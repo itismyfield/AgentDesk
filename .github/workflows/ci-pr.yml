@@ -329,6 +329,7 @@ jobs:
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
+              - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
