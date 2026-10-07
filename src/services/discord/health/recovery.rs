@@ -1454,6 +1454,19 @@ pub async fn clear_provider_channel_runtime(
         return Some(ManagedReset::Refused(reason));
     }
 
+    #[cfg(test)]
+    discord::admin_host_guard::run_before_verified_clear_recheck_for_tests(channel_id.get());
+    if let Some(reason) = discord::commands::control::verified_codex_reset_refusal_for_target(
+        &shared,
+        &provider,
+        channel_id,
+        tmux_name.as_deref(),
+    )
+    .await
+    {
+        return Some(ManagedReset::Refused(reason.to_owned()));
+    }
+
     let cleared = discord::mailbox_clear_channel(&shared, &provider, channel_id).await;
     if let Some(token) = cleared.removed_token {
         discord::turn_bridge::stop_active_turn(

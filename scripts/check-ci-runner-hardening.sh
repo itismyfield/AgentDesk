@@ -999,12 +999,13 @@ targets = {
     # #6104 re-pins after renaming the replay call; its list is now generated
     # from the PG manifest instead of hand-kept.
     # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
-    "job_sha256" => "8a73d261db9578fe4ca5899371307928111dba3d982e0ec038cb119072820e8c",
+    # Re-pinned for the two Codex legacy lock child summaries.
+    "job_sha256" => "ac5c10900533d6673911e5e6f9efabb2180792c5edc35762ad7ed31e2d2de2a0",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => [
           "source scripts/ci/non-pg-test-filter.sh",
-          'python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"',
+          'python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"',
           "run_non_pg_filter_replay",
         ],
         "timeout_minutes" => 45,

@@ -164,6 +164,12 @@ pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
+#[cfg(all(test, unix))]
+pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 mod tui_task_card;
 mod turn_bridge;
 #[allow(clippy::too_many_arguments)]
@@ -3458,3 +3464,10 @@ mod queued_placeholder_cluster_characterization_tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use recovery_engine::{codex_rebind_spawn_for_tests, codex_restart_output_for_tests};
+#[cfg(all(test, unix))]
+pub(crate) use tmux::tmux_output_stream::{
+    codex_native_read_for_tests, codex_source_witness_present_for_tests,
+};

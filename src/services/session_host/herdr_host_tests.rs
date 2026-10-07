@@ -2159,7 +2159,11 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                     BEFORE_WRITER,
                 ),
                 ("src/services/discord/tmux_reaper.rs", 2, MISSING),
-                ("src/services/discord/commands/control.rs", 1, MISSING),
+                (
+                    "src/services/discord/commands/control/managed_reset.rs",
+                    1,
+                    MISSING,
+                ),
                 ("src/services/turn_lifecycle.rs", 1, MISSING),
             ],
         ),

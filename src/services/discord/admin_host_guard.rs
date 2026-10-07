@@ -244,6 +244,18 @@ async fn reset_refusal(
     explicit_session_key: Option<&str>,
     channel_name: Option<String>,
 ) -> Option<String> {
+    let approved_tmux =
+        explicit_session_key.and_then(super::session_identity::tmux_name_from_session_key);
+    if let Some(reason) = super::commands::control::verified_codex_reset_refusal_for_target(
+        shared,
+        provider,
+        channel_id,
+        approved_tmux.as_deref(),
+    )
+    .await
+    {
+        return Some(reason.to_owned());
+    }
     if let Some(reason) = configured_refusal(channel_id.get()) {
         return Some(reason);
     }
@@ -282,7 +294,7 @@ async fn session_channel_name(shared: &SharedData, channel_id: ChannelId) -> Opt
 }
 
 /// A provider-state reset of one channel judged once, read only, on the runtime, channel name,
-/// key and turn it acts on; [`ManagedResetVerdict::apply`] runs on that target without judging again.
+/// key and turn it acts on; [`ManagedResetVerdict::apply`] rechecks the target and source policy.
 #[must_use]
 pub(crate) struct ManagedResetVerdict {
     shared: Arc<SharedData>,
@@ -349,6 +361,13 @@ impl ManagedResetVerdict {
         {
             let reason = "the channel's session changed after its reset was approved";
             return ManagedReset::Refused(reason.to_string());
+        }
+        if let Some(reason) = super::commands::control::verified_codex_reset_refusal_for_target(
+            &shared, &provider, channel_id, approved,
+        )
+        .await
+        {
+            return ManagedReset::Refused(reason.to_owned());
         }
         let cleared = super::mailbox_clear_channel(&shared, &provider, channel_id).await;
         if let Some(token) = cleared.removed_token {
@@ -484,3 +503,37 @@ pub(crate) async fn row_unsupported(
 #[cfg(all(test, unix))]
 #[path = "admin_host_guard_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "admin_host_guard_verified_reset_tests.rs"]
+pub(crate) mod verified_reset_tests;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_VERIFIED_CLEAR_RECHECK: std::cell::RefCell<Option<(u64, Box<dyn FnOnce()>)>> =
+        Default::default();
+}
+
+#[cfg(test)]
+pub(crate) fn before_verified_clear_recheck_for_tests(
+    channel: u64,
+    action: impl FnOnce() + 'static,
+) {
+    BEFORE_VERIFIED_CLEAR_RECHECK
+        .with(|cell| *cell.borrow_mut() = Some((channel, Box::new(action))));
+}
+
+#[cfg(test)]
+pub(crate) fn run_before_verified_clear_recheck_for_tests(channel: u64) {
+    let action = BEFORE_VERIFIED_CLEAR_RECHECK.with(|cell| {
+        let mut pending = cell.borrow_mut();
+        pending
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == channel)
+            .then(|| pending.take().unwrap().1)
+    });
+    if let Some(action) = action {
+        action();
+    }
+}

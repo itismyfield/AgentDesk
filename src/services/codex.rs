@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::services::codex_tui::verified_hold;
 mod process_session_launch;
 use process_session_launch::execute_streaming_local_process_codex;
 
@@ -14,6 +16,8 @@ mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
+#[cfg(unix)]
+pub(crate) use tui_session_launch::emit_codex_tui_post_tail_handoff;
 #[cfg(unix)]
 use tui_session_launch::prepare_codex_tui_launch_script;
 
@@ -1663,7 +1667,10 @@ fn execute_streaming_local_tui_tmux(
         return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
     }
     let warm_followup_enabled =
-        crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled();
+        match verified_hold::preflight(tmux_session_name, cancel_token.as_ref()) {
+            Some(result) => return result,
+            None => crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),
+        };
     let turn_lock = warm_followup_enabled.then(|| codex_tui_session_turn_lock(tmux_session_name));
     let _turn_guard = turn_lock
         .as_ref()
@@ -1696,6 +1703,11 @@ fn execute_streaming_local_tui_tmux(
         .with_goals_enabled(goals_enabled)
         .with_cwd(Some(working_dir));
     if let Some(fallback_reason) = direct_tui_material_fallback_reason(&launch_options) {
+        if crate::services::codex_tui::canary::enabled_for(tmux_session_name)
+            || crate::services::tui_prompt_dedupe::codex_verified_requires_proof(tmux_session_name)
+        {
+            return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
+        }
         tracing::warn!(
             provider = "codex",
             unsupported_options = fallback_reason,
@@ -1923,6 +1935,10 @@ fn resolve_codex_tui_tail_result(
                 );
                 return Ok(None);
             }
+            if verified_hold::existing_incarnation(tmux_session_name) {
+                verified_hold::wait_for_cancel(tmux_session_name, cancel_token_for_post_tail)?;
+                return Ok(None);
+            }
             // #2182 follow-up: rollout wait / tail failures used to leak the
             // tmux session because `?` propagated Err without cleaning the
             // launched session. Kill it explicitly so the worktree doesn't
@@ -1953,195 +1969,6 @@ fn resolve_codex_tui_tail_result(
 thread_local! {
     /// Runs once between a ready composer and the RuntimeReady recheck.
     pub(crate) static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Post-tail StreamMessage emission for the Codex Direct TUI launch: handles
-/// the cancel-suppression guards, the SessionDied failure `Done`, the idle
-/// relay binding, and the gated RuntimeReady handoff (with its readiness /
-/// session-death / timeout outcomes). Always returns `Ok(())`; early returns
-/// stand in for post-cancel suppression and for a source a hook already replaced.
-#[cfg(unix)]
-pub(crate) fn emit_codex_tui_post_tail_handoff(
-    tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
-    sender: Sender<StreamMessage>,
-    cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,
-    tmux_session_name: &str,
-) -> Result<(), String> {
-    let cancel_observed =
-        || crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref());
-
-    let read_result = tail_result.read_result.clone();
-    // #2172 cancel boundary: relay suppression is enforced at every
-    // Direct TUI StreamMessage producer, not just rollout_tail. The
-    // post-tail SessionDied Done and the RuntimeReady handoff frame
-    // must also drop on the floor when the user has cancelled — a
-    // cancelled turn must not deliver any further frame to the bridge.
-    // ReadOutputResult::Cancelled is handled explicitly: it never
-    // emits RuntimeReady (which would let the bridge mutate handoff
-    // state on a cancelled turn) and it never emits Done either.
-    if matches!(
-        read_result,
-        crate::services::provider::ReadOutputResult::Cancelled { .. }
-    ) {
-        tracing::info!(
-            tmux_session = tmux_session_name,
-            "Codex Direct TUI tail returned Cancelled; suppressing post-tail StreamMessage emission"
-        );
-        return Ok(());
-    }
-    if cancel_observed() {
-        tracing::info!(
-            tmux_session = tmux_session_name,
-            "Codex Direct TUI launch observed cancel after tail returned; suppressing post-tail StreamMessage emission"
-        );
-        return Ok(());
-    }
-    if let crate::services::provider::ReadOutputResult::SessionDied { offset } = read_result {
-        record_codex_tmux_termination(
-            tmux_session_name,
-            "codex_tui_provider",
-            "session_died_before_response",
-            "codex tui session ended before producing a response",
-            Some(offset),
-        );
-        let _ = sender.send(StreamMessage::Done {
-            result: "⚠ Codex TUI session ended before producing a response.".to_string(),
-            session_id: None,
-        });
-    } else {
-        // The Discord turn bridge only needs RuntimeReady when the TUI is
-        // actually ready for another routed turn. The idle SSH-direct relay is
-        // different: it scans Codex's rollout after the bridge has gone idle,
-        // so it still needs the rollout binding even when RuntimeReady is
-        // suppressed by the post-turn readiness guard.
-        if !register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result) {
-            // A hook moved the pane, or with hooks on its history is unreadable: a handoff could reclaim it.
-            return Ok(());
-        }
-
-        // #2325: gate the RuntimeReady handoff on the Codex TUI composer
-        // actually being ready for input. RuntimeReady is the signal the
-        // turn-bridge uses to publish CodexTui handoff state that
-        // downstream recovery / watcher-relay paths assume corresponds
-        // to a live, input-ready pane (see
-        // `services::discord::turn_bridge::mod::RuntimeHandoff::CodexTui`
-        // branch). If we publish RuntimeReady against a tmux session
-        // whose composer never came back up, downstream consumers will
-        // operate on a non-ready handoff.
-        //
-        // Bridge-drain race (Codex round-3 review on #2325):
-        // `rollout_tail` has already emitted `StreamMessage::Done` by
-        // the time we get here, so the bridge has started its
-        // `terminal_control_drain_until` window (250ms) before it
-        // finalises the inflight. The readiness wait MUST fit inside
-        // that window or our `RuntimeReady` / failure `Done` will be
-        // dropped after the bridge has already cleared inflight state.
-        // We use `PromptReadinessKind::PostTurnHandoff` (200ms budget)
-        // and split outcomes:
-        //   - Ready → emit RuntimeReady (handoff preserved).
-        //   - Session dead → emit failure Done; tmux death is
-        //     observable synchronously so the verdict reaches the
-        //     bridge inside the drain window.
-        //   - Composer not yet redrawn within the probe budget → suppress
-        //     RuntimeReady (see the timeout arm below).
-        match crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
-            tmux_session_name,
-            crate::services::codex_tui::input::PromptReadinessKind::PostTurnHandoff,
-            cancel_token_for_post_tail.as_ref(),
-        ) {
-            Ok(()) => {
-                #[cfg(test)]
-                if let Some(seam) = AFTER_READINESS_WAIT.with_borrow_mut(Option::take) {
-                    seam();
-                }
-                let ready = StreamMessage::RuntimeReady {
-                    handoff: RuntimeHandoff::CodexTui {
-                        rollout_path: tail_result.rollout_path.display().to_string(),
-                        thread_id: tail_result.session_id.clone(),
-                        tmux_session_name: tmux_session_name.to_string(),
-                        last_offset: tail_result.final_offset,
-                    },
-                };
-                if !codex_direct_tui_hook_overrides_enabled() {
-                    let _ = sender.send(ready);
-                } else if !crate::services::tui_prompt_dedupe::publish_unless_codex_tail_retired(
-                    &codex_tui_idle_relay_binding(tmux_session_name, &tail_result),
-                    tmux_session_name,
-                    || drop(sender.send(ready)),
-                ) {
-                    tracing::info!(
-                        tmux_session = tmux_session_name,
-                        "Codex tail source was replaced during the readiness wait; suppressing RuntimeReady"
-                    );
-                }
-            }
-            Err(error)
-                if crate::services::codex_tui::input::is_prompt_ready_cancelled_error(&error) =>
-            {
-                // Cancel beats deadline / session-death — match the
-                // post-tail cancel-suppression behaviour above: emit no
-                // further StreamMessage and let the bridge's cancel arm
-                // drive finalisation.
-                tracing::info!(
-                    tmux_session = tmux_session_name,
-                    "Codex TUI input readiness wait cancelled post-turn; suppressing RuntimeReady"
-                );
-                return Ok(());
-            }
-            Err(error) if crate::services::codex_tui::input::is_session_dead_error(&error) => {
-                // Session death is detected synchronously by the tmux
-                // pane-alive check, so this verdict reaches the bridge
-                // inside its drain window. Skip RuntimeReady and surface
-                // a failure Done.
-                tracing::warn!(
-                    tmux_session = tmux_session_name,
-                    error = %error,
-                    "Codex TUI session died before becoming input-ready; suppressing RuntimeReady"
-                );
-                record_codex_tmux_termination(
-                    tmux_session_name,
-                    "codex_tui_provider",
-                    "session_died_before_input_ready",
-                    "codex tui session ended before becoming input-ready",
-                    Some(tail_result.final_offset),
-                );
-                let _ = sender.send(StreamMessage::Done {
-                    result: "⚠ Codex TUI session ended before becoming input-ready.".to_string(),
-                    session_id: tail_result.session_id.clone(),
-                });
-            }
-            Err(error) => {
-                // #2399 HIGH 2: composer did not redraw within the 200ms
-                // probe budget. The previous behaviour emitted
-                // `RuntimeReady` anyway "best-effort", which republished a
-                // CodexTui handoff against a TUI whose readiness was
-                // unknown. Downstream recovery / watcher-relay paths then
-                // operated on a non-ready session and ran into the
-                // original #2325 failure mode.
-                //
-                // Updated contract: on a readiness-timeout verdict we
-                // suppress `RuntimeReady` entirely. The bridge has already
-                // received the rollout-tail `Done` and finalised the
-                // assistant text; the only thing we *would* be publishing
-                // is the CodexTui handoff metadata. Skipping it forces the
-                // bridge to treat the next turn as a fresh session
-                // launch (or recovery), which is safer than reusing a
-                // possibly-hung pane.
-                //
-                // Session-dead and cancel cases are already handled by
-                // dedicated arms above — only the readiness-timeout path
-                // lands here, but we still log the error string verbatim
-                // so operators can correlate with the input.rs telemetry.
-                tracing::warn!(
-                    tmux_session = tmux_session_name,
-                    error = %error,
-                    "Codex TUI composer not yet input-ready inside post-turn probe budget; suppressing RuntimeReady to avoid republishing a non-ready handoff (#2399 HIGH 2)"
-                );
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -3408,5 +3235,213 @@ mod relay_separator_tests {
             .collect();
         assert_eq!(texts, vec!["first".to_string(), "\n\nsecond".to_string()]);
         assert_eq!(final_text, "first\n\nsecond");
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod verified_admission_tests {
+    use super::*;
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe, binding_context::PreparedIncarnation,
+    };
+
+    fn verified(f: impl FnOnce(&str, &std::path::Path)) {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        dedupe::reset_state_for_tests();
+        let tmux = format!("verified-preflight-{}", uuid::Uuid::new_v4().simple());
+        let prepared = PreparedIncarnation::prepare_pinned(
+            "codex",
+            &tmux,
+            Some(584_533),
+            None,
+            false,
+            Some(root.path().join("sessions")),
+            (None, Some("verified".to_owned())),
+        )
+        .unwrap();
+        let nonce = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
+        std::fs::create_dir_all(std::path::Path::new(&nonce).parent().unwrap()).unwrap();
+        std::fs::write(&nonce, &prepared.context.execution_nonce).unwrap();
+        dedupe::register_tmux_channel(&tmux, 584_533);
+        f(&tmux, root.path());
+        dedupe::reset_state_for_tests();
+    }
+
+    #[test]
+    fn verified_existing_ingress_holds_before_auth_lookup_cleanup_or_launch() {
+        verified(|tmux, root| {
+            let fake =
+                crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+            let _ = fake.take_calls();
+            let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+            let before = std::fs::read(&nonce).unwrap();
+            let token = Arc::new(CancelToken::new());
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let (tx, rx) = std::sync::mpsc::channel();
+            assert!(
+                execute_streaming_local_tui_tmux(
+                    "not submitted",
+                    None,
+                    None,
+                    None,
+                    None,
+                    "/missing/verified-workspace",
+                    tx,
+                    Some(token),
+                    tmux,
+                    None,
+                    Some(584_533),
+                    Some(ProviderKind::Codex),
+                    None,
+                    false,
+                    None,
+                    true,
+                )
+                .is_ok()
+            );
+            assert_eq!(std::fs::read(nonce).unwrap(), before);
+            assert!(rx.try_recv().is_err());
+            assert!(
+                fake.take_calls().is_empty(),
+                "preflight must precede any pane or auth probe"
+            );
+            assert!(!root.join("sessions").exists());
+            assert!(!verified_hold::existing_incarnation(
+                "new-unpinned-incarnation"
+            ));
+        });
+    }
+
+    #[test]
+    fn verified_post_tail_session_death_waits_without_done_or_runtime_ready() {
+        verified(|tmux, root| {
+            let token = Arc::new(CancelToken::new());
+            let delayed = token.clone();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                delayed
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            });
+            let (tx, rx) = std::sync::mpsc::channel();
+            assert!(
+                emit_codex_tui_post_tail_handoff(
+                    crate::services::codex_tui::rollout_tail::CodexTuiTailResult {
+                        read_result: crate::services::provider::ReadOutputResult::SessionDied {
+                            offset: 12
+                        },
+                        rollout_path: root.join("missing-source.jsonl"),
+                        final_offset: 12,
+                        session_id: Some("019e660d-4859-7522-9cee-8ba7c4e7c743".to_owned()),
+                    },
+                    tx,
+                    Some(token),
+                    tmux,
+                )
+                .is_ok()
+            );
+            release.join().unwrap();
+            assert!(
+                rx.try_recv().is_err(),
+                "verified permission must suppress terminal handoff frames"
+            );
+        });
+    }
+
+    #[test]
+    fn verified_tail_error_preserves_live_and_dead_panes_until_cancel() {
+        verified(|tmux, _| {
+            for alive in [false, true] {
+                let fake =
+                    crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+                        tmux,
+                    );
+                let _liveness = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
+                    tmux,
+                    if alive {
+                        crate::services::platform::tmux::PaneLiveness::Live
+                    } else {
+                        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+                    },
+                );
+                if !alive {
+                    fake.mark_missing();
+                }
+                assert_eq!(tmux_live_pane_bool(tmux), alive);
+                let _ = fake.take_calls();
+                let token = Arc::new(CancelToken::new());
+                let delayed = token.clone();
+                let release = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(150));
+                    delayed
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                });
+                let result = resolve_codex_tui_tail_result(
+                    Err("injected verified descriptor IO race".to_owned()),
+                    Some(&token),
+                    tmux,
+                );
+                release.join().unwrap();
+                assert!(
+                    matches!(result, Ok(None)),
+                    "verified error must hold until cancellation"
+                );
+                let calls = fake.take_calls();
+                assert!(
+                    !calls.iter().any(|call| call.starts_with("kill-session")),
+                    "{calls:?}"
+                );
+                assert!(
+                    !crate::services::provider_teardown::tests::test_support::take_exit_reason(
+                        tmux
+                    )
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn verified_warm_reuse_holds_instead_of_returning_legacy_or_destructive_fallback() {
+        verified(|tmux, _| {
+            let token = Arc::new(CancelToken::new());
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let selection = crate::services::codex_tui::session::CodexTuiSessionSelection {
+                requested_session_id: None,
+                selected_session_id: None,
+                resume: false,
+                reason: "unavailable verified source".to_owned(),
+                rollout_path: None,
+                rollout_start_offset: None,
+                candidate_count: 0,
+            };
+            let outcome = crate::services::codex_tui::warm_followup::try_codex_tui_warm_followup(
+                &selection,
+                &CodexLaunchOptions::new("not submitted"),
+                true,
+                true,
+                true,
+                "not submitted",
+                tx,
+                Some(token),
+                tmux,
+                Some(584_533),
+            );
+            assert!(matches!(
+                outcome,
+                crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Terminal(Ok(
+                    ()
+                ))
+            ));
+            assert!(rx.try_recv().is_err());
+        });
     }
 }

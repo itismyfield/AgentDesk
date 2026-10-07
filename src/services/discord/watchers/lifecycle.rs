@@ -11,6 +11,10 @@ pub(in crate::services::discord) use self::activity::{
 
 #[path = "codex_tui_restore.rs"]
 mod codex_restore;
+#[cfg(all(test, unix))]
+pub(crate) use codex_restore::commit_codex_watcher_restore_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use codex_restore::commit_codex_watcher_restore_to_empty_registry_for_tests;
 #[path = "dispatched_origin_ghost.rs"]
 mod dispatched_origin_ghost;
 use dispatched_origin_ghost::consume_dispatched_origin_ghost_if_current;

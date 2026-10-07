@@ -64,6 +64,10 @@ mod tmux_reattach_offsets;
 mod tmux_session_files;
 #[path = "watchers/lifecycle.rs"]
 mod watcher_lifecycle;
+#[cfg(all(test, unix))]
+pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry_for_tests;
 
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;

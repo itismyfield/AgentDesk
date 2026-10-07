@@ -18,6 +18,10 @@ pub(in crate::services::discord) fn watcher_source_witness(
             });
     if native {
         Some(observer::read_source_epoch_witness(session))
+    } else if *provider == ProviderKind::Codex
+        && crate::services::tui_prompt_dedupe::codex_verified_requires_proof(session)
+    {
+        None
     } else {
         observer::marker_if_enabled(session)
     }
@@ -48,6 +52,9 @@ pub(in crate::services::discord) fn read_native_codex_state(
 ) -> Result<crate::services::codex_tui::rollout_tail::RolloutRecordDecoder, String> {
     use crate::services::cluster::stream_relay::SourceFileIdentity;
     use std::io::{BufReader, Read, Seek, SeekFrom};
+    if !crate::services::tui_prompt_dedupe::codex_verified_source_allowed(session, path, None) {
+        return Err("native Codex restore lacks current source proof or permission".into());
+    }
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     if expected_file == SourceFileIdentity::Unavailable
         || SourceFileIdentity::from_open_file(&file) != expected_file
@@ -75,7 +82,8 @@ pub(in crate::services::discord) fn read_native_codex_state(
             current_identity,
         ) == Some(expected)
     });
-    if range.limit() != 0
+    if !crate::services::tui_prompt_dedupe::codex_verified_source_allowed(session, path, None)
+        || range.limit() != 0
         || read_generation_file_mtime_ns(session) != generation
         || current_identity != expected_file
         || !stamp_matches
@@ -172,4 +180,37 @@ pub(super) fn process_native_codex_messages(
         }
     }
     result
+}
+
+#[cfg(test)]
+pub(crate) use test_support::{
+    codex_native_read_for_tests, codex_source_witness_present_for_tests,
+};
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    #[cfg(test)]
+    pub(crate) fn codex_native_read_for_tests(tmux: &str, path: &str) -> Result<(), String> {
+        let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+        std::fs::write(generation_path, "1").map_err(|error| error.to_string())?;
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let identity =
+            crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file);
+        read_native_codex_state(
+            path,
+            0,
+            file.metadata().map_err(|error| error.to_string())?.len(),
+            identity,
+            tmux,
+            read_generation_file_mtime_ns(tmux),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn codex_source_witness_present_for_tests(tmux: &str, path: &str) -> bool {
+        watcher_source_witness(&ProviderKind::Codex, tmux, path).is_some()
+    }
 }

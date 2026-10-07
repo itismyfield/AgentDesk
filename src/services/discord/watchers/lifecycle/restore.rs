@@ -165,6 +165,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         restored_turn: Option<RestoredWatcherTurn>,
         thread_parent: Option<ThreadFollowUpParent>,
         codex_direct_resume_fallback: Option<codex_restore::DirectResumeFallback>,
+        codex_source_binding: Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
     }
 
     let mut pending: Vec<PendingWatcher> = Vec::new();
@@ -521,6 +522,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 .unwrap_or(0)
         };
 
+        let codex_source_binding = (provider == ProviderKind::Codex)
+            .then(|| {
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session_name)
+            })
+            .flatten();
         pending.push(PendingWatcher {
             channel_id: *channel_id,
             output_path,
@@ -529,6 +535,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             restored_turn,
             thread_parent,
             codex_direct_resume_fallback,
+            codex_source_binding,
         });
         if let Some(path) = selected_claude_tui_fallback_transcript {
             restore_claimed_claude_tui_transcripts.insert(path);
@@ -683,6 +690,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             &pw.session_name,
             pw.channel_id,
             pw.codex_direct_resume_fallback,
+            pw.codex_source_binding,
+            &pw.output_path,
             || {
                 try_claim_watcher_for_host(
                     &shared.tmux_watchers,

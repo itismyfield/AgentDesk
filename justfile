@@ -193,6 +193,7 @@ test-postgres:
     cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
     cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
     cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
+    cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
 # Main's PG matrix job: shard 0 runs the whole recipe on its part of the
 # selection and shard 1 only its part, so the targeted commands run once.

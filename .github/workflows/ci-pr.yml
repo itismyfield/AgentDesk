@@ -285,6 +285,7 @@ jobs:
               - 'src/services/auto_queue/route_generate.rs'
               - 'src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs'
               - 'src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs'
+              - 'src/services/auto_queue/runtime/verified_reset_pg_tests.rs'
               - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
               - 'src/services/cluster/attachment_transfer/storage_tests.rs'
               - 'src/services/cluster/channel_home_boot_tests.rs'
@@ -1688,10 +1689,8 @@ jobs:
       # two must match: a lane that told the adjudicator about a narrower
       # selection than it executed would shrink its own expectation to fit.
       #
-      # --max-summaries 2 because `non_wait_relay_parent_subprocess_entry`
-      # re-executes the test binary and its child libtest writes a second
-      # "test result:" line to the inherited stdout. Any further nesting is an
-      # error: child output is otherwise counted as if this run had produced it.
+      # --max-summaries 4 includes the primary run and the hook relay child.
+      # codex_legacy_lock_tests adds two child runs; further nesting is an error.
       - name: Library sweep (selection-set gated)
         timeout-minutes: 45
         shell: bash
@@ -1701,7 +1700,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           source scripts/ci/non-pg-test-filter.sh
-          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
+          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
           run_non_pg_filter_replay
 
       - name: Stop PostgreSQL service
@@ -2116,7 +2115,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f
+          expected=2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2349,7 +2348,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f
+          expected=2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

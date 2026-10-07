@@ -254,6 +254,12 @@ pub(crate) fn try_codex_tui_warm_followup(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
 ) -> CodexWarmFollowupOutcome {
+    if super::verified_hold::existing_incarnation(tmux_session_name) {
+        return CodexWarmFollowupOutcome::Terminal(super::verified_hold::wait_for_cancel(
+            tmux_session_name,
+            cancel_token.as_ref(),
+        ));
+    }
     let target = InputTarget::legacy_tmux(tmux_session_name);
     warm_followup_on(
         &target,

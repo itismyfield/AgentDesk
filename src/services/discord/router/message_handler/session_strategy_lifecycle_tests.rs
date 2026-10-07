@@ -1600,3 +1600,165 @@ fn resolver_conservative_none_when_launch_cutoff_unavailable() {
     );
     assert_eq!(resolved_with_cutoff.as_deref(), Some(candidate.as_path()));
 }
+
+#[cfg(unix)]
+#[test]
+fn verified_codex_followup_rejects_missing_identity_before_legacy_observation_or_pane_probe() {
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe, binding_context::PreparedIncarnation,
+    };
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _state_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    dedupe::reset_state_for_tests();
+    let channel = serenity::ChannelId::new(584_530);
+    let tmux = ProviderKind::Codex.build_tmux_session_name("verified-followup");
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "codex",
+        &tmux,
+        Some(channel.get()),
+        None,
+        false,
+        Some(root.path().join("sessions")),
+        (None, Some("verified".to_owned())),
+    )
+    .unwrap();
+    let nonce_path = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
+    std::fs::create_dir_all(std::path::Path::new(&nonce_path).parent().unwrap()).unwrap();
+    std::fs::write(nonce_path, &prepared.context.execution_nonce).unwrap();
+    dedupe::register_tmux_channel(&tmux, channel.get());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for (cwd, id) in [
+        (None, None),
+        (root.path().to_str(), None),
+        (
+            root.path().to_str(),
+            Some("01234567-89ab-cdef-0123-456789abcdef"),
+        ),
+    ] {
+        assert_eq!(
+            observe_codex_tui_rollout_state_for_cwd(cwd, Some(&tmux), id),
+            crate::services::tui_turn_state::TuiTurnState::Unknown
+        );
+        let diagnostic = tui_busy_followup_diagnostic(
+            &shared,
+            &ProviderKind::Codex,
+            channel,
+            Some(&tmux),
+            false,
+            cwd,
+            id,
+        )
+        .expect("verified permission must block before endpoint and pane probes");
+        assert_eq!(diagnostic.watcher_state, "verified_source_unavailable");
+        assert_eq!(
+            diagnostic.transcript_turn_state,
+            crate::services::tui_turn_state::TuiTurnState::Unknown
+        );
+        assert!(!diagnostic.capture_available);
+    }
+    assert!(
+        tui_busy_followup_diagnostic(
+            &shared,
+            &ProviderKind::Codex,
+            channel,
+            Some("legacy-no-pane"),
+            false,
+            None,
+            None
+        )
+        .is_none()
+    );
+    dedupe::reset_state_for_tests();
+}
+
+#[cfg(unix)]
+#[test]
+fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission() {
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe, binding_context::PreparedIncarnation,
+    };
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _state_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    dedupe::reset_state_for_tests();
+    // Host and composer admission are ready; only the source permission may hold the queue.
+    let _ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_TEST_CODEX_PROMOTE_READY",
+        std::ffi::OsStr::new("1"),
+    );
+    let channel = serenity::ChannelId::new(584_531);
+    let provider = ProviderKind::Codex;
+    let name = "verified-followup-queue";
+    let tmux = provider.build_tmux_session_name(name);
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "codex",
+        &tmux,
+        Some(channel.get()),
+        None,
+        false,
+        Some(root.path().join("sessions")),
+        (None, Some("verified".to_owned())),
+    )
+    .unwrap();
+    let nonce_path = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
+    std::fs::create_dir_all(std::path::Path::new(&nonce_path).parent().unwrap()).unwrap();
+    std::fs::write(nonce_path, &prepared.context.execution_nonce).unwrap();
+    dedupe::register_tmux_channel(&tmux, channel.get());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.core.lock().await.sessions.insert(
+            channel,
+            DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel.get()),
+                channel_name: Some(name.to_owned()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+        let queued = build_race_requeued_intervention(
+            serenity::UserId::new(584_531_001),
+            serenity::MessageId::new(584_531_002),
+            "keep queued until source permission is known",
+            false,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+        );
+        let persistence =
+            crate::services::discord::queue_persistence_context(&shared, &provider, channel);
+        shared
+            .mailbox(channel)
+            .replace_queue(vec![queued], persistence)
+            .await;
+        let before = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+        assert!(hosted_tui_promote_readiness_blocked(&shared, &provider, channel).await);
+        let after = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+        assert_eq!(after.intervention_queue.len(), 1);
+        assert_eq!(
+            after.intervention_queue[0].message_id,
+            before.intervention_queue[0].message_id
+        );
+        assert_eq!(
+            after.intervention_queue[0].text,
+            before.intervention_queue[0].text
+        );
+    });
+    dedupe::reset_state_for_tests();
+}

@@ -520,7 +520,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
-│   │   │   └── slot_reset_host_pg_tests.rs
+│   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
@@ -733,16 +734,22 @@ src/
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── legacy_selection.rs
 │   │   │   └── parser.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── verified_tail/
+│   │   │   └── diagnostic_tests.rs
+│   │   ├── canary.rs
 │   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
+│   │   ├── verified_hold.rs
+│   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
 │   ├── discord/
 │   │   ├── abandon_request_store/
@@ -767,10 +774,12 @@ src/
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── input_clear.rs
 │   │   │   │   ├── input_clear_tests.rs
+│   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
@@ -1134,7 +1143,8 @@ src/
 │   │   │   │   ├── test_barriers.rs
 │   │   │   │   └── watcher_claim.rs
 │   │   │   ├── rebind_runtime/
-│   │   │   │   └── codex_relay_generation.rs
+│   │   │   │   ├── codex_relay_generation.rs
+│   │   │   │   └── codex_spawn.rs
 │   │   │   ├── restore_inflight/
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
@@ -1250,6 +1260,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── tui_followup/
+│   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
@@ -1808,6 +1820,7 @@ src/
 │   │   ├── adk_session_selector_checked_tests.rs
 │   │   ├── admin_host_guard.rs
 │   │   ├── admin_host_guard_tests.rs
+│   │   ├── admin_host_guard_verified_reset_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
@@ -2294,6 +2307,7 @@ src/
 │   │   │   ├── adoption.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
@@ -2337,11 +2351,19 @@ src/
 │   │   ├── binding_events/
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
-│   │   │   └── lane_tests.rs
+│   │   │   ├── codex_claim_tests.rs
+│   │   │   ├── lane_tests.rs
+│   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── adopt_skip.rs
+│   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs
+│   │   │   ├── codex_cursor.rs
 │   │   │   ├── codex_hook.rs
+│   │   │   ├── codex_legacy_lock_tests.rs
+│   │   │   ├── codex_policy.rs
+│   │   │   ├── codex_verified.rs
+│   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
