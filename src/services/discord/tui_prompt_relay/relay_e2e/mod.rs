@@ -515,6 +515,21 @@ impl RelayE2eHarness {
         self.mock.release_held_note.notify_one();
     }
 
+    /// Holds the next history `GET` open until [`Self::release_held_history`].
+    pub(super) fn hold_next_history(&self) {
+        self.mock.hold_next_history.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) async fn wait_for_held_history(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.mock.history_held.notified())
+            .await
+            .is_ok()
+    }
+
+    pub(super) fn release_held_history(&self) {
+        self.mock.release_held_history.notify_one();
+    }
+
     /// Points the notify bot at the mock; `timeout` bounds each of its requests.
     pub(super) async fn use_mock_notify_bot(&self, timeout: Duration) {
         let client = reqwest::Client::builder()
