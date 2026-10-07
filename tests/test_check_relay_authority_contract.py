@@ -65,7 +65,7 @@ def write_workflow(
     workflow.write_text(
         yaml.safe_dump({"jobs": {
             contract.RELAY_AUTHORITY_JOB: {
-                "if": "always()",
+                "if": "${{ !cancelled() }}",
                 "needs": [contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
             },
             contract.RELAY_AUTHORITY_TARGETS_JOB: {"steps": steps},

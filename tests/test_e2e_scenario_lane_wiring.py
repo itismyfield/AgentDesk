@@ -90,7 +90,7 @@ class E2eScenarioLaneWiring(unittest.TestCase):
     def test_census_target_remains_required_by_the_always_publisher(self) -> None:
         jobs = yaml.safe_load(self.workflow)["jobs"]
         publisher = jobs["relay-authority-contract"]
-        self.assertEqual(publisher["if"], "always()")
+        self.assertEqual(publisher["if"], "${{ !cancelled() }}")
         self.assertEqual(publisher["needs"], [UNCONDITIONAL_JOB, "relay_authority_mutations"])
         census_steps = [step for step in jobs[UNCONDITIONAL_JOB]["steps"]
                         if CENSUS_TARGET in step.get("run", "")]

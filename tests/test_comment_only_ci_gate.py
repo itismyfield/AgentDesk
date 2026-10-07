@@ -370,8 +370,8 @@ def evaluate(expr: str, lookup) -> object:
         if kind == "id" and value in ("true", "false"):
             return value == "true"
         if kind == "id" and tokens[index] == ("op", "("):
-            assert value == "always" and take() == ("op", "(") and take() == ("op", ")"), expr
-            return True
+            assert value in ("always", "cancelled") and take() == ("op", "(") and take() == ("op", ")"), expr
+            return value == "always" or truthy(lookup("cancelled()"))
         assert kind == "id", expr
         return lookup(value)
 
@@ -422,6 +422,10 @@ def render(value: object, lookup) -> str:
     return text
 
 
+def mirror_steps(job: dict) -> list[dict]:
+    return [s for s in job.get("steps", []) if s.get("run") == "./scripts/required-check-mirror.sh"]
+
+
 class WorkflowSimulation:
     """Evaluates one ci-pr.yml run from the filter and gate step outputs."""
 
@@ -432,7 +436,9 @@ class WorkflowSimulation:
         forced: dict[str, str] | None = None,
         rust_tests_skip: str | None = None,
         gate_outcome: str = "success",
+        run_cancelled: bool = False,
     ):
+        self.run_cancelled = run_cancelled
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
@@ -448,12 +454,14 @@ class WorkflowSimulation:
         self.changes = {key: render(value, step_lookup) for key, value in self.jobs["changes"]["outputs"].items()}
         self.results = {"changes": "success"}
         for job_id, job in self.jobs.items():
-            if job_id != "changes" and "always()" not in str(job.get("if", "")):
+            if job_id != "changes" and not mirror_steps(job):
                 runs = "if" not in job or truthy(evaluate(job["if"], self.lookup))
                 self.results[job_id] = "success" if runs else "skipped"
         self.results.update(forced or {})
 
     def lookup(self, name: str) -> object:
+        if name == "cancelled()":
+            return self.run_cancelled
         parts = name.split(".")
         assert parts[0] == "needs", name
         if parts[2] == "outputs":
@@ -465,11 +473,10 @@ class WorkflowSimulation:
         """Every job that publishes through required-check-mirror.sh, keyed by its context name."""
         published: dict[str, list[subprocess.CompletedProcess[str]]] = {}
         for job in self.jobs.values():
-            mirror_steps = [s for s in job.get("steps", []) if s.get("run") == "./scripts/required-check-mirror.sh"]
-            if not mirror_steps:
+            if not mirror_steps(job) or not self.job_runs(job):
                 continue
             runs = published.setdefault(job["name"], [])
-            for step in mirror_steps:
+            for step in mirror_steps(job):
                 if "if" in step and not truthy(evaluate(render(step["if"], self.lookup), self.lookup)):
                     continue
                 env = {key: render(value, self.lookup) for key, value in step["env"].items()}
@@ -478,6 +485,17 @@ class WorkflowSimulation:
                     capture_output=True, text=True, check=False,
                 ))
         return published
+
+    def job_runs(self, job: dict) -> bool:
+        """A job-level `if:`; one without a status function implies success(), as in Actions."""
+        whole = re.fullmatch(r"\$\{\{(.*)\}\}", str(job.get("if", "")).strip(), re.S)
+        condition = (whole.group(1) if whole else str(job.get("if", ""))).strip()
+        if re.search(r"\b(?:always|cancelled)\(", condition):
+            return truthy(evaluate(condition, self.lookup))
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        succeeded = not self.run_cancelled and all(self.results[name] == "success" for name in needs)
+        return succeeded and (not condition or truthy(evaluate(condition, self.lookup)))
 
 
 # Raw filters for a comment edit that selects every heavy lane.
@@ -547,6 +565,24 @@ class WorkflowWiringTests(unittest.TestCase):
         kept = WorkflowSimulation(HEAVY_RAW, "true", forced={"library_sweep": "skipped"}, rust_tests_skip="false")
         codes = [result.returncode for result in kept.mirror_runs()["Library test sweep (ubuntu-latest)"]]
         self.assertIn(1, codes, "library sweep kept for an include reader passed while skipped")
+
+    def test_only_a_cancelled_run_stops_the_required_context_mirrors(self) -> None:
+        # A condition-skipped required job counts as passing, and a job timeout reads as `cancelled`.
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        needs = {job["name"]: [job["needs"]] if isinstance(job["needs"], str) else job["needs"]
+                 for job in jobs.values() if mirror_steps(job)}
+        self.assertLessEqual(set(REQUIRED_CONTEXTS), set(needs))
+        for upstream in sorted({name for names in needs.values() for name in names}):
+            for outcome in ("failure", "skipped", "cancelled"):
+                with self.subTest(upstream=upstream, outcome=outcome):
+                    live = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: outcome}).mirror_runs()
+                    self.assertEqual(set(live), set(needs), "a live run skipped a required-context mirror")
+                    for context, names in needs.items():
+                        if upstream in names and outcome != "skipped":
+                            self.assertIn(1, [run.returncode for run in live[context]], context)
+            with self.subTest(upstream=upstream, run="cancelled"):
+                cancelled = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: "cancelled"}, run_cancelled=True)
+                self.assertEqual(cancelled.mirror_runs(), {}, "a cancelled run still published a mirror")
 
 
 if __name__ == "__main__":
