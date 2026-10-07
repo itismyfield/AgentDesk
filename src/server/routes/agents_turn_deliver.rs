@@ -369,7 +369,8 @@ mod pg_tests {
         );
     }
 
-    /// The route reaches a scripted pane only when switched on; a veto queues and names itself.
+    /// The route reaches a scripted pane only when switched on; a pane veto hands the input back to
+    /// the queue front and names itself.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg() {
@@ -430,7 +431,7 @@ mod pg_tests {
             [
                 "inject-on: 200 injected turn=null reason=null veto=- detail=- keys=[\"paste-buffer\", \"send-keys\"] tmux=true queued=0",
                 "inject-off: 200 queued turn=discord:6245122:* reason=external_turn_active veto=- detail=- keys=[] tmux=false queued=1",
-                "inject-attached: 200 queued turn=discord:6245123:* reason=external_turn_active veto=human_attached detail=- keys=[] tmux=true queued=1",
+                "inject-attached: 200 queued turn=discord:6245123:* reason=handed_back veto=human_attached detail=- keys=[] tmux=true queued=1",
                 "inject-unconfirmed: 200 unconfirmed turn=null reason=inject_unconfirmed veto=- detail=paste_failed keys=[] tmux=true queued=0",
             ]
         );
