@@ -895,3 +895,30 @@ async fn an_unconfigured_channel_passes_both_entries_without_a_read() {
 
 #[path = "provider_dispatch_herdr_reconnect_tests.rs"]
 mod reconnect;
+
+// A Herdr turn takes its stop state before launch even with the Escape switch off, and records
+// its submitted prompt there; no stop intent exists until a user stop records one.
+#[test]
+fn a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg() {
+    let fx = Fixture::new("stopstate", None);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    let token = fx.cancel.lock().unwrap().clone();
+    assert!(!crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled());
+    let state = token
+        .herdr_interrupt_state()
+        .expect("the turn holds its stop state");
+    use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+    assert_eq!(
+        *state.submission.lock().unwrap(),
+        HerdrSubmission::Submitted
+    );
+    assert!(!state.user_stop.load(Ordering::SeqCst));
+    assert_eq!(token.tmux_session_name().as_deref(), Some(fx.logical()));
+}

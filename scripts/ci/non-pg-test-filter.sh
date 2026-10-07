@@ -101,6 +101,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   --skip services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   --skip services::auto_queue::runtime::slot_reset_host_pg_tests::host
+  --skip services::auto_queue::runtime::verified_reset_pg_tests
   --skip services::auto_queue::tests
   --skip services::automation_candidate_materializer::iteration_result_tests
   --skip services::cluster::attachment_transfer::storage_tests
@@ -168,6 +169,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
   --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
+  --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   --skip services::discord::router::message_handler::provider_dispatch::tests
@@ -843,6 +845,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   services::auto_queue::runtime::slot_reset_host_pg_tests::host
+  services::auto_queue::runtime::verified_reset_pg_tests
   services::auto_queue::tests
   services::automation_candidate_materializer::iteration_result_tests
   services::cluster::attachment_transfer::storage_tests
@@ -910,6 +913,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
   services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
+  services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
   services::discord::router::message_handler::provider_dispatch::herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   services::discord::router::message_handler::provider_dispatch::tests

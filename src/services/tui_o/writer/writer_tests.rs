@@ -198,6 +198,7 @@ impl Alarms {
 type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
 
 struct Harness {
+    channel_id: u64,
     _runtime: tempfile::TempDir,
     store: OStore,
     gate: Arc<OwnershipGate>,
@@ -213,6 +214,13 @@ impl Harness {
 
     /// `sources` may create transcripts under the runtime root before the era begins.
     fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
+        Self::build_channel(CHANNEL, sources)
+    }
+
+    fn build_channel(
+        channel_id: u64,
+        sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>,
+    ) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
             .unwrap()
@@ -228,12 +236,12 @@ impl Harness {
                 at,
             })
         };
-        store.begin_era(&[CHANNEL], Utc::now(), init).unwrap();
+        store.begin_era(&[channel_id], Utc::now(), init).unwrap();
         let port = Arc::new(FakePort::default());
         let ledger = runtime
             .path()
             .join("o_store")
-            .join(CHANNEL.to_string())
+            .join(channel_id.to_string())
             .join("ledger.jsonl");
         *port.ledger.lock().unwrap() = Some(ledger);
         let (gate, lease) = (
@@ -241,6 +249,7 @@ impl Harness {
             Arc::new(FakeLease::default()),
         );
         Self {
+            channel_id,
             _runtime: runtime,
             store,
             gate,
@@ -252,7 +261,10 @@ impl Harness {
 
     fn channel(&self) -> ChannelStore {
         let era = self.store.read_era().unwrap().unwrap();
-        self.store.open_channel(&era, CHANNEL).unwrap().unwrap()
+        self.store
+            .open_channel(&era, self.channel_id)
+            .unwrap()
+            .unwrap()
     }
 
     fn writer(&self) -> Writer {

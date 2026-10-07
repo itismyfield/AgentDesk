@@ -130,10 +130,12 @@ pub(crate) use tmux_runtime::TmuxCleanupPolicy;
 pub(super) use tmux_runtime::bind_cancel_token_tmux_runtime;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::handoff_interrupted_message;
+#[cfg(unix)]
+pub(super) use tmux_runtime::herdr_marked;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::tmux_generation_file_mtime_ns;
 pub(super) use tmux_runtime::{
-    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, keeps_turn,
+    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, begin_user_stop, keeps_turn,
 };
 pub(super) use tmux_runtime::{
     stop_active_turn, stop_active_turn_with_outcome, stop_approved_turn,
@@ -695,10 +697,13 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 return;
             }
         }
-        if is_external_input_tui_direct && rx_disconnected {
-            // The reader never supplied an admitted terminal frame. Preserve
-            // the captured source/row for recovery; a partial stream is not a
-            // successfully published terminal response.
+        let terminal_admitted = stream_loop_output.codex_tui_terminal_range.is_some();
+        let unconfirmed = stream_loop::exit_reconcile::herdr_stop_unconfirmed;
+        if (is_external_input_tui_direct && rx_disconnected)
+            || unconfirmed(&cancel_token, cancelled, terminal_admitted)
+        {
+            // No admitted terminal frame: keep the source/row for recovery, or a stopped
+            // Herdr turn for its provider; a partial stream is not a terminal response.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;

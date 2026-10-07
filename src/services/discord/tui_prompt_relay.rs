@@ -69,6 +69,8 @@ use self::rehydration::{
     codex_tui_rehydrated_binding_from_rollout_path, rehydrate_existing_claude_tui_bindings,
     rehydrate_existing_codex_tui_bindings, rehydrated_claude_tui_binding_for_tmux_session,
 };
+#[cfg(all(unix, test))]
+pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
 
 mod anchor_completion;
 mod bridge_completion;

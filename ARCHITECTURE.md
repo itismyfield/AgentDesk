@@ -520,7 +520,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
-│   │   │   └── slot_reset_host_pg_tests.rs
+│   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
@@ -728,21 +729,28 @@ src/
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── startup_update_tests.rs
+│   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── legacy_selection.rs
 │   │   │   └── parser.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── verified_tail/
+│   │   │   └── diagnostic_tests.rs
+│   │   ├── canary.rs
 │   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
+│   │   ├── verified_hold.rs
+│   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
 │   ├── discord/
 │   │   ├── abandon_request_store/
@@ -753,6 +761,8 @@ src/
 │   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
+│   │   │   ├── consumed_commands.rs
+│   │   │   ├── consumed_commands_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
@@ -765,10 +775,12 @@ src/
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── input_clear.rs
 │   │   │   │   ├── input_clear_tests.rs
+│   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
@@ -1132,7 +1144,8 @@ src/
 │   │   │   │   ├── test_barriers.rs
 │   │   │   │   └── watcher_claim.rs
 │   │   │   ├── rebind_runtime/
-│   │   │   │   └── codex_relay_generation.rs
+│   │   │   │   ├── codex_relay_generation.rs
+│   │   │   │   └── codex_spawn.rs
 │   │   │   ├── restore_inflight/
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
@@ -1248,6 +1261,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── tui_followup/
+│   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
@@ -1258,6 +1273,7 @@ src/
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -1534,6 +1550,7 @@ src/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
+│   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
@@ -1541,6 +1558,7 @@ src/
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
 │   │   │   │   ├── stale_resume_retry_e2e.rs
+│   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
@@ -1548,6 +1566,7 @@ src/
 │   │   │   │   ├── claim_entry_tests.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs
@@ -1806,6 +1825,7 @@ src/
 │   │   ├── adk_session_selector_checked_tests.rs
 │   │   ├── admin_host_guard.rs
 │   │   ├── admin_host_guard_tests.rs
+│   │   ├── admin_host_guard_verified_reset_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
@@ -2293,6 +2313,7 @@ src/
 │   │   │   ├── adoption.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
@@ -2336,11 +2357,19 @@ src/
 │   │   ├── binding_events/
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
-│   │   │   └── lane_tests.rs
+│   │   │   ├── codex_claim_tests.rs
+│   │   │   ├── lane_tests.rs
+│   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── adopt_skip.rs
+│   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs
+│   │   │   ├── codex_cursor.rs
 │   │   │   ├── codex_hook.rs
+│   │   │   ├── codex_legacy_lock_tests.rs
+│   │   │   ├── codex_policy.rs
+│   │   │   ├── codex_verified.rs
+│   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
@@ -2371,6 +2400,7 @@ src/
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
+│   │   ├── herdr_user_stop.rs
 │   │   ├── inbound_order.rs
 │   │   ├── incarnation.rs
 │   │   ├── injected_inputs.rs

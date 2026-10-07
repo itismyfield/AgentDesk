@@ -494,6 +494,10 @@ fn sweep(
         {
             continue;
         }
+        // Retirement cannot dispose verified delivery evidence before explicit disposition.
+        if ctx.provider == "codex" && ctx.source_policy.as_deref() == Some("verified") {
+            continue;
+        }
         let presence = probe(&ctx.tmux_session);
         tc::with_tmux_source_authority(&ctx.tmux_session, |_| {
             let retired = match observe_spawn_nonce_marker(&ctx.tmux_session) {
@@ -710,6 +714,86 @@ pub(crate) mod tests {
         }
         assert!(kept.path.exists());
         assert!(!retired.path.exists());
+    }
+    #[test]
+    fn binding_context_retired_verified_sweep_preserves_launch_evidence() {
+        let (root, _env) = fixture();
+        let _tmux = fake_tmux(root.path());
+        let template = prepared().context;
+        for (provider, policy) in [
+            ("codex", Some("verified")),
+            ("codex", Some("legacy")),
+            ("codex", None),
+            ("claude", Some("verified")),
+        ] {
+            for marker in ["same", "other", "absent", "unreadable"] {
+                for presence in [Present, Missing, ProbeFailed] {
+                    let mut context = template.clone();
+                    context.provider = provider.into();
+                    context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+                    context.tmux_session = format!("binding-{}", context.execution_nonce);
+                    context.source_policy = policy.map(str::to_owned);
+                    context.created_at = Utc::now() - chrono::Duration::days(8);
+                    let p = PreparedIncarnation::create(context).unwrap();
+                    let bytes = fs::read(&p.path).unwrap();
+                    let marker_path = tc::session_temp_path(&p.context.tmux_session, "spawn_nonce");
+                    match marker {
+                        "same" => fs::write(marker_path, &p.context.execution_nonce).unwrap(),
+                        "other" => fs::write(marker_path, "replacement").unwrap(),
+                        "unreadable" => fs::create_dir(marker_path).unwrap(),
+                        _ => (),
+                    }
+                    sweep(provider, Utc::now(), 128, |_| presence);
+                    let retired = marker == "other" || (marker == "absent" && presence == Missing);
+                    let protected = provider == "codex" && policy == Some("verified");
+                    assert_eq!(p.path.exists(), protected || !retired);
+                    if p.path.exists() {
+                        assert_eq!(fs::read(&p.path).unwrap(), bytes);
+                        fs::remove_file(p.path).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn binding_context_new_launch_preserves_retired_verified_and_temp_evidence() {
+        let (root, _env) = fixture();
+        let _tmux = fake_tmux(root.path());
+        let mut context = prepared().context;
+        context.provider = "codex".into();
+        context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+        context.created_at = Utc::now() - chrono::Duration::days(8);
+        context.source_policy = Some("verified".into());
+        let verified = PreparedIncarnation::create(context.clone()).unwrap();
+        fs::write(
+            tc::session_temp_path(&context.tmux_session, "spawn_nonce"),
+            "replacement",
+        )
+        .unwrap();
+        let bytes = fs::read(&verified.path).unwrap();
+        let temp = verified
+            .path
+            .parent()
+            .unwrap()
+            .join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        fs::write(&temp, &bytes).unwrap();
+        context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+        context.source_policy = Some("legacy".into());
+        let legacy = PreparedIncarnation::create(context).unwrap();
+        let next = PreparedIncarnation::prepare_pinned(
+            "codex",
+            "binding-next-launch",
+            Some(42),
+            None,
+            false,
+            Some(root.path().join("codex")),
+            (None, Some("legacy".into())),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&verified.path).unwrap(), bytes);
+        assert_eq!(fs::read(&temp).unwrap(), bytes);
+        assert!(!legacy.path.exists());
+        assert!(next.path.exists());
     }
     #[test]
     fn binding_context_capture_errors_and_header_codec_are_bounded() {

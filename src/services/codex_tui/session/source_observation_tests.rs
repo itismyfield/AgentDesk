@@ -1255,6 +1255,8 @@ fn shadow_ingress_is_readonly_before_equality_and_without_a_source_map() {
                             Err(e) => panic!("accept ordered HTTP: {e}"),
                         }
                     };
+                    // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+                    socket.set_nonblocking(false).unwrap();
                     socket
                         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                         .unwrap();

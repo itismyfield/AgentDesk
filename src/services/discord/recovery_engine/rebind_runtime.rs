@@ -1,3 +1,7 @@
+#[path = "rebind_runtime/codex_spawn.rs"]
+mod codex_spawn;
+pub(super) use codex_spawn::spawn_codex_tui_rebind_relay_output;
+
 use super::*;
 use crate::services::discord::host_liveness::{not_dead, observe_liveness};
 
@@ -51,10 +55,24 @@ pub(super) fn resolve_rebind_runtime_state(
             .filter(|path| !path.is_empty())
             .filter(|path| !codex_rebind_saved_output_is_normalized_relay(tmux_session_name, path))
             .filter(|path| std::fs::metadata(path).is_ok())
+            .filter(|path| {
+                crate::services::tui_prompt_dedupe::codex_verified_source_allowed(
+                    tmux_session_name,
+                    path,
+                    existing_session_id.as_deref(),
+                )
+            })
             .map(str::to_string);
         let codex_rollout_marker =
             crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)
                 .filter(|marker| std::fs::metadata(&marker.rollout_path).is_ok())
+                .filter(|marker| {
+                    crate::services::tui_prompt_dedupe::codex_verified_source_allowed(
+                        tmux_session_name,
+                        &marker.rollout_path.to_string_lossy(),
+                        marker.session_id.as_deref(),
+                    )
+                })
                 .filter(|marker| {
                     codex_rebind_marker_session_matches(marker, existing_session_id.as_deref())
                 });
@@ -145,6 +163,11 @@ pub(super) fn resolve_rebind_runtime_state(
         if let Some(session_id) = existing_session_id.as_deref()
             && let Some(rollout) =
                 crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(session_id)
+            && crate::services::tui_prompt_dedupe::codex_verified_source_allowed(
+                tmux_session_name,
+                &rollout.to_string_lossy(),
+                Some(session_id),
+            )
         {
             let output_path = rollout.display().to_string();
             return Ok(RebindRuntimeState {
@@ -407,182 +430,6 @@ fn persist_codex_tui_rebind_rollout_cursor(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_codex_tui_rebind_relay_output(
-    tmux_session_name: &str,
-    rollout_path: &str,
-    raw_start_offset: u64,
-    truncate_relay_output: bool,
-    watcher_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    session_id: Option<String>,
-    already_relayed_response: String,
-    already_normalized_replay_events: Vec<serde_json::Value>,
-) -> Result<String, RebindError> {
-    let relay_output_path =
-        crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-    let (relay_generation_gate, relay_generation) =
-        prepare_codex_rebind_relay_generation(&relay_output_path, truncate_relay_output)?;
-
-    crate::services::codex_tui::session::install_codex_tui_runtime_binding(
-        tmux_session_name,
-        Some(raw_start_offset),
-        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            runtime_kind: RuntimeHandoffKind::CodexTui,
-            output_path: rollout_path.to_string(),
-            relay_output_path: Some(relay_output_path.clone()),
-            input_fifo_path: None,
-            session_id: session_id.clone(),
-            last_offset: raw_start_offset,
-            relay_last_offset: Some(0),
-        },
-    );
-
-    let tmux_session_name = tmux_session_name.to_string();
-    let rollout_path = std::path::PathBuf::from(rollout_path);
-    let relay_path = std::path::PathBuf::from(&relay_output_path);
-    let watcher_cancel_for_writer = watcher_cancel.clone();
-    std::thread::Builder::new()
-        .name("codex_tui_rebind_relay_writer".to_string())
-        .spawn(move || {
-            let (sender, receiver) =
-                std::sync::mpsc::channel::<crate::services::agent_protocol::StreamMessage>();
-            let tail_rollout_path = rollout_path.clone();
-            let tail_tmux_session_name = tmux_session_name.clone();
-            let tail_session_id = session_id.clone();
-            let tail_cancel_token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-            let cancel_bridge_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let watcher_cancel_for_bridge = watcher_cancel_for_writer.clone();
-            let tail_cancel_for_bridge = tail_cancel_token.clone();
-            let cancel_bridge_done_for_thread = cancel_bridge_done.clone();
-            let cancel_bridge_handle = std::thread::Builder::new()
-                .name("codex_tui_rebind_cancel_bridge".to_string())
-                .spawn(move || {
-                    while !cancel_bridge_done_for_thread
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        if watcher_cancel_for_bridge.load(std::sync::atomic::Ordering::Relaxed) {
-                            tail_cancel_for_bridge
-                                .cancelled
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                });
-            if let Err(error) = &cancel_bridge_handle {
-                tracing::warn!(
-                    tmux_session = %tmux_session_name,
-                    error = %error,
-                    "failed to spawn Codex TUI rebind cancel bridge"
-                );
-            }
-            let watcher_cancel_for_alive = watcher_cancel_for_writer.clone();
-            let tail_handle = std::thread::Builder::new()
-                .name("codex_tui_rebind_rollout_tail".to_string())
-                .spawn(move || {
-                    crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
-                        &tail_rollout_path,
-                        raw_start_offset,
-                        tail_session_id.as_deref(),
-                        sender,
-                        Some(tail_cancel_token),
-                        || {
-                            !watcher_cancel_for_alive
-                                .load(std::sync::atomic::Ordering::Relaxed)
-                                && not_dead(observe_liveness(&tail_tmux_session_name, None))
-                        },
-                        &tail_tmux_session_name,
-                    )
-                });
-
-            let writer_result = write_codex_rebind_normalized_stream_for_generation(
-                &relay_path,
-                receiver,
-                already_relayed_response,
-                already_normalized_replay_events,
-                &relay_generation_gate,
-                relay_generation,
-            );
-            if let Err(error) = &writer_result {
-                tracing::warn!(
-                    tmux_session = %tmux_session_name,
-                    relay_output_path = %relay_path.display(),
-                    error = %error,
-                    "Codex TUI rebind relay writer failed"
-                );
-            }
-
-            match tail_handle {
-                Ok(handle) => match handle.join() {
-                    Ok(Ok(read_result)) => {
-                        let (final_offset, advance_cursor) = match read_result {
-                            crate::services::provider::ReadOutputResult::Completed { offset }
-                            | crate::services::provider::ReadOutputResult::SessionDied {
-                                offset,
-                            } => (offset, true),
-                            crate::services::provider::ReadOutputResult::Cancelled { offset } => {
-                                (offset, false)
-                            }
-                        };
-                        if writer_result.is_ok() && advance_cursor {
-                            crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
-                                &tmux_session_name,
-                                &rollout_path,
-                                final_offset,
-                            );
-                        } else if !advance_cursor {
-                            tracing::warn!(
-                                tmux_session = %tmux_session_name,
-                                rollout_path = %rollout_path.display(),
-                                final_offset,
-                                "Codex TUI rebind relay was cancelled with watcher; preserving previous raw rollout cursor for retry"
-                            );
-                        } else {
-                            tracing::warn!(
-                                tmux_session = %tmux_session_name,
-                                rollout_path = %rollout_path.display(),
-                                final_offset,
-                                "Codex TUI rebind relay writer failed; preserving previous raw rollout cursor for retry"
-                            );
-                        }
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            tmux_session = %tmux_session_name,
-                            rollout_path = %rollout_path.display(),
-                            error = %error,
-                            "Codex TUI rebind rollout tail failed"
-                        );
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            tmux_session = %tmux_session_name,
-                            rollout_path = %rollout_path.display(),
-                            "Codex TUI rebind rollout tail panicked"
-                        );
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        tmux_session = %tmux_session_name,
-                        rollout_path = %rollout_path.display(),
-                        error = %error,
-                        "failed to spawn Codex TUI rebind rollout tail"
-                    );
-                }
-            }
-            cancel_bridge_done.store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Ok(handle) = cancel_bridge_handle {
-                let _ = handle.join();
-            }
-        })
-        .map_err(|error| {
-            RebindError::Internal(format!("spawn Codex TUI rebind relay writer: {error}"))
-        })?;
-
-    Ok(relay_output_path)
-}
-
 #[cfg(test)]
 fn write_codex_rebind_normalized_stream(
     relay_path: &std::path::Path,
@@ -601,6 +448,7 @@ fn write_codex_rebind_normalized_stream(
         already_normalized_replay_events,
         &relay_generation_gate,
         relay_generation,
+        None,
     )
 }
 
@@ -611,7 +459,20 @@ fn write_codex_rebind_normalized_stream_for_generation(
     already_normalized_replay_events: Vec<serde_json::Value>,
     relay_generation_gate: &CodexRebindRelayGenerationGate,
     relay_generation: u64,
+    source: Option<(&str, &std::path::Path, Option<&str>)>,
 ) -> Result<(), String> {
+    let source_allowed = || {
+        source.is_none_or(|(tmux, path, session_id)| {
+            crate::services::tui_prompt_dedupe::codex_verified_source_allowed(
+                tmux,
+                &path.to_string_lossy(),
+                session_id,
+            )
+        })
+    };
+    if !source_allowed() {
+        return Err("Codex relay writer lacks source proof or permission".into());
+    }
     let mut already_relayed_response = already_relayed_response;
     let mut known_response_for_done = already_relayed_response.clone();
     let mut already_normalized_replay_events =
@@ -633,6 +494,9 @@ fn write_codex_rebind_normalized_stream_for_generation(
         .open(relay_path)
         .map_err(|error| format!("open {}: {error}", relay_path.display()))?;
     for message in receiver {
+        if !source_allowed() {
+            return Err("Codex relay writer source proof or permission changed".into());
+        }
         let Some(message) =
             codex_rebind_message_after_relayed_prefix(message, &mut already_relayed_response)
         else {
@@ -2247,5 +2111,41 @@ mod tests {
             "tool input must stay as JSON object, got {input:?}"
         );
         assert_eq!(input["command"].as_str(), Some("cargo test"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) use test_support::{REBIND_WRITER_SPAWNS, codex_rebind_spawn_for_tests};
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    #[cfg(test)]
+    thread_local! {
+        pub(crate) static REBIND_WRITER_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn codex_rebind_spawn_for_tests(
+        tmux: &str,
+        path: &str,
+        session_id: Option<String>,
+        truncate: bool,
+    ) -> (bool, usize) {
+        let before = REBIND_WRITER_SPAWNS.with(std::cell::Cell::get);
+        let result = spawn_codex_tui_rebind_relay_output(
+            tmux,
+            path,
+            0,
+            truncate,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            session_id,
+            String::new(),
+            Vec::new(),
+        );
+        (
+            result.is_ok(),
+            REBIND_WRITER_SPAWNS.with(|count| count.get() - before),
+        )
     }
 }

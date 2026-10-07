@@ -13,8 +13,9 @@ async fn cancel_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
     channel_id: serenity::ChannelId,
+    reason: &str,
 ) -> CommandStop {
-    super::super::turn_bridge::begin_command_stop(shared, provider, channel_id, true).await
+    super::super::turn_bridge::begin_user_stop(shared, provider, channel_id, true, reason).await
 }
 
 /// #1672: After a `!stop`/`!cc stop` completes, kick the deferred
@@ -379,7 +380,8 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
         TextCommandId::Stop => {
             let stop_lookup =
-                cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
+                cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id, "!stop")
+                    .await;
             match stop_lookup {
                 CommandStop::Session(stop) => {
                     stop.interrupt("!stop").await;
@@ -421,6 +423,11 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 }
                 CommandStop::NoActiveTurn => {
                     let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
+                }
+                // The turn stays with its provider: no cancel finalize and no queue drain.
+                #[cfg(unix)]
+                CommandStop::Herdr(stop) => {
+                    let _ = msg.reply(&ctx.http, stop.reply()).await;
                 }
             }
             return Ok(true);
@@ -1277,9 +1284,13 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         let _ = msg.reply(&ctx.http, reply).await;
                         return Ok(true);
                     }
-                    let stop_lookup =
-                        cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id)
-                            .await;
+                    let stop_lookup = cancel_text_stop_token_mailbox(
+                        &data.shared,
+                        &data.provider,
+                        channel_id,
+                        stop_reason,
+                    )
+                    .await;
                     match stop_lookup {
                         CommandStop::Session(stop) => {
                             stop.interrupt(&stop_reason).await;
@@ -1320,6 +1331,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         }
                         CommandStop::NoActiveTurn => {
                             let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
+                        }
+                        #[cfg(unix)]
+                        CommandStop::Herdr(stop) => {
+                            let _ = msg.reply(&ctx.http, stop.reply()).await;
                         }
                     }
                     return Ok(true);

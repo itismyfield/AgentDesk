@@ -561,3 +561,8 @@ impl std::fmt::Display for RebindError {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use rebind_runtime::codex_rebind_spawn_for_tests;
+#[cfg(test)]
+pub(crate) use restore_persist_outcome::codex_restart_output_for_tests;

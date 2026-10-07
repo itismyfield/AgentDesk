@@ -992,7 +992,7 @@ def validate_scenario_filter(raw: str | None, scenarios_dir: Path) -> set[str]:
 STEP_OPTIONS = {
     "send_prompt": None, "send_discord_prompt": None, "send_keys": None, "send_keys_no_enter": None,
     "wait_for_discord_text": None, "wait_for_raw_discord_text": None, "wait_idle_s": None,
-    "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target"},
+    "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target", "require_status", "allowed_degraded_reasons"},
     "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
     "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
     "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"},
@@ -2139,7 +2139,8 @@ def _health_ready_violations(
         violations.append("ok=false")
     if strict_healthy and payload.get("degraded") is True:
         violations.append("degraded=true")
-    if strict_healthy and payload.get("fully_recovered") is False:
+    # Startup recovery is its own readiness axis; allowing degraded status does not waive it.
+    if payload.get("fully_recovered") is False:
         violations.append("fully_recovered=false")
 
     degraded_reasons = payload.get("degraded_reasons") or []
@@ -4041,15 +4042,20 @@ def run_one_cell(
                 )
                 raise ScenarioStepAssertionError(str(error), record=record) from error
         elif "restart_dcserver" in step:
-            target = args.restart_target_override or (step["restart_dcserver"] or {}).get(
-                "target", "release"
-            )
+            restart_options = step["restart_dcserver"] or {}
+            target = args.restart_target_override or restart_options.get("target", "release")
             restart_dcserver_for_e2e(
                 target=target,
                 args=args,
                 base_url=client.base_url,
                 cell=cell,
                 channel_id=channel_id,
+                require_status=_as_string_tuple(
+                    restart_options.get("require_status"), default=("healthy",)
+                ),
+                allowed_degraded_reasons=_as_string_tuple(
+                    restart_options.get("allowed_degraded_reasons")
+                ),
             )
         elif "poison_claude_tui_relay_offset" in step:
             record.setdefault("poisoned_offsets", []).append(
@@ -4618,6 +4624,8 @@ def restart_dcserver_for_e2e(
     base_url: str,
     cell: str,
     channel_id: str,
+    require_status: tuple[str, ...] = ("healthy",),
+    allowed_degraded_reasons: tuple[str, ...] = (),
 ) -> None:
     if target not in ("dev", "release"):
         raise assertions.AssertionError(f"unsupported restart target: {target!r}")
@@ -4642,12 +4650,26 @@ def restart_dcserver_for_e2e(
             )
     else:
         label = "com.agentdesk." + ("release" if target == "release" else "dev")
-        subprocess.run(
+        proc = subprocess.run(
             ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
             check=False,
             capture_output=True,
+            text=True,
         )
-    wait_for_health(base_url, timeout_s=90)
+        # A refused kickstart leaves the old server answering health; never pass on it.
+        if proc.returncode != 0:
+            raise assertions.AssertionError(
+                f"launchctl kickstart failed for {label} with exit {proc.returncode}\n"
+                f"stdout:\n{proc.stdout[-4000:]}\n"
+                f"stderr:\n{proc.stderr[-4000:]}"
+            )
+    # Same status/reason semantics as assert_health; the default stays healthy-only.
+    wait_for_health(
+        base_url,
+        timeout_s=90,
+        allowed_statuses=require_status,
+        allowed_degraded_reasons=allowed_degraded_reasons,
+    )
 
 
 def _assert_provider_hold_marker_seen(

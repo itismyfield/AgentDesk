@@ -118,8 +118,17 @@ impl RestartProbe {
     }
 }
 
-fn typed(provider: &ProviderKind) -> bool {
-    *provider == ProviderKind::Claude
+/// Claude rows, and Codex rows whose marker names another host than tmux while Codex turns may
+/// run on Herdr, read a deferred probe as deferred.
+fn typed(provider: &ProviderKind, name: &str) -> bool {
+    match provider {
+        ProviderKind::Claude => true,
+        ProviderKind::Codex => {
+            crate::services::turn_host::herdr_turn_switched_on_for(provider)
+                && !host_liveness::local_tmux(name, None)
+        }
+        _ => false,
+    }
 }
 
 /// The row's pane, retried while tmux settles, with no host-guard read.
@@ -128,7 +137,7 @@ fn restart_pane_local(
     name: &str,
     row: &InflightTurnState,
 ) -> RestartProbe {
-    if !typed(provider) {
+    if !typed(provider, name) {
         return RestartProbe::of_liveness(liveness_with_retry(name, None)).legacy();
     }
     RestartProbe::of_liveness(liveness_with_retry(name, Some(row)))
@@ -158,7 +167,7 @@ pub(super) async fn restart_session(
     let Some(name) = name else {
         return RestartProbe::Missing;
     };
-    if !typed(provider) {
+    if !typed(provider, name) {
         return RestartProbe::of_presence(presence_with_retry(name, None)).legacy();
     }
     let probe = RestartProbe::of_presence(presence_with_retry(name, Some(row)));
@@ -182,7 +191,7 @@ async fn admit_death(
     caller: &str,
 ) -> RestartProbe {
     let verdict = match probe {
-        RestartProbe::Missing if typed(provider) => {
+        RestartProbe::Missing if typed(provider, name) => {
             let observed = SessionLiveness::Missing;
             let channel = row.channel_id;
             let gate =
@@ -215,7 +224,8 @@ fn reader_probe(
     runtime_kind: RuntimeHandoffKind,
     output_path: &str,
 ) -> crate::services::provider::SessionProbe {
-    let tmux = (!typed(provider) || host_liveness::local_tmux(name, Some(row))).then_some(name);
+    let tmux =
+        (!typed(provider, name) || host_liveness::local_tmux(name, Some(row))).then_some(name);
     let probe = crate::services::claude::host_gate::host_poll_probe;
     probe(tmux, provider.clone(), Some(runtime_kind), output_path)
 }
@@ -521,6 +531,29 @@ mod tests {
             let presence_probe = RestartProbe::of_presence(presence_with_retry(&name, None));
             assert_eq!(presence_probe, claude_probe, "{presence:?}");
             assert_eq!(presence_probe.legacy(), codex_probe, "codex {presence:?}");
+        }
+    }
+
+    // T2-7: a Codex row on a Herdr pane defers like a Claude row once Codex turns run on Herdr,
+    // and reads alive as before while they do not.
+    #[tokio::test]
+    async fn a_codex_row_on_a_herdr_pane_defers_while_codex_turns_run_there() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let codex = ProviderKind::Codex;
+        let herdr = "AgentDesk-codex-p10-restart-herdr";
+        let marker = crate::services::tmux_common::session_temp_path(herdr, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, "herdr").unwrap();
+        let session = HostSessionRef::tmux(herdr);
+        let _pane = InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent);
+        let _presence = InjectedPresenceGuard::set(session, HostPresence::Missing);
+        let row = row(codex.clone(), herdr);
+        for (on, probe) in [(false, RestartProbe::Alive), (true, RestartProbe::Defer)] {
+            let _switch = crate::services::turn_host::force_codex_switch_for_test(Some(on));
+            let pane = restart_pane(&shared, &codex, &row, Some(herdr)).await;
+            let session = restart_session(&shared, &codex, &row, Some(herdr)).await;
+            assert_eq!((pane, session), (probe, probe), "switch on={on}");
         }
     }
 }

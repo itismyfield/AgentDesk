@@ -14,6 +14,13 @@ use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::{CommandStop, stop_active_turn};
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
 mod home_fence;
+mod managed_reset;
+#[cfg(all(test, unix))]
+use managed_reset::VERIFIED_CODEX_RESET_REFUSAL;
+pub(in crate::services::discord) use managed_reset::reset_managed_process_session;
+pub(in crate::services::discord) use managed_reset::{
+    verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
+};
 #[allow(dead_code)]
 pub(in crate::services::discord) mod input_clear;
 pub(in crate::services::discord) mod native;
@@ -124,35 +131,6 @@ fn pending_session_reset_plan(
     None
 }
 
-pub(in crate::services::discord) fn reset_managed_process_session(session_name: &str) -> bool {
-    let mut reset = false;
-    let lingering_pid =
-        crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);
-    if let Some(handle) = crate::services::session_backend::remove_process_session(session_name) {
-        crate::services::session_backend::terminate_process_handle(handle);
-        reset = true;
-    } else if let Some(pid) = lingering_pid {
-        if let Ok(pid) = u32::try_from(pid) {
-            crate::services::process::kill_pid_tree(pid);
-            reset = true;
-        }
-    }
-
-    #[cfg(unix)]
-    if crate::services::platform::tmux::has_session(session_name) {
-        crate::services::tmux_diagnostics::record_tmux_exit_reason(
-            session_name,
-            "managed session reset",
-        );
-        if crate::services::platform::tmux::kill_session(session_name, "managed session reset") {
-            crate::services::tmux_common::cleanup_session_temp_files(session_name);
-            reset = true;
-        }
-    }
-
-    reset
-}
-
 async fn resolve_session_key_for_clear(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -211,6 +189,10 @@ fn build_fallback_session_key_for_clear(
     super::super::adk_session::build_namespaced_session_key(token_hash, provider, &tmux_name)
 }
 
+#[cfg(test)]
+#[cfg(unix)]
+mod codex_verified_clear_tests;
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn reset_channel_provider_state(
     http: &Arc<serenity::Http>,
@@ -222,6 +204,9 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     clear_history: bool,
     recreate_tmux: bool,
 ) -> ManagedReset {
+    if let Some(reason) = verified_codex_reset_refusal(shared, provider, channel_id).await {
+        return ManagedReset::Refused(reason.to_owned());
+    }
     let refusal = super::super::admin_host_guard::managed_reset_refusal;
     let (reset, recreate) = (reset_provider_state, recreate_tmux);
     if let Some(reason) = refusal(shared, provider, channel_id, reset, recreate, None).await {
@@ -385,6 +370,10 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    let refusal = managed_reset::refusal_for_session_key;
+    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
+        anyhow::bail!(reason);
+    }
     if shared.pg_pool.is_none() {
         anyhow::bail!("postgres pool is required to persist a channel clear boundary");
     }
@@ -423,6 +412,10 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    let refusal = managed_reset::refusal_for_session_key;
+    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
+        anyhow::bail!(reason);
+    }
     home_fence::check(channel_id)?;
     // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
     let hosted = native::target(http, shared, provider, channel_id, explicit_session_key).await?;
@@ -436,6 +429,9 @@ async fn clear_channel_session_state_fenced(
         .acquire_session_transition(channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
+    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
+        anyhow::bail!(reason);
+    }
     let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;
     let tmux_name = {
         let data = shared.core.lock().await;

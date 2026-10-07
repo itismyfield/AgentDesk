@@ -86,18 +86,61 @@ pub(super) fn commit_live_direct_resume_fallback(
     tmux_session_name: &str,
     channel_id: ChannelId,
     fallback: Option<DirectResumeFallback>,
+    candidate: Option<TuiRuntimeBinding>,
+    watcher_output: &str,
     claim_watcher: impl FnOnce() -> bool,
 ) -> bool {
     #[cfg(not(unix))]
     {
-        let _ = (tmux_session_name, channel_id, fallback);
+        let _ = (
+            tmux_session_name,
+            channel_id,
+            fallback,
+            candidate,
+            watcher_output,
+        );
         claim_watcher()
     }
 
     #[cfg(unix)]
     {
         let Some(fallback) = fallback else {
-            return claim_watcher();
+            return tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+                let unresolved = TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::CodexTui,
+                    output_path: String::new(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: None,
+                    last_offset: 0,
+                    relay_last_offset: None,
+                };
+                if dedupe::codex_verified_publication_allowed(authority, &unresolved) {
+                    return claim_watcher();
+                }
+                if !dedupe::codex_verified_channel_allowed_under_source_authority(
+                    authority,
+                    channel_id.get(),
+                ) {
+                    return false;
+                }
+                let Some(candidate) = candidate else {
+                    return false;
+                };
+                if candidate.runtime_kind != RuntimeHandoffKind::CodexTui
+                    || !dedupe::codex_verified_publication_allowed(authority, &candidate)
+                {
+                    return false;
+                }
+                let Some(current) =
+                    dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+                else {
+                    return false;
+                };
+                codex_bindings_same_source(&candidate, &current)
+                    && watcher_output_matches(tmux_session_name, watcher_output, &current)
+                    && claim_watcher()
+            });
         };
         tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
             let Some(current) = rollout_fallback_for_live_direct_resume(
@@ -130,17 +173,85 @@ pub(super) fn commit_live_direct_resume_fallback(
                     Some(_) => return false,
                     None => current.binding,
                 };
-            if !claim_watcher() {
+            if !dedupe::codex_verified_publication_allowed(authority, &binding)
+                || !watcher_output_matches(tmux_session_name, watcher_output, &binding)
+            {
                 return false;
             }
-            #[rustfmt::skip]
-            tmux_common::write_tmux_runtime_kind_marker(tmux_session_name, RuntimeHandoffKind::CodexTui).ok();
-            #[rustfmt::skip]
-            dedupe::register_rehydrated_tmux_runtime_binding_under_source_authority(
-                authority, ProviderKind::Codex.as_str(), channel_id.get(), binding,
-            );
-            true
+            let verified = dedupe::codex_verified_marker_metadata(
+                authority,
+                std::path::Path::new(&binding.output_path),
+                binding.session_id.as_deref(),
+            )
+            .is_ok_and(|metadata| metadata.is_some());
+            commit_registration(verified, claim_watcher, || {
+                let registered =
+                    dedupe::register_rehydrated_tmux_runtime_binding_under_source_authority(
+                        authority,
+                        ProviderKind::Codex.as_str(),
+                        channel_id.get(),
+                        binding,
+                    );
+                if !verified || registered {
+                    tmux_common::write_tmux_runtime_kind_marker(
+                        tmux_session_name,
+                        RuntimeHandoffKind::CodexTui,
+                    )
+                    .ok();
+                }
+                registered
+            })
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn commit_codex_watcher_restore_for_tests(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    candidate: Option<TuiRuntimeBinding>,
+    watcher_output: &str,
+    claim_watcher: impl FnOnce() -> bool,
+) -> bool {
+    commit_live_direct_resume_fallback(
+        tmux_session_name,
+        channel_id,
+        None,
+        candidate,
+        watcher_output,
+        claim_watcher,
+    )
+}
+
+#[cfg(unix)]
+fn watcher_output_matches(tmux: &str, output: &str, binding: &TuiRuntimeBinding) -> bool {
+    let output = std::path::Path::new(output);
+    if crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+        output,
+        std::path::Path::new(&binding.output_path),
+    ) {
+        return true;
+    }
+    // Relay output belongs to this tmux namespace, independently of its native rollout.
+    let relay = tmux_common::session_temp_path(tmux, "jsonl");
+    output == std::path::Path::new(&relay)
+        && binding.relay_output_path.as_deref() == Some(relay.as_str())
+}
+
+#[cfg(unix)]
+fn commit_registration(
+    verified: bool,
+    claim: impl FnOnce() -> bool,
+    register: impl FnOnce() -> bool,
+) -> bool {
+    if verified {
+        // Failed publication must not reserve a watcher that will never start.
+        register() && claim()
+    } else if claim() {
+        register();
+        true
+    } else {
+        false
     }
 }
 
@@ -227,5 +338,175 @@ mod codex_direct_resume_args_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) use verified_watcher_claim_tests::commit_codex_watcher_restore_to_empty_registry_for_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+mod verified_watcher_claim_tests {
+    use super::*;
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        BindingContext, PreparedIncarnation,
+    };
+
+    pub(crate) fn commit_codex_watcher_restore_to_empty_registry_for_tests(
+        tmux: &str,
+        channel: ChannelId,
+        candidate: Option<TuiRuntimeBinding>,
+        output: &str,
+    ) -> (bool, usize, Option<u64>) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI64, AtomicU64},
+        };
+        let registry = crate::services::discord::TmuxWatcherRegistry::new();
+        let handle = crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: tmux.to_owned(),
+            output_path: output.to_owned(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        };
+        let mut attempts = 0;
+        let committed =
+            commit_live_direct_resume_fallback(tmux, channel, None, candidate, output, || {
+                attempts += 1;
+                super::super::try_claim_watcher_for_host(
+                    &registry,
+                    channel,
+                    handle,
+                    Some(&ProviderKind::Codex),
+                    None,
+                    super::super::WatchHost::Legacy,
+                )
+                .unwrap_or(false)
+            });
+        (
+            committed,
+            attempts,
+            registry
+                .owner_channel_for_tmux_session(tmux)
+                .map(|owner| owner.get()),
+        )
+    }
+
+    #[test]
+    fn actual_watcher_without_fallback_refuses_verified_without_proof_and_preserves_legacy() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        dedupe::reset_state_for_tests();
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let tmux = format!("verified-w-{}", uuid::Uuid::new_v4().simple());
+        let context = BindingContext {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: chrono::Utc::now(),
+            execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+            tmux_session: tmux.clone(),
+            channel_id: Some(584_505),
+            owner_runtime_root: tmux_common::current_tmux_owner_marker(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some(sessions.canonicalize().unwrap()),
+            first_prompt_digest: Some(format!("sha256:{}", "a".repeat(64))),
+            source_policy: Some("verified".into()),
+        };
+        let _prepared = PreparedIncarnation::create(context.clone()).unwrap();
+        let nonce = tmux_common::session_temp_path(&tmux, "spawn_nonce");
+        std::fs::create_dir_all(std::path::Path::new(&nonce).parent().unwrap()).unwrap();
+        std::fs::write(nonce, context.execution_nonce).unwrap();
+        dedupe::register_tmux_channel(&tmux, 584_505);
+        let claims = std::cell::Cell::new(0);
+        assert!(!commit_live_direct_resume_fallback(
+            &tmux,
+            ChannelId::new(584_505),
+            None,
+            None,
+            "",
+            || {
+                claims.set(claims.get() + 1);
+                true
+            },
+        ));
+        assert_eq!(claims.get(), 0);
+        assert!(dedupe::runtime_binding_for_tmux_session(&tmux).is_none());
+        assert!(dedupe::provider_session_for_tmux("codex", &tmux).is_none());
+        assert!(
+            crate::services::codex_tui::session::read_codex_tui_rollout_marker(&tmux).is_none()
+        );
+        let legacy = format!("legacy-w-{}", uuid::Uuid::new_v4().simple());
+        assert!(commit_live_direct_resume_fallback(
+            &legacy,
+            ChannelId::new(584_505),
+            None,
+            None,
+            "",
+            || {
+                claims.set(claims.get() + 1);
+                true
+            },
+        ));
+        assert_eq!(claims.get(), 1);
+        let candidate = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: "/legacy/native.jsonl".into(),
+            relay_output_path: Some("/tmp/legacy-relay.jsonl".into()),
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: Some(0),
+        };
+        assert!(commit_live_direct_resume_fallback(
+            &legacy,
+            ChannelId::new(584_505),
+            None,
+            Some(candidate),
+            "/tmp/legacy-relay.jsonl",
+            || {
+                claims.set(claims.get() + 1);
+                true
+            },
+        ));
+        assert_eq!(claims.get(), 2);
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod verified_commit_order_tests {
+    #[test]
+    fn actual_commit_helper_publishes_before_claim_and_failed_publish_claims_nothing() {
+        for (verified, registered, expected) in [
+            (true, true, vec!["register", "claim"]),
+            (true, false, vec!["register"]),
+            (false, true, vec!["claim", "register"]),
+            (false, false, vec!["claim", "register"]),
+        ] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let result = super::commit_registration(
+                verified,
+                || {
+                    calls.borrow_mut().push("claim");
+                    true
+                },
+                || {
+                    calls.borrow_mut().push("register");
+                    registered
+                },
+            );
+            assert_eq!(*calls.borrow(), expected);
+            assert_eq!(result, !verified || registered);
+        }
     }
 }

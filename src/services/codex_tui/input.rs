@@ -103,9 +103,12 @@ use tokio::sync::Notify;
 // about a visible, still-stranded composer draft without ever double-submitting.
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
+mod composer_content;
 mod composer_lock;
 mod composer_status;
 mod inline_banner;
+use composer_content::boxed_composer_body;
+pub(crate) use composer_content::{ComposerContent, active_composer_content_in_pane};
 #[allow(unused_imports)]
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
@@ -938,27 +941,7 @@ pub(crate) fn active_composer_visible_prompt_draft_in_pane(pane: &str) -> Option
             .get(1)
             .and_then(|line| codex_visible_prompt_draft_text(line));
     }
-
-    let footer_idx = recent
-        .iter()
-        .take(FOOTER_HINT_BOTTOM_WINDOW)
-        .position(|line| line_is_codex_footer_hint(line))?;
-    let bottom_edge_idx = recent
-        .iter()
-        .take(COMPOSER_EDGE_BOTTOM_WINDOW)
-        .position(|line| line_is_codex_composer_edge(line))?;
-    if footer_idx > bottom_edge_idx
-        || bottom_edge_idx - footer_idx > COMPOSER_FOOTER_ADJACENCY_LINES
-    {
-        return None;
-    }
-    let body_start = bottom_edge_idx + 1;
-    let top_edge_offset = recent
-        .iter()
-        .skip(body_start)
-        .position(|line| line_is_codex_composer_edge(line))?;
-    let body_end = body_start + top_edge_offset;
-    recent[body_start..body_end]
+    boxed_composer_body(&recent)?
         .iter()
         .find_map(|line| codex_composer_body_draft_text(line))
 }
@@ -1072,6 +1055,22 @@ fn pane_has_codex_interactive_modal_in_pane(pane: &str) -> bool {
             .iter()
             .any(|marker| lower.starts_with(marker))
     })
+}
+
+/// Whether the bottom of a pane names a Codex modal (sign-in, trust, approval, update): a screen
+/// that waits on a person rather than one that turns ready by itself.
+pub(crate) fn pane_shows_codex_interactive_modal(pane: &str) -> bool {
+    pane.lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(PROMPT_READY_SCAN_LINES)
+        .any(|line| {
+            let lower = line.to_ascii_lowercase();
+            CODEX_INTERACTIVE_MODAL_MARKERS
+                .iter()
+                .any(|marker| lower.contains(marker))
+        })
 }
 
 fn codex_snapshot_indicates_interactive_modal(snapshot: &PromptReadinessSnapshot) -> bool {

@@ -30,6 +30,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
             if now >= next_rehydrate {
                 let shared_for_rehydrate = shared.clone();
                 let rehydrate_result = tokio::task::spawn_blocking(move || {
+                    crate::services::tui_prompt_dedupe::resolve_codex_claims();
                     rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate);
                 })
                 .await;
@@ -51,6 +52,8 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     RuntimeHandoffKind::CodexTui,
                 )
             {
+                #[cfg(test)]
+                note_poll(&tmux_session_name, PollNote::Visit);
                 if active_tails.contains(&tmux_session_name) {
                     continue;
                 }
@@ -101,6 +104,19 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                 line_end_offset,
                                 ..
                             })) => {
+                                let same_path = inflight.output_path.as_deref().map(Path::new)
+                                    == Some(rollout_path.as_path());
+                                // A same-rollout match before the claim's start is an earlier turn's
+                                // prompt; wait for this turn's prompt and leave the row untouched.
+                                if same_path
+                                    && inflight
+                                        .turn_start_offset
+                                        .is_some_and(|start| line_end_offset < start)
+                                {
+                                    #[cfg(test)]
+                                    note_poll(&tmux_session_name, PollNote::EarlierPrompt);
+                                    continue;
+                                }
                                 if let Some(anchor_id) = inflight.injected_prompt_message_id {
                                     crate::services::tui_prompt_dedupe::record_prompt_anchor(
                                         ProviderKind::Codex.as_str(),
@@ -121,10 +137,18 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                 );
                                 let expected = inflight::InflightTurnIdentity::from_state(&inflight);
                                 let mut repaired = inflight;
-                                repaired.output_path =
-                                    rollout_path.to_str().map(ToString::to_string);
+                                // A claim on this rollout keeps its start: the bridge witness pins it,
+                                // and the tail below resumes from the prompt end on its own cursor.
+                                let same_source = same_path
+                                    && repaired
+                                        .turn_start_offset
+                                        .is_some_and(|start| start <= line_end_offset);
+                                if !same_source {
+                                    repaired.output_path =
+                                        rollout_path.to_str().map(ToString::to_string);
+                                    repaired.turn_start_offset = Some(line_end_offset);
+                                }
                                 repaired.last_offset = line_end_offset;
-                                repaired.turn_start_offset = Some(line_end_offset);
                                 repaired.restamp_external_turn_lease(&lease);
                                 repaired.set_relay_owner_kind(RelayOwnerKind::None);
                                 let outcome = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
@@ -390,6 +414,32 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
     )));
 }
 
+/// Test hooks: channels whose response tail started, and a one-shot pause before bridge capture.
+#[cfg(test)]
+pub(super) static TAIL_STARTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+#[cfg(test)]
+type TestPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
+#[cfg(test)]
+pub(super) static CAPTURE_PAUSE: Mutex<TestPause> = Mutex::new(None);
+/// Test hook: per tmux session, how often a poll reached each checkpoint.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum PollNote {
+    Visit,
+    EarlierPrompt,
+}
+#[cfg(test)]
+pub(super) static POLL_NOTES: Mutex<std::collections::BTreeMap<(String, PollNote), usize>> =
+    Mutex::new(std::collections::BTreeMap::new());
+#[cfg(test)]
+fn note_poll(tmux_session_name: &str, note: PollNote) {
+    *POLL_NOTES
+        .lock()
+        .unwrap()
+        .entry((tmux_session_name.to_string(), note))
+        .or_default() += 1;
+}
+
 #[cfg(unix)]
 async fn run_codex_idle_response_tail(
     shared: Arc<SharedData>,
@@ -400,6 +450,8 @@ async fn run_codex_idle_response_tail(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) {
+    #[cfg(test)]
+    TAIL_STARTS.lock().unwrap().push(channel_id.get());
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
         ProviderKind::Codex,
         &tmux_session_name,
@@ -488,6 +540,8 @@ async fn run_codex_idle_response_tail(
         .await;
         return;
     }
+    #[cfg(test)]
+    super::synthetic_start::bridge_handoff::pause_for_test(&CAPTURE_PAUSE, channel_id).await;
     let delivery_result = stream_tui_idle_response_through_bridge(
         &shared,
         ProviderKind::Codex,

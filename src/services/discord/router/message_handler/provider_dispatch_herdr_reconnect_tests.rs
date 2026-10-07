@@ -30,7 +30,10 @@ fn restart_and_reconnect(fx: &Fixture) -> ReconnectCounts {
     let _registry = fx.rig.registry_on_this_thread();
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[]);
     fx.rig.show_panes(&[PANE]);
-    reconnect_restarted_herdr_panes(Some(&fx.pool));
+    reconnect_restarted_herdr_panes(
+        Some(&fx.pool),
+        &crate::services::provider::ProviderKind::Claude,
+    );
     reconnect_counts()
 }
 

@@ -13,6 +13,7 @@
 //! scenario module inherits that only once it is named in the same invocation.
 
 mod catch_up_pagination_e2e;
+mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode;
@@ -21,6 +22,7 @@ mod prompt_identity_e2e;
 mod queue_recovery_e2e;
 mod registered_bootstrap_e2e;
 mod stale_resume_retry_e2e;
+mod stop_command_catch_up_e2e;
 #[cfg(unix)]
 mod thread_guard_host_e2e;
 
@@ -308,6 +310,29 @@ impl RelayE2eHarness {
         router::handle_event(&self.ctx, &event, &self.data).await
     }
 
+    /// [`Self::deliver_user_message`] on its own task, for scenarios that act while it runs.
+    pub(super) fn spawn_user_message(
+        &self,
+        id: u64,
+        text: &str,
+    ) -> tokio::task::JoinHandle<Result<(), Error>> {
+        let event = serenity::FullEvent::Message {
+            new_message: user_message(id, text),
+        };
+        let (ctx, data) = (self.ctx.clone(), self.clone_data());
+        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+    }
+
+    /// [`Self::run_catch_up`] on its own task.
+    pub(super) fn spawn_catch_up(&self) -> tokio::task::JoinHandle<()> {
+        let (http, shared) = (self.ctx.http.clone(), self.shared.clone());
+        let provider = self.data.provider.clone();
+        tokio::spawn(async move {
+            crate::services::discord::catch_up::catch_up_missed_messages(&http, &shared, &provider)
+                .await
+        })
+    }
+
     /// Spawns production intake for `id` and returns once the mock has its
     /// placeholder POST parked, leaving the mailbox occupied until
     /// [`Self::release_held_placeholder`]. The guard aborts the turn on drop.
@@ -512,6 +537,21 @@ impl RelayE2eHarness {
 
     pub(super) fn release_held_note(&self) {
         self.mock.release_held_note.notify_one();
+    }
+
+    /// Holds the next history `GET` open until [`Self::release_held_history`].
+    pub(super) fn hold_next_history(&self) {
+        self.mock.hold_next_history.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) async fn wait_for_held_history(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.mock.history_held.notified())
+            .await
+            .is_ok()
+    }
+
+    pub(super) fn release_held_history(&self) {
+        self.mock.release_held_history.notify_one();
     }
 
     /// Points the notify bot at the mock; `timeout` bounds each of its requests.

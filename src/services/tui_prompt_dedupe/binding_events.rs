@@ -29,6 +29,8 @@ mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) mod codex;
+mod log_record;
+use log_record::{Logged, LoggedRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,28 +84,6 @@ pub(crate) struct BindingEvent {
     pub parent_hint: Option<SourceId>,
     pub evidence: BindingEvidence,
     pub committed_at: DateTime<Utc>,
-}
-
-/// A log line: the event plus whether its source passed the Claude source check and when its hook
-/// was published. Both sit beside the event so readers of `BindingEvent` see the same record.
-#[derive(Deserialize)]
-struct Logged {
-    #[serde(flatten)]
-    event: BindingEvent,
-    #[serde(default)]
-    verified: bool,
-    #[serde(default)]
-    published_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Serialize)]
-struct LoggedRef<'a> {
-    #[serde(flatten)]
-    event: &'a BindingEvent,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    verified: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    published_at: Option<DateTime<Utc>>,
 }
 
 /// A binding change whose event could not be persisted; the binding was not published.
@@ -413,6 +393,7 @@ pub(crate) enum Committed {
 /// publish time, or keep it.
 enum Planned {
     Append(BindingEvent, bool, Option<DateTime<Utc>>),
+    CodexAppend(BindingEvent, Box<codex::Ownership>),
     Keep(Committed),
 }
 
@@ -548,15 +529,17 @@ fn commit_with(
     let Some(writer) = log.writer.as_mut() else {
         return Ok(Committed::Unchanged);
     };
-    let (record, verified, published_at) = match plan(writer) {
-        Planned::Append(record, verified, published_at) => (record, verified, published_at),
+    let (record, verified, published_at, codex_ownership) = match plan(writer) {
+        Planned::Append(record, verified, published_at) => (record, verified, published_at, None),
+        Planned::CodexAppend(record, ownership) => (record, false, None, Some(ownership)),
         Planned::Keep(committed) => return Ok(committed),
     };
     #[cfg(test)]
     let logged = published_at.filter(|_| !n2b_mutant("live"));
     #[cfg(not(test))]
     let logged = published_at;
-    if let Err(error) = writer.append(&path, &record, verified, logged) {
+    if let Err(error) = writer.append(&path, &record, verified, logged, codex_ownership.as_deref())
+    {
         // A line that could not be cut back off is re-read from disk before the next append.
         if writer.poisoned {
             log.writer = None;
@@ -921,11 +904,13 @@ impl Writer {
         record: &BindingEvent,
         verified: bool,
         published_at: Option<DateTime<Utc>>,
+        codex_ownership: Option<&codex::Ownership>,
     ) -> io::Result<()> {
         let logged = LoggedRef {
             event: record,
             verified,
             published_at,
+            codex_ownership,
         };
         let mut line = serde_json::to_vec(&logged).map_err(io::Error::other)?;
         line.push(b'\n');
@@ -996,3 +981,6 @@ pub(crate) fn forget_channel_for_tests(channel_id: u64) {
 
 #[cfg(test)]
 mod lane_tests;
+
+#[cfg(test)]
+mod codex_claim_tests;
