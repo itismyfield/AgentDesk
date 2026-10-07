@@ -3691,6 +3691,7 @@ services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
 services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
 services::discord::health::turn_deliver::inject_tests::a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_handback_pg
+services::discord::health::turn_deliver::inject_tests::a_flat_paste_drawn_with_its_indent_is_injected_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_onto_a_full_queue_records_its_one_overflow_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg
 services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
@@ -10457,6 +10458,7 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_input::actor_tests::a_flat_claude_paste_is_owned_only_as_drawn
 services::tui_input::actor_tests::a_not_sent_input_is_offered_afresh_under_the_next_binding
 services::tui_input::actor_tests::actual_binding_context_mismatch_and_post_paste_replacement_veto_enter
 services::tui_input::actor_tests::actual_tmux_adapter_folded_frames_and_800_boundary_enter_once

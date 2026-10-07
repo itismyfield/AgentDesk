@@ -25,9 +25,10 @@ const SPINNER: &str = "✻ Thinking… (12s · esc to interrupt)";
 const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
-/// A scripted `tmux`: the composer folds the paste, and the Enter makes the transcript record
-/// the pasted header the way Claude queues input typed during a turn. `gate` holds keys until `go`;
-/// `hold` holds the first pane capture, after the reservation, until `go`.
+/// A scripted `tmux`: the composer folds the paste, or with `draw` shows it flat as Claude does,
+/// and the Enter makes the transcript record the pasted header the way Claude queues input typed
+/// during a turn. `gate` holds keys until `go`; `hold` holds the first pane capture, after the
+/// reservation, until `go`.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -50,7 +51,9 @@ if-shell)
   [ -f "$d/fail_paste" ] && exit 1
   echo "$7" >> "$d/keys"
   case "$7" in
-  paste-buffer*) touch "$d/pasted" ;;
+  paste-buffer*)
+    touch "$d/pasted"
+    [ -f "$d/draw" ] && { cat "$d/draw"; awk 'NR == 1 { printf "\342\235\257\302\240%s\n", $0; next } { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
   send-keys*) printf '{"type":"queue-operation","operation":"enqueue","content":"%s\\nstatus?","sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"}\n' "$(head -n 1 "$d/buffer")" >> "$d/transcript.jsonl" ;;
   esac ;;
 esac
@@ -161,6 +164,15 @@ impl InjectPane {
         let pane =
             format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ {folded}\n{BORDER}\n{FOOTER}");
         self.set("cap.pasted", &pane);
+    }
+
+    /// The composer after the paste shows it flat: continuation rows two columns in.
+    fn draw_paste(&self) {
+        self.set(
+            "draw",
+            &format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n"),
+        );
+        self.set("draw.tail", &format!("{BORDER}\n{FOOTER}"));
     }
 
     pub(crate) fn tmux_calls(&self) -> usize {
@@ -489,6 +501,36 @@ async fn a_busy_pane_takes_the_input_whoever_holds_the_channel_pg() {
     }
     let injected = "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true []";
     assert_eq!(observed, [injected; 4]);
+}
+
+/// A short input renders flat rather than folded; the deliver still proves the drawn draft is
+/// its own, enters it once and confirms it from the transcript.
+#[tokio::test(flavor = "current_thread")]
+async fn a_flat_paste_drawn_with_its_indent_is_injected_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let inputs = [
+        (
+            6_687_001,
+            "응답에 정확히 한 줄로 [E2E:PR1:pb1-c-s5d-pr1-074645] 만 출력해줘.",
+        ),
+        (6_687_002, "first line\n   indented second"),
+    ];
+    let registry = HealthRegistry::new();
+    let channels = inputs.map(|(ch, _)| ch);
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
+    let mut observed = Vec::new();
+    for (ch, text) in inputs {
+        let pane = InjectPane::new(ch, "all");
+        pane.draw_paste();
+        let outcome = deliver_text(&registry, ch, text).await;
+        let queue = queue_texts(&shared, ch).await.join(",");
+        let (keys, seen) = (pane.keys().join("+"), pane.transcript_recorded_the_paste());
+        observed.push(format!("{outcome} keys={keys} seen={seen} [{queue}]"));
+    }
+    let injected = "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true []";
+    assert_eq!(observed, [injected; 2]);
 }
 
 /// A channel whose input moved to the input runtime keeps its pane untouched.

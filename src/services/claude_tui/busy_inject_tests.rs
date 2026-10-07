@@ -29,7 +29,9 @@ fn text() -> String {
     frame("iMessage", "ann", NONCE, "are you there?")
 }
 
+// Claude draws continuation rows two columns in.
 fn screen(composer: &str, extra: &str) -> String {
+    let composer = composer.replace('\n', "\n  ");
     format!("⏺ Working on it.\n\n{SPINNER}\n{extra}\n{BORDER}\n❯ {composer}\n{BORDER}\n{FOOTER}")
 }
 
