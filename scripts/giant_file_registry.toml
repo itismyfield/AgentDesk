@@ -875,9 +875,3 @@ file = "src/services/discord/catch_up.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
-
-[[entry]]
-file = "src/services/tui_prompt_dedupe/binding_events.rs"
-owner = "discord-relay"
-decision = "keep"
-keep_reason = "Channel sequence allocation, append rollback, fsync, and watch publication share one durable commit boundary. Provider-specific claim folds already live in child modules; optional ownership serialization adds a small shared envelope change without moving publication away from its durability fence."

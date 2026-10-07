@@ -29,6 +29,8 @@ mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) mod codex;
+mod log_record;
+use log_record::{Logged, LoggedRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,32 +84,6 @@ pub(crate) struct BindingEvent {
     pub parent_hint: Option<SourceId>,
     pub evidence: BindingEvidence,
     pub committed_at: DateTime<Utc>,
-}
-
-/// A log line: the event plus whether its source passed the Claude source check and when its hook
-/// was published. Both sit beside the event so readers of `BindingEvent` see the same record.
-#[derive(Deserialize)]
-struct Logged {
-    #[serde(flatten)]
-    event: BindingEvent,
-    #[serde(default)]
-    verified: bool,
-    #[serde(default)]
-    published_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    codex_ownership: Option<codex::Ownership>,
-}
-
-#[derive(Serialize)]
-struct LoggedRef<'a> {
-    #[serde(flatten)]
-    event: &'a BindingEvent,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    verified: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    published_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    codex_ownership: Option<&'a codex::Ownership>,
 }
 
 /// A binding change whose event could not be persisted; the binding was not published.

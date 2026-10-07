@@ -2291,7 +2291,8 @@ src/
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs
-│   │   │   └── lane_tests.rs
+│   │   │   ├── lane_tests.rs
+│   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── claude_source.rs
