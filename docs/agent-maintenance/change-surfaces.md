@@ -281,11 +281,12 @@ time for diagnostics; neither is a stored approval value.
   contract, and one result-mirror step per shard job (`scripts` runs the
   `cargo` shard, `scripts_guards` and `scripts_contracts` the others); its
   `name`, `needs: [changes, scripts, scripts_guards, scripts_contracts]`,
-  required job-level `if: always()`, `runs-on`, checkout provenance, and
+  required job-level `if: ${{ !cancelled() }}`, `runs-on`, checkout provenance, and
   absence of `continue-on-error`,
   `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
-  publisher's `if: always()` is what runs the fail-closed
-  mirror after an upstream failure, skip, or cancellation. The independent
+  publisher's `if: ${{ !cancelled() }}` is what runs the fail-closed
+  mirror after an upstream failure, skip, or timeout cancellation; a cancelled
+  run cancels the publisher instead of publishing a failure. The independent
   `relay-authority-contract` publisher has no `needs` and must omit job-level
   `if`; the internal `changes` job and every shard job must also omit
   job-level `if` so their own work cannot be condition-skipped. Each extra
@@ -302,7 +303,7 @@ time for diagnostics; neither is a stored approval value.
   `{scripts_required_context, relay-authority-contract, scripts,
   scripts_guards, scripts_contracts, changes}`; every member must exist and
   omit `continue-on-error`, the Script checks publisher must carry exactly
-  `if: always()`, and the other jobs must
+  `if: ${{ !cancelled() }}`, and the other jobs must
   omit job-level `if`. Any edge that expands that set is a review-triggering
   gate failure.
 - aggregate execution: the calculator records shell/working-directory
@@ -369,9 +370,9 @@ time for diagnostics; neither is a stored approval value.
   pull-request subfilters such as `paths-ignore` are likewise not guaranteed.
   The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
   prove that an upstream success used the intended semantics. Because the
-  publisher runs with `if: always()`, a failure, skip, or cancellation of a
-  single upstream job still reaches the mirror and makes the required context
-  red.
+  publisher runs with `if: ${{ !cancelled() }}`, a failure, skip, or timeout
+  cancellation of a single upstream job in a live run still reaches the mirror
+  and makes the required context red.
   More fundamentally, a single PR that consistently rewrites every guard and
   every pin can pass this in-repository gate system. A cheaper edit in the same
   class: GitHub treats a condition-skipped required check as satisfied, so one

@@ -195,8 +195,9 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
 4. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
    (= `library_sweep_required_context` job)이다. sweep 잡 본체인
    `Library test sweep`을 등록하면 `rust_tests` 출력이 false인 PR에서
-   잡이 skip되어 **pending으로 영구 블록**된다. mirror job은 `if: always()`로
-   돌면서 skip을 명시적 green으로 변환하고 upstream 실패/취소에는 fail-closed다.
+   잡이 skip되어 **pending으로 영구 블록**된다. mirror job은 `if: ${{ !cancelled() }}`로
+   돌면서 skip을 명시적 green으로 변환하고 upstream 실패/timeout 취소에는 fail-closed다.
+   run 자체가 취소되면 mirror도 `cancelled`로 끝나 실패를 발행하지 않고 머지는 계속 막힌다.
 
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
 `high-risk-recovery`, `check_fast_cross_os`, `check_fast_cross_os_targets`,

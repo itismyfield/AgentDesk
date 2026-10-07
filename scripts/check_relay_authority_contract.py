@@ -86,7 +86,7 @@ def validate_workflow_contract(
 ) -> None:
     publisher = load_relay_authority_job(repo_root, RELAY_AUTHORITY_JOB)
     if (
-        publisher.get("if") != "always()"
+        publisher.get("if") != "${{ !cancelled() }}"
         or publisher.get("needs") != [RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB]
         or "continue-on-error" in publisher
     ):
