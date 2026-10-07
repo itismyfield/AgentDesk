@@ -2139,7 +2139,8 @@ def _health_ready_violations(
         violations.append("ok=false")
     if strict_healthy and payload.get("degraded") is True:
         violations.append("degraded=true")
-    if strict_healthy and payload.get("fully_recovered") is False:
+    # Startup recovery is its own readiness axis; allowing degraded status does not waive it.
+    if payload.get("fully_recovered") is False:
         violations.append("fully_recovered=false")
 
     degraded_reasons = payload.get("degraded_reasons") or []
@@ -4649,11 +4650,19 @@ def restart_dcserver_for_e2e(
             )
     else:
         label = "com.agentdesk." + ("release" if target == "release" else "dev")
-        subprocess.run(
+        proc = subprocess.run(
             ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
             check=False,
             capture_output=True,
+            text=True,
         )
+        # A refused kickstart leaves the old server answering health; never pass on it.
+        if proc.returncode != 0:
+            raise assertions.AssertionError(
+                f"launchctl kickstart failed for {label} with exit {proc.returncode}\n"
+                f"stdout:\n{proc.stdout[-4000:]}\n"
+                f"stderr:\n{proc.stderr[-4000:]}"
+            )
     # Same status/reason semantics as assert_health; the default stays healthy-only.
     wait_for_health(
         base_url,

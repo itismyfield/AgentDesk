@@ -305,11 +305,14 @@ Before a destructive restart, the driver now fails closed if
 mailbox state, cancel token, inflight state, queue depth, recovery/finalizing
 state, pending Discord callback, stale thread proof, or relay stall state.
 
-Health waits parse the JSON payload, not just HTTP 2xx. A run is considered
-ready only when the health body is healthy (`status: healthy`, `ok` not false,
-`fully_recovered` not false, and no unallowed degraded reasons). Degraded or
-unhealthy bodies keep polling until timeout and then fail with the last health
-summary.
+Health waits parse the JSON payload, not just HTTP 2xx. By default a run is
+considered ready only when the health body is healthy (`status: healthy`, `ok`
+not false, `fully_recovered` not false, and no unallowed degraded reasons). A
+`restart_dcserver` step may declare `require_status` and
+`allowed_degraded_reasons` with the same meaning as `assert_health`; they relax
+only the status and the `ok`/`degraded` flags, never `fully_recovered` or an
+unlisted degraded reason. A failed `launchctl kickstart` fails the step. Other
+bodies keep polling until timeout and then fail with the last health summary.
 
 After every executed scenario, the driver also asserts the tested cell's
 mailbox is idle via `/api/health/detail`: `agent_turn_status=idle`,

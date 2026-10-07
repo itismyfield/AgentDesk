@@ -223,10 +223,12 @@ class SourceCompareTests(unittest.TestCase):
                     # Only lastPrompt is a prompt copy; exact-shape metadata must not hide a marker.
                     {"type": "last-prompt", "leafUuid": MARKER, "sessionId": "s"},
                     {"type": "last-prompt", "leafUuid": "leaf", "sessionId": MARKER},
-                    {**copies[0], "leafUuid": MARKER}, {**copies[0], "lastPrompt": "x", "sessionId": MARKER}]:
+                    {**copies[0], "leafUuid": MARKER}, {**copies[0], "lastPrompt": "x", "sessionId": MARKER},
+                    {**copies[1], "leafUuid": [MARKER]}, {**copies[0], "sessionId": {"probe": MARKER}}]:
             self.write([self.user(), row])
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
                 self.compare()
+        self.assertEqual(self.main_rc(self.messages), 2)  # the nested metadata marker reaches the entry point
 
     def test_text_command_marker_is_command_not_lost(self):
         command = message(1, "!clear " + MARKER, author=OUR_BOT_ID)

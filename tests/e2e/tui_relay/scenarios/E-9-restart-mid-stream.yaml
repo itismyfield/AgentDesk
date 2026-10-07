@@ -17,8 +17,8 @@ steps:
   - restart_dcserver:
       target: dev
       # Same bulk inventory baseline as E-54; any other degraded reason still fails.
-      require_status: [healthy, degraded]
-      allowed_degraded_reasons:
+      require_status: &bulk_status [healthy, degraded]
+      allowed_degraded_reasons: &bulk_baseline_reasons
         - "tui_o:released:1474933804887179286"
         - "tui_o:released:1475086789696946196"
         - "tui_o:released:1478248459445469264"
@@ -41,6 +41,8 @@ steps:
     timeout_s: 300
   - wait_idle_s: 5
   - assert_health:
+      require_status: *bulk_status
+      allowed_degraded_reasons: *bulk_baseline_reasons
       forbid_degraded_reasons:
         - global_active_counter_out_of_bounds
       global_active_max: 0
