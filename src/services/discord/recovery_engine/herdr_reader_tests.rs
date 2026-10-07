@@ -119,7 +119,7 @@ fn the_restart_pass_reads_nothing_without_a_local_endpoint() {
     std::fs::create_dir_all(&holds).unwrap();
     std::fs::write(holds.join(NONCE), "2026-10-05T07:00:00+00:00").unwrap();
     let passes = || PASSES.with(std::cell::Cell::get);
-    reconnect_restarted_herdr_panes(None);
+    reconnect_restarted_herdr_panes(None, &crate::services::provider::ProviderKind::Claude);
     assert_eq!(passes(), 0);
     assert_eq!(reconnect_counts(), ReconnectCounts::default());
     assert_eq!(local_reconnect_health(), None);
@@ -128,7 +128,7 @@ fn the_restart_pass_reads_nothing_without_a_local_endpoint() {
     let _registry = rig.registry_on_this_thread();
     let counted = |held| Some((ReconnectCounts::default(), held));
     assert_eq!(local_reconnect_health(), counted(None));
-    reconnect_restarted_herdr_panes(None);
+    reconnect_restarted_herdr_panes(None, &crate::services::provider::ProviderKind::Claude);
     assert_eq!(passes(), 1, "a local endpoint gets past the switch");
     assert_eq!(local_reconnect_health(), counted(Some(Ok(1))));
 }

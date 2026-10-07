@@ -1074,6 +1074,22 @@ fn pane_has_codex_interactive_modal_in_pane(pane: &str) -> bool {
     })
 }
 
+/// Whether the bottom of a pane names a Codex modal (sign-in, trust, approval, update): a screen
+/// that waits on a person rather than one that turns ready by itself.
+pub(crate) fn pane_shows_codex_interactive_modal(pane: &str) -> bool {
+    pane.lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(PROMPT_READY_SCAN_LINES)
+        .any(|line| {
+            let lower = line.to_ascii_lowercase();
+            CODEX_INTERACTIVE_MODAL_MARKERS
+                .iter()
+                .any(|marker| lower.contains(marker))
+        })
+}
+
 fn codex_snapshot_indicates_interactive_modal(snapshot: &PromptReadinessSnapshot) -> bool {
     let lower = snapshot.pane_tail.to_ascii_lowercase();
     CODEX_INTERACTIVE_MODAL_MARKERS

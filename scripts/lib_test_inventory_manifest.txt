@@ -5367,6 +5367,7 @@ services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offs
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_prefers_newer_saved_last_offset
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_rewinds_only_when_output_truncated_below_floor
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_uses_turn_start_floor_when_last_offset_is_zero
+services::discord::recovery_engine::tmux_probe::tests::a_codex_row_on_a_herdr_pane_defers_while_codex_turns_run_there
 services::discord::recovery_engine::tmux_probe::tests::restart_probes_read_dead_only_on_a_confirmed_tmux_answer
 services::discord::recovery_known_ids::recovery_known_message_ids_tests::active_turn_outranks_a_stale_queue_entry_for_the_same_id
 services::discord::recovery_known_ids::recovery_known_message_ids_tests::each_source_reports_its_own_arm
@@ -5787,6 +5788,15 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_composer_that_never_turns_ready_stops_the_cold_start_at_its_deadline_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_modal_on_a_cold_start_refuses_its_first_prompt_at_once_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_replaced_root_shell_restores_no_codex_source_and_takes_no_input_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_no_codex_source_without_its_logged_file_or_baseline_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_the_logged_rollout_of_a_matched_codex_pane_for_its_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::o_posts_only_the_rest_of_a_turn_across_a_restart_and_its_restore_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send

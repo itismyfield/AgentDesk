@@ -48,6 +48,17 @@ impl ODrive {
         self.harness.port.posts()
     }
 
+    /// What a dcserver restart keeps of O: its store. The writer, its sources and what it owes
+    /// start again from there.
+    pub(crate) fn restart(&mut self) {
+        self.writer = self.harness.writer();
+        self.sources = Sources::new(CHANNEL, ShadowProvider::Codex, Arc::new(BindingLog));
+        self.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Codex);
+        self.owed.clear();
+        let (writer, deriver, owed) = (&mut self.writer, &mut self.deriver, &mut self.owed);
+        self.sources.resume(writer, deriver, owed).unwrap();
+    }
+
     /// How far O has captured `source`, from its own store.
     pub(crate) fn captured_through(&mut self, source: &SourceId) -> Option<u64> {
         let cursor = self.writer.store().cursor(source);
