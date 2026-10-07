@@ -125,7 +125,9 @@ class ScriptChecksMirrorAggregation(unittest.TestCase):
         needs = job.get("needs", [])
         needs = [needs] if isinstance(needs, str) else list(needs)
         declared = {name: results[name] for name in needs}
-        if job.get("if") != "always()" and any(r != "success" for r in declared.values()):
+        # A live run: `always()` and `!cancelled()` both run the mirror; anything else skips it.
+        runs_on_any_result = scalar(job.get("if", "")).replace(" ", "") in ("always()", "${{!cancelled()}}")
+        if not runs_on_any_result and any(r != "success" for r in declared.values()):
             return "skipped"
 
         def expand(value: object) -> str:

@@ -2343,6 +2343,10 @@ pub(super) fn defer_synthetic_turn_start(
 
 /// The worker's per-poll view builder (see [`synthetic_start_prior_turn_view`]).
 pub(super) fn pending_start_view_fn() -> super::super::tui_direct_pending_start::ViewFn {
+    #[cfg(test)]
+    if let Some(view) = RESTORE_VIEW_FOR_TEST.with(|slot| slot.borrow_mut().take()) {
+        return view;
+    }
     Box::new(|shared, record| {
         Box::pin(async move {
             let provider = ProviderKind::from_str(&record.provider)?;
@@ -2366,6 +2370,10 @@ pub(super) fn pending_start_view_fn() -> super::super::tui_direct_pending_start:
 /// reads the runtime binding FRESH and seeds `turn_start_offset = relay_last_offset()`
 /// (post-drain == EOF) with `response_sent_offset = 0`.
 pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start::ClaimFn {
+    #[cfg(test)]
+    if let Some(claim) = RESTORE_CLAIM_FOR_TEST.with(|slot| slot.borrow_mut().take()) {
+        return claim;
+    }
     Box::new(|shared, record| {
         Box::pin(async move {
             let Some(provider) = ProviderKind::from_str(&record.provider) else {
@@ -2579,13 +2587,25 @@ pub(super) fn pending_start_abort_cleanup_fn()
     })
 }
 
-/// #3154 restart durability: restore durable pending-start records during
-/// provider relay startup. Rehydrates the in-memory presence index (so the
-/// watcher / idle-queue gates hold immediately) and respawns the worker for each
-/// record whose provider matches.
-pub(super) fn restore_pending_starts(shared: &Arc<SharedData>, provider: &ProviderKind) {
+#[cfg(test)]
+thread_local! {
+    pub(in crate::services::discord) static RESTORE_VIEW_FOR_TEST: std::cell::RefCell<Option<super::super::tui_direct_pending_start::ViewFn>> = const { std::cell::RefCell::new(None) };
+    pub(in crate::services::discord) static RESTORE_CLAIM_FOR_TEST: std::cell::RefCell<Option<super::super::tui_direct_pending_start::ClaimFn>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restore matching pending starts only for channels without an input-fence gate.
+/// Protected records stay durable instead of spawning a second boot consumer.
+pub(in crate::services::discord) fn restore_pending_starts(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) {
     for record in super::super::tui_direct_pending_start::load_all() {
         if !record.provider.eq_ignore_ascii_case(provider.as_str()) {
+            continue;
+        }
+        if crate::services::discord::input_runtime::fence::lookup(provider, record.channel_id)
+            .is_some()
+        {
             continue;
         }
         // Re-mark present (load_all does not touch the index) so the gates hold

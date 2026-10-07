@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 102
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 103
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -29,16 +29,17 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs:227` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs:27` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs:31` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
+| `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:177` | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs:44` (+1 more) | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs:6` (+1 more) |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs:34` (+1 more) | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
-| `ADK_TEST_INPUT_TRANSITION_MUTANT` | `src/services/tui_input/transition.rs:404` |  |
+| `ADK_TEST_INPUT_TRANSITION_MUTANT` | `src/services/tui_input/transition.rs:430` |  |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs:549` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:131` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:110` | Hook capture reads this value without consulting mutable markers. |
-| `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
+| `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:422` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:553` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs:66` | `0` lets watcher respawn take over a live Claude original again. |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:220` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
@@ -97,7 +98,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:630` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
 | `AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS` | `src/services/discord/runtime_bootstrap/framework_setup.rs:284` |  |
 | `AGENTDESK_PYTHON3_PATH` | `src/engine/ops/runtime_ops.rs:18` |  |
-| `AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:492` |  |
+| `AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:500` |  |
 | `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` | `src/services/discord/inflight/rebind_reap.rs:175` | #3581: resolve the rebind-origin reap deadline from `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` (clamped to [`REBIND_ORIGIN_DEADLINE_SECS_MIN`]), falling back to [… |
 | `AGENTDESK_RECOVERY_ANCHOR_REPOST` | `src/services/discord/recovery_paths/shared.rs:243` | #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`). |
 | `AGENTDESK_RELAY_CIRCUIT_STAMP` | `src/services/discord/relay_recovery_circuit_alert_producer.rs:19` (+1 more) |  |

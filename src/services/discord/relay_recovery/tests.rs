@@ -9,6 +9,8 @@ use std::sync::atomic::Ordering;
 mod circuit_breaker_apply;
 #[path = "tests/incarnation_follow_up.rs"]
 pub(in crate::services::discord) mod incarnation_follow_up;
+#[path = "tests/input_fence.rs"]
+mod input_fence;
 #[path = "tests/orphan_token_finish.rs"]
 pub(in crate::services::discord) mod orphan_token_finish;
 

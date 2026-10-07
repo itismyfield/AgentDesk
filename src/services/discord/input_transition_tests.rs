@@ -423,8 +423,8 @@ mod supported {
                 self.files.effects.assert_unlocked();
                 self.files.start_actor()
             }
-            fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<(bool, Composer)> {
-                self.files.reconcile(key, row)
+            fn reconciliation(&mut self, key: u64, row: &Row) -> io::Result<Reconciliation> {
+                self.files.reconciliation(key, row)
             }
             fn enqueue(&mut self, key: u64, row: &Row) -> io::Result<EnqueueOutcome> {
                 self.files.enqueue(key, row)

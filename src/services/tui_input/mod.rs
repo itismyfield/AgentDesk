@@ -1,6 +1,7 @@
 //! Dormant input persistence, row semantics and bounded effects; the channel actor supplies execution.
 
 pub mod actor;
+pub mod attempt;
 pub mod blob;
 pub mod bounded_tmux;
 mod durable;
