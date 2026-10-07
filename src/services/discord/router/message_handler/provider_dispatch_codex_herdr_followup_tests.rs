@@ -139,6 +139,9 @@ fn a_composer_other_than_the_bottom_one_refuses_the_follow_up_pg() {
         format!("earlier output\n  남은 초안\n›\n\n{STATUS}"),
         format!("╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n› 남은 초안\n{STATUS}"),
         format!("╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n  loading plugins…"),
+        format!(
+            "╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n› Esc to interrupt\n{STATUS}"
+        ),
         format!("earlier output\n  › 남은 초안\n\n›\n\n{STATUS}"),
         format!("earlier output\n› 남은 초안\n\n›\n\n{STATUS}"),
         format!("earlier output\n\n  ›\n\n{STATUS}"),

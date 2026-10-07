@@ -96,10 +96,7 @@ fn compact_content(lines: &[&str], recent: &[usize], rows: &[&str]) -> ComposerC
     let blank_above = recent[1]
         .checked_sub(1)
         .is_none_or(|above| lines[above].trim_matches(blank).is_empty());
-    let prompts = rows
-        .iter()
-        .filter(|row| row.trim_start_matches(blank).starts_with('›'))
-        .count();
+    let prompts = rows.iter().filter(|row| line_is_prompt_like(row)).count();
     let Some(input) = prompt.strip_prefix('›') else {
         return ComposerContent::Unread;
     };
@@ -110,6 +107,11 @@ fn compact_content(lines: &[&str], recent: &[usize], rows: &[&str]) -> ComposerC
         "" => ComposerContent::Empty,
         input => cursor_row_content(input),
     }
+}
+
+/// A `›` prompt row, indented or not.
+fn line_is_prompt_like(line: &str) -> bool {
+    line.trim_start_matches(blank).starts_with('›')
 }
 
 fn line_is_status(line: &str) -> bool {
@@ -144,9 +146,9 @@ fn herdr_composer_body<'r, 'a>(recent: &'r [&'a str]) -> Option<&'r [&'a str]> {
     if !line_is_box_rule(recent[bottom_idx], '╰', '╯')
         || footer_idx > bottom_idx
         || bottom_idx - footer_idx > COMPOSER_FOOTER_ADJACENCY_LINES
-        || !recent[..bottom_idx]
-            .iter()
-            .all(|line| line_is_codex_footer_hint(line) || line_is_status(line))
+        || !recent[..bottom_idx].iter().all(|line| {
+            !line_is_prompt_like(line) && (line_is_codex_footer_hint(line) || line_is_status(line))
+        })
     {
         return None;
     }
