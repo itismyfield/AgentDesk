@@ -28,6 +28,7 @@ pub(crate) use codex_hook::{
     register_launched_tmux_runtime_binding_under_source_authority,
 };
 pub(crate) use codex_verified::{
+    channel_allowed_under_source_authority as codex_verified_channel_allowed_under_source_authority,
     codex_verified_discovered_channel, observe_verified_codex_hook,
     recover_discovered_codex_binding, resolve_registered_claims as resolve_codex_claims,
 };
@@ -102,6 +103,19 @@ pub fn register_tmux_channel(tmux_session_name: &str, channel_id: u64) {
     if tmux_session_name.is_empty() || channel_id == 0 {
         return;
     }
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        register_tmux_channel_under_source_authority(authority, channel_id);
+    });
+}
+
+pub(crate) fn register_tmux_channel_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    channel_id: u64,
+) {
+    let tmux_session_name = authority.session();
+    if tmux_session_name.is_empty() || channel_id == 0 {
+        return;
+    }
     if tmux_session_name.contains("-dm-") {
         if let Err(error) =
             crate::services::tmux_common::write_tmux_channel_binding(tmux_session_name, channel_id)
@@ -165,7 +179,7 @@ fn publish_runtime_binding(
                     return None;
                 }
                 let binding = codex_cursor::restore(authority, binding).ok()?;
-                codex_cursor::persist(authority, &binding).ok()?;
+                codex_cursor::persist_after_restore(authority, &binding).ok()?;
                 with_runtime_binding_state_under_source_authority(authority, |state| {
                     state.runtime_by_tmux.insert(
                         tmux_session_name.to_owned(),
@@ -290,8 +304,20 @@ pub(crate) fn reconcile_rehydrated_tmux_runtime_binding(
     observe_before_replace: impl FnOnce(),
     decide: impl FnOnce(Option<TuiRuntimeBinding>) -> Option<(TuiRuntimeBinding, bool)>,
 ) -> Option<TuiRuntimeBinding> {
+    reconcile_rehydrated_tmux_runtime_binding_with_authority(
+        provider, tmux_session_name, channel_id, observe_before_replace,
+        |_, existing| decide(existing),
+    )
+}
+
+#[rustfmt::skip]
+pub(crate) fn reconcile_rehydrated_tmux_runtime_binding_with_authority(
+    provider: &str, tmux_session_name: &str, channel_id: u64,
+    observe_before_replace: impl FnOnce(),
+    decide: impl FnOnce(&crate::services::tmux_common::TmuxSourceAuthority<'_>, Option<TuiRuntimeBinding>) -> Option<(TuiRuntimeBinding, bool)>,
+) -> Option<TuiRuntimeBinding> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        let (binding, replace) = decide(runtime_binding_for_tmux_session_under_source_authority(authority))?;
+        let (binding, replace) = decide(authority, runtime_binding_for_tmux_session_under_source_authority(authority))?;
         if replace {
             observe_before_replace();
             // An unpublished binding reports none; a published one reports what restore stored.

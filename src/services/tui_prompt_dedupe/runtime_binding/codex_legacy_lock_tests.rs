@@ -13,12 +13,28 @@ use std::{fs, path::Path, process::Command, time::Duration};
 
 #[test]
 fn legacy_canonical_read_failure_completes_ingress_and_another_getter() {
+    run_legacy_ingress(false);
+}
+
+#[test]
+fn legacy_channel_registration_serializes_hook_disk_and_memory_publication() {
+    run_legacy_ingress(true);
+}
+
+fn run_legacy_ingress(race_channel_registration: bool) {
     const CHILD_ENV: &str = "ADK_CODEX_LEGACY_LOCK_CHILD";
     if std::env::var_os(CHILD_ENV).is_none() {
+        let name = if race_channel_registration {
+            "legacy_channel_registration_serializes_hook_disk_and_memory_publication"
+        } else {
+            "legacy_canonical_read_failure_completes_ingress_and_another_getter"
+        };
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "services::tui_prompt_dedupe::runtime_binding::codex_legacy_lock_tests::legacy_canonical_read_failure_completes_ingress_and_another_getter",
+                &format!(
+                    "services::tui_prompt_dedupe::runtime_binding::codex_legacy_lock_tests::{name}"
+                ),
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
@@ -98,6 +114,32 @@ fn legacy_canonical_read_failure_completes_ingress_and_another_getter() {
     };
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+    let registration = race_channel_registration.then(|| {
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let pane = tmux.clone();
+        let registration = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            attempt_tx.send(()).unwrap();
+            register_tmux_channel(&pane, 584_510);
+            let _ = done_tx.send(());
+        });
+        codex_hook::AFTER_LEGACY_SNAPSHOT.with_borrow_mut(|slot| {
+            *slot = Some(Box::new(move || {
+                start_tx.send(()).unwrap();
+                attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert!(
+                    matches!(
+                        done_rx.recv_timeout(Duration::from_millis(200)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    ),
+                    "channel registration crossed the hook's source authority"
+                );
+            }));
+        });
+        registration
+    });
     let outcome = observe_binding_hook(
         "codex",
         "SessionStart",
@@ -110,6 +152,10 @@ fn legacy_canonical_read_failure_completes_ingress_and_another_getter() {
         matches!(outcome, IngressOutcome::Durable(DurableKind::Adopted)),
         "{outcome:?}"
     );
+    if let Some(registration) = registration {
+        registration.join().unwrap();
+        assert_eq!(owner_channel_for_tmux_session(&tmux), Some(584_510));
+    }
     let restored = runtime_binding_for_tmux_session(&tmux).unwrap();
     assert_eq!(
         restored.output_path,
@@ -120,6 +166,39 @@ fn legacy_canonical_read_failure_completes_ingress_and_another_getter() {
     let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(&tmux).unwrap();
     assert_eq!(marker.rollout_path, native.canonicalize().unwrap());
     assert_eq!(marker.session_id.as_deref(), Some(incoming));
+    if race_channel_registration {
+        let before = fs::read(crate::services::tmux_common::session_temp_path(
+            &tmux,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        ))
+        .ok();
+        let rejected = observe_binding_hook(
+            "codex",
+            "SessionStart",
+            Some(command),
+            Some(command),
+            &json!({"session_id":command,"transcript_path":old,"source":"clear"}),
+            &headers,
+        );
+        assert!(matches!(
+            rejected,
+            IngressOutcome::NotApplicable(NotApplicableReason::CodexContextUnavailable)
+        ));
+        let marker =
+            crate::services::codex_tui::session::read_codex_tui_rollout_marker(&tmux).unwrap();
+        assert_eq!(marker.rollout_path, native.canonicalize().unwrap());
+        assert_eq!(
+            fs::read(crate::services::tmux_common::session_temp_path(
+                &tmux,
+                crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT
+            ))
+            .ok(),
+            before
+        );
+        assert_eq!(runtime_binding_for_tmux_session(&tmux).unwrap(), restored);
+        assert!(runtime_binding_for_tmux_session("another-legacy-lock-pane").is_none());
+        register_tmux_channel(&tmux, 584_509);
+    }
     let wrong = "019e660d-4859-7522-9cee-8ba7c4e7c745";
     let malformed = write_native(wrong);
     fs::write(

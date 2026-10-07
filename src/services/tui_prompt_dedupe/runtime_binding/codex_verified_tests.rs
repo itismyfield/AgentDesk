@@ -218,7 +218,7 @@ fn actual_rehydration_recovers_proof_only_restart_without_manual_registration() 
         )
         .unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        crate::services::discord::run_codex_rehydrate_pass_for_tests(
+        let _ = crate::services::discord::run_codex_rehydrate_pass_for_tests(
             &shared,
             &h.context.tmux_session,
         );
@@ -233,6 +233,47 @@ fn actual_rehydration_recovers_proof_only_restart_without_manual_registration() 
             h.absent();
         }
     }
+}
+
+#[test]
+fn actual_rehydration_rejects_configured_channel_mismatch_before_owner_publication() {
+    let mut h = Fixture::new("fresh", None);
+    h.context.tmux_session =
+        crate::services::provider::ProviderKind::Codex.build_tmux_session_name("584505");
+    fs::write(&h.canonical, serde_json::to_vec(&h.context).unwrap()).unwrap();
+    let nonce =
+        crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "spawn_nonce");
+    fs::write(nonce, &h.context.execution_nonce).unwrap();
+    register_tmux_channel(&h.context.tmux_session, 584_504);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    let fold = h.fold();
+    dedupe::reset_state_for_tests();
+    binding_events::forget_channel_for_tests(584_504);
+    fs::remove_file(h.marker()).unwrap();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        &h.context.tmux_session,
+        RuntimeHandoffKind::CodexTui,
+    )
+    .unwrap();
+    let role_map = h.root.path().join("config/role_map.json");
+    fs::create_dir_all(role_map.parent().unwrap()).unwrap();
+    fs::write(role_map, serde_json::to_vec(&json!({"byChannelId":{"584505":{"roleId":"test","promptFile":"/dev/null","provider":"codex"}}})).unwrap()).unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    assert_eq!(
+        crate::services::discord::run_codex_rehydrate_pass_for_tests(
+            &shared,
+            &h.context.tmux_session
+        ),
+        None
+    );
+    assert_eq!(h.fold(), fold);
+    assert_eq!(
+        owner_channel_for_tmux_session(&h.context.tmux_session),
+        None
+    );
+    h.absent();
 }
 
 #[test]
@@ -283,6 +324,32 @@ fn actual_watcher_restore_claims_only_a_proven_source_and_its_output_namespace()
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
     assert!(!call(Some(linked), &relay));
     assert_eq!(attempts.get(), 2);
+}
+
+#[test]
+fn actual_watcher_restore_validates_destination_channel_before_registry_claim() {
+    use crate::services::discord::commit_codex_watcher_restore_to_empty_registry_for_tests as claim;
+    use poise::serenity_prelude::ChannelId;
+    let h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    let binding = h.consumer().unwrap();
+    let call = |channel| {
+        claim(
+            &h.context.tmux_session,
+            ChannelId::new(channel),
+            Some(binding.clone()),
+            &binding.output_path,
+        )
+    };
+    assert_eq!(call(584_505), (false, 0, None));
+    assert_eq!(call(584_504), (true, 1, Some(584_504)));
+    register_tmux_channel(&h.context.tmux_session, 584_505);
+    assert_eq!(
+        call(584_504),
+        (false, 0, None),
+        "conflicting channel mirror must not publish a watcher"
+    );
 }
 
 #[test]
@@ -380,6 +447,84 @@ fn restart_refuses_unlinked_or_foreign_proof_cursors_and_replaced_relay_identity
             assert_eq!(restored.relay_last_offset, Some(0));
         }
     }
+}
+
+#[test]
+fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
+    let h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    let relay = crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
+    fs::write(&relay, "delivered\nunread relay bytes\n").unwrap();
+    let mut binding = h.binding();
+    binding.relay_output_path = Some(relay.clone());
+    register_tmux_runtime_binding(&h.context.tmux_session, binding);
+    assert!(advance_tmux_runtime_binding_offset(
+        &h.context.tmux_session,
+        h.path(ID).to_str().unwrap(),
+        12
+    ));
+    assert!(advance_tmux_runtime_binding_offset(
+        &h.context.tmux_session,
+        &relay,
+        10
+    ));
+    let marker = fs::read(h.marker()).unwrap();
+    let before = h.raw().unwrap();
+    fs::rename(&relay, format!("{relay}.old")).unwrap();
+    fs::write(&relay, "fresh unread prefix and suffix\n").unwrap();
+    assert!(!advance_tmux_runtime_binding_offset(
+        &h.context.tmux_session,
+        h.path(ID).to_str().unwrap(),
+        13
+    ));
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    assert_eq!(h.raw(), Some(before));
+    dedupe::reset_state_for_tests();
+    binding_events::forget_channel_for_tests(584_504);
+    register_tmux_channel(&h.context.tmux_session, 584_504);
+    codex_verified::resolve_registered_claims();
+    let restored = h.consumer().unwrap();
+    assert_eq!(restored.last_offset, 12);
+    assert_eq!(restored.relay_last_offset, Some(0));
+    // Explicit reconnection may certify the replacement, starting at zero.
+    let mut reconnect = restored;
+    reconnect.relay_output_path = Some(relay.clone());
+    register_tmux_runtime_binding(&h.context.tmux_session, reconnect);
+    assert!(advance_tmux_runtime_binding_offset(
+        &h.context.tmux_session,
+        &relay,
+        1
+    ));
+}
+
+#[test]
+fn pending_retry_refuses_a_replacement_native_inode_after_restart() {
+    let h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    assert!(advance_tmux_runtime_binding_offset(
+        &h.context.tmux_session,
+        h.path(ID).to_str().unwrap(),
+        12
+    ));
+    let held = h.path(ID).with_extension("held");
+    fs::rename(h.path(ID), &held).unwrap();
+    h.send("user-prompt-submit", ID, json!("later prompt"), None);
+    let pending = h.fold();
+    h.header(ID, false);
+    dedupe::reset_state_for_tests();
+    binding_events::forget_channel_for_tests(584_504);
+    register_tmux_channel(&h.context.tmux_session, 584_504);
+    codex_verified::resolve_registered_claims();
+    assert!(h.consumer().is_none());
+    assert_eq!(
+        h.fold().verified.unwrap().source,
+        pending.verified.unwrap().source
+    );
+    assert!(!h.fold().pending.is_empty());
+    let marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
+    assert_eq!(marker["rollout_start_offset"], 12);
 }
 
 #[test]
@@ -719,8 +864,13 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
                 assert_eq!(marker["codex_relay"]["last_offset"], 10);
                 assert_eq!(raw.relay_output_path, Some(relay));
             }
+            // Restart after resolution must preserve each cursor's own namespace.
+            dedupe::reset_state_for_tests();
             binding_events::forget_channel_for_tests(584_504);
+            register_tmux_channel(&h.context.tmux_session, 584_504);
+            codex_verified::resolve_registered_claims();
             assert_eq!(h.fold(), resolved);
+            assert_eq!(h.consumer(), Some(raw.clone()));
             h.send("user-prompt-submit", ID, json!("later retry"), None);
             codex_verified::resolve_registered_claims();
             assert_eq!(h.fold(), resolved);

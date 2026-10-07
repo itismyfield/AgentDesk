@@ -182,6 +182,21 @@ pub(super) fn persist(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> io::Result<()> {
+    persist_checkpoint(authority, binding, false)
+}
+
+pub(super) fn persist_after_restore(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> io::Result<()> {
+    persist_checkpoint(authority, binding, true)
+}
+
+fn persist_checkpoint(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+    restored: bool,
+) -> io::Result<()> {
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui
         || codex_verified::current_context(authority)?.is_none()
     {
@@ -199,6 +214,15 @@ pub(super) fn persist(
         let offset = binding.relay_last_offset.unwrap_or(0);
         if offset > len {
             return Err(io::Error::other("Codex relay cursor beyond file"));
+        }
+        let same_relay = marker.get("codex_relay").is_some_and(|relay| {
+            relay["output_path"].as_str() == Some(path)
+                && relay["dev"].as_u64() == Some(dev)
+                && relay["ino"].as_u64() == Some(ino)
+        });
+        // Only an explicit restore can connect a new spool at its beginning.
+        if !same_relay && !(restored && offset == 0) {
+            return Err(io::Error::other("Codex relay checkpoint identity changed"));
         }
         marker["codex_relay"] =
             json!({"output_path":path,"last_offset":offset,"dev":dev,"ino":ino});

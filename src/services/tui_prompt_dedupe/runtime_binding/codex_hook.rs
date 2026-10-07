@@ -52,6 +52,9 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 thread_local! { pub(crate) static SHADOW_IO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 #[cfg(test)]
+thread_local! { pub(crate) static AFTER_LEGACY_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+
+#[cfg(test)]
 fn shadow_mutant(name: &str) -> bool {
     std::env::var("AGENTDESK_CODEX_SHADOW_TEST_MUTATION").is_ok_and(|value| value == name)
 }
@@ -381,6 +384,10 @@ pub(crate) fn observe_codex_hook(
                         .map(|entry| entry.value),
                 )
             });
+        #[cfg(test)]
+        if let Some(after_snapshot) = AFTER_LEGACY_SNAPSHOT.with_borrow_mut(Option::take) {
+            after_snapshot();
+        }
         let Some(old) = old else {
             return IngressOutcome::Unavailable(UnavailableReason::RestoreNotReady);
         };

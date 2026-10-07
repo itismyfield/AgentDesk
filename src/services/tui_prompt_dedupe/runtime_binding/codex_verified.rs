@@ -388,7 +388,7 @@ pub(super) fn publish_proof(
     )
     .map_err(io::Error::other)?;
     let binding = super::codex_cursor::restore_after_publication(authority, binding)?;
-    super::codex_cursor::persist(authority, &binding)?;
+    super::codex_cursor::persist_after_restore(authority, &binding)?;
     with_runtime_binding_state_under_source_authority(authority, |state| {
         state.runtime_by_tmux.insert(
             authority.session().to_owned(),
@@ -525,6 +525,26 @@ pub(crate) fn codex_verified_discovered_channel(tmux: &str) -> Option<u64> {
     tc::with_tmux_source_authority(tmux, |authority| {
         current_context(authority).ok().flatten()?.channel_id
     })
+}
+
+pub(crate) fn channel_allowed_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    channel: u64,
+) -> bool {
+    match current_context(authority) {
+        Ok(None) => true,
+        Ok(Some(context)) => {
+            context.channel_id == Some(channel)
+                && channel != 0
+                && with_runtime_binding_state_under_source_authority(authority, |state| {
+                    state
+                        .channel_by_tmux
+                        .get(authority.session())
+                        .is_none_or(|entry| entry.value == channel)
+                })
+        }
+        Err(_) => false,
+    }
 }
 
 pub(crate) fn recover_discovered_codex_binding(tmux: &str, channel: u64) -> bool {

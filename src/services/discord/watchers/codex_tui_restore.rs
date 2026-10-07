@@ -118,6 +118,12 @@ pub(super) fn commit_live_direct_resume_fallback(
                 if dedupe::codex_verified_publication_allowed(authority, &unresolved) {
                     return claim_watcher();
                 }
+                if !dedupe::codex_verified_channel_allowed_under_source_authority(
+                    authority,
+                    channel_id.get(),
+                ) {
+                    return false;
+                }
                 let Some(candidate) = candidate else {
                     return false;
                 };
@@ -335,6 +341,9 @@ mod codex_direct_resume_args_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use verified_watcher_claim_tests::commit_codex_watcher_restore_to_empty_registry_for_tests;
+
 #[cfg(test)]
 #[cfg(unix)]
 mod verified_watcher_claim_tests {
@@ -342,6 +351,52 @@ mod verified_watcher_claim_tests {
     use crate::services::tui_prompt_dedupe::binding_context::{
         BindingContext, PreparedIncarnation,
     };
+
+    pub(crate) fn commit_codex_watcher_restore_to_empty_registry_for_tests(
+        tmux: &str,
+        channel: ChannelId,
+        candidate: Option<TuiRuntimeBinding>,
+        output: &str,
+    ) -> (bool, usize, Option<u64>) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI64, AtomicU64},
+        };
+        let registry = crate::services::discord::TmuxWatcherRegistry::new();
+        let handle = crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: tmux.to_owned(),
+            output_path: output.to_owned(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        };
+        let mut attempts = 0;
+        let committed =
+            commit_live_direct_resume_fallback(tmux, channel, None, candidate, output, || {
+                attempts += 1;
+                super::super::try_claim_watcher_for_host(
+                    &registry,
+                    channel,
+                    handle,
+                    Some(&ProviderKind::Codex),
+                    None,
+                    super::super::WatchHost::Legacy,
+                )
+                .unwrap_or(false)
+            });
+        (
+            committed,
+            attempts,
+            registry
+                .owner_channel_for_tmux_session(tmux)
+                .map(|owner| owner.get()),
+        )
+    }
 
     #[test]
     fn actual_watcher_without_fallback_refuses_verified_without_proof_and_preserves_legacy() {

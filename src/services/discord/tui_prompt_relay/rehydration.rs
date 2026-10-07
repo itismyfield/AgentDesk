@@ -500,10 +500,13 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
         }
 
         if let Some(authoritative_channel) = authoritative_channel {
-            let repaired = shared.tmux_watchers.restore_owner_channel_for_tmux_session(
+            let Some(repaired) = codex_marker::restore_codex_owner_channel(
+                shared,
                 &tmux_session_name,
-                ChannelId::new(authoritative_channel),
-            );
+                authoritative_channel,
+            ) else {
+                continue;
+            };
             if repaired {
                 tracing::warn!(
                     tmux_session_name = %tmux_session_name,
@@ -557,12 +560,12 @@ fn rehydrate_codex_tui_binding_transaction(
     if !recovered {
         return None;
     }
-    crate::services::tui_prompt_dedupe::reconcile_rehydrated_tmux_runtime_binding(
+    crate::services::tui_prompt_dedupe::reconcile_rehydrated_tmux_runtime_binding_with_authority(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
         channel_id,
         observe_before_register,
-        |existing| {
+        |authority, existing| {
             if let Some(existing) = existing
                 && existing.runtime_kind == RuntimeHandoffKind::CodexTui
                 && Path::new(&existing.output_path).exists()
@@ -616,8 +619,8 @@ fn rehydrate_codex_tui_binding_transaction(
                             tmux_session_name,
                         ) != Some(channel_id)
                         {
-                            crate::services::tui_prompt_dedupe::register_tmux_channel(
-                                tmux_session_name,
+                            crate::services::tui_prompt_dedupe::register_tmux_channel_under_source_authority(
+                                authority,
                                 channel_id,
                             );
                         }
@@ -643,19 +646,7 @@ fn rehydrate_codex_tui_binding_transaction(
 }
 
 #[cfg(all(unix, test))]
-pub(crate) fn run_codex_rehydrate_pass_for_tests(
-    shared: &Arc<SharedData>,
-    tmux_session_name: &str,
-) {
-    struct RestoreView(Option<Vec<String>>);
-    impl Drop for RestoreView {
-        fn drop(&mut self) {
-            CODEX_PASS_TMUX_VIEW.set(self.0.take());
-        }
-    }
-    let _view = RestoreView(CODEX_PASS_TMUX_VIEW.replace(Some(vec![tmux_session_name.to_owned()])));
-    rehydrate_existing_codex_tui_bindings(shared);
-}
+pub(crate) use codex_marker::run_codex_rehydrate_pass_for_tests;
 
 /// One boot restore pass for a live pane, with no other pane's claims.
 #[cfg(all(unix, test))]
