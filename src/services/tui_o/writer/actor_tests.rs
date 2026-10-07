@@ -424,3 +424,123 @@ mod host_start;
 
 #[path = "drain_projection_tests.rs"]
 mod drain_projection;
+
+#[tokio::test(start_paused = true)]
+async fn verified_permission_hold_preserves_an_attached_actor_cursor_and_owed_output() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::verified_permission_hold_preserves_an_attached_actor_cursor_and_owed_output"
+    )) {
+        return;
+    }
+    held_actor_preserves_cursor_and_owed_output(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn verified_new_source_permission_does_not_release_a_prior_actor_source_or_owed_output() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::verified_new_source_permission_does_not_release_a_prior_actor_source_or_owed_output"
+    )) {
+        return;
+    }
+    held_actor_preserves_cursor_and_owed_output(true).await;
+}
+
+async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe,
+        binding_context::{BindingContext, PreparedIncarnation},
+    };
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (_context_root, _env) =
+        dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    dedupe::reset_state_for_tests();
+    dedupe::binding_events::set_test_root(Some(_context_root.path()));
+    let native = |kind: &str, payload: serde_json::Value| {
+        format!("{}\n", serde_json::json!({"type":kind,"payload":payload})).into_bytes()
+    };
+    let message = |id: &str, text: &str| {
+        native(
+            "response_item",
+            serde_json::json!({
+                "type":"message","role":"assistant","id":id,
+                "content":[{"type":"output_text","text":text}]
+            }),
+        )
+    };
+    let turn = |kind: &str| native("event_msg", serde_json::json!({"type":kind,"turn_id":"t1"}));
+    let (harness, path, _) = switched_over(b"");
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let bindings = startup_log(&mut writer);
+    for line in [
+        turn("task_started"),
+        message("m1", "already owed"),
+        turn("task_complete"),
+    ] {
+        append(&path, &line);
+    }
+    let tmux = format!("o-held-{}", uuid::Uuid::new_v4().simple());
+    super::super::actor::exercise_held_actor_for_tests(
+        writer,
+        ShadowProvider::Codex,
+        bindings,
+        || {
+            let context = BindingContext {
+                schema: 1,
+                provider: "codex".into(),
+                created_at: Utc::now(),
+                execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+                tmux_session: tmux.clone(),
+                channel_id: Some(CHANNEL),
+                owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+                host: None,
+                expected_native_session_id: None,
+                launch_mode: "fresh".into(),
+                provider_root: Some(_context_root.path().canonicalize().unwrap()),
+                first_prompt_digest: None,
+                source_policy: Some("verified".into()),
+            };
+            PreparedIncarnation::create(context.clone()).unwrap();
+            let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
+            std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(marker, &context.execution_nonce).unwrap();
+            dedupe::register_tmux_channel(&tmux, CHANNEL);
+            if allowed_new_source {
+                use dedupe::binding_context::{BINDING_HEADER, CapturedContext, HookBindingEnvelope, ObservedHookProcess};
+                let id = "019e660d-4859-7522-9cee-8ba7c4e7c743";
+                let proof_path = context.provider_root.as_ref().unwrap().join(format!("rollout-{id}.jsonl"));
+                let timestamp = (context.created_at + chrono::Duration::seconds(1)).to_rfc3339();
+                let header = serde_json::json!({"type":"session_meta", "timestamp":timestamp,
+                    "payload":{"id":id,"timestamp":timestamp,"source":"cli",
+                    "cwd":_context_root.path(),"originator":"codex_cli_rs"}});
+                std::fs::write(&proof_path, format!("{header}\n")).unwrap();
+                dedupe::set_codex_delivery_permission_for_tests(&context, dedupe::CodexDeliveryPermissionForTests::Allowed);
+                let envelope = HookBindingEnvelope { context: CapturedContext::Captured(context.clone()), observed: ObservedHookProcess::default() };
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+                let ingress = crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook(
+                    "codex", "session_start", Some(id), Some(id),
+                    &serde_json::json!({"session_id":id,"transcript_path":proof_path,"source":"startup"}), &headers,
+                );
+                let fold = dedupe::binding_events::codex::read_ownership(&context);
+                assert!(dedupe::runtime_binding_for_tmux_session(&tmux).is_some(), "new source must actually publish its Allowed proof: ingress={ingress:?}, fold={fold:?}");
+                assert!(dedupe::codex_verified_channel_delivery_allowed(CHANNEL), "channel guard must pass so source identity is the only hold");
+            }
+            append(&path, &message("m2", "must remain uncaptured"));
+        },
+    )
+    .await;
+    assert!(
+        harness.port.posts().is_empty(),
+        "held actor must send nothing"
+    );
+    assert!(
+        harness.alarms.taken().is_empty(),
+        "permission hold must not alarm"
+    );
+    dedupe::reset_state_for_tests();
+    dedupe::binding_events::set_test_root(None);
+}

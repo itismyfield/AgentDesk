@@ -232,52 +232,68 @@ fn install_binding(
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
     launched: bool,
 ) -> bool {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        install_binding_under_source_authority(authority, rollout_start_offset, binding, launched)
+    })
+}
+
+pub(crate) fn install_codex_tui_runtime_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    rollout_start_offset: Option<u64>,
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> bool {
+    install_binding_under_source_authority(authority, rollout_start_offset, binding, false)
+}
+
+fn install_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    rollout_start_offset: Option<u64>,
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    launched: bool,
+) -> bool {
     use crate::services::tui_prompt_dedupe as dedupe;
+    let tmux_session_name = authority.session();
     let rollout_path = PathBuf::from(&binding.output_path);
     let session_id = binding.session_id.clone();
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        if !dedupe::codex_verified_publication_allowed(authority, &binding) {
-            return false;
-        }
-        let verified =
-            dedupe::codex_verified_marker_metadata(authority, &rollout_path, session_id.as_deref())
-                .is_ok_and(|metadata| metadata.is_some());
-        // A recovery install with hooks on gets the same check; its reader keeps the old source.
-        if (launched || crate::services::codex::codex_direct_tui_hook_overrides_enabled())
-            && dedupe::codex_tail_source_retired(authority, &binding)
-        {
-            tracing::info!(
-                tmux_session_name,
-                "Codex tail source retired by a hook or held on an unreadable hook history"
-            );
-            return false;
-        }
-        source_observation::observe(&rollout_path, session_id.as_deref());
-        if dedupe::codex_tui_binding_is_subagent(tmux_session_name, &binding) {
-            return false;
-        }
-        if let Err(error) = write_codex_tui_rollout_marker_under_source_authority(
-            authority,
-            &rollout_path,
-            session_id.as_deref(),
-            rollout_start_offset,
-        ) {
-            tracing::warn!(
-                tmux_session_name,
-                error,
-                "failed to persist Codex TUI rollout marker; runtime binding unchanged"
-            );
-            return !verified;
-        }
-        let registered = if launched {
-            dedupe::register_launched_tmux_runtime_binding_under_source_authority(
-                authority, binding,
-            )
-        } else {
-            dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding)
-        };
-        !verified || registered
-    })
+    if !dedupe::codex_verified_publication_allowed(authority, &binding) {
+        return false;
+    }
+    let verified =
+        dedupe::codex_verified_marker_metadata(authority, &rollout_path, session_id.as_deref())
+            .is_ok_and(|metadata| metadata.is_some());
+    // A recovery install with hooks on gets the same check; its reader keeps the old source.
+    if (launched || crate::services::codex::codex_direct_tui_hook_overrides_enabled())
+        && dedupe::codex_tail_source_retired(authority, &binding)
+    {
+        tracing::info!(
+            tmux_session_name,
+            "Codex tail source retired by a hook or held on an unreadable hook history"
+        );
+        return false;
+    }
+    source_observation::observe(&rollout_path, session_id.as_deref());
+    if dedupe::codex_tui_binding_is_subagent(tmux_session_name, &binding) {
+        return false;
+    }
+    if let Err(error) = write_codex_tui_rollout_marker_under_source_authority(
+        authority,
+        &rollout_path,
+        session_id.as_deref(),
+        rollout_start_offset,
+    ) {
+        tracing::warn!(
+            tmux_session_name,
+            error,
+            "failed to persist Codex TUI rollout marker; runtime binding unchanged"
+        );
+        return !verified;
+    }
+    let registered = if launched {
+        dedupe::register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
+    } else {
+        dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding)
+    };
+    !verified || registered
 }
 
 pub fn advance_codex_tui_rollout_marker_start_offset(

@@ -20,6 +20,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const CANARY_CHANNEL: u64 = 1_509_350_778_043_895_902;
+const CANARY_TMUX: &str = "AgentDesk-codex-adk-codex-tui-e2e";
+
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 const CHILD: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
 const PROMPT: &str = "첫 argv\n한글 e\u{301}";
@@ -29,6 +32,7 @@ fn digest(s: &str) -> String {
 }
 
 struct Fixture {
+    _fake_tmux: crate::services::provider_teardown::tests::test_support::FakeTmux,
     env: [TestEnvVarGuard; 2],
     root: tempfile::TempDir,
     context: BindingContext,
@@ -42,6 +46,24 @@ impl Fixture {
         Self::with_policy(mode, expected, Some("verified"))
     }
     fn with_policy(mode: &str, expected: Option<&str>, policy: Option<&str>) -> Self {
+        Self::with_identity(mode, expected, policy, None, 584_504)
+    }
+    fn canary() -> Self {
+        Self::with_identity(
+            "fresh",
+            None,
+            Some("verified"),
+            Some(CANARY_TMUX),
+            CANARY_CHANNEL,
+        )
+    }
+    fn with_identity(
+        mode: &str,
+        expected: Option<&str>,
+        policy: Option<&str>,
+        tmux: Option<&str>,
+        channel: u64,
+    ) -> Self {
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
@@ -55,8 +77,10 @@ impl Fixture {
             provider: "codex".into(),
             created_at: chrono::Utc::now(),
             execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
-            tmux_session: format!("verified-{}", uuid::Uuid::new_v4().simple()),
-            channel_id: Some(584_504),
+            tmux_session: tmux
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("verified-{}", uuid::Uuid::new_v4().simple())),
+            channel_id: Some(channel),
             owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
             host: None,
             expected_native_session_id: expected.map(str::to_owned),
@@ -70,9 +94,13 @@ impl Fixture {
             crate::services::tmux_common::session_temp_path(&context.tmux_session, "spawn_nonce");
         fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
         fs::write(marker, &context.execution_nonce).unwrap();
-        register_tmux_channel(&context.tmux_session, 584_504);
+        register_tmux_channel(&context.tmux_session, channel);
         codex_verified::set_permission_for_tests(&context, DeliveryPermission::Allowed);
+        let fake_tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+            &context.tmux_session,
+        );
         Self {
+            _fake_tmux: fake_tmux,
             env,
             root,
             context,
@@ -163,7 +191,9 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         binding_events::APPEND_FAULT.with(|f| f.set(None));
         codex_verified::clear_permissions_for_tests();
-        binding_events::forget_channel_for_tests(584_504);
+        if let Some(channel) = self.context.channel_id {
+            binding_events::forget_channel_for_tests(channel);
+        }
         binding_events::set_test_root(None);
         dedupe::reset_state_for_tests();
         let _ = &self.env;
@@ -1250,5 +1280,451 @@ fn optional_path_pending_does_not_merge_replaced_descriptors_or_other_parents() 
         assert_eq!(h.fold(), pending);
         assert_eq!(h.fold().verified.as_ref(), Some(&original));
         assert!(h.consumer().is_none());
+    }
+}
+
+#[test]
+fn canary_actual_native_read_and_witness_require_current_proof_and_permission() {
+    use crate::services::discord::{
+        codex_native_read_for_tests, codex_source_witness_present_for_tests,
+    };
+    let h = Fixture::canary();
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    let path = h.path(ID).display().to_string();
+    assert!(codex_native_read_for_tests(CANARY_TMUX, &path).is_ok());
+    assert!(codex_source_witness_present_for_tests(CANARY_TMUX, &path));
+    let fold = h.fold();
+    let marker = fs::read(h.marker()).unwrap();
+    let raw = h.raw();
+    for permission in [DeliveryPermission::Unknown, DeliveryPermission::Cancelled] {
+        codex_verified::set_permission_for_tests(&h.context, permission);
+        assert!(h.consumer().is_none());
+        assert!(!codex_source_witness_present_for_tests(CANARY_TMUX, &path));
+        let error = codex_native_read_for_tests(CANARY_TMUX, &path).unwrap_err();
+        assert!(error.contains("proof or permission"), "{error}");
+        assert_eq!(h.fold(), fold);
+        assert_eq!(h.raw(), raw);
+        assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    }
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    assert!(codex_native_read_for_tests(CANARY_TMUX, &path).is_ok());
+    fs::rename(h.path(ID), h.root.path().join("old-inode")).unwrap();
+    h.header(ID, false);
+    assert!(h.consumer().is_none());
+    assert!(codex_native_read_for_tests(CANARY_TMUX, &path).is_err());
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+}
+
+#[test]
+fn canary_actual_manual_rebind_refuses_before_relay_generation_or_spawn() {
+    use crate::services::discord::codex_rebind_spawn_for_tests;
+    let h = Fixture::canary();
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    let path = h.path(ID).display().to_string();
+    let relay = crate::services::tmux_common::session_temp_path(CANARY_TMUX, "jsonl");
+    let marker = fs::read(h.marker()).unwrap();
+    let raw = h.raw();
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+    assert_eq!(
+        codex_rebind_spawn_for_tests(CANARY_TMUX, &path, Some(ID.into()), false),
+        (false, 0)
+    );
+    assert!(
+        !Path::new(&relay).exists(),
+        "rejected rebind must not prepare a relay generation"
+    );
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    assert_eq!(h.raw(), raw);
+    fs::write(&relay, b"retained normalized output\n").unwrap();
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    assert_eq!(
+        codex_rebind_spawn_for_tests(CANARY_TMUX, &path, Some(ID.into()), true),
+        (false, 0)
+    );
+    assert_eq!(fs::read(&relay).unwrap(), b"retained normalized output\n");
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    assert_eq!(h.raw(), raw);
+}
+
+#[test]
+fn canary_actual_restart_requires_source_permission_and_destination_channel() {
+    use crate::services::discord::codex_restart_output_for_tests;
+    let h = Fixture::canary();
+    let _codex_home =
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", h.root.path());
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    assert!(
+        crate::services::discord::codex_restart_output_for_tests(
+            "missing-or-wrong-pane",
+            CANARY_CHANNEL,
+            Some(ID.to_owned()),
+            h.path(ID).display().to_string(),
+        )
+        .is_none()
+    );
+    let path = h.path(ID).display().to_string();
+    assert_eq!(
+        codex_restart_output_for_tests(CANARY_TMUX, CANARY_CHANNEL, Some(ID.into()), path.clone()),
+        Some(path.clone())
+    );
+    assert!(
+        codex_restart_output_for_tests(
+            CANARY_TMUX,
+            CANARY_CHANNEL + 1,
+            Some(ID.into()),
+            path.clone()
+        )
+        .is_none()
+    );
+    assert!(
+        codex_restart_output_for_tests(
+            CANARY_TMUX,
+            CANARY_CHANNEL,
+            Some(CHILD.into()),
+            path.clone()
+        )
+        .is_none()
+    );
+    let marker = fs::read(h.marker()).unwrap();
+    let missing_relay = crate::services::tmux_common::session_temp_path(CANARY_TMUX, "jsonl");
+    assert!(!Path::new(&missing_relay).exists());
+    assert_eq!(
+        crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(ID)
+            .map(|path| path.canonicalize().unwrap()),
+        Some(h.path(ID))
+    );
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+    for output in [path.clone(), missing_relay] {
+        assert!(
+            codex_restart_output_for_tests(CANARY_TMUX, CANARY_CHANNEL, Some(ID.into()), output)
+                .is_none()
+        );
+    }
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    assert_eq!(
+        codex_restart_output_for_tests(CANARY_TMUX, CANARY_CHANNEL, Some(ID.into()), path.clone()),
+        Some(path)
+    );
+}
+
+#[test]
+fn legacy_actual_native_read_and_restart_ignore_verified_permission() {
+    use crate::services::discord::{codex_native_read_for_tests, codex_restart_output_for_tests};
+    let h = Fixture::with_policy("fresh", None, Some("legacy"));
+    h.header(ID, false);
+    register_tmux_runtime_binding(&h.context.tmux_session, h.binding());
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+    let path = h.path(ID).display().to_string();
+    assert!(codex_native_read_for_tests(&h.context.tmux_session, &path).is_ok());
+    assert_eq!(
+        codex_restart_output_for_tests(
+            &h.context.tmux_session,
+            584_504,
+            Some(ID.into()),
+            path.clone()
+        ),
+        Some(path)
+    );
+}
+
+#[test]
+fn canary_actual_rehydrate_missing_launch_evidence_never_publishes_stale_owner() {
+    for missing_nonce in [0, 1, 2] {
+        let h = Fixture::canary();
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        h.assert_proof();
+        let before = h.fold();
+        fs::remove_file(&h.canonical).unwrap();
+        fs::remove_file(h.marker()).unwrap();
+        if missing_nonce == 2 {
+            fs::write(
+                crate::services::tmux_common::session_temp_path(
+                    &h.context.tmux_session,
+                    "spawn_nonce",
+                ),
+                "f".repeat(32),
+            )
+            .unwrap();
+        } else if missing_nonce == 1 {
+            fs::remove_file(crate::services::tmux_common::session_temp_path(
+                &h.context.tmux_session,
+                "spawn_nonce",
+            ))
+            .unwrap();
+        }
+        dedupe::reset_state_for_tests();
+        binding_events::forget_channel_for_tests(h.context.channel_id.unwrap());
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            &h.context.tmux_session,
+            RuntimeHandoffKind::CodexTui,
+        )
+        .unwrap();
+        let role_map = h.root.path().join("config/role_map.json");
+        fs::create_dir_all(role_map.parent().unwrap()).unwrap();
+        fs::write(
+            &role_map,
+            serde_json::to_vec(&json!({"byChannelId":{
+                "584505":{"roleId":"test", "promptFile":"/dev/null","provider":"codex"}
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        let config_path = h.root.path().join("config/agentdesk.yaml");
+        fs::write(
+            &config_path,
+            r#"server:
+  port: 8791
+agents:
+  - id: canary-test
+    name: Canary
+    provider: codex
+    channels:
+      codex:
+        id: "584505"
+        name: "adk-codex-tui-e2e"
+"#,
+        )
+        .unwrap();
+        crate::config::load_from_path(&config_path).unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
+        // A rollback changes new launches, not the durable pin of a lost launch.
+        SOURCE_MODE_TEST.with(|mode| mode.set(Some(CodexSourceMode::Legacy)));
+        let restored = crate::services::discord::run_codex_rehydrate_pass_for_tests(
+            &shared,
+            &h.context.tmux_session,
+        );
+        SOURCE_MODE_TEST.with(|mode| mode.set(None));
+        assert_eq!(restored, None);
+        assert_eq!(
+            owner_channel_for_tmux_session(&h.context.tmux_session),
+            None
+        );
+        assert_eq!(h.fold(), before);
+        assert!(h.raw().is_none());
+        assert!(!h.marker().exists());
+    }
+}
+
+#[test]
+fn canary_source_policy_first_launch_and_existing_legacy_remain_legacy_until_pinned() {
+    for policy in [None, Some("legacy"), Some("shadow")] {
+        let h = Fixture::with_identity(
+            "fresh",
+            None,
+            policy,
+            Some(crate::services::codex_tui::canary::CANARY_TMUX),
+            crate::services::codex_tui::canary::CANARY_CHANNEL,
+        );
+        use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
+        SOURCE_MODE_TEST.with(|mode| mode.set(Some(CodexSourceMode::Verified)));
+        assert!(!codex_verified_requires_proof(&h.context.tmux_session));
+        assert!(!codex_verified_input_blocked(&h.context.tmux_session));
+        SOURCE_MODE_TEST.with(|mode| mode.set(None));
+    }
+    let h = Fixture::canary();
+    fs::remove_file(&h.canonical).unwrap();
+    fs::remove_file(crate::services::tmux_common::session_temp_path(
+        &h.context.tmux_session,
+        "spawn_nonce",
+    ))
+    .unwrap();
+    use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
+    SOURCE_MODE_TEST.with(|mode| mode.set(Some(CodexSourceMode::Verified)));
+    assert!(!codex_verified_requires_proof(&h.context.tmux_session));
+    SOURCE_MODE_TEST.with(|mode| mode.set(None));
+}
+
+#[test]
+fn canary_actual_o_log_holds_source_without_losing_sequence_or_durable_record() {
+    use crate::services::tui_o::writer::binding::{BindingEvents, BindingLog, BindingRecord};
+    let h = Fixture::canary();
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    let channel = h.context.channel_id.unwrap();
+    let before = BindingLog.binding_events_since(channel, 0).unwrap();
+    assert!(matches!(before[0].record, BindingRecord::Bound { .. }));
+    let seq = before[0].seq;
+    let log = fs::read(
+        h.root
+            .path()
+            .join(binding_events::BINDING_EVENTS_DIR)
+            .join(format!("{channel}.log")),
+    )
+    .unwrap();
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+    let held = BindingLog.binding_events_since(channel, 0).unwrap();
+    assert_eq!(held.len(), before.len());
+    assert_eq!(held[0].seq, seq);
+    assert!(matches!(held[0].record, BindingRecord::Rejected { .. }));
+    assert!(
+        BindingLog
+            .binding_events_since(channel, seq)
+            .unwrap()
+            .is_empty()
+    );
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    assert_eq!(BindingLog.binding_events_since(channel, 0).unwrap(), before);
+    assert_eq!(
+        fs::read(
+            h.root
+                .path()
+                .join(binding_events::BINDING_EVENTS_DIR)
+                .join(format!("{channel}.log"))
+        )
+        .unwrap(),
+        log
+    );
+}
+
+fn append_tail_response(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    for record in [
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant", "content":[{"type":"output_text","text":text}]}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","last_agent_message":text}}),
+    ] {
+        writeln!(file, "{record}").unwrap();
+    }
+}
+
+#[test]
+fn actual_fresh_selector_uses_canary_proof_and_other_channels_keep_newest_mtime() {
+    for canary in [true, false] {
+        let h = if canary {
+            Fixture::canary()
+        } else {
+            Fixture::new("fresh", None)
+        };
+        let _codex_home =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", h.root.path());
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        h.assert_proof();
+        append_tail_response(&h.path(ID), "owned-source");
+        h.header(CHILD, false);
+        append_tail_response(&h.path(CHILD), "newer-unowned-source");
+        for (id, seconds) in [(ID, 10), (CHILD, 20)] {
+            fs::File::options()
+                .write(true)
+                .open(h.path(id))
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let deadline_token = cancel.clone();
+        let deadline = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            deadline_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        });
+        let result = crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+            h.root.path(), std::time::UNIX_EPOCH, tx, Some(cancel), || false,
+            &h.context.tmux_session, Some(PROMPT),
+        );
+        deadline.join().unwrap();
+        let result = result.expect("the selected owned source must complete before the deadline");
+        let expected = if canary { ID } else { CHILD };
+        assert_eq!(
+            result.rollout_path.canonicalize().unwrap(),
+            h.path(expected).canonicalize().unwrap()
+        );
+        assert_eq!(result.session_id.as_deref(), Some(expected));
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(messages.iter().any(|message| matches!(message,
+            crate::services::agent_protocol::StreamMessage::Text { content }
+                if content == if canary {"owned-source"} else {"newer-unowned-source"})));
+        if canary {
+            assert_eq!(h.consumer().unwrap().last_offset, 0);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(h.marker()).unwrap()).unwrap()["rollout_start_offset"],
+                json!(0)
+            );
+        }
+    }
+}
+
+#[test]
+fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_without_frames() {
+    use crate::services::provider::CancelToken;
+    use std::{
+        sync::{Arc, atomic::Ordering},
+        time::Duration,
+    };
+    for pending in [false, true] {
+        let h = Fixture::canary();
+        if !pending {
+            h.header(ID, false);
+        }
+        codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+        let outcome = h.send("session-start", ID, Value::Null, None);
+        assert!(!outcome.refused(), "{outcome:?}");
+        let before = h.fold();
+        let token = Arc::new(CancelToken::new());
+        let cancel = token.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            cancel.cancelled.store(true, Ordering::Release);
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+            h.root.path(), std::time::UNIX_EPOCH, tx, Some(token), || false,
+            &h.context.tmux_session, Some(PROMPT),
+        );
+        release.join().unwrap();
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(h.fold(), before);
+        assert!(h.raw().is_none());
+        assert!(!h.marker().exists());
+        if pending {
+            h.header(ID, false);
+            codex_verified::resolve_registered_claims();
+        }
+        codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+        h.send("session-start", ID, Value::Null, None);
+        h.assert_proof();
+        append_tail_response(&h.path(ID), "must stay held");
+        let binding = h.consumer().unwrap();
+        let marker = fs::read(h.marker()).unwrap();
+        codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+        let token = Arc::new(CancelToken::new());
+        let cancel = token.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            cancel.cancelled.store(true, Ordering::Release);
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result =
+            crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
+                &h.path(ID),
+                0,
+                Some(ID),
+                tx,
+                Some(token),
+                || false,
+                &h.context.tmux_session,
+            )
+            .unwrap();
+        release.join().unwrap();
+        assert!(matches!(
+            result,
+            crate::services::provider::ReadOutputResult::Cancelled { offset: 0 }
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(h.raw(), Some(binding));
+        assert_eq!(fs::read(h.marker()).unwrap(), marker);
     }
 }

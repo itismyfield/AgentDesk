@@ -1553,3 +1553,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) use native_codex::{
+    codex_native_read_for_tests, codex_source_witness_present_for_tests,
+};

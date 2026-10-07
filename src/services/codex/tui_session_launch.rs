@@ -20,7 +20,8 @@ pub(super) fn prepare_codex_tui_launch_script(
     if herdr_configured_for_tui_launch(report_channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
-    let policy = codex_source_mode_snapshot().launch_policy()?;
+    let policy =
+        crate::services::codex_tui::canary::launch_policy(tmux_session_name, report_channel_id)?;
     use sha2::{Digest, Sha256};
     let digest = format!(
         "sha256:{:x}",
@@ -158,10 +159,235 @@ fn add_codex_tui_hooks(
     true
 }
 
+/// Publishes a tail handoff only after cancellation, source and readiness checks.
+#[cfg(unix)]
+pub(crate) fn emit_codex_tui_post_tail_handoff(
+    tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
+    sender: Sender<StreamMessage>,
+    cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+) -> Result<(), String> {
+    let cancel_observed =
+        || crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref());
+
+    let read_result = tail_result.read_result.clone();
+    if matches!(
+        read_result,
+        crate::services::provider::ReadOutputResult::Cancelled { .. }
+    ) {
+        tracing::info!(
+            tmux_session = tmux_session_name,
+            "Codex Direct TUI tail returned Cancelled; suppressing post-tail StreamMessage emission"
+        );
+        return Ok(());
+    }
+    if cancel_observed() {
+        tracing::info!(
+            tmux_session = tmux_session_name,
+            "Codex Direct TUI launch observed cancel after tail returned; suppressing post-tail StreamMessage emission"
+        );
+        return Ok(());
+    }
+    if !crate::services::tui_prompt_dedupe::codex_verified_source_allowed(
+        tmux_session_name,
+        &tail_result.rollout_path.display().to_string(),
+        tail_result.session_id.as_deref(),
+    ) {
+        return verified_hold::wait_for_cancel(
+            tmux_session_name,
+            cancel_token_for_post_tail.as_ref(),
+        );
+    }
+    if let crate::services::provider::ReadOutputResult::SessionDied { offset } = read_result {
+        record_codex_tmux_termination(
+            tmux_session_name,
+            "codex_tui_provider",
+            "session_died_before_response",
+            "codex tui session ended before producing a response",
+            Some(offset),
+        );
+        let _ = sender.send(StreamMessage::Done {
+            result: "⚠ Codex TUI session ended before producing a response.".to_string(),
+            session_id: None,
+        });
+    } else {
+        if !register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result) {
+            return Ok(());
+        }
+
+        match crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
+            tmux_session_name,
+            crate::services::codex_tui::input::PromptReadinessKind::PostTurnHandoff,
+            cancel_token_for_post_tail.as_ref(),
+        ) {
+            Ok(()) => {
+                #[cfg(test)]
+                if let Some(seam) = AFTER_READINESS_WAIT.with_borrow_mut(Option::take) {
+                    seam();
+                }
+                let ready = StreamMessage::RuntimeReady {
+                    handoff: RuntimeHandoff::CodexTui {
+                        rollout_path: tail_result.rollout_path.display().to_string(),
+                        thread_id: tail_result.session_id.clone(),
+                        tmux_session_name: tmux_session_name.to_string(),
+                        last_offset: tail_result.final_offset,
+                    },
+                };
+                if !codex_direct_tui_hook_overrides_enabled() {
+                    let _ = sender.send(ready);
+                } else if !crate::services::tui_prompt_dedupe::publish_unless_codex_tail_retired(
+                    &codex_tui_idle_relay_binding(tmux_session_name, &tail_result),
+                    tmux_session_name,
+                    || drop(sender.send(ready)),
+                ) {
+                    tracing::info!(
+                        tmux_session = tmux_session_name,
+                        "Codex tail source was replaced during the readiness wait; suppressing RuntimeReady"
+                    );
+                }
+            }
+            Err(error)
+                if crate::services::codex_tui::input::is_prompt_ready_cancelled_error(&error) =>
+            {
+                tracing::info!(
+                    tmux_session = tmux_session_name,
+                    "Codex TUI input readiness wait cancelled post-turn; suppressing RuntimeReady"
+                );
+                return Ok(());
+            }
+            Err(error) if crate::services::codex_tui::input::is_session_dead_error(&error) => {
+                tracing::warn!(
+                    tmux_session = tmux_session_name,
+                    error = %error,
+                    "Codex TUI session died before becoming input-ready; suppressing RuntimeReady"
+                );
+                record_codex_tmux_termination(
+                    tmux_session_name,
+                    "codex_tui_provider",
+                    "session_died_before_input_ready",
+                    "codex tui session ended before becoming input-ready",
+                    Some(tail_result.final_offset),
+                );
+                let _ = sender.send(StreamMessage::Done {
+                    result: "⚠ Codex TUI session ended before becoming input-ready.".to_string(),
+                    session_id: tail_result.session_id.clone(),
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    tmux_session = tmux_session_name,
+                    error = %error,
+                    "Codex TUI composer not yet input-ready inside post-turn probe budget; suppressing RuntimeReady to avoid republishing a non-ready handoff (#2399 HIGH 2)"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
     use super::*;
+    #[test]
+    fn actual_launch_pins_verified_only_for_exact_canary_and_keeps_policy_after_rollback() {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::codex_tui::canary::{self, CANARY_CHANNEL, CANARY_TMUX};
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context};
+        use std::os::unix::fs::PermissionsExt;
+
+        struct SourceModeRestore(Option<CodexSourceMode>);
+        impl Drop for SourceModeRestore {
+            fn drop(&mut self) {
+                SOURCE_MODE_TEST.with(|slot| slot.set(self.0));
+            }
+        }
+        let _mode = SourceModeRestore(SOURCE_MODE_TEST.with(|slot| slot.get()));
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _state = dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
+        let _tmux = binding_context::tests::fake_tmux(root.path());
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let binary = root.path().join("codex");
+        std::fs::write(&binary, "#!/bin/bash\necho 'codex-cli 0.157.1'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
+        let _hooks = Guard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+            std::ffi::OsStr::new("0"),
+        );
+
+        for mode in [
+            CodexSourceMode::Legacy,
+            CodexSourceMode::Shadow,
+            CodexSourceMode::Verified,
+        ] {
+            SOURCE_MODE_TEST.with(|slot| slot.set(Some(mode)));
+            for (tmux, channel) in [
+                (CANARY_TMUX, Some(CANARY_CHANNEL)),
+                (CANARY_TMUX, Some(CANARY_CHANNEL + 1)),
+                (CANARY_TMUX, None),
+                ("AgentDesk-codex-another-channel", Some(CANARY_CHANNEL)),
+                ("AgentDesk-codex-another-channel", Some(CANARY_CHANNEL + 1)),
+            ] {
+                let expected = match mode {
+                    CodexSourceMode::Verified
+                        if tmux == CANARY_TMUX && channel == Some(CANARY_CHANNEL) =>
+                    {
+                        "verified"
+                    }
+                    CodexSourceMode::Shadow => "shadow",
+                    _ => "legacy",
+                };
+                let script = prepare_codex_tui_launch_script(
+                    tmux,
+                    None,
+                    "actual first prompt",
+                    &CodexLaunchOptions::new("actual first prompt"),
+                    channel,
+                    None,
+                    false,
+                    &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                        ProviderKind::Codex,
+                    ),
+                )
+                .unwrap();
+                let context = script.prepared.context.clone();
+                assert_eq!(context.source_policy.as_deref(), Some(expected));
+                assert_eq!(context.channel_id, channel);
+                assert_eq!(context.tmux_session, tmux);
+                let launch_script = std::fs::read_to_string(&script.script_path).unwrap();
+                assert!(launch_script.contains(&format!(
+                    "export AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE={}\n",
+                    shell_escape(expected),
+                )));
+                SOURCE_MODE_TEST.with(|slot| slot.set(Some(CodexSourceMode::Legacy)));
+                assert_eq!(
+                    binding_context::execution_context("codex", &context.execution_nonce).unwrap(),
+                    context
+                );
+                SOURCE_MODE_TEST.with(|slot| slot.set(Some(mode)));
+            }
+            assert_eq!(
+                canary::enabled_for(CANARY_TMUX),
+                mode == CodexSourceMode::Verified
+            );
+            assert!(!canary::enabled_for("AgentDesk-codex-another-channel"));
+        }
+        SOURCE_MODE_TEST.with(|slot| slot.set(Some(CodexSourceMode::Invalid)));
+        assert_eq!(
+            canary::launch_policy(CANARY_TMUX, Some(CANARY_CHANNEL)),
+            Err("SourceModeInvalid")
+        );
+        assert_eq!(
+            CodexSourceMode::Verified.launch_policy(),
+            Err("SourceModeVerifiedNotLanded")
+        );
+    }
+
     #[test]
     fn source_mode_snapshot_is_immutable_and_invalid_launches_write_nothing() {
         if std::env::var_os("ADK_SOURCE_SNAPSHOT_CHILD").is_some() {
@@ -187,7 +413,6 @@ mod tests {
         let (root, _guards) = tests::fixture_after_shared_test_env_lock();
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
         for (value, reason) in [
-            (Some("verified"), "SourceModeVerifiedNotLanded"),
             (Some("typo"), "SourceModeInvalid"),
             (Some(""), "SourceModeInvalid"),
             (Some("SHADOW"), "SourceModeInvalid"),
@@ -222,6 +447,10 @@ mod tests {
         assert_eq!(
             CodexSourceMode::parse(Some("legacy")).launch_policy(),
             Ok("legacy")
+        );
+        assert_eq!(
+            CodexSourceMode::Verified.launch_policy(),
+            Err("SourceModeVerifiedNotLanded")
         );
     }
 

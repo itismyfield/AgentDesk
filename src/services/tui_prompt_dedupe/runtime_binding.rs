@@ -7,9 +7,16 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
+mod codex_policy;
 pub(crate) use codex_cursor::{
     advance_tmux_runtime_binding_offset_under_source_authority,
     preservable_marker as codex_verified_preservable_marker,
+};
+pub(crate) use codex_policy::{
+    codex_verified_channel_delivery_allowed, codex_verified_event_allowed,
+    codex_verified_input_blocked, codex_verified_o_source_allowed, codex_verified_requires_proof,
+    codex_verified_requires_proof_under_source_authority, codex_verified_source_allowed,
+    codex_verified_source_allowed_under_source_authority,
 };
 mod codex_hook;
 pub use binding_access::register_provider_session;
@@ -26,6 +33,11 @@ pub(crate) use codex_hook::{
     observe_codex_shadow, publish_unless_codex_tail_retired,
     register_launched_tmux_runtime_binding,
     register_launched_tmux_runtime_binding_under_source_authority,
+};
+#[cfg(test)]
+pub(crate) use codex_verified::{
+    DeliveryPermission as CodexDeliveryPermissionForTests,
+    set_permission_for_tests as set_codex_delivery_permission_for_tests,
 };
 pub(crate) use codex_verified::{
     channel_allowed_under_source_authority as codex_verified_channel_allowed_under_source_authority,
@@ -173,6 +185,9 @@ fn publish_runtime_binding(
         return None;
     }
     if binding.runtime_kind == RuntimeHandoffKind::CodexTui {
+        if !codex_verified::publication_allowed(authority, &binding) {
+            return None;
+        }
         match codex_verified::current_context(authority) {
             Ok(Some(_)) => {
                 if !codex_verified::consumer_allowed(authority, &binding) {

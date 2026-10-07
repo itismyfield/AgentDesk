@@ -146,7 +146,13 @@ fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, Stri
             ));
         }
     };
+    let source_allowed = crate::services::tui_prompt_dedupe::codex_verified_event_allowed(&event);
     let record = match event.new.clone() {
+        p5::BindingTarget::Source(_) | p5::BindingTarget::Resolved { .. } if !source_allowed => {
+            BindingRecord::Rejected {
+                detail: "Codex source proof or delivery permission held".into(),
+            }
+        }
         p5::BindingTarget::Source(source) => bound(&event, reclaims, BindingTarget::Source(source)),
         p5::BindingTarget::Pending {
             payload_session_id,

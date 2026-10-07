@@ -718,16 +718,20 @@ src/
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── legacy_selection.rs
 │   │   │   └── parser.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── canary.rs
 │   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
+│   │   ├── verified_hold.rs
+│   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
 │   ├── discord/
 │   │   ├── abandon_request_store/
@@ -1111,7 +1115,8 @@ src/
 │   │   │   │   ├── test_barriers.rs
 │   │   │   │   └── watcher_claim.rs
 │   │   │   ├── rebind_runtime/
-│   │   │   │   └── codex_relay_generation.rs
+│   │   │   │   ├── codex_relay_generation.rs
+│   │   │   │   └── codex_spawn.rs
 │   │   │   ├── restore_inflight/
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
@@ -1222,6 +1227,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── tui_followup/
+│   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
@@ -2300,6 +2307,7 @@ src/
 │   │   │   ├── codex_cursor.rs
 │   │   │   ├── codex_hook.rs
 │   │   │   ├── codex_legacy_lock_tests.rs
+│   │   │   ├── codex_policy.rs
 │   │   │   ├── codex_verified.rs
 │   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs

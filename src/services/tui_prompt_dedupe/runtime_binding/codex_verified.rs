@@ -32,7 +32,7 @@ thread_local! {
     static PERMISSIONS: std::cell::RefCell<std::collections::HashMap<String, DeliveryPermission>> = Default::default();
 }
 #[cfg(test)]
-pub(super) fn set_permission_for_tests(context: &BindingContext, permission: DeliveryPermission) {
+pub(crate) fn set_permission_for_tests(context: &BindingContext, permission: DeliveryPermission) {
     PERMISSIONS.with(|values| {
         values
             .borrow_mut()
@@ -50,7 +50,7 @@ pub(super) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
-fn permission(context: &BindingContext) -> DeliveryPermission {
+pub(super) fn permission(context: &BindingContext) -> DeliveryPermission {
     #[cfg(test)]
     if let Some(value) =
         PERMISSIONS.with(|values| values.borrow().get(&context.execution_nonce).copied())
@@ -287,13 +287,13 @@ pub(super) fn publication_allowed(
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
         return true;
     }
-    match current_context(authority) {
-        Ok(None) => true,
-        Ok(Some(context)) => {
+    match super::codex_policy::disposition(authority) {
+        super::codex_policy::SourcePolicyState::Legacy => true,
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => {
             proof_for_binding(authority, &context, binding).is_ok()
                 && permission(&context) == DeliveryPermission::Allowed
         }
-        Err(_) => false,
+        super::codex_policy::SourcePolicyState::VerifiedUnavailable => false,
     }
 }
 
@@ -307,8 +307,12 @@ pub(super) fn marker_metadata(
     path: &Path,
     id: Option<&str>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some(context) = current_context(authority).map_err(|e| e.to_string())? else {
-        return Ok(None);
+    let context = match super::codex_policy::disposition(authority) {
+        super::codex_policy::SourcePolicyState::Legacy => return Ok(None),
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => context,
+        super::codex_policy::SourcePolicyState::VerifiedUnavailable => {
+            return Err("Codex verified launch evidence unavailable".into());
+        }
     };
     let binding = TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::CodexTui,
@@ -333,10 +337,10 @@ pub(super) fn consumer_allowed(
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
         return true;
     }
-    let context = match current_context(authority) {
-        Ok(None) => return true,
-        Ok(Some(context)) => context,
-        Err(_) => return false,
+    let context = match super::codex_policy::disposition(authority) {
+        super::codex_policy::SourcePolicyState::Legacy => return true,
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => context,
+        super::codex_policy::SourcePolicyState::VerifiedUnavailable => return false,
     };
     let Ok(proof) = proof_for_binding(authority, &context, binding) else {
         return false;
@@ -531,9 +535,9 @@ pub(crate) fn channel_allowed_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     channel: u64,
 ) -> bool {
-    match current_context(authority) {
-        Ok(None) => true,
-        Ok(Some(context)) => {
+    match super::codex_policy::disposition(authority) {
+        super::codex_policy::SourcePolicyState::Legacy => true,
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => {
             context.channel_id == Some(channel)
                 && channel != 0
                 && with_runtime_binding_state_under_source_authority(authority, |state| {
@@ -543,7 +547,7 @@ pub(crate) fn channel_allowed_under_source_authority(
                         .is_none_or(|entry| entry.value == channel)
                 })
         }
-        Err(_) => false,
+        super::codex_policy::SourcePolicyState::VerifiedUnavailable => false,
     }
 }
 

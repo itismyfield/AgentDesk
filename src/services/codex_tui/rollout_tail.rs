@@ -19,7 +19,13 @@ pub(crate) use parser::{RolloutRecordDecoder, recover_captured_rollout_response}
 // filters after discovery.
 use super::rollout_index::rollout_files_under;
 
+mod legacy_selection;
 mod parser;
+pub use legacy_selection::{
+    latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since,
+    rollout_candidates_for_cwd_since,
+};
+use legacy_selection::{wait_for_latest_rollout_for_cwd, wait_for_resumed_rollout_for_session};
 
 #[cfg(test)]
 use parser::{
@@ -248,6 +254,28 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
     mut is_alive: impl FnMut() -> bool,
     options: RolloutTailOptions,
 ) -> Result<CodexTuiTailResult, String> {
+    if super::verified_tail::is_verified(options.tmux_session_name.as_deref()) {
+        let binding = super::verified_tail::wait_for_binding(
+            options.tmux_session_name.as_deref().unwrap_or_default(),
+            cancel_token.as_deref(),
+        )?;
+        let rollout_path = PathBuf::from(&binding.output_path);
+        return tail_rollout_file_until_assistant_response_with_pane_busy_probe(
+            &rollout_path,
+            binding.last_offset,
+            binding.session_id,
+            &sender,
+            cancel_token,
+            is_alive,
+            options,
+        )
+        .map(|(read_result, outcome)| CodexTuiTailResult {
+            read_result,
+            rollout_path,
+            final_offset: outcome.final_offset,
+            session_id: outcome.session_id,
+        });
+    }
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
     let rollout_path = wait_for_latest_rollout_for_cwd(
@@ -329,6 +357,7 @@ pub fn tail_rollout_file_from_offset(
         cancel_token,
         is_alive,
         None,
+        None,
     )
 }
 
@@ -349,6 +378,7 @@ pub fn tail_rollout_file_from_offset_for_tmux(
         cancel_token,
         is_alive,
         Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        Some(tmux_session_name),
     )
 }
 
@@ -378,6 +408,7 @@ pub(crate) fn tail_idle_rollout_for_tmux(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tail_rollout_file_from_offset_with_pane_busy_probe(
     rollout_path: &Path,
     start_offset: u64,
@@ -386,9 +417,13 @@ fn tail_rollout_file_from_offset_with_pane_busy_probe(
     cancel_token: Option<Arc<CancelToken>>,
     is_alive: impl FnMut() -> bool,
     pane_busy_probe: Option<Box<dyn FnMut() -> super::input::CodexPaneBusySignal + Send>>,
+    tmux_session_name: Option<&str>,
 ) -> Result<ReadOutputResult, String> {
     let mut defaults = RolloutTailOptions::default();
     defaults.pane_busy_probe = pane_busy_probe;
+    defaults.tmux_session_name = tmux_session_name
+        .filter(|_| super::verified_tail::is_verified(tmux_session_name))
+        .map(str::to_owned);
     tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         rollout_path,
         start_offset,
@@ -456,6 +491,9 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     tmux_session_name: &str,
     discord_origin_prompt: Option<&str>,
 ) -> Result<CodexTuiTailResult, String> {
+    if super::verified_tail::is_verified(Some(tmux_session_name)) {
+        super::verified_tail::hold(cancel_token.as_deref())?;
+    }
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
     // #5264 PR-B: this entry point was the one that left `terminal_range_eligible` at its
@@ -521,6 +559,9 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
     mut is_alive: impl FnMut() -> bool,
     options: RolloutTailOptions,
 ) -> Result<CodexTuiTailResult, String> {
+    if super::verified_tail::is_verified(options.tmux_session_name.as_deref()) {
+        super::verified_tail::hold(cancel_token.as_deref())?;
+    }
     let rollout_path = wait_for_resumed_rollout_for_session(
         cwd,
         session_id,
@@ -570,6 +611,9 @@ fn persist_codex_tui_rollout_marker(
     let Some(tmux_session_name) = tmux_session_name else {
         return;
     };
+    if super::verified_tail::is_verified(Some(tmux_session_name)) {
+        return;
+    }
     if let Err(error) =
         crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
             tmux_session_name,
@@ -585,145 +629,6 @@ fn persist_codex_tui_rollout_marker(
             "failed to persist Codex TUI rollout marker after transcript discovery"
         );
     }
-}
-
-fn wait_for_latest_rollout_for_cwd(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sessions_dir: &Path,
-    cancel_token: Option<&CancelToken>,
-    is_alive: &mut impl FnMut() -> bool,
-    timeout: Duration,
-) -> Result<PathBuf, String> {
-    let started = Instant::now();
-    loop {
-        if cancel_requested(cancel_token) {
-            return Err("cancelled waiting for Codex rollout transcript".to_string());
-        }
-        if let Some(path) = latest_rollout_for_cwd_since(cwd, modified_since, sessions_dir) {
-            return Ok(path);
-        }
-        if !is_alive() {
-            return Err("Codex TUI exited before creating a rollout transcript".to_string());
-        }
-        if started.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for Codex rollout transcript under {}",
-                sessions_dir.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn wait_for_resumed_rollout_for_session(
-    cwd: &Path,
-    session_id: &str,
-    previous_rollout_path: &Path,
-    previous_start_offset: u64,
-    modified_since: SystemTime,
-    sessions_dir: &Path,
-    cancel_token: Option<&CancelToken>,
-    is_alive: &mut impl FnMut() -> bool,
-    timeout: Duration,
-) -> Result<PathBuf, String> {
-    let started = Instant::now();
-    loop {
-        if cancel_requested(cancel_token) {
-            return Err("cancelled waiting for Codex resumed rollout transcript".to_string());
-        }
-        if rollout_file_len(previous_rollout_path).is_some_and(|len| len > previous_start_offset) {
-            return Ok(previous_rollout_path.to_path_buf());
-        }
-        if let Some(path) =
-            latest_rollout_for_cwd_and_session_since(cwd, session_id, modified_since, sessions_dir)
-        {
-            return Ok(path);
-        }
-        if !is_alive() {
-            return Err(
-                "Codex TUI exited before updating a resumed rollout transcript".to_string(),
-            );
-        }
-        if started.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for Codex resumed rollout transcript under {}",
-                sessions_dir.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// Newest rollout transcript under `sessions_dir` whose `session_meta` cwd
-/// matches `cwd` and whose mtime is at/after `modified_since`.
-///
-/// Routed through [`cached_indexed_rollouts`](super::rollout_index::cached_indexed_rollouts)
-/// so the follow-up readiness path (`tui_followup.rs`, which has no provider
-/// session id) and the launch wait loop reuse the process-lifetime index instead
-/// of re-walking `~/.codex/sessions` and re-parsing every header on every probe.
-/// Selection semantics are identical to the legacy direct scan: the index
-/// supplies the same `(mtime, len)` projection and parsed `session_meta`, and the
-/// cwd match still canonicalizes the header's raw cwd against `cwd` exactly as
-/// the former `rollout_session_cwd_matches` did. Files with no parseable
-/// `session_meta` carry `meta == None` in the index and are skipped, matching the
-/// old `false` return from the header scan.
-pub fn latest_rollout_for_cwd_since(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sessions_dir: &Path,
-) -> Option<PathBuf> {
-    rollout_candidates_for_cwd_since(cwd, modified_since, sessions_dir)
-        .into_iter()
-        .next()
-}
-
-pub fn latest_unclaimed_rollout_for_cwd_since(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sessions_dir: &Path,
-    claimed_rollout_paths: &HashSet<PathBuf>,
-) -> Option<PathBuf> {
-    rollout_candidates_for_cwd_since(cwd, modified_since, sessions_dir)
-        .into_iter()
-        .find(|path| !rollout_path_is_claimed(path, claimed_rollout_paths))
-}
-
-pub fn rollout_candidates_for_cwd_since(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sessions_dir: &Path,
-) -> Vec<PathBuf> {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
-    for item in super::rollout_index::cached_indexed_rollouts(sessions_dir) {
-        if item.modified < modified_since {
-            continue;
-        }
-        let Some(meta) = item.meta.as_ref() else {
-            continue;
-        };
-        if meta.is_subagent() {
-            continue;
-        }
-        let session_cwd =
-            std::fs::canonicalize(&meta.cwd).unwrap_or_else(|_| PathBuf::from(&meta.cwd));
-        if session_cwd != canonical_cwd {
-            continue;
-        }
-        candidates.push((item.modified, item.path));
-    }
-    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    candidates.into_iter().map(|(_, path)| path).collect()
-}
-
-fn rollout_path_is_claimed(path: &Path, claimed_rollout_paths: &HashSet<PathBuf>) -> bool {
-    if claimed_rollout_paths.contains(path) {
-        return true;
-    }
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    claimed_rollout_paths.contains(&canonical)
 }
 
 /// Find a codex rollout transcript by its session UUID alone, scanning the
@@ -910,8 +815,31 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         terminal_range_eligible,
         ..
     } = options;
-    let mut file = std::fs::File::open(rollout_path)
-        .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
+    let source_pin = super::verified_tail::SourcePin::new(
+        tmux_session_name.as_deref(),
+        rollout_path,
+        initial_session_id.as_deref(),
+    );
+    let mut file = if let Some(pin) = &source_pin {
+        let Some(file) = pin.open(cancel_token.as_deref(), start_offset) else {
+            return Ok((
+                ReadOutputResult::Cancelled {
+                    offset: start_offset,
+                },
+                RolloutTailOutcome {
+                    harvest: Default::default(),
+                    lines_read: 0,
+                    bytes_read: 0,
+                    final_offset: start_offset,
+                    session_id: initial_session_id,
+                },
+            ));
+        };
+        file
+    } else {
+        std::fs::File::open(rollout_path)
+            .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?
+    };
     let file_len = file
         .metadata()
         .map_err(|error| format!("stat Codex rollout {}: {error}", rollout_path.display()))?
@@ -950,7 +878,11 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     // cancels a turn, no further rollout-derived StreamMessage may reach
     // the bridge / Discord for that turn. See
     // docs/codex-tui-cancel-boundary.md for the full contract.
-    let sender = RelaySuppressionSender::new(sender, cancel_token.as_deref());
+    let source_identity =
+        crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file);
+    let mut sender = RelaySuppressionSender::new(sender, cancel_token.as_deref());
+    sender.source_pin = source_pin.as_ref();
+    sender.source_identity = source_identity;
 
     loop {
         if sender.cancel_observed() {
@@ -962,6 +894,18 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
             ));
         }
 
+        if let Some(pin) = &source_pin {
+            if !pin.wait(cancel_token.as_deref(), source_identity) {
+                continue;
+            }
+            if !file
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() >= current_offset)
+            {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
         match file.read(&mut buf) {
             Ok(0) => {
                 if try_process_complete_partial_line(&mut partial_line, &sender, &mut state) {
@@ -986,6 +930,10 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         },
                         outcome(&state, seek_offset),
                     ));
+                }
+                if source_pin.is_some() {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
                 }
                 // #2419: only consider the turn drainable when no tool call
                 // is currently in flight. Otherwise the natural silence while
@@ -1183,12 +1131,20 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 // enforcement point: once the shared cancel flag flips,
                 // every `send` call drops on the floor.
                 while let Some(pos) = partial_line.iter().position(|byte| *byte == b'\n') {
+                    if let Some(pin) = &source_pin
+                        && !pin.wait(cancel_token.as_deref(), source_identity)
+                    {
+                        break;
+                    }
                     let line: Vec<u8> = partial_line.drain(..=pos).collect();
                     state.record(line.len());
                     if process_rollout_line_bytes(&line, &sender, &mut state) {
                         last_output_at = Some(Instant::now());
                     }
                 }
+            }
+            Err(_) if source_pin.is_some() => {
+                std::thread::sleep(Duration::from_millis(100));
             }
             Err(error) => {
                 return Err(format!(
@@ -1218,6 +1174,8 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
 struct RelaySuppressionSender<'a> {
     inner: &'a Sender<StreamMessage>,
     cancel_token: Option<&'a CancelToken>,
+    source_pin: Option<&'a super::verified_tail::SourcePin>,
+    source_identity: crate::services::cluster::stream_relay::SourceFileIdentity,
 }
 
 impl<'a> RelaySuppressionSender<'a> {
@@ -1225,6 +1183,9 @@ impl<'a> RelaySuppressionSender<'a> {
         Self {
             inner,
             cancel_token,
+            source_pin: None,
+            source_identity:
+                crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable,
         }
     }
 
@@ -1233,6 +1194,12 @@ impl<'a> RelaySuppressionSender<'a> {
     }
 
     fn send(&self, message: StreamMessage) {
+        if self
+            .source_pin
+            .is_some_and(|pin| !pin.wait(self.cancel_token, self.source_identity))
+        {
+            return;
+        }
         if self.cancel_observed() {
             // Post-cancel relay suppression. Dropping the message here is
             // intentional: the cancelled turn must not emit any further

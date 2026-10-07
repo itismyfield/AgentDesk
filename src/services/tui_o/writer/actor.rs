@@ -229,14 +229,18 @@ where
         bindings,
         notice: None,
     };
-    let (writer, deriver, owed) = (&mut actor.writer, &mut actor.deriver, &mut actor.owed);
-    if let Err(alarm) = actor.sources.resume(writer, deriver, owed) {
-        actor.writer.stop(alarm);
-    }
-    if !actor.writer.is_stopped() {
-        resumed.send_replace(true);
-    }
+    let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
+        if !sources_resumed && actor.delivery_allowed() {
+            let (writer, deriver, owed) = (&mut actor.writer, &mut actor.deriver, &mut actor.owed);
+            if let Err(alarm) = actor.sources.resume(writer, deriver, owed) {
+                actor.writer.stop(alarm);
+            }
+            sources_resumed = true;
+            if !actor.writer.is_stopped() {
+                resumed.send_replace(true);
+            }
+        }
         actor.deliver_owed().await;
         actor.collect_settled();
         actor.read_sources();
@@ -262,8 +266,33 @@ where
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    fn delivery_allowed(&mut self) -> bool {
+        let channel = self.writer.channel();
+        if !crate::services::tui_prompt_dedupe::codex_verified_channel_delivery_allowed(channel) {
+            return false;
+        }
+        // Derived items have no source field, so outstanding work keeps every retained source pinned.
+        let owing = !self.owed.is_empty();
+        self.writer
+            .store()
+            .cursors()
+            .filter(|cursor| !cursor.retired || owing)
+            .all(|cursor| {
+                crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
+                    channel,
+                    &cursor.source,
+                )
+            })
+    }
+
     async fn deliver_owed(&mut self) {
-        while let Some(item) = self.owed.front() {
+        while !self.owed.is_empty() {
+            if !self.delivery_allowed() {
+                return;
+            }
+            let Some(item) = self.owed.front() else {
+                return;
+            };
             match self.writer.deliver(item).await {
                 Step::Done => {
                     self.owed.pop_front();
@@ -276,12 +305,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     /// With nothing owed, unsealed or open, every retained segment of a source with a decided start
     /// is settled. The open segment stays unless the spool is full, so segment files do not churn.
     fn collect_settled(&mut self) {
+        if !self.delivery_allowed() {
+            return;
+        }
         let open = self.writer.store().ledger().unresolved().is_some();
         if self.writer.is_stopped() || open || !self.owed.is_empty() || self.deriver.has_unsealed()
         {
             return;
         }
         for (source, keep) in self.sources.collectable() {
+            if !crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
+                self.writer.channel(),
+                &source,
+            ) {
+                continue;
+            }
             while self.writer.store().retained_segments(&source) > keep {
                 if let Err(error) = self.writer.store().gc_oldest_segment(&source) {
                     let violation = self.writer.store().ledger().violation().map(str::to_string);
@@ -342,7 +380,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
     fn read_sources(&mut self) {
-        if self.writer.is_stopped() {
+        if self.writer.is_stopped() || !self.delivery_allowed() {
             return;
         }
         let (writer, deriver, owed) = (&mut self.writer, &mut self.deriver, &mut self.owed);
@@ -364,4 +402,76 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn undelivered_reads_for_test() -> usize {
     UNDELIVERED_READS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) use test_support::exercise_held_actor_for_tests;
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    #[cfg(test)]
+    pub(crate) async fn exercise_held_actor_for_tests<P, L, A, B>(
+        writer: ChannelWriter<P, L, A>,
+        provider: ShadowProvider,
+        bindings: Arc<B>,
+        hold: impl FnOnce(),
+    ) where
+        P: DiscordPort,
+        L: DeliveryLease,
+        A: AlarmSink,
+        B: BindingEvents,
+    {
+        let channel = writer.channel();
+        let mut actor = Actor {
+            writer,
+            deriver: UnitDeriver::new(channel, provider),
+            owed: VecDeque::new(),
+            sources: Sources::new(channel, provider, Arc::clone(&bindings)),
+            bindings,
+            notice: None,
+        };
+        actor
+            .sources
+            .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
+            .unwrap();
+        actor.read_sources();
+        assert!(
+            !actor.owed.is_empty(),
+            "the actor must already owe captured output"
+        );
+        let cursor = |actor: &mut Actor<P, L, A, B>| {
+            actor
+                .writer
+                .store()
+                .cursors()
+                .map(|c| (c.source.clone(), c.captured_through))
+                .collect::<Vec<_>>()
+        };
+        let previous_cursor = cursor(&mut actor);
+        let previous_checkpoint = actor.writer.store().binding_checkpoint().unwrap();
+        let previous_owed = actor.owed.len();
+        hold();
+        actor.read_sources();
+        actor.collect_settled();
+        actor.deliver_owed().await;
+        assert_eq!(
+            cursor(&mut actor),
+            previous_cursor,
+            "held capture must not advance"
+        );
+        assert_eq!(
+            actor.writer.store().binding_checkpoint().unwrap(),
+            previous_checkpoint
+        );
+        assert_eq!(
+            actor.owed.len(),
+            previous_owed,
+            "held delivery must retain every owed item"
+        );
+        assert!(
+            !actor.writer.is_stopped(),
+            "permission hold must not stop the actor"
+        );
+    }
 }
