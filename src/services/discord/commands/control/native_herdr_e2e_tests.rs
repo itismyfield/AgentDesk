@@ -400,24 +400,30 @@ impl NativeClearEffects for Crashing {
 }
 
 /// `!clear` in a dcserver of its own until `/clear` is sent (and `session`'s Pending logged when
-/// `logged`); then it dies with its runtime, tasks, guard, pool and memory.
+/// `logged`); then its runtime threads end, nothing holds its SharedData or effects, memory goes.
 fn clear_then_crash(fx: &Fixture, home: &Home, session: &str, logged: bool) -> Vec<String> {
+    let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let rt = {
         let (rig, log) = (fx.rig.clone(), fx.log.path().to_path_buf());
+        let (started, stopped) = (live.clone(), live.clone());
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .on_thread_start(move || {
+                started.fetch_add(1, Ordering::SeqCst);
                 std::mem::forget(rig.registry_on_this_thread());
                 std::mem::forget(open_admission());
                 binding_events::set_test_root(Some(&log));
+            })
+            .on_thread_stop(move || {
+                stopped.fetch_sub(1, Ordering::SeqCst);
             })
             .build()
             .unwrap()
     };
     let effects = Arc::new(Crashing::default());
     let installed = host_effects_for_tests(effects.clone());
-    rt.block_on(async {
+    let shared = rt.block_on(async {
         let pool = fx.db.as_ref().unwrap().connect_and_migrate().await;
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
         let session_state = super::session(fx.channel_id, fx.channel_name.clone(), &shared);
@@ -455,18 +461,34 @@ fn clear_then_crash(fx: &Fixture, home: &Home, session: &str, logged: bool) -> V
                 () = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
         }
+        Arc::downgrade(&shared)
     });
     drop(installed);
     rt.shutdown_timeout(Duration::from_secs(10));
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "the clear worker and every runtime thread ended"
+    );
+    assert!(
+        shared.upgrade().is_none(),
+        "nothing outlived the crash holding its SharedData"
+    );
+    let effects = Arc::into_inner(effects).expect("nothing outlived the crash holding its effects");
+    // The caller holds `TEST_LOCK`, which serialises this reset with the other dedupe tests.
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
     binding_events::forget_channel_for_tests(fx.channel_id.get());
-    effects.calls.lock().unwrap().clone()
+    effects.calls.into_inner().unwrap()
 }
 
 /// A boot after that crash holds input until the Pending is logged, completes it with one save and
 /// no second line or reset, and its next turn prompts the cleared session once.
 fn assert_boot_completes_the_crashed_clear(n: u64, logged: bool) {
     let fx = Fixture::new(n);
+    // After the fixture's env lock (the env -> dedupe order), held until the boot's turn ends.
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let home = Home::new();
     let z = uuid();
     let crashed = clear_then_crash(&fx, &home, &z, logged);

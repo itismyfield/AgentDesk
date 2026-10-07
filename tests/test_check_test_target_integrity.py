@@ -723,7 +723,7 @@ class AllowlistContract(unittest.TestCase):
     def test_allowlist_cannot_excuse_target_mismatch(self) -> None:
         # A target-mismatch means the command itself is wrong; the allowlist
         # (meant for legitimately-empty platform-cfg lanes) must not hide it.
-        allow = "# attempted excuse\n" + BAD_COMMAND + "\n"
+        allow = "# reason: attempted excuse\n" + BAD_COMMAND + "\n"
         violations = run_fixture(BAD_COMMAND, allowlist=allow)
         self.assertEqual([v.kind for v in violations], ["target-mismatch"])
 
@@ -731,12 +731,205 @@ class AllowlistContract(unittest.TestCase):
         command = "cargo test --lib bogus_module::tests"
         self.assertEqual(
             [v.kind for v in run_fixture(command)], ["zero-match"])
-        allow = "# legitimately-empty on this platform\n" + command + "\n"
+        allow = "# reason: legitimately-empty on this platform\n" + command + "\n"
         self.assertEqual(run_fixture(command, allowlist=allow), [])
 
     def test_comments_and_blanks_do_not_allowlist(self) -> None:
         allow = "# comment only\n\n"
         self.assertEqual(len(run_fixture(BAD_COMMAND, allowlist=allow)), 1)
+
+
+class ResidualSelectionContract(unittest.TestCase):
+    def test_union_and_bins_typo_fail_but_valid_selection_passes(self) -> None:
+        for selector in ("--all-targets", "--bins", ""):
+            with self.subTest(selector=selector, typo=True):
+                violations = run_fixture(
+                    f"cargo test {selector} high_risk_recovry::",
+                    bin_test=True, integration_test=True,
+                )
+                self.assertEqual([v.kind for v in violations], ["unknown-module"])
+            owned = "bin_owned::tests::owned_case" if selector == "--bins" else (
+                "high_risk_recovery::tests::recovery_case")
+            with self.subTest(selector=selector, typo=False):
+                self.assertEqual(run_fixture(
+                    f"cargo test {selector} {owned}", bin_test=True,
+                ), [])
+
+    def test_bins_cannot_select_a_library_module(self) -> None:
+        violations = run_fixture("cargo test --bins high_risk_recovery::")
+        self.assertEqual([v.kind for v in violations], ["target-mismatch"])
+        self.assertEqual(run_fixture(
+            "cargo test --lib --bins high_risk_recovery::"), [])
+
+    def test_union_includes_nested_and_manifest_integration_targets(self) -> None:
+        for selector in ("--all-targets", ""):
+            for relative in ("tests/owned.rs", "tests/owned/main.rs",
+                             "custom/integration.rs"):
+                with self.subTest(selector=selector, relative=relative), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    command = f"cargo test {selector} integration_owned::"
+                    workflow = build_fixture_repo(root, command)
+                    source = root / relative
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(
+                        "mod integration_owned { #[test] fn case() {} }\n",
+                        encoding="utf-8")
+                    if relative.startswith("custom/"):
+                        with (root / "Cargo.toml").open("a") as manifest:
+                            manifest.write(
+                                '\n[[test]]\nname = "owned"\n'
+                                f'path = "{relative}"\n')
+                    self.assertEqual(integrity.check_workflows(
+                        root, [workflow], set(), False), [])
+
+    def test_all_targets_includes_examples_and_benches(self) -> None:
+        for kind in ("example", "bench"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                command = f"cargo test --all-targets {kind}_owned::"
+                workflow = build_fixture_repo(root, command)
+                directory = "benches" if kind == "bench" else "examples"
+                source = root / f"{directory}/owned/main.rs"
+                source.parent.mkdir(parents=True)
+                source.write_text(f"mod {kind}_owned {{}}\n", encoding="utf-8")
+                self.assertEqual(integrity.check_workflows(
+                    root, [workflow], set(), False), [])
+
+    def test_cargo_glob_and_bare_filters_are_not_module_assertions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = "cargo test --bins --test '*' high_risk_recovery"
+            workflow = build_fixture_repo(root, command)
+            (root / "tests/owned").mkdir(parents=True)
+            (root / "tests/owned/main.rs").write_text(
+                "mod integration_owned { #[test] fn case() {} }\n", encoding="utf-8")
+            self.assertEqual(integrity.check_workflows(
+                root, [workflow], set(), False), [])
+            workflow.write_text(
+                "jobs:\n  lane:\n    steps:\n"
+                "      - run: cargo test --bins --test '*' integration_owned::\n",
+                encoding="utf-8")
+            self.assertEqual(integrity.check_workflows(
+                root, [workflow], set(), False), [])
+            workflow.write_text(
+                "jobs:\n  lane:\n    steps:\n"
+                "      - run: cargo test --bins --test 'absent*' typo::\n",
+                encoding="utf-8")
+            violations = integrity.check_workflows(root, [workflow], set(), False)
+            self.assertIn("unknown-target", [v.kind for v in violations])
+
+    def test_allowlist_needs_an_adjacent_nonempty_reason(self) -> None:
+        command = "cargo test --lib high_risk_recovry::"
+        for prefix in ("", "#\n", "# platform exception\n", "# reason:\n",
+                       "# reason: platform exception\n\n",
+                       "# reason: platform exception\n# unrelated comment\n"):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as tmp:
+                allow = Path(tmp) / "allowlist.txt"
+                allow.write_text(prefix + command + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "reason"):
+                    integrity.load_allowlist(allow)
+        self.assertEqual(run_fixture(
+            command, "# reason: suite is cfg-gated on this platform\n" + command + "\n"), [])
+
+    def test_stale_and_duplicate_allowlist_entries_are_rejected(self) -> None:
+        stale = "cargo test --lib absent::"
+        violations = run_fixture(GOOD_COMMAND, "# reason: platform exception\n" + stale)
+        self.assertEqual([v.kind for v in violations], ["stale-allowlist"])
+        with tempfile.TemporaryDirectory() as tmp:
+            allow = Path(tmp) / "allowlist.txt"
+            allow.write_text(("# reason: platform exception\n" + stale + "\n") * 2)
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                integrity.load_allowlist(allow)
+
+    def test_allowlist_does_not_excuse_bad_target_or_inventory(self) -> None:
+        command = "cargo test --bin missing-bin owned::"
+        violations = run_fixture(command, "# reason: platform exception\n" + command)
+        self.assertEqual([v.kind for v in violations], ["unknown-target", "unknown-module"])
+        command = "cargo test --bin agentdesk bin_owned::"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, command, bin_test=True)
+            (root / "src/bin_owned.rs").write_text(
+                '#[path = "missing.rs"] mod child;\n', encoding="utf-8")
+            violations = integrity.check_workflows(root, [workflow], {command}, False)
+            self.assertEqual([v.kind for v in violations], ["inventory-error"])
+
+    def test_deployed_header_cannot_supply_an_entry_reason(self) -> None:
+        header = (REPO_ROOT / "scripts/test_target_integrity_allowlist.txt").read_text()
+        command = "cargo test --lib high_risk_recovry::"
+        for reason, expected in (("", 2), ("# reason: cfg-gated platform suite\n", 0)):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_fixture_repo(root, command)
+                (root / "scripts/test_target_integrity_allowlist.txt").write_text(
+                    header + reason + command + "\n", encoding="utf-8")
+                proc = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--repo-root", str(root), "--enforce"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
+                self.assertIn("reason" if expected else "check passed",
+                              proc.stderr if expected else proc.stdout)
+
+    def test_each_allowlist_entry_consumes_its_own_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            allow = Path(tmp) / "allowlist.txt"
+            allow.write_text(
+                "# reason: platform suite\n" + GOOD_COMMAND + "\n" + BAD_COMMAND + "\n")
+            with self.assertRaisesRegex(ValueError, "reason"):
+                integrity.load_allowlist(allow)
+
+    def test_justfile_only_allowlist_entry_is_not_stale(self) -> None:
+        command = "cargo test --lib cfg_owned::"
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND, "# reason: platform suite\n" + command + "\n",
+            just_text="fixture:\n    " + command + "\n"), [])
+
+    def test_stale_cli_reports_override_allowlist_path_and_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            allow = root / "override-allowlist.txt"
+            allow.write_text("# reason: obsolete platform suite\ncargo test --lib absent::\n")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo-root", str(root),
+                 "--allowlist", str(allow), "--enforce"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("override-allowlist.txt:2: [stale-allowlist]", proc.stdout)
+
+    def test_cli_residual_triggers_and_clean_control(self) -> None:
+        cases = (
+            ("--all-targets", "", "high_risk_recovry::", "unknown-module"),
+            ("--bins", "", "high_risk_recovry::", "unknown-module"),
+            ("", "", "high_risk_recovry::", "unknown-module"),
+            ("--lib", "missing-reason", "high_risk_recovry::", "reason"),
+            ("--lib", "stale", "high_risk_recovery::", "stale-allowlist"),
+            ("--lib", "", "high_risk_recovery::", None),
+        )
+        for selector, allow_kind, filt, expected in cases:
+            with self.subTest(selector=selector, allow=allow_kind), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                command = f"cargo test {selector} {filt}"
+                build_fixture_repo(root, command, bin_test=True)
+                allow = root / "scripts/test_target_integrity_allowlist.txt"
+                allow.write_text(
+                    command + "\n" if allow_kind == "missing-reason" else (
+                        "# reason: stale platform exception\ncargo test --lib absent::\n"
+                        if allow_kind == "stale" else ""), encoding="utf-8")
+                proc = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--repo-root", str(root), "--enforce"],
+                    capture_output=True, text=True, check=False,
+                )
+                if expected:
+                    self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertIn(expected, proc.stdout + proc.stderr)
+                else:
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertIn("check passed", proc.stdout)
 
 
 class ParserContract(unittest.TestCase):

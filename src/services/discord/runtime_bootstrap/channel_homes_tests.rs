@@ -199,6 +199,7 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
 }
 
 /// The standby writer's port names its bot over the REST client and posts through it.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_standby_writers_port_posts_over_the_bot_tokens_rest_client() {
     use crate::services::discord::admin_host_guard::tests::Recorder;
@@ -229,6 +230,7 @@ async fn a_standby_writers_port_posts_over_the_bot_tokens_rest_client() {
 
 /// A releasing drain's reset runs main's managed reset on a Legacy session, keeps a pane whose
 /// Herdr endpoint runs here untouched, and reports a refusal of the existing path.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg() {
     use crate::services::discord::host_defer_gate::tests::{ScriptedTmux, map_channel, postgres};
