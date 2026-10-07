@@ -738,6 +738,8 @@ src/
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── verified_tail/
+│   │   │   └── diagnostic_tests.rs
 │   │   ├── canary.rs
 │   │   ├── host_input.rs
 │   │   ├── input.rs
@@ -2298,6 +2300,7 @@ src/
 │   │   │   ├── adoption.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs

@@ -1656,6 +1656,32 @@ fn actual_fresh_selector_uses_canary_proof_and_other_channels_keep_newest_mtime(
     }
 }
 
+fn capture_verified_tail_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    (result, logs)
+}
+
 #[test]
 fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_without_frames() {
     use crate::services::provider::CancelToken;
@@ -1675,16 +1701,31 @@ fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_withou
         let token = Arc::new(CancelToken::new());
         let cancel = token.clone();
         let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(450));
             cancel.cancelled.store(true, Ordering::Release);
         });
         let (tx, rx) = std::sync::mpsc::channel();
-        let result = crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
-            h.root.path(), std::time::UNIX_EPOCH, tx, Some(token), || false,
-            &h.context.tmux_session, Some(PROMPT),
-        );
+        let (result, logs) = capture_verified_tail_logs(|| {
+            crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+                h.root.path(), std::time::UNIX_EPOCH, tx, Some(token), || false,
+                &h.context.tmux_session, Some(PROMPT),
+            )
+        });
         release.join().unwrap();
         assert!(result.unwrap_err().contains("cancelled"));
+        assert_eq!(
+            logs.matches("Codex verified output is held").count(),
+            1,
+            "{logs}"
+        );
+        assert!(
+            logs.contains(if pending {
+                "verified_unavailable"
+            } else {
+                "permission_unknown"
+            }),
+            "{logs}"
+        );
         assert!(rx.try_recv().is_err());
         assert_eq!(h.fold(), before);
         assert!(h.raw().is_none());
@@ -1703,11 +1744,11 @@ fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_withou
         let token = Arc::new(CancelToken::new());
         let cancel = token.clone();
         let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(450));
             cancel.cancelled.store(true, Ordering::Release);
         });
         let (tx, rx) = std::sync::mpsc::channel();
-        let result =
+        let (result, logs) = capture_verified_tail_logs(|| {
             crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
                 &h.path(ID),
                 0,
@@ -1717,7 +1758,8 @@ fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_withou
                 || false,
                 &h.context.tmux_session,
             )
-            .unwrap();
+            .unwrap()
+        });
         release.join().unwrap();
         assert!(matches!(
             result,
@@ -1726,5 +1768,118 @@ fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_withou
         assert!(rx.try_recv().is_err());
         assert_eq!(h.raw(), Some(binding));
         assert_eq!(fs::read(h.marker()).unwrap(), marker);
+        assert_eq!(
+            logs.matches("Codex verified output is held").count(),
+            1,
+            "{logs}"
+        );
+        assert!(logs.contains("permission_unknown"), "{logs}");
     }
+}
+
+#[test]
+fn canary_actual_native_tail_identity_mismatch_diagnostic_preserves_cursors() {
+    use crate::services::provider::CancelToken;
+    use std::sync::{Arc, atomic::Ordering};
+    let h = Fixture::canary();
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    let before = h.fold();
+    let binding = h.raw();
+    let marker = fs::read(h.marker()).unwrap();
+    let old = h.path(ID).with_extension("old");
+    fs::rename(h.path(ID), &old).unwrap();
+    h.header(ID, false);
+    append_tail_response(&h.path(ID), "replacement must stay held");
+    let token = Arc::new(CancelToken::new());
+    let cancel = token.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        cancel.cancelled.store(true, Ordering::Release);
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (result, logs) = capture_verified_tail_logs(|| {
+        crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
+            &h.path(ID),
+            0,
+            Some(ID),
+            tx,
+            Some(token),
+            || false,
+            &h.context.tmux_session,
+        )
+        .unwrap()
+    });
+    release.join().unwrap();
+    assert!(matches!(
+        result,
+        crate::services::provider::ReadOutputResult::Cancelled { offset: 0 }
+    ));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        logs.matches("Codex verified output is held").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("source_identity_mismatch"), "{logs}");
+    assert_eq!(h.fold(), before);
+    assert_eq!(h.raw(), binding);
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+}
+
+#[test]
+fn canary_hold_diagnostic_preserves_expired_state_when_launch_context_is_unavailable() {
+    let h = Fixture::canary();
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    h.assert_proof();
+    let before_fold = h.fold();
+    let before_marker = fs::read(h.marker()).unwrap();
+    let before_nonce = dedupe::binding_context::observe_spawn_nonce_marker(&h.context.tmux_session);
+    let (before_channel, before_binding) = {
+        let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = state.aged_stamp_for_tests(SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
+        let expired = Instant::now() - SESSION_MAPPING_TTL - std::time::Duration::from_secs(1);
+        let channel = state
+            .channel_by_tmux
+            .get_mut(&h.context.tmux_session)
+            .unwrap();
+        channel.recorded_at = expired;
+        let before_channel = (channel.value, channel.recorded_at);
+        let binding = state
+            .runtime_by_tmux
+            .get_mut(&h.context.tmux_session)
+            .unwrap();
+        binding.recorded_at = expired;
+        (before_channel, (binding.value.clone(), binding.recorded_at))
+    };
+    fs::remove_file(&h.canonical).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            codex_verified_hold_reason(&h.context.tmux_session),
+            "verified_unavailable"
+        );
+        let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        let channel = state
+            .channel_by_tmux
+            .get(&h.context.tmux_session)
+            .expect("a diagnostic must not purge the expired channel mapping");
+        let binding = state
+            .runtime_by_tmux
+            .get(&h.context.tmux_session)
+            .expect("a diagnostic must not purge the expired runtime binding");
+        assert_eq!((channel.value, channel.recorded_at), before_channel);
+        assert_eq!(
+            (&binding.value, binding.recorded_at),
+            (&before_binding.0, before_binding.1)
+        );
+    }
+    assert_eq!(h.raw(), Some(before_binding.0));
+    assert_eq!(h.fold(), before_fold);
+    assert_eq!(fs::read(h.marker()).unwrap(), before_marker);
+    assert_eq!(
+        dedupe::binding_context::observe_spawn_nonce_marker(&h.context.tmux_session),
+        before_nonce
+    );
 }

@@ -12,7 +12,7 @@ use crate::services::{
 use std::{
     fs::File,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(crate) fn is_verified(tmux: Option<&str>) -> bool {
@@ -26,6 +26,7 @@ pub(crate) fn wait_for_binding(
     cancel: Option<&CancelToken>,
 ) -> Result<dedupe::TuiRuntimeBinding, String> {
     let nonce = binding_context::observe_spawn_nonce_marker(tmux);
+    let mut polling = HoldPoll::new(tmux);
     loop {
         if cancel_requested(cancel) {
             return Err("cancelled waiting for verified Codex source".into());
@@ -43,13 +44,14 @@ pub(crate) fn wait_for_binding(
         {
             return Ok(binding);
         }
-        pause();
+        polling.pause(None);
     }
 }
 
 pub(crate) fn hold(cancel: Option<&CancelToken>) -> Result<(), String> {
+    let mut polling = HoldPoll::new(super::canary::CANARY_TMUX);
     while !cancel_requested(cancel) {
-        pause();
+        polling.pause(None);
     }
     Err("cancelled waiting for verified Codex turn anchor".into())
 }
@@ -116,7 +118,37 @@ impl SourcePin {
         })
     }
 
+    fn identity_hold_reason(&self, identity: Option<SourceFileIdentity>) -> Option<&'static str> {
+        let identity = identity.or_else(|| {
+            File::open(&self.path)
+                .ok()
+                .map(|file| SourceFileIdentity::from_open_file(&file))
+        })?;
+        tc::with_tmux_source_authority(&self.tmux, |_| {
+            let SpawnNonceMarker::Known(nonce) = &self.nonce else {
+                return None;
+            };
+            let context = binding_context::execution_context("codex", nonce).ok()?;
+            let proof = dedupe::binding_events::codex::read_ownership(&context)
+                .ok()?
+                .verified?;
+            #[cfg(unix)]
+            let matches = identity
+                == SourceFileIdentity::Unix {
+                    dev: proof.source.dev,
+                    ino: proof.source.ino,
+                };
+            #[cfg(not(unix))]
+            let matches = {
+                let _ = (identity, proof);
+                false
+            };
+            (!matches).then_some("source_identity_mismatch")
+        })
+    }
+
     pub(super) fn wait(&self, cancel: Option<&CancelToken>, identity: SourceFileIdentity) -> bool {
+        let mut polling = HoldPoll::new(&self.tmux);
         loop {
             if cancel_requested(cancel) {
                 return false;
@@ -124,11 +156,12 @@ impl SourcePin {
             if self.allowed(Some(identity)) {
                 return true;
             }
-            pause();
+            polling.pause(self.identity_hold_reason(Some(identity)));
         }
     }
 
     pub(super) fn open(&self, cancel: Option<&CancelToken>, start: u64) -> Option<File> {
+        let mut polling = HoldPoll::new(&self.tmux);
         loop {
             if cancel_requested(cancel) {
                 return None;
@@ -142,11 +175,45 @@ impl SourcePin {
             {
                 return Some(file);
             }
-            pause();
+            polling.pause(self.identity_hold_reason(None));
         }
     }
 }
 
-fn pause() {
-    std::thread::sleep(Duration::from_millis(100));
+struct HoldPoll<'a> {
+    tmux: &'a str,
+    last_warning: Option<Instant>,
 }
+
+impl<'a> HoldPoll<'a> {
+    fn new(tmux: &'a str) -> Self {
+        Self {
+            tmux,
+            last_warning: None,
+        }
+    }
+
+    fn diagnose(&mut self, reason: Option<&'static str>, now: Instant) {
+        if self
+            .last_warning
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(60))
+        {
+            let reason = reason.unwrap_or_else(|| dedupe::codex_verified_hold_reason(self.tmux));
+            tracing::warn!(
+                tmux_session = self.tmux,
+                hold_reason = reason,
+                "Codex verified output is held; preserving its source and cursors"
+            );
+            self.last_warning = Some(now);
+        }
+    }
+
+    fn pause(&mut self, reason: Option<&'static str>) {
+        self.diagnose(reason, Instant::now());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod diagnostic_tests;

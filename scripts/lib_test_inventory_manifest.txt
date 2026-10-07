@@ -2777,6 +2777,7 @@ services::codex_tui::session::tests::requested_session_with_only_codex_exec_roll
 services::codex_tui::session::tests::requested_session_without_matching_rollout_resolves_fresh
 services::codex_tui::session::tests::shared_discovery_primitive_matches_direct_scan
 services::codex_tui::session::tests::warm_lookup_picks_up_newer_rollout_after_first_resolve
+services::codex_tui::verified_tail::diagnostic_tests::verified_tail_hold_diagnostic_is_bounded_to_one_warning_per_minute
 services::codex_tui::warm_followup::tests::eligibility_requires_all_reuse_axes
 services::codex_tui::warm_followup::tests::fallback_reason_codes_are_stable_and_complete
 services::codex_tui::warm_followup::tests::kill_switch_defaults_on_and_zero_disables
@@ -10648,6 +10649,8 @@ services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_deliver
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
+services::tui_o::writer::tests::actor::canary_policy::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post
+services::tui_o::writer::tests::actor::canary_policy::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold
 services::tui_o::writer::tests::actor::drain_projection::a_channel_without_herdr_publishes_nothing_and_counts_no_posts
 services::tui_o::writer::tests::actor::drain_projection::a_post_counts_as_running_from_its_start_until_its_request_is_gone
 services::tui_o::writer::tests::actor::drain_projection::an_announced_unit_counts_as_unsealed_until_its_record_seals_it
@@ -10959,9 +10962,11 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::cached_gener
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_without_frames
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_manual_rebind_refuses_before_relay_generation_or_spawn
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_native_read_and_witness_require_current_proof_and_permission
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_native_tail_identity_mismatch_diagnostic_preserves_cursors
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_o_log_holds_source_without_losing_sequence_or_durable_record
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_rehydrate_missing_launch_evidence_never_publishes_stale_owner
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_actual_restart_requires_source_permission_and_destination_channel
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_hold_diagnostic_preserves_expired_state_when_launch_context_is_unavailable
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canary_source_policy_first_launch_and_existing_legacy_remain_legacy_until_pinned
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::cancelled_and_unknown_permission_preserve_proof_but_publish_nothing
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::canonical_corruption_after_claim_never_falls_back_to_generic_cache

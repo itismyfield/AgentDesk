@@ -544,3 +544,6 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(None);
 }
+
+#[path = "canary_policy_tests.rs"]
+mod canary_policy;

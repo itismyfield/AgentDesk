@@ -127,6 +127,41 @@ pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
     })
 }
 
+pub(crate) fn codex_verified_hold_reason(tmux: &str) -> &'static str {
+    tc::with_tmux_source_authority(tmux, |authority| {
+        let SpawnNonceMarker::Known(nonce) =
+            binding_context::observe_spawn_nonce_marker(authority.session())
+        else {
+            return "verified_unavailable";
+        };
+        let Ok(context) = binding_context::execution_context("codex", &nonce) else {
+            return "verified_unavailable";
+        };
+        if context.execution_nonce != nonce
+            || context.tmux_session != authority.session()
+            || context.owner_runtime_root != tc::current_tmux_owner_marker()
+        {
+            return "verified_unavailable";
+        }
+        if context.source_policy.as_deref() != Some("verified") {
+            return "binding_missing";
+        }
+        if !binding_events::codex::read_ownership(&context)
+            .is_ok_and(|fold| fold.verified.is_some() && fold.pending.is_empty())
+        {
+            return "verified_unavailable";
+        }
+        if codex_verified::permission(&context) != DeliveryPermission::Allowed {
+            return "permission_unknown";
+        }
+        let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.runtime_by_tmux.contains_key(tmux) {
+            return "binding_missing";
+        }
+        "source_identity_mismatch"
+    })
+}
+
 pub(crate) fn codex_verified_channel_requires_proof(channel: u64) -> bool {
     verified_panes(channel)
         .into_iter()
@@ -210,7 +245,7 @@ fn verified_panes(channel: u64) -> Vec<String> {
             .map(|(tmux, _)| tmux.clone())
             .collect::<Vec<_>>()
     };
-    if channel == crate::services::codex_tui::canary::CANARY_CHANNEL {
+    if panes.is_empty() && channel == crate::services::codex_tui::canary::CANARY_CHANNEL {
         panes.push(crate::services::codex_tui::canary::CANARY_TMUX.to_owned());
     }
     panes
