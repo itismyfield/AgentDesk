@@ -18,7 +18,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ADK_API_URL` | `src/cli/monitoring.rs:33` | This module's api_base() prefers ADK_API_URL over AGENTDESK_API_URL — the hint must match that order. |
-| `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs:18` (+1 more) | `ADK_BUSY_INJECT` turns on busy-turn injection for turn/deliver, read once per process: `external` for TUI-direct turns, `all` for Discord turns too; unset or… |
+| `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs:24` (+1 more) | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs:6` (+1 more) |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs:204` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs:53` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
