@@ -173,13 +173,16 @@ pub(super) fn run_bot_spawn_reachability_observation(
     });
 }
 
+/// Exclude Held rows before restart snapshot classification and compatibility backfill.
 fn deferred_restart_inflight_snapshot(provider: &ProviderKind) -> Vec<InflightTurnState> {
     inflight::load_inflight_states_excluding(provider, |channel| {
         crate::services::turn_orchestrator::input_fence::held(provider, channel)
     })
 }
 
-/// Poll deferred restart requests; fence intake and persist before acknowledging shutdown.
+/// Background: poll for the deferred restart marker for gateway and standby
+/// runtimes. The marker first fences admissions and cancels intake polling;
+/// health counters then provide the drain proof before the wrapper boots out.
 pub(super) fn run_bot_spawn_deferred_restart_poller(
     shared_for_tmux: &Arc<SharedData>,
     provider_for_setup: &ProviderKind,
