@@ -786,6 +786,9 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
+mod retirement_census_tests;
+
+#[cfg(test)]
 mod warning_tests;
 
 #[cfg(test)]

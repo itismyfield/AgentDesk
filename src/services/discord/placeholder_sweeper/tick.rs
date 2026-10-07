@@ -56,7 +56,7 @@ pub(in crate::services::discord) fn spawn_placeholder_sweeper(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct TickReport {
+pub(super) struct TickReport {
     pass: SweepPassReport,
     drained_orphans: usize,
     drained_abort_markers: usize,
@@ -76,7 +76,7 @@ impl TickReport {
 }
 
 /// One sweeper tick: the row pass, then the durable-record drains in fixed order.
-async fn run_placeholder_sweeper_tick(
+pub(super) async fn run_placeholder_sweeper_tick(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

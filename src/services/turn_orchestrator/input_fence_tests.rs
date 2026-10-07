@@ -669,3 +669,54 @@ fn freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mut
         closing.freeze(ack).unwrap();
     });
 }
+
+#[test]
+fn c2_restart_drain_leaves_a_held_channel_alone_and_still_persists_legacy() {
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = Env::set(root.path());
+    run(async {
+        let (held, legacy) = (ChannelId::new(6_325_540), ChannelId::new(6_325_541));
+        let gate = Gate::protect(ProviderKind::Claude, held.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let registry = ChannelMailboxRegistry::default();
+        registry
+            .handle(held)
+            .replace_queue(vec![item(6_325_542)], context())
+            .await;
+        registry
+            .handle(legacy)
+            .replace_queue(vec![item(6_325_543)], context())
+            .await;
+        let queue = |channel: ChannelId| {
+            fence::population_root().unwrap().join(format!(
+                "discord_pending_queue/claude/fence-test/{}.json",
+                channel.get()
+            ))
+        };
+        std::fs::remove_file(queue(legacy)).unwrap();
+        let held_before = std::fs::read(queue(held)).unwrap();
+        let closing = gate.close().unwrap();
+
+        // Deferred restart and standby promotion retain the runtime on any drain error.
+        let drain = registry
+            .restart_drain_all(
+                &ProviderKind::Claude,
+                "fence-test",
+                &dashmap::DashMap::new(),
+            )
+            .await;
+        assert!(
+            drain.persistence_errors.is_empty(),
+            "{:?}",
+            drain.persistence_errors
+        );
+        assert_eq!(drain.queued_count, 1);
+        assert_eq!(std::fs::read(queue(held)).unwrap(), held_before);
+        let (persisted, _) =
+            load_channel_pending_queue_for_tests(&ProviderKind::Claude, "fence-test", legacy);
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(gate.mode(), Mode::Closing);
+        closing.drain().await;
+    });
+}

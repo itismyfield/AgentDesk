@@ -6,8 +6,8 @@ fmt:
 fmt-check:
     cargo fmt --all --check
 
-# `-W clippy::all` reports current warning debt; only `[lints.clippy]` deny
-# entries in Cargo.toml are hard gates for this staged check.
+# `-W clippy::all` reports debt and overrides five group-member deny levels.
+# dbg_macro/todo/unimplemented remain denied; see docs/ci/rust-quality-gates.md.
 lint:
     cargo clippy --workspace --all-targets --all-features -- -W clippy::all
 

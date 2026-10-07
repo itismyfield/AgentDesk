@@ -6,16 +6,16 @@ use std::future::Future;
 use std::sync::Arc;
 
 tokio::task_local! { static TASK: Option<Permit>; }
-thread_local! { static WORKER: RefCell<Option<Permit>> = const { RefCell::new(None) }; }
+thread_local! { static WORKER: RefCell<Option<Option<Permit>>> = const { RefCell::new(None) }; }
 
 pub(crate) fn current() -> Option<Permit> {
     WORKER
         .with(|held| held.borrow().clone())
-        .or_else(|| TASK.try_with(Clone::clone).ok().flatten())
+        .unwrap_or_else(|| TASK.try_with(Clone::clone).ok().flatten())
 }
 
 pub(crate) fn admit(provider: &ProviderKind, channel: u64) -> Result<Option<Permit>, Failure> {
-    if let Some(permit) = current() {
+    if let Some(permit) = current().filter(|permit| permit.names(provider, channel)) {
         permit.validate(provider, channel)?;
         return Ok(Some(permit));
     }
@@ -25,10 +25,61 @@ pub(crate) fn admit(provider: &ProviderKind, channel: u64) -> Result<Option<Perm
 }
 
 pub(crate) fn scope<F: Future>(permit: Option<Permit>, work: F) -> impl Future<Output = F::Output> {
-    match permit {
-        Some(permit) => futures::future::Either::Right(TASK.scope(Some(permit), work)),
-        None => futures::future::Either::Left(work),
+    if permit.is_some() || current().is_some() {
+        futures::future::Either::Right(TASK.scope(
+            permit.clone(),
+            ScopedFuture {
+                future: Some(Box::pin(work)),
+                permit,
+            },
+        ))
+    } else {
+        futures::future::Either::Left(work)
     }
+}
+
+struct ScopedFuture<F: Future> {
+    future: Option<std::pin::Pin<Box<F>>>,
+    permit: Option<Permit>,
+}
+impl<F: Future> Future for ScopedFuture<F> {
+    type Output = F::Output;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let permit = self.permit.clone();
+        synchronous(permit, || self.future.as_mut().unwrap().as_mut().poll(cx))
+    }
+}
+impl<F: Future> Drop for ScopedFuture<F> {
+    fn drop(&mut self) {
+        synchronous(self.permit.clone(), || drop(self.future.take()));
+    }
+}
+
+pub(crate) fn run<F, T>(permit: Option<Permit>, work: F) -> impl Future<Output = T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    if permit.is_none() && current().is_none() {
+        return futures::future::Either::Left(work);
+    }
+    let (send, recv) = tokio::sync::oneshot::channel();
+    // Own the worker transport now so an unpolled caller drops its captures there too.
+    let worker = detached(
+        permit.clone().or_else(current),
+        scope(permit, async move {
+            let result = work.await;
+            let _ = send.send(result);
+        }),
+    );
+    futures::future::Either::Right(async move {
+        worker.await;
+        recv.await
+            .expect("input effect work returned without its result")
+    })
 }
 
 pub(crate) fn detached<F>(permit: Option<Permit>, work: F) -> impl Future<Output = ()>
@@ -147,14 +198,14 @@ impl<F: Future + Send + 'static> Drop for WorkerCleanup<F> {
     }
 }
 
-pub(crate) struct WorkerScope(Option<Permit>);
+pub(crate) struct WorkerScope(Option<Option<Permit>>);
 impl Drop for WorkerScope {
     fn drop(&mut self) {
         WORKER.with(|held| *held.borrow_mut() = self.0.take());
     }
 }
 pub(crate) fn worker_scope(permit: Option<Permit>) -> WorkerScope {
-    WorkerScope(WORKER.with(|held| held.replace(permit)))
+    WorkerScope(WORKER.with(|held| held.replace(Some(permit))))
 }
 pub(crate) fn synchronous<T>(permit: Option<Permit>, work: impl FnOnce() -> T) -> T {
     let _reset = worker_scope(permit);

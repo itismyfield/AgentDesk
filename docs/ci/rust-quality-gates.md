@@ -17,12 +17,36 @@ repository is already clippy-clean.
 
 ## Current Staging
 
-The hard clippy gate currently denies `dbg_macro`, `todo`, and `unimplemented`
-through the root `Cargo.toml` `[lints.clippy]` table. `just lint` also passes
-`-W clippy::all` so CI exposes the remaining warning debt, but those warnings
-are informational until the zero-warning cleanup lands. This gives CI a passing
-Rust-native lint gate while the larger zero-warning cleanup is split into
-reviewable follow-ups.
+`Cargo.toml` configures eight Clippy denies: `dbg_macro`, `todo`,
+`unimplemented`, `await_holding_lock`, `large_enum_variant`, `result_large_err`,
+`too_many_arguments` and `type_complexity`. The authoritative staged command is
+`cargo clippy --workspace --all-targets --all-features -- -W clippy::all`.
+The trailing group level overrides the five group-member denies to warnings;
+only `dbg_macro`, `todo` and `unimplemented` remain denied. Configured deny
+entries must not be mistaken for effective hard gates under this argv.
+
+Main CI observes this same invocation once, adding only Cargo's JSON output
+format. `check_clippy_warning_count.py` counts compiler warning diagnostics
+(including Rust warnings), requires successful `build-finished`, and records
+SHA, runner, pinned toolchain, source and argv in the uploaded observation.
+Compilation still fails the step through pipefail. Invalid observations emit an
+explicit warning, never a valid zero. The count is compiler-emitted diagnostics,
+not source occurrences or a deduplicated cross-target debt estimate.
+
+Warning-total ratcheting (B2) remains deferred until a valid main Ubuntu/pinned
+Rust observation establishes a reproducible baseline. No historical or local
+Mac count is admitted as that baseline. Existing suppression-occurrence
+ratchets do not enforce warning totals. B3 (`lint-strict` required CI) remains
+deferred until warning debt is zero under the authoritative environment.
+
+The dead-code suppression ratchet freezes the observed per-file counts in
+`src/**/*.rs`, including tests: 389 suppression bodies across 179 files.
+It catches `allow`/`expect`, conditional attributes and broader `unused`/
+`warnings` groups using the existing Rust lexical scanner. New paths and
+per-file increases fail; decreases pass. This is not permission to add more
+suppression or proof that dead code was removed. Relocations require a reviewed
+allowance transfer that removes the old allocation. No automatic baseline
+rewrite is exposed. The baseline is suppression debt, not B2 warning debt.
 
 `unwrap`, `expect`, and `panic` lint gates are intentionally deferred. The
 current tree has many uses in tests, fixtures, and some existing runtime paths,

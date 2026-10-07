@@ -8,6 +8,8 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedObservation, HostedRecord, HostedState,
     load_hosted_execution_pg,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::cluster::channel_home::{self, HomeRefusal};
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_writer_ready};
 use crate::services::provider::ProviderKind;
@@ -49,6 +51,10 @@ pub(crate) enum HerdrRefusal {
     },
     OWriterNotReady,
     ExecutorNotWired,
+    /// The channel is delegated and this node does not hold its home.
+    HomeNotHeld,
+    /// This node holds the delegated channel's home while a drain keeps its intake closed.
+    HomeDraining,
 }
 
 impl std::fmt::Display for HerdrRefusal {
@@ -66,6 +72,8 @@ impl std::fmt::Display for HerdrRefusal {
             Self::AdmissionStopped { cause } => write!(f, "admission_stopped({})", cause.as_str()),
             Self::OWriterNotReady => f.write_str("o_writer_not_ready"),
             Self::ExecutorNotWired => f.write_str("executor_not_wired"),
+            Self::HomeNotHeld => f.write_str("home_not_held"),
+            Self::HomeDraining => f.write_str("home_draining"),
         }
     }
 }
@@ -99,6 +107,15 @@ async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
     }
 }
 
+/// A delegated channel's turn runs only where its home is held with intake open; a channel with
+/// no registered home reads nothing more.
+fn home_refusal(channel_id: u64) -> Option<HerdrRefusal> {
+    Some(match channel_home::refusal(channel_id)? {
+        HomeRefusal::NotHeld => HerdrRefusal::HomeNotHeld,
+        HomeRefusal::Draining => HerdrRefusal::HomeDraining,
+    })
+}
+
 /// Called again right before spawn, after [`refusal_before_turn`]. Admission and O readiness are
 /// read only for a configured channel.
 pub(crate) async fn for_turn(
@@ -107,6 +124,10 @@ pub(crate) async fn for_turn(
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
+    // Read after the turn took its mailbox, so a drain that closes intake later waits for it.
+    if let Some(refusal) = home_refusal(channel_id) {
+        return TurnHost::Refused(refusal);
+    }
     let Some(endpoint) = session_hosts::herdr_endpoint(channel_id) else {
         // An unconfigured channel's unreadable row keeps the existing path; a Herdr row refuses.
         return match herdr_trace(&read_row(pool, session_key).await) {
@@ -120,8 +141,8 @@ pub(crate) async fn for_turn(
     }
 }
 
-/// The turn's first judgement, before it resets, reconciles or clears anything. An unconfigured
-/// channel passes without I/O; a configured one is refused: headless turns run no Herdr executor.
+/// The turn's first judgement, before it resets, reconciles or clears anything: a delegated channel
+/// not held here or a configured one is refused, any other passes without I/O.
 pub(crate) async fn refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -131,6 +152,9 @@ pub(crate) async fn refusal_before_turn<F>(
 where
     F: std::future::Future<Output = Option<String>>,
 {
+    if let Some(refusal) = home_refusal(channel_id) {
+        return Some(refusal);
+    }
     session_hosts::herdr_endpoint(channel_id)?;
     let session_key = session_key().await;
     match for_turn(pool, provider, channel_id, session_key.as_deref()).await {
@@ -141,7 +165,7 @@ where
 }
 
 /// The intake's first judgement: a configured turn only the missing executor refused passes while
-/// `runtime.herdr_turn_enabled` is on.
+/// its provider's Herdr switch is on.
 pub(crate) async fn intake_refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -152,7 +176,7 @@ where
     F: std::future::Future<Output = Option<String>>,
 {
     match refusal_before_turn(pool, provider, channel_id, session_key).await {
-        Some(HerdrRefusal::ExecutorNotWired) if herdr_turn_switched_on() => None,
+        Some(HerdrRefusal::ExecutorNotWired) if herdr_turn_switched_on_for(provider) => None,
         judged => judged,
     }
 }
@@ -160,6 +184,25 @@ where
 #[cfg(test)]
 thread_local! {
     static FORCED_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static FORCED_CODEX_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether a configured channel's turn of `provider` runs on Herdr; any other provider never does.
+pub(crate) fn herdr_turn_switched_on_for(provider: &ProviderKind) -> bool {
+    match provider {
+        ProviderKind::Claude => herdr_turn_switched_on(),
+        ProviderKind::Codex => {
+            #[cfg(test)]
+            if let Some(forced) = FORCED_CODEX_SWITCH.with(std::cell::Cell::get) {
+                return forced;
+            }
+            cfg!(unix)
+                && crate::config_live_reload::current()
+                    .and_then(|config| config.runtime.herdr_codex_turn_enabled)
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a configured channel's Claude turn runs on Herdr; unset or false keeps it refused.
@@ -190,6 +233,22 @@ impl Drop for ForcedSwitch {
     }
 }
 
+/// Stands in for the live Codex switch on this thread until dropped.
+#[cfg(test)]
+pub(crate) struct ForcedCodexSwitch(Option<bool>);
+
+#[cfg(test)]
+pub(crate) fn force_codex_switch_for_test(on: Option<bool>) -> ForcedCodexSwitch {
+    ForcedCodexSwitch(FORCED_CODEX_SWITCH.with(|cell| cell.replace(on)))
+}
+
+#[cfg(test)]
+impl Drop for ForcedCodexSwitch {
+    fn drop(&mut self) {
+        FORCED_CODEX_SWITCH.with(|cell| cell.set(self.0));
+    }
+}
+
 async fn configured_turn(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -197,10 +256,15 @@ async fn configured_turn(
     session_key: Option<&str>,
     endpoint: ChannelEndpoint,
 ) -> Result<HerdrTurnPlan, HerdrRefusal> {
-    if *provider != ProviderKind::Claude {
-        let provider = provider.as_str().to_owned();
-        return Err(HerdrRefusal::ProviderUnsupported { provider });
-    }
+    // Codex is judged by its own switch alone, before any read; off it stays unsupported.
+    let kind = match provider {
+        ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+        ProviderKind::Codex if herdr_turn_switched_on_for(provider) => RuntimeHandoffKind::CodexTui,
+        _ => {
+            let provider = provider.as_str().to_owned();
+            return Err(HerdrRefusal::ProviderUnsupported { provider });
+        }
+    };
     if session_hosts::local_node().as_deref() != Some(endpoint.execution_node.as_str()) {
         let node = endpoint.execution_node;
         return Err(HerdrRefusal::EndpointNotLocal { node });
@@ -212,7 +276,7 @@ async fn configured_turn(
     }
     let row = read.map_err(|detail| HerdrRefusal::HostedRowUnreadable { detail })?;
     herdr_admission::check().map_err(|cause| HerdrRefusal::AdmissionStopped { cause })?;
-    if !o_writer_ready(channel_id) {
+    if !o_writer_ready(channel_id, kind) {
         return Err(HerdrRefusal::OWriterNotReady);
     }
     let endpoint = HerdrLaunchEndpoint {

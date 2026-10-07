@@ -225,6 +225,9 @@ struct Effect {
     epoch: u64,
 }
 impl Permit {
+    pub(crate) fn names(&self, provider: &ProviderKind, channel: u64) -> bool {
+        channel == self.0.gate.channel && provider == &self.0.gate.provider
+    }
     pub(crate) fn validate(&self, provider: &ProviderKind, channel: u64) -> Result<(), Failure> {
         let state = self.0.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if channel != self.0.gate.channel

@@ -1,15 +1,8 @@
 name: CI PR
 
 on:
-  # PR-only triggers. The previous `push: branches-ignore: [main]` trigger ran
-  # this whole workflow a SECOND time for every push that also had an open PR
-  # (pull_request: synchronize already covers PR-branch pushes), doubling CI
-  # compute. Deduping via the concurrency group instead would cancel the older
-  # run, but the `*_required_context` mirrors run `if: always()` and FAIL CLOSED
-  # on a `cancelled` upstream — so cancellation surfaces spurious required-check
-  # failures. Dropping both the redundant push trigger and manual dispatch
-  # prevents any non-candidate run from publishing the required `Script checks`
-  # context. Branch CI is obtained by opening a PR; main is covered by ci-main.yml.
+  # PR-only: no push/dispatch run may publish `Script checks`. Mirrors use !cancelled(): on run cancel
+  # pending mirrors never start and running ones are cancelled; a timed-out upstream still mirrors red.
   pull_request:
 
 concurrency:
@@ -293,6 +286,7 @@ jobs:
               - 'src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs'
               - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
               - 'src/services/cluster/attachment_transfer/storage_tests.rs'
+              - 'src/services/cluster/channel_home_boot_tests.rs'
               - 'src/services/cluster/channel_home_drain_tests.rs'
               - 'src/services/cluster/channel_home_tests.rs'
               - 'src/services/cluster/execution_capacity/tests.rs'
@@ -315,6 +309,7 @@ jobs:
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
               - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/control/home_fence_tests.rs'
               - 'src/services/discord/commands/control/input_clear_tests.rs'
               - 'src/services/discord/commands/control/native_herdr_e2e_tests.rs'
               - 'src/services/discord/commands/control/native_herdr_tests.rs'
@@ -334,6 +329,7 @@ jobs:
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
+              - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
@@ -349,11 +345,13 @@ jobs:
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
               - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/channel_homes_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
@@ -1035,7 +1033,7 @@ jobs:
     needs:
       - changes
       - check_fast
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1068,7 +1066,7 @@ jobs:
     needs:
       - changes
       - test_fast
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1087,7 +1085,7 @@ jobs:
     needs:
       - changes
       - dashboard
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1419,7 +1417,7 @@ jobs:
     needs:
       - changes
       - high-risk-recovery
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1713,7 +1711,7 @@ jobs:
     needs:
       - changes
       - library_sweep
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1780,7 +1778,7 @@ jobs:
     needs:
       - changes
       - lint
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1816,7 +1814,7 @@ jobs:
       - changes
       - check_fast_cross_os
       - check_fast_cross_os_targets
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1852,7 +1850,7 @@ jobs:
   win32_build_token_required_context:
     name: Win32 build-token required context
     needs: [changes, win32_build_token]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1953,6 +1951,14 @@ jobs:
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: cargo
+
+      - name: Production PR cap
+        shell: bash
+        run: bash scripts/pr_cap_check.sh
+        env:
+          PR_CAP_CI: "1"
+          PR_CAP_MODE: ${{ vars.PR_CAP_MODE || 'enforce' }}
+          BASH_ENV: /dev/null
 
       - name: Upload giant-file progress evidence
         if: always()
@@ -2082,7 +2088,7 @@ jobs:
       - scripts
       - scripts_guards
       - scripts_contracts
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -2104,7 +2110,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c
+          expected=ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2312,7 +2318,7 @@ jobs:
     needs:
       - relay_authority_targets
       - relay_authority_mutations
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -2337,7 +2343,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c
+          expected=ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

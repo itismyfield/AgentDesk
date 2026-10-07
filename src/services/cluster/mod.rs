@@ -12,6 +12,7 @@ pub(crate) mod agent_execution_node;
 pub(crate) mod attachment_transfer;
 pub(crate) mod capability_routing;
 pub(crate) mod channel_home;
+pub(crate) mod channel_home_boot;
 pub(crate) mod channel_home_drain;
 pub(crate) mod channel_home_port;
 pub(crate) mod execution_capacity;

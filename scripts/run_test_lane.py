@@ -494,13 +494,17 @@ def run_and_capture(command: list[str], log_path: Path | None) -> tuple[int, Out
     scanner = TranscriptScanner(outcome)
     sink = log_path.open("w", encoding="utf-8") if log_path else None
     try:
+        # libtest writes results, `failures:` and the summary to stdout. stderr
+        # is inherited: still logged, but a child's write cannot split a result line.
         process = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True,
+                                   stderr=None, text=True,
                                    bufsize=1)
         assert process.stdout is not None
 
         for line in process.stdout:
             sys.stdout.write(line)
+            # Flush per line to cut the relayed stdout's extra buffering delay.
+            sys.stdout.flush()
             if sink:
                 sink.write(line)
             scanner.feed(line.rstrip("\n"))

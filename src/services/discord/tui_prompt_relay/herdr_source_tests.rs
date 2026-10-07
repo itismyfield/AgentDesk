@@ -171,6 +171,7 @@ impl Herdr {
             channel_id: Some(self.channel),
             expected_native_session_id: Some(session.to_owned()),
             resume: false,
+            provider_root: None,
         };
         let host: Arc<dyn HerdrLaunchHost> = Arc::new(Launcher);
         let outcome = self
@@ -1017,7 +1018,7 @@ fn a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg() 
     // The writer's readiness is this host's own, so the launch gate is told it accepts work.
     let _launch_gate = crate::services::herdr_launch::force_writer_accepts(Some(true));
     assert!(
-        crate::services::herdr_launch::o_writer_ready(channel),
+        crate::services::herdr_launch::o_writer_ready(channel, RuntimeHandoffKind::ClaudeTui),
         "O owns the channel on a seeded store: {:?}",
         io.alarms.0.lock().unwrap()
     );

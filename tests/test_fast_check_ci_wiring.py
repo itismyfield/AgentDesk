@@ -19,9 +19,12 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "fb28d007e588531caf2c55740581f690882cf7fa891f92bde1bda5f75408436c"
+    "ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+# Job-level condition of every required-context mirror and its source line.
+MIRROR_IF = "${{ !cancelled() }}"
+MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
 # Path-filtered required contexts: (mirror job, required name, runner job,
 # runner name, runner `if`, FILTER_NAME, FILTER_OUTPUT).
 _LINT_FILTER = (
@@ -443,7 +446,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
         self.assertIn("name: Fast check (ubuntu-latest)", job)
         self.assertIn("- check_fast", job)
-        self.assertIn("if: always()", job)
+        self.assertIn(MIRROR_IF_LINE, job)
         self.assertEqual(job.count("UPSTREAM_JOB_NAME: check_fast"), 2)
         self.assertIn(
             "if: ${{ needs.changes.outputs.relay_contract != 'true' }}", job
@@ -466,7 +469,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("name: Fast targeted tests (ubuntu-latest)", job)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - changes\n      - test_fast\n    if: always\(\)$",
+            r"(?m)^    needs:\n      - changes\n      - test_fast\n    if: "
+            + re.escape(MIRROR_IF)
+            + "$",
         )
         self.assertEqual(job.count("FILTER_NAME: pg_db"), 1)
         self.assertEqual(
@@ -743,7 +748,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             mirror["needs"],
             ["changes", "check_fast_cross_os", "check_fast_cross_os_targets"],
         )
-        self.assertEqual(mirror["if"], "always()")
+        self.assertEqual(mirror["if"], MIRROR_IF)
         mirror_steps = [
             step
             for step in mirror["steps"]
@@ -839,6 +844,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
             if "cargo test --lib " not in command
         ]
         self.assertIn("cargo test --doc ClaudeBinary", non_lib)
+        lint_run = next(step["run"] for step in main_jobs["lint"]["steps"] if step.get("name") == "just lint")
+        observed = next(line.strip().split(" | tee ")[0] for line in lint_run.splitlines() if line.strip().startswith("cargo clippy "))
+        self.assertEqual(observed.replace(" --message-format=json", ""), just_recipe_commands(justfile, "lint")[0])
+        self.assertIn("set -o pipefail", lint_run)
+        self.assertNotIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", lint_run)
         self.assertEqual(
             [
                 line.strip()
@@ -849,7 +859,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [
                 "npm run test:policies",
                 "just fmt-check",
-                "just lint",
+                "set -o pipefail",
+                "mkdir -p target/clippy-observation",
+                "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then",
+                "echo '::warning::Clippy observation invalid; no warning baseline can be derived'",
+                "fi",
                 "source scripts/ci/non-pg-test-filter.sh",
                 *non_lib,
                 "sccache --show-stats || true",
@@ -992,7 +1007,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             CI_RUNNER_HARDENING_SHA256,
         )
         relay_job = yaml.safe_load(workflow)["jobs"]["relay-authority-contract"]
-        self.assertEqual(relay_job["if"], "always()")
+        self.assertEqual(relay_job["if"], MIRROR_IF)
         self.assertEqual(relay_job["needs"], ["relay_authority_targets", "relay_authority_mutations"])
         pin_steps = {
             step["name"]: step
@@ -1279,7 +1294,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(
             job["needs"], ["changes", "scripts", "scripts_guards", "scripts_contracts"]
         )
-        self.assertEqual(job["if"], "always()")
+        self.assertEqual(job["if"], MIRROR_IF)
         self.assertNotIn("continue-on-error", job)
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(len(job["steps"]), 5)
@@ -1302,7 +1317,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "job deleted": "",
             "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
             "job if weakened": mirror.replace(
-                "    if: always()\n",
+                MIRROR_IF_LINE,
                 "    if: ${{ github.event_name == 'push' }}\n",
                 1,
             ),
@@ -1354,13 +1369,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_script_checks_publisher_rejects_missing_always_condition(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         mirror = job_block(workflow, "scripts_required_context")
-        mutated_mirror = mirror.replace("    if: always()\n", "", 1)
+        mutated_mirror = mirror.replace(MIRROR_IF_LINE, "", 1)
         self.assertNotEqual(mutated_mirror, mirror)
         mutated = workflow.replace(mirror, mutated_mirror, 1)
         result = self.run_hardening_fixture(mutated)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
-            "publisher must carry `if: always()` so upstream failure still "
+            "publisher must carry `if: ${{ !cancelled() }}` so upstream failure still "
             "runs the fail-closed mirror",
             result.stderr,
         )
@@ -1370,10 +1385,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         mirror = job_block(workflow, "scripts_required_context")
         mutations = {
             "success": mirror.replace(
-                "    if: always()\n", "    if: success()\n", 1
+                MIRROR_IF_LINE, "    if: success()\n", 1
             ),
             "event condition": mirror.replace(
-                "    if: always()\n",
+                MIRROR_IF_LINE,
                 "    if: ${{ github.event_name == 'push' }}\n",
                 1,
             ),
@@ -1385,7 +1400,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(
-                    "publisher must carry `if: always()` so upstream failure "
+                    "publisher must carry `if: ${{ !cancelled() }}` so upstream failure "
                     "still runs the fail-closed mirror",
                     result.stderr,
                 )
@@ -1394,8 +1409,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         publisher = job_block(workflow, "relay-authority-contract")
         mutations = [
-            (publisher, publisher.replace("    if: always()\n", "", 1), "publisher must carry `if: always()`"),
-            (publisher, publisher.replace("    if: always()\n", "    if: success()\n", 1), "publisher must carry `if: always()`"),
+            (publisher, publisher.replace(MIRROR_IF_LINE, "", 1), f"publisher must carry `if: {MIRROR_IF}`"),
+            (publisher, publisher.replace(MIRROR_IF_LINE, "    if: success()\n", 1), f"publisher must carry `if: {MIRROR_IF}`"),
             (publisher, publisher.replace("      - relay_authority_mutations\n", "", 1), "required unconditional needs closure changed"),
         ]
         for job_id in ("relay_authority_targets", "relay_authority_mutations"):
@@ -1469,7 +1484,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         writer = step_block(targets, "Writer namespace exact Windows targets")
         mutations = (
             (mirror, mirror.replace("      - check_fast_cross_os_targets\n", "", 1), "cross-OS required-context mirror must retain exact needs"),
-            (mirror, mirror.replace("    if: always()\n", "", 1), "cross-OS required-context mirror must retain exact if"),
+            (mirror, mirror.replace(MIRROR_IF_LINE, "", 1), "cross-OS required-context mirror must retain exact if"),
             (mirror, mirror.replace(targets_mirror, "", 1), 'must retain exactly one "Mirror check_fast_cross_os_targets result for branch protection" step'),
             (mirror, mirror.replace(targets_mirror, targets_mirror.replace("${{ needs.changes.outputs.cross_os_rust }}", "'false'"), 1), "must pin exact step env"),
             (targets, targets.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1), "cross-OS exact targets job must not be allowed to continue on error"),
@@ -1507,8 +1522,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
             frontier.extend([needs] if isinstance(needs, str) else needs)
         self.assertEqual(closure, expected_closure)
 
-        self.assertEqual(jobs["scripts_required_context"]["if"], "always()")
-        self.assertEqual(jobs["relay-authority-contract"]["if"], "always()")
+        self.assertEqual(jobs["scripts_required_context"]["if"], MIRROR_IF)
+        self.assertEqual(jobs["relay-authority-contract"]["if"], MIRROR_IF)
         for job_id in (
             "relay_authority_targets",
             "relay_authority_mutations",
@@ -1552,6 +1567,28 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 mutated = workflow.replace(job, mutated_job, 1)
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
+
+    def test_change_surfaces_wiring_table_is_the_exact_publisher_closure(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        doc = (REPO_ROOT / "docs/agent-maintenance/change-surfaces.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"<!-- required-publisher-wiring -->\n(.*?)\n *<!-- /required-publisher-wiring -->", doc, re.S)
+        self.assertEqual(len(blocks), 1, "change-surfaces.md must hold exactly one publisher wiring table")
+        rows, frontier = {}, ["scripts_required_context", "relay-authority-contract"]
+        while frontier:
+            job_id = frontier.pop()
+            if job_id not in rows:
+                needs = jobs[job_id].get("needs", [])
+                rows[job_id] = [needs] if isinstance(needs, str) else needs
+                frontier.extend(rows[job_id])
+
+        def cell(values: list[str]) -> str:
+            return ", ".join(f"`{value}`" for value in values) or "none"
+
+        expected = ["| job | needs | job-level `if` |", "|---|---|---|"] + [
+            f"| `{job_id}` | {cell(needs)} | {cell([jobs[job_id]['if']] if 'if' in jobs[job_id] else [])} |"
+            for job_id, needs in sorted(rows.items())
+        ]
+        self.assertEqual([line.strip() for line in blocks[0].splitlines()], expected)
 
     def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -1637,7 +1674,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 job = jobs[mirror_id]
                 self.assertEqual(job["name"], context)
                 self.assertEqual(job["needs"], ["changes", runner_id])
-                self.assertEqual(job["if"], "always()")
+                self.assertEqual(job["if"], MIRROR_IF)
                 self.assertNotIn("continue-on-error", job)
                 self.assertEqual(job["runs-on"], "ubuntu-latest")
                 self.assertEqual(len(job["steps"]), 3)
@@ -1695,9 +1732,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
             mirror_mutations = {
                 "job deleted": "",
                 "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
-                "job if deleted": mirror.replace("    if: always()\n", "", 1),
+                "job if deleted": mirror.replace(MIRROR_IF_LINE, "", 1),
                 "job if weakened": mirror.replace(
-                    "    if: always()\n", "    if: success()\n", 1
+                    MIRROR_IF_LINE, "    if: success()\n", 1
                 ),
                 "job continue-on-error injected": mirror.replace(
                     "    runs-on: ubuntu-latest\n",

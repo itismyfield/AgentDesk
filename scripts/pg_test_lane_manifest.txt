@@ -80,6 +80,7 @@ src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
+src/services/cluster/channel_home_boot_tests.rs
 src/services/cluster/channel_home_drain_tests.rs
 src/services/cluster/channel_home_tests.rs
 src/services/cluster/execution_capacity/tests.rs
@@ -102,6 +103,7 @@ src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
+src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/input_clear_tests.rs
 src/services/discord/commands/control/native_herdr_e2e_tests.rs
 src/services/discord/commands/control/native_herdr_tests.rs
@@ -121,6 +123,7 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
+src/services/discord/placeholder_sweeper/retirement_tests.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
 src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs
 src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs
@@ -136,11 +139,13 @@ src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
+src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
+src/services/discord/runtime_bootstrap/channel_homes_tests.rs
 src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
@@ -295,6 +300,7 @@ services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
 services::cluster::channel_home::tests
+services::cluster::channel_home_boot::tests
 services::cluster::channel_home_drain::tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
@@ -316,6 +322,7 @@ services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::control::home_fence::tests
 services::discord::commands::control::input_clear::tests
 services::discord::commands::control::native::herdr_tests
 services::discord::commands::control::native::herdr_tests::e2e
@@ -337,6 +344,7 @@ services::discord::inflight::host_recovery_guard::keyed_tests
 services::discord::inflight::rebind_reap::tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::placeholder_sweeper::abandon_guard::tests
+services::discord::placeholder_sweeper::retirement_tests
 services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -351,12 +359,14 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::router::message_handler::watchdog::host_tests
+services::discord::runtime_bootstrap::channel_homes_tests
 services::discord::runtime_bootstrap::gateway_handback_integration_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
@@ -994,6 +1004,10 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
+services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_lease_and_a_restart_reopens_by_write_pg
+services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
+services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
+services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -1109,6 +1123,7 @@ services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_ou
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
+services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
 services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
@@ -1171,6 +1186,7 @@ services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_star
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
+services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg
@@ -1204,6 +1220,17 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_matched_bound_execution_takes_one_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
@@ -1227,6 +1254,9 @@ services::discord::router::message_handler::provider_isolation::host_tests::a_ru
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
+services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg

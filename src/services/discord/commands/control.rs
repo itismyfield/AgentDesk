@@ -13,6 +13,7 @@ use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::{CommandStop, stop_active_turn};
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
+mod home_fence;
 #[allow(dead_code)]
 pub(in crate::services::discord) mod input_clear;
 mod native;
@@ -422,6 +423,7 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    home_fence::check(channel_id)?;
     // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
     let hosted = native::target(http, shared, provider, channel_id, explicit_session_key).await?;
     let boundary = match shared.pg_pool.as_ref() {
@@ -600,6 +602,9 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
             return Ok(());
         }
     }
+    if home_fence::refused(&ctx).await? {
+        return Ok(());
+    }
 
     if let Err(error) = crate::services::session_forwarding::revalidate_local_cancel_owner(
         &forward_context,
@@ -696,6 +701,9 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
         ctx.say("유효한 큐 메시지 ID를 입력해 주세요.").await?;
         return Ok(());
     };
+    if home_fence::refused(&ctx).await? {
+        return Ok(());
+    }
 
     let removed = mailbox_cancel_queued_primary_message(
         &ctx.data().shared,
@@ -842,7 +850,7 @@ mod clear_persist_failure_tests {
         Intervention, InterventionMode, QueuePersistenceContext,
     };
 
-    const SESSION_ID: &str = "provider-session-6233";
+    pub(super) const SESSION_ID: &str = "provider-session-6233";
     const CHANNEL_NAME: &str = "adk-6233-clear-persist";
 
     fn queued(message_id: u64) -> Intervention {
@@ -865,7 +873,7 @@ mod clear_persist_failure_tests {
         }
     }
 
-    async fn seed_session(shared: &Arc<SharedData>, channel_id: ChannelId) {
+    pub(super) async fn seed_session(shared: &Arc<SharedData>, channel_id: ChannelId) {
         shared.core.lock().await.sessions.insert(
             channel_id,
             DiscordSession {
@@ -888,7 +896,7 @@ mod clear_persist_failure_tests {
         );
     }
 
-    async fn seed_backlog(
+    pub(super) async fn seed_backlog(
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: ChannelId,
@@ -946,13 +954,16 @@ mod clear_persist_failure_tests {
         .await
     }
 
-    async fn session_state(shared: &SharedData, channel_id: ChannelId) -> (Option<String>, bool) {
+    pub(super) async fn session_state(
+        shared: &SharedData,
+        channel_id: ChannelId,
+    ) -> (Option<String>, bool) {
         let data = shared.core.lock().await;
         let session = data.sessions.get(&channel_id).expect("session kept");
         (session.session_id.clone(), session.cleared)
     }
 
-    async fn queue_len(shared: &SharedData, channel_id: ChannelId) -> usize {
+    pub(super) async fn queue_len(shared: &SharedData, channel_id: ChannelId) -> usize {
         shared
             .mailbox(channel_id)
             .snapshot()
@@ -1256,7 +1267,7 @@ mod clear_persist_failure_tests {
         }
     }
 
-    async fn boundary_rows(pool: &sqlx::PgPool, channel_id: ChannelId) -> Vec<i64> {
+    pub(super) async fn boundary_rows(pool: &sqlx::PgPool, channel_id: ChannelId) -> Vec<i64> {
         sqlx::query_scalar(
             "SELECT clear_generation::BIGINT FROM channel_session_clear_boundaries WHERE channel_id = $1",
         )

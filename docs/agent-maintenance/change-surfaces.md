@@ -268,10 +268,9 @@ time for diagnostics; neither is a stored approval value.
   `scripts/required-check-mirror.sh`. The required `Script checks` publisher
   compares both the helper digest and the digest of
   `scripts/check-ci-runner-hardening.sh` immediately after checkout; the
-  unconditional required `relay-authority-contract` job repeats the same two
-  comparisons before its own gate run (they sit after its toolchain and
-  relay-contract steps, and any earlier step failure already turns that
-  required job red), and each job then runs only its verified gate copy. The publisher-side copy is intentional and
+  required `relay-authority-contract` publisher repeats the same two
+  comparisons in its first step after checkout, before its own gate run and
+  its two result mirrors, and each job then runs only its verified gate copy. The publisher-side copy is intentional and
   symmetric: it catches a skipped/altered relay job, while the relay copy
   catches a skipped/altered publisher. The helper's
   behavior tests remain useful regressions, but byte identity is primary:
@@ -280,31 +279,43 @@ time for diagnostics; neither is a stored approval value.
 - fixed surfaces: the `Script checks` publisher has exactly checkout,
   contract, and one result-mirror step per shard job (`scripts` runs the
   `cargo` shard, `scripts_guards` and `scripts_contracts` the others); its
-  `name`, `needs: [changes, scripts, scripts_guards, scripts_contracts]`,
-  required job-level `if: always()`, `runs-on`, checkout provenance, and
+  `name`, `needs`, job-level `if`, `runs-on`, checkout provenance, and
   absence of `continue-on-error`,
   `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
-  publisher's `if: always()` is what runs the fail-closed
-  mirror after an upstream failure, skip, or cancellation. The independent
-  `relay-authority-contract` publisher has no `needs` and must omit job-level
-  `if`; the internal `changes` job and every shard job must also omit
-  job-level `if` so their own work cannot be condition-skipped. Each extra
+  publishers' job-level `if` (wiring table below) is what runs the fail-closed
+  mirror after an upstream failure, skip, or timeout cancellation. When the
+  run is cancelled, a publisher that has not started never starts and a
+  running one is cancelled with the run; its final check conclusion is
+  measured on a PR run, not assumed here. Execution jobs omit job-level `if`
+  so their own work cannot be condition-skipped. Each extra
   shard job runs `./scripts/ci-script-checks.sh` exactly once with the
   `scripts` aggregate's effective execution and its own `SCRIPT_CHECK_SHARD`.
   Its source-byte range is also hashed, so YAML scalar tags and styles remain in
   the comparison; Psych cannot erase an explicit tag such as `!!binary` or
   equate YAML 1.1 spellings such as `yes` and `012` with the intended
   Actions scalars. Plain YAML-boolean-like job IDs fail closed, while quoted
-  `"yes"` remains a valid string job ID. The relay job's semantic hash and
-  explicit step registry pin its absent `needs`/`if`, non-matrix shape, and
-  content-hash backstop. Starting at the two required publishers, the complete
-  recursive `needs` closure is the finite set
-  `{scripts_required_context, relay-authority-contract, scripts,
-  scripts_guards, scripts_contracts, changes}`; every member must exist and
-  omit `continue-on-error`, the Script checks publisher must carry exactly
-  `if: always()`, and the other jobs must
-  omit job-level `if`. Any edge that expands that set is a review-triggering
-  gate failure.
+  `"yes"` remains a valid string job ID. The relay publisher's semantic hash
+  and explicit step registry pin its `needs`, `if`, non-matrix shape, and
+  content-hash backstop. The wiring table below is the single statement of
+  the recursive `needs` closure of the two required publishers and of each
+  member's `needs` and job-level `if`; `tests/test_fast_check_ci_wiring.py`
+  requires it to equal `ci-pr.yml` exactly. Every member must exist and omit
+  `continue-on-error`, and any edge that expands the closure is a
+  review-triggering gate failure.
+
+  <!-- required-publisher-wiring -->
+  | job | needs | job-level `if` |
+  |---|---|---|
+  | `changes` | none | none |
+  | `relay-authority-contract` | `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
+  | `relay_authority_mutations` | none | none |
+  | `relay_authority_targets` | none | none |
+  | `scripts` | `changes` | none |
+  | `scripts_contracts` | `changes` | none |
+  | `scripts_guards` | `changes` | none |
+  | `scripts_required_context` | `changes`, `scripts`, `scripts_guards`, `scripts_contracts` | `${{ !cancelled() }}` |
+  <!-- /required-publisher-wiring -->
+
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
   the selected
@@ -369,9 +380,9 @@ time for diagnostics; neither is a stored approval value.
   pull-request subfilters such as `paths-ignore` are likewise not guaranteed.
   The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
   prove that an upstream success used the intended semantics. Because the
-  publisher runs with `if: always()`, a failure, skip, or cancellation of a
-  single upstream job still reaches the mirror and makes the required context
-  red.
+  publisher runs with `if: ${{ !cancelled() }}`, a failure, skip, or timeout
+  cancellation of a single upstream job in a live run still reaches the mirror
+  and makes the required context red.
   More fundamentally, a single PR that consistently rewrites every guard and
   every pin can pass this in-repository gate system. A cheaper edit in the same
   class: GitHub treats a condition-skipped required check as satisfied, so one

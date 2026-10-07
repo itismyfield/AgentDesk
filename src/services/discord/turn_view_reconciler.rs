@@ -354,6 +354,8 @@ pub(in crate::services::discord) struct TurnViewReconciler {
     // replay remains the source of truth for messages still queued on disk.
     recently_finalized: std::sync::Mutex<RecentlyFinalizedTargets>,
     #[cfg(test)]
+    test_http_reactions: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     ops: Arc<std::sync::Mutex<Vec<TestReactionOp>>>,
     #[cfg(test)]
     test_deliveries: Arc<std::sync::Mutex<std::collections::VecDeque<TurnViewDelivery>>>,
@@ -872,6 +874,11 @@ pub(in crate::services::discord) struct TestReactionOp {
 
 #[cfg(test)]
 impl TurnViewReconciler {
+    /// Opt only this reconciler into real REST requests against a test HTTP client.
+    pub(in crate::services::discord) fn enable_test_http_reactions(&self) {
+        self.test_http_reactions.store(true, Ordering::Relaxed);
+    }
+
     pub(in crate::services::discord) fn ops(&self) -> Vec<TestReactionOp> {
         self.ops.lock().expect("turn view test op lock").clone()
     }
@@ -900,3 +907,14 @@ impl TurnViewReconciler {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn http_reaction_opt_in_is_instance_local_and_defaults_off() {
+    let enabled = TurnViewReconciler::default();
+    let untouched = TurnViewReconciler::default();
+    assert!(!enabled.test_http_reactions.load(Ordering::Relaxed));
+    enabled.enable_test_http_reactions();
+    assert!(enabled.test_http_reactions.load(Ordering::Relaxed));
+    assert!(!untouched.test_http_reactions.load(Ordering::Relaxed));
+}

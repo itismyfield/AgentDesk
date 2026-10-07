@@ -326,6 +326,111 @@ fn e1_handback_judges_a_ledger_attempt_by_its_own_exact_witness() {
     }
 }
 
+// Only positive no-effect evidence goes back to Legacy; a queued or consumed frame never does.
+#[test]
+fn e1_handback_returns_only_never_sent_rows_and_holds_a_queued_frame() {
+    use crate::services::tui_input::attempt::{
+        AttemptMeta, Effect, Tracking, Witness, WitnessKind, fresh_token,
+    };
+    let rt = runtime();
+    let consumed = RowState::Done(DoneReason::HandbackRunning);
+    for (kind, settled, outcome, notice) in [
+        (
+            WitnessKind::Queued,
+            RowState::Queued,
+            Outcome::Held,
+            "handback_queued",
+        ),
+        (
+            WitnessKind::Hook,
+            RowState::Queued,
+            Outcome::Held,
+            "handback_queued",
+        ),
+        (
+            WitnessKind::Tool,
+            consumed,
+            Outcome::Legacy,
+            "handback_consumed",
+        ),
+    ] {
+        let root = sandbox();
+        let (path, binding) = transcript(root.path());
+        let eof = fs::metadata(&path).unwrap().len();
+        let mut ledger = Ledger::open(root.path(), CHANNEL).unwrap();
+        for key in [10, 8] {
+            let mut input = item(key);
+            input["legacy_input"] = item(key);
+            let received = Entry::Received { key, input };
+            ledger.append_entry(&received, &[]).unwrap();
+        }
+        let meta = AttemptMeta {
+            generation: 1,
+            token: fresh_token(),
+            frame_digest: "ab".repeat(32),
+            frame_profile: None,
+            execution_nonce: "nonce".into(),
+            source: binding.source.clone(),
+            anchor: eof,
+            effect: Effect::Intent,
+            incarnation: None,
+            queue_end: None,
+        };
+        let evidence = AttemptEvidence {
+            binding,
+            execution_nonce: "nonce".into(),
+            eof,
+            rendered_prompt: "[adk:source:8]\ninput 8\n[adk:end]".into(),
+            source_ids: vec![8],
+            record_end: None,
+            native_turn_id: None,
+        };
+        let tracking = Tracking {
+            attempt: Some(meta.clone()),
+            ..Tracking::default()
+        };
+        ledger
+            .append_tracked(8, RowState::Injecting, Some(evidence), &tracking)
+            .unwrap();
+        let sent = Entry::Transition {
+            key: 8,
+            state: RowState::AwaitTurn,
+            attempt: None,
+        };
+        ledger.append_entry(&sent, &[]).unwrap();
+        let witness = Witness {
+            generation: 1,
+            token: meta.token,
+            kind,
+            range: None,
+            record_key: Some("queue-record".into()),
+            turn_ref: None,
+        };
+        ledger.append_witness(8, witness).unwrap();
+        drop(ledger);
+
+        let closing = frozen();
+        closing.begin_handback().unwrap();
+        let mut host = files(root.path(), effects(root.path(), closing, &rt));
+        let returned = handback(&mut LedgerLease::new(root.path(), CHANNEL), &mut host).unwrap();
+        let queue = root
+            .path()
+            .join("discord_pending_queue/claude/token/9.json");
+        let queued: Value = serde_json::from_slice(&fs::read(&queue).unwrap()).unwrap();
+        let ids: Vec<_> = (queued.as_array().unwrap().iter())
+            .map(|item| item["message_id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![10], "{kind:?}: only the never-pasted row returns");
+        assert_eq!(returned, outcome, "{kind:?}");
+        assert_eq!(state(root.path(), 8), settled, "{kind:?}");
+        assert_eq!(
+            host.effects_mut().take_notices(),
+            vec![(Some(8), notice)],
+            "{kind:?}"
+        );
+    }
+}
+
 #[test]
 fn e1_every_effect_refuses_an_async_worker_and_runs_under_the_blocking_marker() {
     let rt = runtime();

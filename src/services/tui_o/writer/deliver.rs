@@ -1,5 +1,6 @@
 //! One channel's delivery. For each piece: take the delivery lease, then under the ownership gate
-//! fsync `Prepared` and start the POST, record the result, and settle unclear ones.
+//! (a delegated channel's home gate) fsync `Prepared` and start the POST, record the result, and
+//! settle unclear ones.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
@@ -15,6 +16,7 @@ use tokio::sync::oneshot;
 use super::confirm::{self, Verdict};
 use super::pieces::{Derived, PieceWork};
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm};
+use crate::services::cluster::channel_home;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceOutcome, Unsent};
@@ -124,6 +126,15 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A delegated channel posts only through its registered home gate, which also ends a lapsed hold;
+/// any other channel through the writer's gate.
+fn admit<T>(gate: &OwnershipGate, channel: u64, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
+    match channel_home::registered_channel(channel) {
+        Some(home) => home.admit_post(hand_off),
+        None => gate.admit(hand_off),
     }
 }
 
@@ -337,7 +348,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         // The first poll of the request runs under the gate, so no request starts after a
         // transition; the rest runs outside the lock.
         let admitted = poll_fn(|cx| {
-            Poll::Ready(gate.admit(|epoch| {
+            Poll::Ready(admit(&gate, channel, |epoch| {
                 let prepared = || LedgerEntry::Prepared {
                     serial,
                     unit_key: piece.unit_key.clone(),

@@ -1,5 +1,7 @@
 //! A delegated channel's home gate. The `o_channel_homes` row decides who holds the channel;
 //! this process opens its gate only from its own successful renewal write, never from a read.
+//! Lock order: registry, then a gate's `local`, then its inner `OwnershipGate` or a `Candidate`;
+//! a writer's readiness map comes before all of them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::BTreeMap;
@@ -332,15 +334,56 @@ impl HomeGate {
 
     /// Runs `hand_off` under the gate lock with the row epoch, only while this home is held.
     pub(crate) fn admit<T>(&self, hand_off: impl FnOnce(i64) -> T) -> Option<T> {
+        self.admit_held(|home_epoch, _| hand_off(home_epoch))
+    }
+
+    /// [`HomeGate::admit`] for a writer's POST: `hand_off` gets the gate epoch its ledger records.
+    pub(crate) fn admit_post<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
+        self.admit_held(|_, gate_epoch| hand_off(gate_epoch))
+    }
+
+    fn admit_held<T>(&self, hand_off: impl FnOnce(i64, u64) -> T) -> Option<T> {
         let mut local = self.locked();
         self.expire(&mut local, Instant::now());
         let held = local.held.as_ref()?;
         let (home_epoch, gate_epoch) = (held.home_epoch, held.gate_epoch);
         self.gate
-            .admit(|epoch| (epoch == gate_epoch).then(|| hand_off(home_epoch)))
+            .admit(|epoch| (epoch == gate_epoch).then(|| hand_off(home_epoch, gate_epoch)))
             .flatten()
     }
+
+    /// Why a turn or command may not run here now; `None` while held with intake open.
+    pub(crate) fn refusal(&self) -> Option<HomeRefusal> {
+        match self.ownership() {
+            HomeOwnership::Owned {
+                intake: HomeIntake::Open,
+                ..
+            } => None,
+            HomeOwnership::Owned { .. } => Some(HomeRefusal::Draining),
+            HomeOwnership::Lost => Some(HomeRefusal::NotHeld),
+        }
+    }
 }
+
+/// Why a delegated channel's turn or command does not run on this node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HomeRefusal {
+    /// This node does not hold the channel's home.
+    NotHeld,
+    /// This node holds it while a drain keeps its intake closed.
+    Draining,
+}
+
+impl std::fmt::Display for HomeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotHeld => "home_not_held",
+            Self::Draining => "home_draining",
+        })
+    }
+}
+
+impl std::error::Error for HomeRefusal {}
 
 type Homes = BTreeMap<String, Arc<HomeGate>>;
 
@@ -412,6 +455,29 @@ pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
 /// The gate of a channel this process takes part in; none means the gateway rules apply.
 pub(crate) fn registered(channel_id: &str) -> Option<Arc<HomeGate>> {
     read_homes(|homes| homes.get(channel_id).cloned()).flatten()
+}
+
+/// [`registered`] by Discord id; while nothing was ever registered it locks and allocates nothing.
+pub(crate) fn registered_channel(channel: u64) -> Option<Arc<HomeGate>> {
+    read_homes(|homes| homes.get(&channel.to_string()).cloned()).flatten()
+}
+
+/// [`HomeGate::refusal`] of the channel's registered gate; a channel with none is not refused.
+pub(crate) fn refusal(channel: u64) -> Option<HomeRefusal> {
+    registered_channel(channel)?.refusal()
+}
+
+/// Registers a gate for `channel` held as `state` at epoch 1 (`None`: never held), as a holder's
+/// renewal would leave it.
+#[cfg(test)]
+pub(crate) fn register_for_test(channel: u64, state: Option<HomeState>) -> Arc<HomeGate> {
+    let home = Arc::new(HomeGate::new(&channel.to_string(), "mini"));
+    if let Some(state) = state {
+        let written = HeldHome::for_test(&channel.to_string(), "mini", 1, state);
+        home.confirm(&written, Instant::now()).unwrap();
+    }
+    register(Arc::clone(&home));
+    home
 }
 
 pub(crate) fn any_registered() -> bool {

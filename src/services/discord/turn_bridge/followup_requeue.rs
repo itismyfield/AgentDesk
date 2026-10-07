@@ -400,6 +400,70 @@ mod tests {
         )
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources() {
+        use crate::services::discord::input_runtime::fence::{self, effect};
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(6_325_519);
+        let mut state = inflight(channel, MessageId::new(6_325_520));
+        state.source_message_ids = vec![6_325_521, 6_325_522];
+        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let permit = gate.admit().unwrap();
+        let closing = gate.close().unwrap();
+        let result = effect::run(Some(permit), {
+            let shared = shared.clone();
+            let provider = provider.clone();
+            async move {
+                requeue_claude_tui_followup_pre_submit_timeout(
+                    &shared,
+                    &provider,
+                    channel,
+                    &state,
+                    None,
+                    None,
+                    "c1b-preclose-timeout",
+                )
+                .await
+            }
+        })
+        .await;
+        assert!(result.requeued);
+        assert!(!result.retry_capped);
+        assert_eq!(result.notice_message_id, MessageId::new(6_325_521));
+        let binding = super::super::super::busy_followup_retry_store::load(
+            &provider,
+            channel.get(),
+            6_325_520,
+        )
+        .unwrap();
+        assert_eq!(binding.busy_retry_count, 1);
+        assert_eq!(binding.notice_message_id, 6_325_521);
+        let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+            &provider,
+            &shared.token_hash,
+            channel,
+        );
+        assert_eq!(disk.len(), 1);
+        assert_eq!(
+            disk[0].source_message_ids,
+            vec![
+                MessageId::new(6_325_521),
+                MessageId::new(6_325_522),
+                MessageId::new(6_325_520),
+            ]
+        );
+        closing.drain().await;
+        assert!(matches!(
+            gate.admit(),
+            Err(fence::Failure::Mode(fence::Mode::Closing))
+        ));
+        assert!(effect::current().is_none());
+        shared.mailboxes.remove_fixture_for_test(channel);
+    }
+
     #[test]
     fn already_queued_refusal_preserves_existing_merged_marker() {
         let outcome = crate::services::discord::MailboxEnqueueOutcome {

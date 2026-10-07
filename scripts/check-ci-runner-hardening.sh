@@ -377,13 +377,13 @@ until frontier.empty?
   end
   case job_id
   when "scripts_required_context"
-    unless job.key?("if") && job["if"] == "always()"
-      warn "#{path}: Script checks publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
+    unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
+      warn "#{path}: Script checks publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
       exit 1
     end
   when "relay-authority-contract"
-    unless job.key?("if") && job["if"] == "always()"
-      warn "#{path}: relay-authority-contract publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
+    unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
+      warn "#{path}: relay-authority-contract publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
       exit 1
     end
   else
@@ -494,7 +494,7 @@ expected_mirror_steps = [
 expected_mirror_job = {
   "name" => "Script checks",
   "needs" => ["changes", *script_check_shard_jobs.keys],
-  "if" => "always()",
+  "if" => "${{ !cancelled() }}",
   "runs-on" => "ubuntu-latest",
   "steps" => expected_mirror_steps,
 }
@@ -544,7 +544,7 @@ mirror_source = mirror_source&.gsub(
   "expected=<required-check-pin-sha256>",
 )
 mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
-unless mirror_source_sha256 == "86cea9c1d95dc6062fe6edfb3fa8334e491c98f9d7f73f6a45796b9a2b9c12df"
+unless mirror_source_sha256 == "d78151431f9f92845ded58a8b9d11046bfe644522f7a1399b09f95ecc5910928"
   warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -687,6 +687,12 @@ unless execution_contract(script_check_execution, expected_script_check_executio
   expected = JSON.generate(canonical_yaml(expected_script_check_execution))
   found = JSON.generate(canonical_yaml(script_check_execution))
   warn "#{path}: Script checks aggregate effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end
+expected_cap = {"name" => "Production PR cap", "shell" => "bash", "run" => "bash scripts/pr_cap_check.sh", "env" => {"PR_CAP_CI" => "1", "PR_CAP_MODE" => "${{ vars.PR_CAP_MODE || 'enforce' }}", "BASH_ENV" => "/dev/null"}}
+cap_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Hash) && step["name"] == "Production PR cap" }
+unless cap_steps == [expected_cap] && Array(script_checks_job["steps"]).index(expected_cap) > script_check_step_index
+  warn "#{path}: production PR cap must retain its unconditional exact post-aggregate execution"
   exit 1
 end
 evidence_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Hash) && step["name"] == "Upload giant-file progress evidence" }
@@ -877,9 +883,9 @@ targets = {
     "label" => "cross-OS required-context mirror",
     "name" => "Fast check cross OS required context (ubuntu-latest)",
     "needs" => %w[changes check_fast_cross_os check_fast_cross_os_targets],
-    "if" => "always()",
+    "if" => "${{ !cancelled() }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "b3f62e36af947ceaede19310676c24f3eb09e33ee2bbbda186df545443bd2390",
+    "job_sha256" => "a805ae940c4b5cc781b0857dccd3c5ee7d8cb5ad79df4c011f3b1c4df13e224b",
     "require_debug_env" => false,
     "cargo_steps" => %w[check_fast_cross_os check_fast_cross_os_targets].to_h do |runner|
       [
@@ -1063,9 +1069,9 @@ targets = {
     "label" => "relay-authority contract job",
     "name" => "relay-authority-contract",
     "needs" => %w[relay_authority_targets relay_authority_mutations],
-    "if" => "always()",
+    "if" => "${{ !cancelled() }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "188f42334c40446fd80b192f8c23a19310010c25ef3a4d9b70cecc97659053a7",
+    "job_sha256" => "2f9a677bab6a53fb6bcb65bbc29ba493c400551beb043ca6b6d6a9bc7e575bbe",
     "job_timeout_minutes" => 10,
     "cargo_steps" => {
       "Pin required-check mirror content (#5321)" => {
@@ -1342,7 +1348,8 @@ evidence = uploads.select { |_, step| step["name"] == "Upload giant-file progres
 unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]]
   errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
 end
-errors << "artifact uploads must stay in the cargo shard job" unless uploads.all? { |job_id, _| job_id == "scripts" }
+clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1386,6 +1393,18 @@ if lint.is_a?(Hash)
   ["Policy JS unit tests", "just fmt-check", "just lint", lint_tests_name].each do |name|
     errors << "job lint must have exactly one #{name.inspect} step" unless lint_steps.count { |step| step["name"] == name } == 1
   end
+  expected_lint_run = <<~CLIPPY
+    set -o pipefail
+    mkdir -p target/clippy-observation
+    cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+    if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then
+      echo '::warning::Clippy observation invalid; no warning baseline can be derived'
+    fi
+  CLIPPY
+  expected_lint = {"name" => "just lint", "shell" => "bash", "run" => expected_lint_run}
+  errors << "main Clippy observation must retain exact argv and fail-closed compilation" unless lint_steps.select { |step| step["name"] == "just lint" } == [expected_lint]
+  expected_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
+  errors << "main Clippy observation upload must remain exact" unless lint_steps.select { |step| step["name"] == "Upload Clippy observation" } == [expected_upload]
   tests = lint_steps.find { |step| step["name"] == lint_tests_name }
   %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
@@ -1770,8 +1789,8 @@ RUBY
   done < <(workflow_files)
 }
 
-# Path-filtered required contexts publish from `if: always()` result mirrors so
-# a failed or cancelled `changes` job cannot leave the required name skipped.
+# Path-filtered required contexts publish from `if: ${{ !cancelled() }}` result mirrors so a failed
+# or timed-out `changes` job cannot leave the required name skipped (skipped counts as passing).
 validate_path_filter_required_mirrors() {
   if ! command -v ruby >/dev/null 2>&1; then
     error "ruby is required to validate path-filter required mirrors structurally"
@@ -1913,7 +1932,7 @@ specs.each do |spec|
   expected_mirror = {
     "name" => context,
     "needs" => ["changes", runner_id],
-    "if" => "always()",
+    "if" => "${{ !cancelled() }}",
     "runs-on" => "ubuntu-latest",
     "steps" => [
       {"uses" => "actions/checkout@v4"},
@@ -1936,7 +1955,7 @@ specs.each do |spec|
   if !mirror.is_a?(Hash)
     errors << "#{context} required-context mirror job #{mirror_id} must exist"
   elsif mirror != expected_mirror
-    errors << "#{context} required-context mirror #{mirror_id} must retain its exact `if: always()` job surface, helper pin, and fail-closed result-mirror step"
+    errors << "#{context} required-context mirror #{mirror_id} must retain its exact `if: ${{ !cancelled() }}` job surface, helper pin, and fail-closed result-mirror step"
   elsif raw_jobs[mirror_id] != stringify(expected_mirror)
     errors << "#{context} required-context mirror #{mirror_id} must retain the exact raw YAML scalars"
   end

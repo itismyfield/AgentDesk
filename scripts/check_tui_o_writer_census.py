@@ -121,6 +121,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "admin_host_guard.rs": {".say": 1},
     "commands/config.rs": {".say": 12, "send_long_message*": 1},
     "commands/control.rs": {".say": 15, "send_long_message*": 1},
+    "commands/control/home_fence.rs": {".say": 1},
     "commands/control/input_clear.rs": {".say": 1},
     "commands/diagnostics/mod.rs": {".say": 9, "send_long_message*": 7},
     "commands/fast_mode.rs": {".say": 2},
@@ -233,6 +234,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "admin_host_guard.rs": ("CMD", "KEEP_NONBODY"),
     "commands/config.rs": ("CMD", "KEEP_NONBODY"),
     "commands/control.rs": ("CMD", "KEEP_NONBODY"),
+    "commands/control/home_fence.rs": ("CMD", "KEEP_NONBODY"),
     "commands/control/input_clear.rs": ("CMD", "KEEP_NONBODY"),
     "commands/diagnostics/mod.rs": ("CMD", "KEEP_NONBODY"),
     "commands/fast_mode.rs": ("CMD", "KEEP_NONBODY"),
@@ -479,7 +481,7 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # Re-exports; a placement releases a pending adoption by design, with no body.
     "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
     # The writer host's once-per-channel actor slot, not an adoption.
-    "src/services/tui_o/writer/host.rs": ("start",),
+    "src/services/tui_o/writer/host.rs": ("spawn_hosts",),
     # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
     "src/services/discord/health/recovery.rs": ("maybe_recover_completed_stale_leak",),
 }
