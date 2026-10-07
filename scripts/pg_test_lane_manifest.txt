@@ -102,7 +102,7 @@ src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
-src/services/discord/catch_up/too_old_notice.rs
+src/services/discord/catch_up/too_old_drop_pg_tests.rs
 src/services/discord/commands/control.rs
 src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/input_clear_tests.rs
@@ -322,7 +322,7 @@ services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
-services::discord::catch_up::too_old_notice::tests
+services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
 services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::home_fence::tests
 services::discord::commands::control::input_clear::tests
@@ -1125,8 +1125,7 @@ services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_b
 services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::admin_host_guard::tests::the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg
-services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
-services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
+services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::production_sweep_too_old_drops_leave_no_outbox_notice_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
