@@ -73,9 +73,8 @@ async fn hand_back(
         .await
 }
 
-/// With the holding turn already over, a reservation by message id or a message-less iMessage
-/// one alone refuses a `BehindQueue` claim on an empty queue and keeps input sent after it in
-/// the queue; once the ticket drops, the next actor access dequeues that input and claims it.
+/// With the turn over, a Discord-id or message-less reservation alone refuses a `BehindQueue` claim
+/// and keeps later input queued; once its ticket drops, that input is dequeued and claimed.
 #[tokio::test]
 async fn take_next_and_behind_queue_claims_wait_on_a_reservation_after_its_turn_ended() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -289,9 +288,8 @@ fn fixture(
     (handle, task)
 }
 
-/// Sent but never answered, whether the actor never took the message or wrote it and the
-/// answer was lost, is no success and no resend; a ticket dropped unanswered orphans its
-/// reservation, so input sent after it moves again.
+/// Sent but unanswered, dropped unread or written with the answer lost, is no success and no
+/// resend; a ticket dropped unanswered orphans its reservation, so later input moves again.
 #[tokio::test]
 async fn a_sent_handback_without_an_answer_is_unknown_and_never_resent() {
     let _root = crate::config::TestRuntimeRootGuard::new();

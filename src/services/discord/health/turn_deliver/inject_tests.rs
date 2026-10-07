@@ -940,9 +940,8 @@ async fn a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reser
     );
 }
 
-/// Four unwritten handback attempts refuse the delivery: nothing reports it queued, and the input
-/// is not requeued on its own. Redelivered once the queue writes again, it is new input and waits
-/// behind what was sent after its abandoned reservation.
+/// Four unwritten handback attempts refuse the delivery, and the input is not requeued on its own;
+/// redelivered once the queue writes again, it is new input behind what was sent meanwhile.
 #[tokio::test(flavor = "current_thread")]
 async fn a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
