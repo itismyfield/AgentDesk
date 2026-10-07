@@ -3267,6 +3267,7 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
             def __init__(self):
                 self.next_id = 5000
                 self.prompts: list[str] = []
+                self.rows: list[dict] = []
 
             def _id(self) -> str:
                 self.next_id += 1
@@ -3280,7 +3281,8 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
                 return {"id": self._id()}
 
             def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
-                return []
+                return [row for row in self.rows
+                        if after_id is None or int(row["id"]) > int(after_id)][:limit]
 
         client = FakeClient()
         idle_calls: list[dict] = []
@@ -3294,6 +3296,7 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
                 "type": 0,
                 "timestamp": "2026-05-31T00:00:00Z",
             }
+            client.rows.append(message)
             return message, [message]
 
         def fake_idle(**kwargs):
@@ -3431,7 +3434,7 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
                 if stage == "dispatch":
                     self.client.send_prompt.side_effect = [RuntimeError("dispatch failed"), {"id": "111"}]
                 else:
-                    self.client.fetch_messages.side_effect = [[], RuntimeError("history failed"), [], []]
+                    self.client.fetch_messages.side_effect = [[], RuntimeError("history failed"), [], [], []]
                 rc, report, output = self.main_result(self.scenario("E-GENERIC"), self.scenario("E-NEXT"))
                 self.assertEqual((rc, [(r["id"], r["status"]) for r in report["scenarios"]]), (1, [("E-GENERIC", "fail"), ("E-NEXT", "pass")]))
                 self.assertEqual(report["scenarios"][0]["failure_attribution"]["source"], "exception")

@@ -79,6 +79,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::pipeline::stage_save_tests
   --skip server::routes::queue_api::cancel_queue_preserve_pg_tests
   --skip server::routes::scheduled_messages::postgres_tests
+  --skip server::routes::session_evidence::tests
   --skip server::routes::stats::memento_feedback_stats_pg_tests
   --skip server::task_dispatch_claims::task_dispatch_claims_pg_tests
   --skip services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -124,7 +125,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
-  --skip services::discord::catch_up::too_old_notice::tests
+  --skip services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::home_fence::tests
   --skip services::discord::commands::control::input_clear::tests
@@ -132,6 +133,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::native::herdr_tests::e2e
   --skip services::discord::commands::control::native::herdr_tests::e2e::o_actor
   --skip services::discord::commands::control::native::tests
+  --skip services::discord::commands::control::native::tests::policy_tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
@@ -163,6 +165,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
@@ -201,6 +205,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -816,6 +821,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   server::routes::pipeline::stage_save_tests
   server::routes::queue_api::cancel_queue_preserve_pg_tests
   server::routes::scheduled_messages::postgres_tests
+  server::routes::session_evidence::tests
   server::routes::stats::memento_feedback_stats_pg_tests
   server::task_dispatch_claims::task_dispatch_claims_pg_tests
   services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -861,7 +867,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_worker::o_route_tests
   services::cluster::machine_resources::store::tests
   services::discord::admin_host_guard::tests
-  services::discord::catch_up::too_old_notice::tests
+  services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::home_fence::tests
   services::discord::commands::control::input_clear::tests
@@ -869,6 +875,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::native::herdr_tests::e2e
   services::discord::commands::control::native::herdr_tests::e2e::o_actor
   services::discord::commands::control::native::tests
+  services::discord::commands::control::native::tests::policy_tests
   services::discord::commands::restart::host_guard_tests
   services::discord::commands::tui_passthrough::host_guard_tests
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
@@ -900,6 +907,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
@@ -938,6 +947,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests
   services::discord::turn_bridge::voice_completion::voice_completion_tests

@@ -19,6 +19,9 @@ mod stale_dispatch_guard;
 mod voice_intake;
 mod worker_entry;
 
+#[cfg(all(test, unix))]
+mod native_fresh_prompt_tests;
+
 pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core};
 
 mod context;
@@ -57,10 +60,7 @@ mod input_effect_tests {
             "runtime transition and native-clear admission retain settings.provider"
         );
         let runtime = include_str!("intake_turn/runtime_transition.rs");
-        assert!(
-            runtime
-                .contains("Ok(mut t) => admits(http, shared, provider, channel_id, &mut t.state)")
-        );
+        assert!(runtime.contains("&mut t.recovered_fresh"));
     }
 
     #[tokio::test]
@@ -1224,7 +1224,7 @@ async fn handle_text_message_admitted(
         return Ok(());
     };
     // #5660 [R2]: classification passed; the mailbox claim still follows below.
-    let session_was_cleared = if let Some(cleared) = session_was_cleared {
+    let taken_cleared = if let Some(cleared) = session_was_cleared {
         cleared
     } else {
         let (taken_uploads, cleared) =
@@ -1232,6 +1232,7 @@ async fn handle_text_message_admitted(
         pending_uploads.splice(0..0, taken_uploads);
         cleared
     };
+    let session_was_cleared = intake_runtime_transition.session_was_cleared(taken_cleared);
     let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
     if force_fresh_provider_session {
         record_fresh_session_context_boundary(shared, channel_id).await?;

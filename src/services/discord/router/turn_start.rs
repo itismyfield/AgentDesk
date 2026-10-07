@@ -610,10 +610,15 @@ pub(crate) fn load_session_runtime_state(
 
 pub(crate) struct IntakeRuntimeTransition {
     pub(crate) state: (Option<String>, bool, String),
+    pub(crate) recovered_fresh: bool,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl IntakeRuntimeTransition {
+    pub(in crate::services::discord) fn session_was_cleared(&self, taken_cleared: bool) -> bool {
+        taken_cleared || self.recovered_fresh
+    }
+
     pub(crate) async fn complete_mailbox_claim<T>(self, claim: impl Future<Output = T>) -> T {
         let output = claim.await;
         drop(self);
@@ -632,6 +637,7 @@ async fn intake_runtime_transition_with_guard(
         .unwrap_or(fallback_state);
     IntakeRuntimeTransition {
         state,
+        recovered_fresh: false,
         _guard: guard,
     }
 }

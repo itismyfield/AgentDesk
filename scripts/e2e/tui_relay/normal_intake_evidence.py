@@ -183,15 +183,7 @@ def hold_publication_ids(window, observed, rows, marker):
 
 def edited_completion_candidates(window, observed, after_id):
     """Chrome we already observed cannot be retired by a later edit of the same message."""
-    ids = set()
-    for update in window.message_updates:
-        mid = str(update["id"])
-        if (row := observed.get(mid)) is None or assertions.is_our_send(row) or int(mid) <= after_id:
-            continue
-        if any(p.search(update.get(field) or "") for field in ("before", "after")
-               for p in assertions._COMPLETION_CHROME_PATTERNS):
-            ids.add(mid)
-    return ids
+    return assertions.edited_completion_candidates(window, observed, after_id)
 
 
 def drained(state):

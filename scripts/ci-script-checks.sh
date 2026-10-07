@@ -428,6 +428,8 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
 # the same scenario machinery compiled in review and executed nowhere.
 "$PYTHON" -m unittest \
   scripts.e2e.tui_relay.test_assertions \
+  scripts.e2e.tui_relay.test_bulk_assertions \
+  scripts.e2e.tui_relay.test_source_compare \
   scripts.e2e.tui_relay.test_cell_resolution \
   scripts.e2e.tui_relay.test_discord_client \
   scripts.e2e.tui_relay.test_driver_health \

@@ -203,6 +203,7 @@ src/
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs
 │   ├── session_agent_resolution.rs
+│   ├── session_evidence.rs
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
@@ -332,7 +333,8 @@ src/
 │   │   │   │       ├── part_08.rs
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
-│   │   │   │       └── part_11.rs
+│   │   │   │       ├── part_11.rs
+│   │   │   │       └── session_evidence.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs
@@ -431,6 +433,8 @@ src/
 │   │   ├── runtime_profile_tests.rs
 │   │   ├── scheduled_messages.rs
 │   │   ├── session_activity.rs
+│   │   ├── session_evidence.rs
+│   │   ├── session_evidence_tests.rs
 │   │   ├── settings.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
@@ -749,7 +753,7 @@ src/
 │   │   │   ├── retry_state.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
-│   │   │   └── too_old_notice.rs
+│   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── home_fence.rs
@@ -759,6 +763,7 @@ src/
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
+│   │   │   │   ├── native_policy_tests.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
@@ -1217,6 +1222,8 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
+│   │   │   │   │   ├── runtime_transition/
+│   │   │   │   │   │   └── native_hold_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1225,6 +1232,7 @@ src/
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
+│   │   │   │   │   ├── native_fresh_prompt_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── runtime_transition.rs
@@ -1648,6 +1656,8 @@ src/
 │   │   │   │   └── rowless_receipt.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
 │   │   │   │   ├── judged_stop_tests.rs

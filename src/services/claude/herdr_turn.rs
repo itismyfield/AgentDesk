@@ -574,7 +574,25 @@ fn prompt_and_read(
     ];
     let cancel = turn.cancel.as_deref();
     let held = hold(&attached.nonce)?;
-    let run = run_herdr(&attached.target, &plan, cancel);
+    let run = if crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled()
+        && let Some(token) = cancel
+    {
+        use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+        let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &turn.owner);
+        let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+        let run = run_herdr(&attached.target, &plan, cancel);
+        *submitted = match &run {
+            InputRun::Applied => HerdrSubmission::Submitted,
+            InputRun::Indeterminate {
+                confirmed: 1,
+                cause: crate::services::claude_tui::host_input::StopCause::Send(_),
+            } => HerdrSubmission::Unknown,
+            _ => HerdrSubmission::Unsubmitted,
+        };
+        run
+    } else {
+        run_herdr(&attached.target, &plan, cancel)
+    };
     if composer_settled(&run)
         && let Err(error) = std::fs::remove_file(&held)
     {

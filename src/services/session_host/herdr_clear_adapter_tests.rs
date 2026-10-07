@@ -55,6 +55,9 @@ impl ClearSession for Session {
         self.saved.lock().unwrap().push(commit.session);
         Box::pin(async { true })
     }
+    fn finish(&mut self, _: ClearCommit) -> Effect<'_> {
+        Box::pin(async { true })
+    }
 }
 
 /// The helper runs its host on a blocking thread; admission is installed there as on this one.
@@ -82,6 +85,9 @@ impl<H: NativeClearHost> NativeClearHost for OnWorker<H> {
     }
     fn save(&mut self, commit: ClearCommit, deadline: Instant) -> Effect<'_> {
         self.host.save(commit, deadline)
+    }
+    fn finish(&mut self, commit: ClearCommit, deadline: Instant) -> Effect<'_> {
+        self.host.finish(commit, deadline)
     }
     fn fallback(&mut self, deadline: Instant) -> Effect<'_> {
         self.host.fallback(deadline)
