@@ -159,11 +159,31 @@ async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pendin
             assert_eq!(after, before, "retirement must stop the writing loader");
         } else {
             assert_ne!(after, before, "the Legacy loader must persist its backfill");
-            let written: discord::inflight::InflightTurnState =
+            let mut written: discord::inflight::InflightTurnState =
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(written.finalizer_turn_id, user_msg);
             assert!(written.save_generation > row.save_generation);
             assert_ne!(written.updated_at, row.updated_at);
+            // Model expiry of the backfill's renewed grace period without a wall-clock wait.
+            written.updated_at = row.updated_at.clone();
+            std::fs::write(&path, serde_json::to_vec_pretty(&written).unwrap()).unwrap();
+            drop(_installed);
+            assert_eq!(
+                discord::relay_recovery::leaked_row_sweep::sweep_leaked_inflight_rows(
+                    &registry, &provider,
+                )
+                .await,
+                1,
+            );
+            assert!(!path.exists());
+            assert!(token.cancelled.load(Ordering::Relaxed));
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+            assert!(
+                discord::mailbox_snapshot(&shared, channel)
+                    .await
+                    .cancel_token
+                    .is_none()
+            );
         }
         return;
     }
