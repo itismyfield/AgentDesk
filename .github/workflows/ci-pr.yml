@@ -380,6 +380,7 @@ jobs:
               - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'

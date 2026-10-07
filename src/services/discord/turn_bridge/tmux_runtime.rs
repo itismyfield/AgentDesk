@@ -13,6 +13,8 @@ use std::time::Duration;
 // async orchestration + session-teardown logic stays here and reaches the
 // moved items by their original bare names via these glob/explicit re-imports.
 mod claude_stop_delivery;
+#[cfg(unix)]
+mod codex_stop_delivery;
 mod interrupt_policy;
 mod judged_stop;
 mod pid_exit;

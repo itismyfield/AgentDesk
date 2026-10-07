@@ -8437,6 +8437,17 @@ services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_identity_without_uuid_still_detects_replaced_turn
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_interrupt_is_fenced_but_can_cancel_submitted_generation
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_submit_pending_overrides_prior_idle_state
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_delivery_sends_once_for_both_providers
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::control_request_envelope_matches_agent_sdk_interrupt_shape
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::tui_pane_uses_escape_keystroke
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::wrapper_pane_uses_stream_json_control_request

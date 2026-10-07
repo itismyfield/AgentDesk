@@ -202,6 +202,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -935,6 +936,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests
   services::discord::turn_bridge::voice_completion::voice_completion_tests

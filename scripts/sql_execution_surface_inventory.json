@@ -30344,6 +30344,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7880c734dc63a6edb1ff2947e399d53a307b6727b19121dc9ce6e9f8863e17e2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",

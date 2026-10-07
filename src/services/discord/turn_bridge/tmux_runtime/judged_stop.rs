@@ -242,6 +242,24 @@ pub(in crate::services::discord) async fn begin_command_stop(
     channel: ChannelId,
     bind_unbound: bool,
 ) -> CommandStop {
+    #[cfg(all(test, unix))]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant("wire_stop")
+        && crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled()
+        && let Some(handle) = shared.mailbox_peek(channel)
+        && let Ok(Some(token)) = handle.cancel_token().await
+        && super::codex_stop_delivery::admit_herdr_command(
+            &token,
+            Some(&token),
+            provider,
+            channel.get(),
+            &shared.token_hash,
+            "/stop",
+        )
+        .is_ok()
+        && let Some(pool) = shared.pg_pool.as_ref()
+    {
+        let _ = super::codex_stop_delivery::interrupt_herdr(pool, &token, provider).await;
+    }
     let judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
     // A confirmed channel's Discord turn still holds its mailbox token and keeps the channel stop.
     if matches!(judgement, Ok(None))
