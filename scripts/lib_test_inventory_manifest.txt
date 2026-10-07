@@ -5860,6 +5860,7 @@ services::discord::router::message_handler::pre_admission_control::pre_admission
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg
@@ -5868,6 +5869,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_matched_bound_execution_takes_one_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg
@@ -7927,6 +7929,7 @@ services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_un
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_stopped_turn_without_provider_terminal_stays_held
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
 services::discord::turn_bridge::bridge_entry_persist::tests::adopting_a_self_duplicated_body_raises_a_correlated_invariant_violation
@@ -8484,6 +8487,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_rollout_ending_mid_record_is_unobserved_not_idle
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_delivery_sends_once_for_both_providers
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
@@ -8491,6 +8495,10 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_reads_a_long_turn_and_never_calls_an_unread_turn_idle
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_sends_one_escape_and_keeps_the_turn
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_with_the_switch_or_settlement_off_records_and_sends_nothing
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_writer_unwinding_after_its_escape_keeps_the_claim_spent
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::control_request_envelope_matches_agent_sdk_interrupt_shape
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::tui_pane_uses_escape_keystroke
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::wrapper_pane_uses_stream_json_control_request
@@ -8735,6 +8743,7 @@ services::discord::turn_finalizer::tests::watcher_register_start_backstop_finali
 services::discord::turn_finalizer::tests::watcher_then_bridge_handoff_double_terminal_exactly_once
 services::discord::turn_finalizer::watcher_backstop::tests::done_with_zero_inflight_offset_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::done_without_inflight_or_lease_defers_strict_finalize
+services::discord::turn_finalizer::watcher_backstop::tests::herdr_turn_without_watcher_ends_only_on_its_transcript
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
 services::discord::turn_finalizer::watcher_backstop::tests::o_delegated_done_turn_needs_no_legacy_delivery_confirmation
@@ -11130,6 +11139,7 @@ services::turn_orchestrator::actor_hydrate_regression_tests::cleanup_stale_pendi
 services::turn_orchestrator::actor_hydrate_regression_tests::concurrent_cancels_do_not_trample_each_others_reason
 services::turn_orchestrator::actor_hydrate_regression_tests::consecutive_inbound_messages_reach_the_agent_in_fire_order
 services::turn_orchestrator::actor_hydrate_regression_tests::dequeued_head_claims_the_slot_while_later_arrivals_wait
+services::turn_orchestrator::actor_hydrate_regression_tests::herdr_user_stop_records_one_intent_and_never_cancels
 services::turn_orchestrator::actor_hydrate_regression_tests::hydrate_from_disk_does_not_reinsert_after_actor_dequeue_removed_file
 services::turn_orchestrator::actor_hydrate_regression_tests::immediate_admission_still_takes_an_idle_slot_ahead_of_the_queue
 services::turn_orchestrator::actor_hydrate_regression_tests::immediate_claim_preserves_a_foreign_pending_dispatch_reservation

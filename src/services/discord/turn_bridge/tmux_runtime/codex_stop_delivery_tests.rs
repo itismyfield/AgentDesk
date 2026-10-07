@@ -15,6 +15,12 @@ use serde_json::json;
 use std::sync::Mutex;
 
 pub(super) static AFTER_IDENTITY: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+static AFTER_SEND: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+/// Takes the post-send action so the lock is released before it runs.
+pub(super) fn take_after_send() -> Option<Box<dyn FnOnce() + Send>> {
+    AFTER_SEND.lock().unwrap().take()
+}
 
 struct Switch;
 impl Switch {
@@ -27,6 +33,7 @@ impl Drop for Switch {
     fn drop(&mut self) {
         HERDR_CANCEL_OVERRIDE.set(None);
         *AFTER_IDENTITY.lock().unwrap() = None;
+        *AFTER_SEND.lock().unwrap() = None;
     }
 }
 
@@ -635,4 +642,146 @@ fn herdr_codex_generation_only_stale_sends_no_escape() {
 #[test]
 fn herdr_codex_identity_only_changed_sends_no_escape() {
     stale_fence(ProviderKind::Codex, true);
+}
+
+fn user_stop(case: &Case, runtime: &tokio::runtime::Runtime, reason: &str) -> HerdrStop {
+    use super::super::judged_stop::begin_user_stop;
+    let stop = begin_user_stop(&case.shared, &case.provider, case.channel, true, reason);
+    match runtime.block_on(stop) {
+        CommandStop::Herdr(stop) => stop,
+        CommandStop::HostRefused => panic!("host refused"),
+        _ => panic!("a Herdr turn took another stop path"),
+    }
+}
+
+fn current_token(case: &Case, runtime: &tokio::runtime::Runtime) -> Option<Arc<CancelToken>> {
+    let snapshot = crate::services::discord::mailbox_snapshot(&case.shared, case.channel);
+    runtime.block_on(snapshot).cancel_token
+}
+
+#[test]
+fn herdr_user_stop_sends_one_escape_and_keeps_the_turn() {
+    with_cases(|case, fx, runtime| {
+        let intent = case.token.herdr_interrupt_state().unwrap();
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Requested(HerdrDelivery::Sent)
+        );
+        assert_eq!(case.escapes(), 1);
+        assert!(intent.user_stop.load(Ordering::SeqCst));
+        assert_eq!(
+            user_stop(case, runtime, "/stop"),
+            HerdrStop::AlreadyRequested
+        );
+        assert_eq!(case.escapes(), 1, "a repeated stop sends nothing");
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert!(case.token.cancel_source().is_none());
+        let current = current_token(case, runtime).expect("the turn keeps its slot");
+        assert!(Arc::ptr_eq(&current, &case.token));
+        assert!(fx.take_calls().is_empty(), "no tmux or cleanup call");
+    });
+}
+
+#[test]
+fn herdr_user_stop_with_the_switch_or_settlement_off_records_and_sends_nothing() {
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+    with_cases(|case, fx, runtime| {
+        let intent = case.token.herdr_interrupt_state().unwrap();
+        HERDR_CANCEL_OVERRIDE.set(Some(false));
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Refused(HerdrNotSent::SwitchOff)
+        );
+        HERDR_CANCEL_OVERRIDE.set(Some(true));
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let user = super::super::judged_stop::begin_user_stop(
+            &case.shared,
+            &case.provider,
+            case.channel,
+            true,
+            "!stop",
+        );
+        let unsettled = matches!(runtime.block_on(user), CommandStop::HostRefused);
+        let command = begin_command_stop(&case.shared, &case.provider, case.channel, true);
+        let legacy = matches!(runtime.block_on(command), CommandStop::HostRefused);
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert!(
+            unsettled && legacy,
+            "without settlement a user stop is the command stop"
+        );
+        assert_eq!(case.escapes(), 0);
+        assert!(!intent.user_stop.load(Ordering::SeqCst));
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert!(fx.take_calls().is_empty());
+    });
+}
+
+#[test]
+fn herdr_user_stop_reads_a_long_turn_and_never_calls_an_unread_turn_idle() {
+    with_cases(|case, _fx, runtime| {
+        if case.provider == ProviderKind::Codex {
+            let filler = json!({"type":"event_msg","payload":{"type":"agent_reasoning","text":"x".repeat(1024)}});
+            let mut rollout = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&case.path)
+                .unwrap();
+            for _ in 0..300 {
+                use std::io::Write;
+                writeln!(rollout, "{filler}").unwrap();
+            }
+            assert!(std::fs::metadata(&case.path).unwrap().len() > 256 * 1024);
+            assert_eq!(
+                user_stop(case, runtime, "!stop"),
+                HerdrStop::Requested(HerdrDelivery::Sent),
+                "a turn started before the last 256 KiB is still the running turn"
+            );
+            assert_eq!(case.escapes(), 1);
+        } else {
+            let reply = json!({"type":"assistant","message":{"content":[]}});
+            std::fs::write(&case.path, format!("{reply}\n")).unwrap();
+            assert_eq!(
+                user_stop(case, runtime, "!stop"),
+                HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved))
+            );
+            assert_eq!(case.escapes(), 0);
+        }
+    });
+}
+
+#[test]
+fn herdr_codex_rollout_ending_mid_record_is_unobserved_not_idle() {
+    with_cases(|case, _fx, runtime| {
+        if case.provider != ProviderKind::Codex {
+            return;
+        }
+        let mut rollout = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&case.path)
+            .unwrap();
+        std::io::Write::write_all(&mut rollout, b"{\"type\":\"event_msg\"").unwrap();
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved))
+        );
+        assert_eq!(case.escapes(), 0);
+    });
+}
+
+#[test]
+fn herdr_writer_unwinding_after_its_escape_keeps_the_claim_spent() {
+    with_cases(|case, _fx, runtime| {
+        *AFTER_SEND.lock().unwrap() = Some(Box::new(|| panic!("writer unwinds after its Escape")));
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Requested(HerdrDelivery::Indeterminate)
+        );
+        assert_eq!(case.escapes(), 1);
+        let pool = case.shared.pg_pool.as_ref().unwrap();
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
+            HerdrDelivery::NotSent(HerdrNotSent::Duplicate),
+            "an uncertain Escape is never sent again"
+        );
+        assert_eq!(case.escapes(), 1);
+    });
 }

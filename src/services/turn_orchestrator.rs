@@ -19,6 +19,7 @@ mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
+mod herdr_user_stop;
 mod inbound_order;
 mod incarnation;
 mod injected_inputs;
@@ -550,6 +551,7 @@ impl ChannelMailboxHandle {
             |reply| ChannelMailboxMsg::CancelActiveTurnIfCurrentWithReason {
                 expected_token,
                 reason,
+                herdr_user_stop: false,
                 reply,
             },
         )
@@ -1286,6 +1288,8 @@ enum ChannelMailboxMsg {
     CancelActiveTurnIfCurrentWithReason {
         expected_token: Arc<CancelToken>,
         reason: String,
+        /// A Herdr user stop records its intent instead of cancelling the token.
+        herdr_user_stop: bool,
         reply: oneshot::Sender<CancelActiveTurnResult>,
     },
     /// #2374 Codex round-1 fix (HIGH-1) — identity-guarded cancel by
@@ -1870,6 +1874,16 @@ fn input_mailbox_step(
         ChannelMailboxMsg::CancelActiveTurnIfCurrentWithReason {
             expected_token,
             reason,
+            herdr_user_stop: true,
+            reply,
+        } => {
+            let token = matching_cancel_token(&state, &expected_token);
+            let _ = reply.send(herdr_user_stop::herdr_user_stop_intent(token, &reason));
+        }
+        ChannelMailboxMsg::CancelActiveTurnIfCurrentWithReason {
+            expected_token,
+            reason,
+            herdr_user_stop: false,
             reply,
         } => {
             // #2374 — atomic reason-then-flip with the
@@ -4140,6 +4154,78 @@ mod actor_hydrate_regression_tests {
             live_token.cancel_source().is_none(),
             "live turn must NOT carry the stale caller's reason"
         );
+    }
+
+    /// A Herdr user stop is admitted once, only for the current token, and never cancels it;
+    /// without settlement or Herdr state nothing is admitted, and the legacy arm is unchanged.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn herdr_user_stop_records_one_intent_and_never_cancels() {
+        use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+        use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+        let registry = ChannelMailboxRegistry::default();
+        let owner = |channel: u64| HostedOwner {
+            provider: "codex".into(),
+            discord_token_hash: "hash".into(),
+            channel_id: channel.to_string(),
+            logical_key: format!("AgentDesk-codex-intent-{channel}"),
+            owner_node: "node".into(),
+            runtime_root: "/tmp".into(),
+        };
+        let handle = registry.handle(ChannelId::new(5_340_320_001));
+        let (stale, live) = (Arc::new(CancelToken::new()), Arc::new(CancelToken::new()));
+        let intent = live.prepare_herdr_interrupt(ProviderKind::Codex, &owner(5_340_320_001));
+        stale.prepare_herdr_interrupt(ProviderKind::Codex, &owner(5_340_320_001));
+        handle
+            .try_start_turn(live.clone(), UserId::new(1), MessageId::new(33))
+            .await;
+
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let unsettled = handle
+            .admit_herdr_user_stop_if_current(live.clone(), "/stop".into())
+            .await;
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert!(unsettled.token.is_none(), "no settlement admits nothing");
+        assert!(!intent.user_stop.load(Ordering::Acquire));
+
+        let stale_stop = handle
+            .admit_herdr_user_stop_if_current(stale.clone(), "/stop".into())
+            .await;
+        assert!(stale_stop.token.is_none(), "a stale token admits nothing");
+        let stale_intent = stale.herdr_interrupt_state().unwrap();
+        assert!(!stale_intent.user_stop.load(Ordering::Acquire));
+
+        let first = handle
+            .admit_herdr_user_stop_if_current(live.clone(), "/stop".into())
+            .await;
+        assert!(first.token.is_some() && !first.already_stopping);
+        assert!(intent.user_stop.load(Ordering::Acquire));
+        let second = handle
+            .admit_herdr_user_stop_if_current(live.clone(), "!stop".into())
+            .await;
+        assert!(second.token.is_some() && second.already_stopping);
+        assert!(
+            !live.cancelled.load(Ordering::Acquire),
+            "the token is never cancelled"
+        );
+        assert!(live.cancel_source().is_none());
+        let snapshot = handle.snapshot().await;
+        assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &live));
+
+        let plain = Arc::new(CancelToken::new());
+        let other = registry.handle(ChannelId::new(5_340_320_002));
+        other
+            .try_start_turn(plain.clone(), UserId::new(1), MessageId::new(34))
+            .await;
+        let refused = other
+            .admit_herdr_user_stop_if_current(plain.clone(), "/stop".into())
+            .await;
+        assert!(refused.token.is_none() && !plain.cancelled.load(Ordering::Acquire));
+        let legacy = other
+            .cancel_active_turn_if_current_with_reason(plain.clone(), "legacy".into())
+            .await;
+        assert!(legacy.token.is_some() && !legacy.already_stopping);
+        assert!(plain.cancelled.load(Ordering::Acquire));
     }
 
     /// #2374 Codex round-1 fix (HIGH-1) —

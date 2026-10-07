@@ -26,6 +26,7 @@ use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand,
     HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
 };
+use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::session_backend::read_output_file_until_result_with_harvest;
 use crate::services::session_host::{
@@ -113,6 +114,12 @@ pub(crate) fn execute(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
+    // The turn takes its stop state before launch, so a stop is recorded whatever the switch says.
+    if herdr_stop_settlement_available()
+        && let Some(token) = turn.cancel.as_deref()
+    {
+        token.prepare_herdr_interrupt(ProviderKind::Claude, &turn.owner);
+    }
     let attached = match turn.row {
         Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
             not_held(&record.execution_nonce)?;
@@ -574,11 +581,10 @@ fn prompt_and_read(
     ];
     let cancel = turn.cancel.as_deref();
     let held = hold(&attached.nonce)?;
-    let run = if crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled()
-        && let Some(token) = cancel
+    let run = if herdr_stop_settlement_available()
+        && let Some(state) = cancel.and_then(CancelToken::herdr_interrupt_state)
     {
         use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
-        let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &turn.owner);
         let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
         let run = run_herdr(&attached.target, &plan, cancel);
         *submitted = match &run {
