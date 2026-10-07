@@ -14,8 +14,9 @@ notes: |
   The existing known_gap profile is bound to E-22 cumulative republication;
   it cannot classify S4. A missing or duplicate AUTO therefore fails this probe.
   Row/lease absence during the autonomous turn requires separate observation.
-  Marker counts alone cannot prove separate native turns; inspect the native
-  task-notification/assistant boundary before claiming autonomous-turn coverage.
+  Native autonomous_background_turn evidence must prove one background Bash,
+  terminal ARMED, its identified completion notice, and terminal AUTO in a
+  separate parent-linked turn. Missing native evidence fails closed.
   Health allows only the exact 2026-10-07 bulk inventory baseline reasons;
   new degraded reasons and loss of target ownership still fail. HTTP health
   responses must remain 2xx because assert_health rejects HTTP 503.
@@ -63,6 +64,9 @@ steps:
       global_active_max: 0
       global_finalizing_max: 0
 assertions:
+  - autonomous_background_turn:
+      armed_marker: "[E2E:S4:{run_id}:ARMED]"
+      auto_marker: "[E2E:S4:{run_id}:AUTO]"
   - text_present: "[E2E:S4:{run_id}:ARMED]"
   - text_present: "[E2E:S4:{run_id}:AUTO]"
   - no_duplicate_marker: "[E2E:S4:{run_id}:ARMED]"

@@ -203,6 +203,7 @@ src/
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs
 │   ├── session_agent_resolution.rs
+│   ├── session_evidence.rs
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
@@ -332,7 +333,8 @@ src/
 │   │   │   │       ├── part_08.rs
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
-│   │   │   │       └── part_11.rs
+│   │   │   │       ├── part_11.rs
+│   │   │   │       └── session_evidence.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs
@@ -431,6 +433,8 @@ src/
 │   │   ├── runtime_profile_tests.rs
 │   │   ├── scheduled_messages.rs
 │   │   ├── session_activity.rs
+│   │   ├── session_evidence.rs
+│   │   ├── session_evidence_tests.rs
 │   │   ├── settings.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs

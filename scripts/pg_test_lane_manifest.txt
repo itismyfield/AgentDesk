@@ -60,6 +60,7 @@ src/server/routes/message_outbox.rs
 src/server/routes/pipeline_stage_save_tests.rs
 src/server/routes/queue_api.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
+src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
@@ -274,6 +275,7 @@ server::routes::message_outbox::tests
 server::routes::pipeline::stage_save_tests
 server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
+server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -893,6 +895,10 @@ server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_e
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_patch_distinguishes_values_from_null_clears
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert
+server::routes::session_evidence::tests::session_evidence_ambiguous_owner_and_sessions_fail_closed_pg
+server::routes::session_evidence::tests::session_evidence_missing_raw_identity_is_null_pg
+server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
+server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_does_not_reclaim_active_null_expiry_semaphore_holder

@@ -32,8 +32,7 @@ def markers(text, pattern):
     return {m.groupdict().get("marker", m.group(0)) for m in pattern.finditer(text)} - {None, ""}
 
 
-def native_inputs(path):
-    """Yield actual user text, excluding Claude tool results and duplicate Codex event mirrors."""
+def transcript_rows(path):
     with Path(path).open(encoding="utf-8") as stream:
         for number, line in enumerate(stream, 1):
             if not line.strip():
@@ -42,23 +41,60 @@ def native_inputs(path):
                 row = json.loads(line)
                 if not isinstance(row, dict):
                     raise ValueError("expected object")
-                if (row.get("type") == "user" and not row.get("isMeta")
-                        and not row.get("isCompactSummary") and not tool_result(row)):
-                    yield content(row)
-                elif row.get("type") == "response_item":
-                    payload = row.get("payload", {})
-                    if payload.get("type") == "message" and payload.get("role") == "user":
-                        blocks = payload.get("content", [])
-                        yield "\n".join(b.get("text", "") for b in blocks
-                                        if b.get("type") in ("input_text", "text"))
+                yield row
             except (ValueError, TypeError, AttributeError) as error:
                 raise ValueError(f"invalid transcript {path}:{number}: {error}") from error
+
+
+def native_inputs(path, pattern):
+    """Only understood native shapes may count or be ignored when carrying a target marker."""
+    ignored = {"summary", "file-history-snapshot", "queue-operation", "permission-mode",
+               "session_meta", "turn_context"}
+    events = {"user_message", "agent_message", "agent_reasoning", "task_started", "task_complete",
+              "token_count", "item_completed", "turn_aborted", "context_compacted"}
+    for row in transcript_rows(path):
+        kind, known, text = row.get("type"), False, None
+        if kind in ("user", "assistant"):
+            message = row.get("message")
+            blocks = message.get("content") if isinstance(message, dict) else None
+            allowed = {"text", "tool_result"} if kind == "user" else {"text", "thinking", "redacted_thinking", "tool_use"}
+            known = isinstance(blocks, str) or (isinstance(blocks, list) and all(
+                isinstance(b, dict) and b.get("type") in allowed and
+                (isinstance(b.get("text"), str) if b.get("type") == "text" else
+                 "content" in b if b.get("type") == "tool_result" else
+                 isinstance(b.get("input"), dict) and bool(b.get("id")) and bool(b.get("name"))
+                 if b.get("type") == "tool_use" else True) for b in blocks))
+            if known and kind == "user" and not (row.get("isMeta") or row.get("isCompactSummary") or tool_result(row) or notification_fields(row)):
+                text = content(row)
+        elif kind == "response_item":
+            payload = row.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            if payload.get("type") == "message":
+                blocks = payload.get("content")
+                known = payload.get("role") in ("user", "assistant", "developer", "system") and isinstance(blocks, list) and all(
+                    isinstance(b, dict) and b.get("type") in ("input_text", "text", "output_text")
+                    and isinstance(b.get("text"), str) for b in blocks)
+                if known and payload.get("role") == "user":
+                    text = "\n".join(b.get("text", "") for b in blocks)
+            else:
+                known = payload.get("type") in {"function_call", "function_call_output", "reasoning", "custom_tool_call", "custom_tool_call_output", "web_search_call"}
+        elif kind == "event_msg":
+            payload = row.get("payload")
+            known = isinstance(payload, dict) and payload.get("type") in events
+        elif kind == "system":
+            known = row.get("subtype") in {"turn_duration", "stop_hook_summary", "task_started", "task_notification", "task_progress", "compact_boundary", "local_command"}
+        else:
+            known = kind in ignored
+        if not known and markers(json.dumps(row, ensure_ascii=False), pattern):
+            raise ValueError(f"unsupported marker-bearing transcript record: {kind}")
+        if text is not None:
+            yield text
 
 
 def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_author_ids=()):
     """Return per-marker counts; same-ID Discord edits count only their last snapshot."""
     pattern = marker_pattern(marker_regex=marker_regex, run_id=run_id)
-    native = Counter(marker for text in native_inputs(path) for marker in markers(text, pattern))
+    native = Counter(marker for text in native_inputs(path, pattern) for marker in markers(text, pattern))
     mirrors, bodies, notices = Counter(), Counter(), Counter()
     final = {}
     for message in messages:
@@ -102,23 +138,17 @@ def get_json(base, path):
 
 
 def resolve_binding(base, *, agent_id=None, channel_id=None, transcript_root=None):
-    """Use turn.session_key plus the documented provider-ID lookup; never inspect the DB."""
-    bindings = get_json(base, "/api/discord/bindings")["bindings"]
-    matches = [b for b in bindings if (not agent_id or b.get("agentId") == agent_id)
-               and (not channel_id or str(b.get("channelId")) == str(channel_id))]
-    if len(matches) != 1:
-        raise ValueError(f"expected one binding, found {len(matches)}; specify agent/channel pair")
-    binding = matches[0]
-    agent = urllib.parse.quote(binding["agentId"], safe="")
-    turn = get_json(base, f"/api/agents/{agent}/turn")
-    key, provider = turn.get("session_key"), turn.get("provider")
-    if not key or provider not in ("claude", "codex") or provider != binding.get("provider"):
-        raise ValueError("turn lacks an unambiguous Claude/Codex binding")
-    query = urllib.parse.urlencode({"session_key": key, "provider": provider})
-    identity = get_json(base, "/api/dispatched-sessions/claude-session-id?" + query)
-    sid = identity.get("raw_provider_session_id") or identity.get("session_id") or identity.get("claude_session_id")
+    """Resolve identity from one SELECT-only server snapshot; never infer a provider ID."""
+    selector = urllib.parse.quote(str(agent_id or channel_id), safe="")
+    identity = get_json(base, f"/api/agents/{selector}/session-evidence")
+    if ((agent_id and identity.get("agent_id") != agent_id)
+            or (channel_id and str(identity.get("channel_id")) != str(channel_id))):
+        raise ValueError("session evidence does not match requested agent/channel")
+    key, provider, sid = (identity.get(k) for k in ("session_key", "provider", "raw_provider_session_id"))
+    if not identity.get("agent_id") or not str(identity.get("channel_id", "")).isdigit() or not key or provider not in ("claude", "codex"):
+        raise ValueError("session evidence lacks an unambiguous Claude/Codex binding")
     if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
-        raise ValueError("session binding lacks a safe native provider session id")
+        raise ValueError("session evidence lacks a safe raw_provider_session_id")
     if transcript_root:
         root = Path(transcript_root).expanduser()
     elif provider == "claude":
@@ -128,8 +158,99 @@ def resolve_binding(base, *, agent_id=None, channel_id=None, transcript_root=Non
     paths = list(root.glob(f"*/{sid}.jsonl" if provider == "claude" else f"**/rollout-*-{sid}.jsonl"))
     if len(paths) != 1:
         raise ValueError(f"expected one local transcript for {sid}, found {len(paths)} under {root}")
-    return dict(agent_id=binding["agentId"], channel_id=str(binding["channelId"]),
+    return dict(agent_id=identity["agent_id"], channel_id=str(identity["channel_id"]),
                 session_key=key, provider=provider, session_id=sid, transcript_path=str(paths[0]))
+
+
+def notification_fields(row):
+    if row.get("type") == "system" and row.get("subtype") == "task_notification":
+        return tuple(row.get(k) for k in ("task_id", "tool_use_id", "status"))
+    if row.get("type") != "user" or tool_result(row):
+        return None
+    match = re.fullmatch(r"\s*<task-notification>(.*?)</task-notification>\s*", content(row), re.S)
+    if not match:
+        return None
+    values = [re.findall(r"<" + name + r">([^<>]+)</" + name + r">", match[1])
+              for name in ("task-id", "tool-use-id", "status")]
+    return tuple(v[0].strip() if len(v) == 1 else None for v in values)
+
+
+def autonomous_background_turn(path, *, armed_marker, auto_marker):
+    """Prove a linked background Bash notification separates two terminal native responses."""
+    list(native_inputs(path, re.compile(re.escape(armed_marker) + "|" + re.escape(auto_marker))))
+    rows = list(transcript_rows(path))
+    starts = [i for i, r in enumerate(rows) if r.get("type") == "user" and not tool_result(r)
+              and not r.get("isMeta") and armed_marker in content(r)]
+    if len(starts) != 1:
+        raise ValueError("S4 requires one initiating native input")
+    rows = rows[starts[0]:]
+    end = next((i for i, r in enumerate(rows[1:], 1) if r.get("type") == "user"
+                and not tool_result(r) and not r.get("isMeta") and not notification_fields(r)), len(rows))
+    rows = rows[:end]
+    by_id = {r.get("uuid"): i for i, r in enumerate(rows) if r.get("uuid")}
+    def linked(start, target):
+        current = start
+        while current > target:
+            parent = by_id.get(rows[current].get("parentUuid"))
+            if parent is None or parent >= current:
+                return False
+            current = parent
+        return current == target
+    work = [(i, r) for i, r in enumerate(rows) if r.get("type") == "assistant"]
+    tools = [(i, b) for i, r in work for b in r.get("message", {}).get("content", [])
+             if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Bash"]
+    if len(tools) != 1 or tools[0][1].get("input", {}).get("run_in_background") is not True:
+        raise ValueError("S4 requires exactly one background Bash tool_use")
+    tool_index, tool = tools[0]
+    tool_id = tool.get("id")
+    if not tool_id:
+        raise ValueError("S4 Bash lacks tool identity")
+    positions = []
+    for marker in (armed_marker, auto_marker):
+        hits = [(i, r) for i, r in work if marker in content(r)]
+        if sum(content(r).count(marker) for _, r in work) != 1 or len(hits) != 1:
+            raise ValueError("S4 requires each assistant marker exactly once")
+        i, r = hits[0]
+        next_work = next((j for j in range(i + 1, len(rows))
+            if rows[j].get("type") in ("assistant", "user")), len(rows))
+        stop = r.get("message", {}).get("stop_reason")
+        duration = any(rows[j].get("type") == "system" and rows[j].get("subtype") == "turn_duration"
+                       and linked(j, i) for j in range(i + 1, next_work))
+        if stop != "end_turn" and not (stop is None and duration):
+            raise ValueError("S4 marker must terminate its native turn")
+        positions.append(i)
+    armed, auto = positions
+    task_ids = set()
+    for r in rows[tool_index + 1:armed]:
+        for block in r.get("message", {}).get("content", []) if tool_result(r) else []:
+            if block.get("type") == "tool_result" and block.get("tool_use_id") == tool_id:
+                result = r.get("toolUseResult") or {}
+                task = result.get("backgroundTaskId") if isinstance(result, dict) else None
+                match = re.search(r"Command running in background with ID: ([A-Za-z0-9_-]+)", str(block.get("content", "")))
+                if task or match:
+                    task_ids.add(task or match.group(1))
+    notices = []
+    for i, row in enumerate(rows):
+        fields = notification_fields(row)
+        if not fields:
+            continue
+        task, source, status = fields
+        if task in task_ids and source == tool_id and status == "completed":
+            notices.append(i)
+    if len(task_ids) != 1 or len(notices) != 1 or not tool_index < armed < notices[0] < auto:
+        raise ValueError("S4 requires a matching completion notice after ARMED and before AUTO")
+    notice = notices[0]
+    message_ids = [rows[i].get("message", {}).get("id") for i in (armed, auto)]
+    if all(message_ids) and message_ids[0] == message_ids[1]:
+        raise ValueError("S4 AUTO belongs to the initiating assistant message")
+    if any(armed < i < notice or i > auto for i, _ in work):
+        raise ValueError("S4 assistant work crosses a terminal turn boundary")
+    # Follow native parent links so disconnected or spoofed marker rows cannot prove a turn.
+    if not linked(notice, armed) or not linked(auto, notice):
+        raise ValueError("S4 lacks a continuous native parent chain across turn boundaries")
+    return {"bash_tool_use_id": tool_id, "task_id": next(iter(task_ids)),
+            "armed_uuid": rows[armed]["uuid"], "notification_uuid": rows[notice]["uuid"],
+            "auto_uuid": rows[auto]["uuid"]}
 
 
 def fetch_messages(base, channel_id, *, after_id="0", max_pages=100):
@@ -152,6 +273,8 @@ def fetch_messages(base, channel_id, *, after_id="0", max_pages=100):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--autonomous-background-turn", action="store_true",
+                        help="verify S4 background native turn evidence (requires --run-id)")
     parser.add_argument("--agent-id")
     parser.add_argument("--channel-id")
     selector = parser.add_mutually_exclusive_group(required=True)
@@ -172,6 +295,13 @@ def main(argv=None):
             raise ValueError("after-id must be digits and max-pages must be positive")
         binding = resolve_binding(args.api_base, agent_id=args.agent_id, channel_id=args.channel_id,
                                   transcript_root=args.transcript_root)
+        if args.autonomous_background_turn:
+            if not args.run_id or binding["provider"] != "claude":
+                raise ValueError("S4 evidence requires --run-id and Claude provider")
+            evidence = autonomous_background_turn(binding["transcript_path"],
+                armed_marker=f"[E2E:S4:{args.run_id}:ARMED]", auto_marker=f"[E2E:S4:{args.run_id}:AUTO]")
+            print(json.dumps({"binding": binding, "autonomous_background_turn": evidence}, indent=2))
+            return 0
         messages = fetch_messages(args.api_base, binding["channel_id"], after_id=args.after_id,
                                   max_pages=args.max_pages)
         result = compare(binding["transcript_path"], messages,
@@ -179,7 +309,7 @@ def main(argv=None):
                          input_mirror_author_ids=args.input_mirror_author_id)
         print(json.dumps({"binding": binding, "markers": result}, ensure_ascii=False, indent=2))
         return int(any(row["verdict"] != "ok" for row in result.values()))
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError, re.error) as error:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, re.error) as error:
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 2
 

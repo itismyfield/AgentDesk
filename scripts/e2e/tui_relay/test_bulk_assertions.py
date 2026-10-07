@@ -34,14 +34,17 @@ class PlaceholderContracts(unittest.TestCase):
     def test_final_body_passes_with_deleted_edited_and_nonrelay_placeholders(self):
         value = window(message(101, "..."), message(102, "…"),
                        message(103, "...", author=a.OUR_BOT_ID),
-                       message(104, "...", bot=False), message(105, "There is ... more."))
+                       message(104, "...", bot=False), message(105, "There is ... more."),
+                       message(106, "There is … more"), message(107, "…\u200bmore"),
+                       message(108, "more\ufeff..."))
         value.deleted_ids.add("101")
         value.add(message(102, "real answer"))
         a.no_placeholder_left(value)
 
     def test_single_surviving_placeholder_fails(self):
         for content in ("...", " \n… \n", "🆕 새 세션 시작\n\n...",
-                        "…\n\n-# ✅ 완료"):
+                        "…\n\n-# ✅ 완료", "\u200b...\ufeff", "\u2060…\u200b",
+                        " \u200b\ufeff\u2060…\u2060\ufeff\u200b\n"):
             with self.subTest(content=content), self.assertRaisesRegex(a.AssertionError, "placeholders remain"):
                 a.no_placeholder_left(window(message(101, content)))
 
@@ -120,6 +123,36 @@ class CompletionContracts(unittest.TestCase):
         a.completion_per_turn(value)
         with self.assertRaises(a.AssertionError):
             a.completion_per_turn(window(message(102, "✅ 완료 [E2E:T:ONE]")), marker="[E2E:T:ONE]")
+
+    def test_completion_edited_to_body_does_not_hide_duplicate(self):
+        for completion in ("✅ 완료", "ordinary text\n\n-# ✅ 완료"):
+            value = window(message(101, "[E2E:T:ONE]"), message(102, completion))
+            value.add(message(102, "ordinary text"))
+            value.add(message(103, "✅ 완료"))
+            for marker in (None, "[E2E:T:ONE]"):
+                with self.subTest(marker=marker, completion=completion), self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
+                    a.completion_per_turn(value, marker=marker)
+
+    def test_edited_completion_candidates_are_scoped_to_each_turn(self):
+        value = timed(message(101, "[E2E:T:ONE]", second=1),
+                      message(102, "✅ 완료", second=2),
+                      message(103, "[E2E:T:TWO]", second=11),
+                      message(104, "✅ 완료", second=12))
+        value.add(message(102, "ordinary text", second=2))
+        value.add(message(105, "✅ 완료", second=3))
+        a.completion_per_turn(value, marker="[E2E:T:TWO]")
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_shared_history_helper_preserves_e36_scope_and_semantics(self):
+        from tui_relay import normal_intake_evidence as e36
+        value = window(message(101, "✅ 완료"), message(102, "✅ 완료"),
+                       message(103, "✅ 완료", author=a.OUR_BOT_ID))
+        for mid in (101, 102, 103):
+            value.add(message(mid, "ordinary text", author=a.OUR_BOT_ID if mid == 103 else "relay"))
+        observed = {row["id"]: row for row in value.raw_messages}
+        self.assertEqual(e36.edited_completion_candidates(value, observed, 101), {"102"})
+        self.assertEqual(e36.edited_completion_candidates(value, {"101": observed["101"]}, 100), {"101"})
 
     def test_ambiguous_fallback_and_missing_timestamp_fail_closed(self):
         for value in (window(message(101, "[E2E:T:PRE] [E2E:T:POST]")),

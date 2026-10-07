@@ -858,7 +858,8 @@ def no_placeholder_left(window: Window) -> None:
     """Reject a surviving placeholder in the final relay body snapshot."""
     ids = [str(row.get("id") or "") for row in _raw_assertion_messages(window)
            if str(row.get("id") or "") not in window.deleted_ids
-           and (relay_body(row) or "").strip() in {"...", "…"}]
+           and re.fullmatch(r"[\s\u200b\ufeff\u2060]*(?:\.\.\.|…)[\s\u200b\ufeff\u2060]*",
+                            relay_body(row) or "")]
     if ids:
         raise AssertionError(f"relay placeholders remain in final snapshot: {ids}")
 
@@ -916,9 +917,13 @@ def completion_per_turn(window: Window, *, exact: int = 1, marker: str | None = 
         sub = Window(window.setup_marker_id)
         for row in group:
             sub.add(row)
-        ids = completion_candidates(sub)
+        observed = {str(row["id"]): row for row in group}
+        ids = completion_candidates(sub) | edited_completion_candidates(window, observed)
         inline_ids = set()
-        for row in sub.messages:
+        views = sub.messages + [{**observed[str(update["id"])], "content": update.get(field) or ""}
+                                for update in window.message_updates if str(update["id"]) in observed
+                                for field in ("before", "after")]
+        for row in views:
             content = row.get("content") or ""
             stripped = _strip_completion_chrome_tail(content)
             footer = content[len(stripped):] if stripped != content else ""
@@ -946,3 +951,18 @@ def completion_per_turn(window: Window, *, exact: int = 1, marker: str | None = 
             if not bodies:
                 raise AssertionError(f"completion_per_turn turn {index}: no relay body")
             completion_chrome_after_body(sub, body_marker=bodies[0], required=True)
+
+
+def edited_completion_candidates(window, observed, after_id=None):
+    """Chrome already observed cannot be retired by a later edit of the same ID."""
+    ids = set()
+    for update in window.message_updates:
+        mid = str(update["id"])
+        if (row := observed.get(mid)) is None or is_our_send(row):
+            continue
+        if after_id is not None and int(mid) <= after_id:
+            continue
+        if any(p.search(update.get(field) or "") for field in ("before", "after")
+               for p in _COMPLETION_CHROME_PATTERNS):
+            ids.add(mid)
+    return ids
