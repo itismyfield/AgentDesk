@@ -42,7 +42,8 @@ pub enum HumanInputDelivery {
         reason: String,
         inject_veto: Option<String>,
     },
-    /// The busy turn's transcript recorded the input; `turn_id` is null for a TUI-direct turn.
+    /// The busy turn's transcript recorded the input; `turn_id` is null unless the turn's durable
+    /// row names a Discord message.
     Injected {
         turn_id: Option<String>,
     },
@@ -107,12 +108,38 @@ trait DeliveryPorts: Send + Sync {
     async fn mailbox_holder(&self) -> MailboxHolder;
     async fn enqueue(&self) -> Result<String, String>;
     fn inject_mode(&self) -> InjectMode;
-    async fn try_inject(&self, mode: InjectMode) -> InjectAttempt;
+    async fn try_inject(&self) -> InjectAttempt;
 }
 
 async fn deliver_with_ports<P: DeliveryPorts>(
     ports: &P,
 ) -> Result<HumanInputDelivery, HumanInputError> {
+    // A busy TUI pane takes the input whoever holds it; a veto keeps the start-or-queue below.
+    let mut inject_veto = None;
+    if ports.inject_mode() != InjectMode::Off {
+        match ports.try_inject().await {
+            InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
+            InjectAttempt::Injected { turn_id } => {
+                return Ok(HumanInputDelivery::Injected { turn_id });
+            }
+            InjectAttempt::Unconfirmed { turn_id, detail } => {
+                let detail = detail.to_string();
+                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
+            }
+            // Ahead of anything sent after the reservation; only a written queue front is Queued.
+            InjectAttempt::HandedBack { turn_id, veto } => {
+                let (reason, inject_veto) = ("handed_back".to_string(), Some(veto.to_string()));
+                return Ok(HumanInputDelivery::Queued {
+                    turn_id,
+                    reason,
+                    inject_veto,
+                });
+            }
+            InjectAttempt::HandbackFailed(reason) => {
+                return Err(HumanInputError::QueueRefused(reason.to_string()));
+            }
+        }
+    }
     if !ports.external_turn_active().await {
         match ports.try_start().await {
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
@@ -142,21 +169,6 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             StartAttempt::Busy => "session_transition",
         },
     };
-    // Only input that would wait behind a live turn may go into it; nothing else changes.
-    let mut inject_veto = None;
-    let mode = ports.inject_mode();
-    if mode != InjectMode::Off && matches!(reason, "turn_active" | EXTERNAL_TURN_ACTIVE) {
-        match ports.try_inject(mode).await {
-            InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
-            InjectAttempt::Injected { turn_id } => {
-                return Ok(HumanInputDelivery::Injected { turn_id });
-            }
-            InjectAttempt::Unconfirmed { turn_id, detail } => {
-                let detail = detail.to_string();
-                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
-            }
-        }
-    }
     match ports.enqueue().await {
         Ok(turn_id) => Ok(HumanInputDelivery::Queued {
             turn_id,
@@ -181,6 +193,17 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_start(&self) -> StartAttempt {
+        // With injection on, human input claims behind input queued or reserved before it.
+        let reservation = match self.inject_mode() {
+            InjectMode::Off => router::reserve_headless_turn(),
+            InjectMode::External | InjectMode::All => {
+                router::reserve_headless_turn().behind_queue()
+            }
+        };
+        #[cfg(test)]
+        if let Some(attempt) = inject::test_hook::start(&self.shared, &self.request, &reservation) {
+            return attempt.await;
+        }
         let (ctx, token) = match &self.runtime {
             Ok(runtime) => runtime,
             Err(error) => return StartAttempt::Unavailable(error.clone()),
@@ -199,7 +222,7 @@ impl DeliveryPorts for LivePorts {
             request.channel_name_hint.clone(),
             None,
             None,
-            router::reserve_headless_turn(),
+            reservation,
         )
         .await;
         match result {
@@ -224,29 +247,8 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn enqueue(&self) -> Result<String, String> {
-        let reservation = router::reserve_headless_turn();
-        let message_id = reservation.user_msg_id();
-        let generation = crate::services::discord::runtime_store::process_generation();
         let request = &self.request;
-        let intervention = Intervention {
-            author_id: UserId::new(request.author_id),
-            author_is_bot: false,
-            message_id,
-            queued_generation: generation,
-            source_message_ids: vec![message_id],
-            source_message_queued_generations: vec![
-                SourceMessageQueuedGeneration::user_instruction(message_id, generation),
-            ],
-            source_text_segments: Vec::new(),
-            text: request.text.clone(),
-            mode: InterventionMode::Soft,
-            created_at: Instant::now(),
-            reply_context: None,
-            has_reply_boundary: false,
-            merge_consecutive: false,
-            pending_uploads: Vec::new(),
-            voice_announcement: None,
-        };
+        let (intervention, turn_id) = request.queue_entry();
         let outcome = super::super::mailbox_enqueue_intervention(
             &self.shared,
             &request.provider,
@@ -260,15 +262,44 @@ impl DeliveryPorts for LivePorts {
                 .map(|reason| format!("{reason:?}"))
                 .unwrap_or_else(|| "not_enqueued".to_string()));
         }
-        Ok(reservation.turn_id(request.channel_id))
+        Ok(turn_id)
     }
 
     fn inject_mode(&self) -> InjectMode {
         inject::mode(self.request.channel_id.get())
     }
 
-    async fn try_inject(&self, mode: InjectMode) -> InjectAttempt {
-        inject::attempt(&self.shared, &self.request, mode).await
+    async fn try_inject(&self) -> InjectAttempt {
+        inject::attempt(&self.shared, &self.request).await
+    }
+}
+
+impl HumanInputRequest {
+    /// The queue entry this input becomes, under a fresh headless message id, and its turn id.
+    fn queue_entry(&self) -> (Intervention, String) {
+        let reservation = router::reserve_headless_turn();
+        let message_id = reservation.user_msg_id();
+        let generation = crate::services::discord::runtime_store::process_generation();
+        let intervention = Intervention {
+            author_id: UserId::new(self.author_id),
+            author_is_bot: false,
+            message_id,
+            queued_generation: generation,
+            source_message_ids: vec![message_id],
+            source_message_queued_generations: vec![
+                SourceMessageQueuedGeneration::user_instruction(message_id, generation),
+            ],
+            source_text_segments: Vec::new(),
+            text: self.text.clone(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        };
+        (intervention, reservation.turn_id(self.channel_id))
     }
 }
 
@@ -407,7 +438,7 @@ mod tests {
         fn inject_mode(&self) -> InjectMode {
             self.mode
         }
-        async fn try_inject(&self, _mode: InjectMode) -> InjectAttempt {
+        async fn try_inject(&self) -> InjectAttempt {
             self.injects.fetch_add(1, Ordering::SeqCst);
             self.inject.clone()
         }
@@ -523,9 +554,10 @@ mod tests {
         }
     }
 
-    /// On, only a queue behind a live turn asks once; a veto queues as PR1 did, with the veto named.
+    /// On, every delivery asks once before any start; a veto keeps PR1's answer with the veto named,
+    /// a written handback is the only Queued answer after a reservation, and a failed one refuses.
     #[tokio::test]
-    async fn the_switch_on_asks_only_where_input_would_wait_behind_a_live_turn() {
+    async fn the_switch_on_asks_once_before_any_start_whoever_holds_the_channel() {
         let answers = [
             InjectAttempt::NotSent("not_busy"),
             InjectAttempt::Injected { turn_id: None },
@@ -533,6 +565,12 @@ mod tests {
                 turn_id: Some("discord:7:5".into()),
                 detail: "not_observed",
             },
+            InjectAttempt::HandedBack {
+                turn_id: "discord:7:42".into(),
+                veto: "draft",
+            },
+            InjectAttempt::HandbackFailed("handback_persistence"),
+            InjectAttempt::HandbackFailed("handback_unknown"),
         ];
         let mut observed = Vec::new();
         for mode in [InjectMode::External, InjectMode::All] {
@@ -549,23 +587,24 @@ mod tests {
         observed.dedup();
         #[rustfmt::skip]
         let expected = [
-            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=1 asked=0",
-            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=2 asked=0",
+            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=1 asked=1",
+            "InvalidTarget(\"provider mismatch\") enqueue=0 starts=2 asked=1",
             "QueueRefused(\"LastItemDedup\") enqueue=1 starts=1 asked=1",
-            "RuntimeUnavailable(\"no ctx\") enqueue=0 starts=1 asked=0",
+            "QueueRefused(\"handback_persistence\") enqueue=0 starts=0 asked=1",
+            "QueueRefused(\"handback_unknown\") enqueue=0 starts=0 asked=1",
+            "RuntimeUnavailable(\"no ctx\") enqueue=0 starts=1 asked=1",
             "injected None enqueue=0 starts=0 asked=1",
-            "injected None enqueue=0 starts=1 asked=1",
-            "queued discord:7:900 background_turn enqueue=1 starts=0 asked=0",
-            "queued discord:7:900 background_turn enqueue=1 starts=1 asked=0",
+            "queued discord:7:42 handed_back veto=draft enqueue=0 starts=0 asked=1",
+            "queued discord:7:900 background_turn veto=not_busy enqueue=1 starts=0 asked=1",
+            "queued discord:7:900 background_turn veto=not_busy enqueue=1 starts=1 asked=1",
             "queued discord:7:900 external_turn_active veto=not_busy enqueue=1 starts=0 asked=1",
             "queued discord:7:900 external_turn_active veto=not_busy enqueue=1 starts=1 asked=1",
-            "queued discord:7:900 session_transition enqueue=1 starts=2 asked=0",
+            "queued discord:7:900 session_transition veto=not_busy enqueue=1 starts=2 asked=1",
             "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=0 asked=1",
             "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=1 asked=1",
-            "started discord:7:1 enqueue=0 starts=1 asked=0",
-            "started discord:7:1 enqueue=0 starts=2 asked=0",
+            "started discord:7:1 enqueue=0 starts=1 asked=1",
+            "started discord:7:1 enqueue=0 starts=2 asked=1",
             "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=0 asked=1",
-            "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=1 asked=1",
         ];
         assert_eq!(observed, expected);
     }
