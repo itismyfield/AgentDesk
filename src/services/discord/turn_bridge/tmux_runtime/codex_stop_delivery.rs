@@ -141,7 +141,7 @@ impl Drop for TestBindingRoot {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "codex_stop_delivery_tests.rs"]
 mod tests;
 
