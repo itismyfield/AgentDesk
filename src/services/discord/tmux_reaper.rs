@@ -5,6 +5,8 @@ use futures::future::BoxFuture;
 mod host_guard;
 #[cfg(all(test, unix))]
 mod host_guard_tests;
+#[cfg(test)]
+mod retirement_await_tests;
 
 use super::host_teardown_gate::shared_teardown;
 use super::inflight::KeyedTeardown;
@@ -188,6 +190,12 @@ async fn heal_stale_busy_mailbox_with_probe(
         &observed_tmux_session_name,
         current_tmux_session_name.as_deref(),
     ) || (respect_watcher_authority && shared.tmux_watchers.contains_key(&channel_id))
+    {
+        return false;
+    }
+
+    // Retirement can land during the mailbox, host or final tmux probe await.
+    if super::health::legacy_supervision::legacy_retired(provider.as_str(), channel_id.get(), site)
     {
         return false;
     }
@@ -986,7 +994,7 @@ mod tests {
     }
 
     /// These tests exercise the probe and identity gates; the host guard has keyed tests.
-    fn admit_any_host<'a>(
+    pub(super) fn admit_any_host<'a>(
         _: &'a Arc<crate::services::discord::SharedData>,
         _: &'a ProviderKind,
         _: ChannelId,
@@ -1581,7 +1589,7 @@ agents:
     }
 
     /// Seeds a busy Claude channel whose recorded tmux session the probe will call dead.
-    async fn seed_busy_channel(
+    pub(super) async fn seed_busy_channel(
         shared: &Arc<crate::services::discord::SharedData>,
         channel: u64,
     ) -> Arc<CancelToken> {
@@ -1629,7 +1637,10 @@ agents:
         token
     }
 
-    async fn still_busy(shared: &Arc<crate::services::discord::SharedData>, channel: u64) -> bool {
+    pub(super) async fn still_busy(
+        shared: &Arc<crate::services::discord::SharedData>,
+        channel: u64,
+    ) -> bool {
         crate::services::discord::mailbox_snapshot(shared, ChannelId::new(channel))
             .await
             .active_user_message_id
