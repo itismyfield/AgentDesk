@@ -7957,6 +7957,7 @@ services::discord::turn_bridge::finalize_epilogue::tests::disconnected_gateway_w
 services::discord::turn_bridge::finalize_epilogue::tests::dispatch_failure_requeue_front_schedules_deferred_kickoff
 services::discord::turn_bridge::finalize_epilogue::tests::session_transition_fences_finalizer_dequeue_and_preserves_fifo_4794
 services::discord::turn_bridge::finalize_epilogue::tests::stale_queue_flag_skips_capped_retry_and_dispatches_unrelated_backlog_4893
+services::discord::turn_bridge::followup_requeue::tests::a_follow_up_held_by_a_draft_resumes_once_the_draft_is_recovered
 services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_preserves_existing_merged_marker
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued

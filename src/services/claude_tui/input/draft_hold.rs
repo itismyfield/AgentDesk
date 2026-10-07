@@ -2,8 +2,8 @@
 //! composer admission first and sends no key when the pane is held.
 
 use super::{
-    CancelToken, PROMPT_READY_CAPTURE_SCROLLBACK, PROMPT_READY_TIMEOUT_ERROR_PREFIX,
-    PromptReadinessKind, TuiInputAction, host_input, prompt_readiness_snapshot, run_actions,
+    CancelToken, PROMPT_READY_TIMEOUT_ERROR_PREFIX, PromptReadinessKind, TuiInputAction,
+    host_input, prompt_readiness_snapshot, run_actions,
 };
 use crate::services::claude_tui::composer_lock::{
     admit_composer_write, with_composer_mutation_lock,
@@ -18,7 +18,7 @@ pub(super) fn admit_automatic_write(
     session_name: &str,
     readiness: PromptReadinessKind,
 ) -> Result<(), String> {
-    let capture = || host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK).0;
+    let capture = || host_input::observe_draft(session_name);
     admit_composer_write(session_name, capture).map_err(|_| {
         format!(
             "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness held; reason=draft_recovery_hold; previous_tui_turn_still_running=false; prompt_marker_detected=true",

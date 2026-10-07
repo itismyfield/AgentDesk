@@ -27,8 +27,8 @@ const FAST: Timing = Timing {
     restore_window: Duration::from_millis(600),
 };
 
-/// A scripted Claude TUI behind `tmux`: composer and stash files, the single-slot C-s, the submit
-/// that hands a stash back, attach generation, a person after capture N, a `barrier` after Enter.
+/// A scripted Claude TUI behind `tmux`: composer, stash, the single-slot C-s, a submit handing the
+/// stash back, attach generation, a person, a barrier, and a faint idle placeholder only `-e` keeps.
 const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -63,6 +63,8 @@ render() {
   if [ -f "$d/status" ]; then cat "$d/status"; elif [ -f "$d/stash" ]; then cat "$d/stashrow"; else echo; fi
   cat "$d/border"
   if [ -s "$d/composer" ]; then awk -v p="$(cat "$d/prompt")" 'NR==1{print p $0; next} {print ($0 == "" ? "" : "  " $0)}' "$d/composer"
+  elif [ -s "$d/placeholder" ] && ! grep -q 'esc to interrupt' "$d/head"; then
+    printf '%s\033[2m%s\033[0m\n' "$(cat "$d/prompt")" "$(cat "$d/placeholder")"
   else cat "$d/prompt"; echo; fi
   cat "$d/border" "$d/footer"
 }
@@ -81,7 +83,7 @@ capture-pane)
     if [ "$k" = 0 ]; then mv "$d/stash" "$d/composer"; rm "$d/restore_in"
     elif [ "$k" != never ]; then echo $((k-1)) > "$d/restore_in"; fi
   fi
-  render
+  case " $* " in *" -e "*) render ;; *) render | sed "s/$(printf '\033')\[[0-9;]*m//g" ;; esac
   [ -f "$d/human.$n" ] && . "$d/human.$n"
   ;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
@@ -139,6 +141,7 @@ impl Tui {
                 "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n".to_string(),
             ),
             ("stashrow", format!("{:>58}\n", "› stashed")),
+            ("placeholder", "Try \"edit <filepath> to...\"".to_string()),
             ("composer", draft.to_string()),
         ] {
             tui.put(name, &value);

@@ -140,6 +140,19 @@ pub(crate) fn composer_admission(
     }
 }
 
+/// Whether this pane protects a person's draft now; reads no pane.
+pub(crate) fn draft_guarded(tmux_session_name: &str) -> bool {
+    draft_guards().contains_key(tmux_session_name)
+}
+
+/// One look, between composer mutations, for whether automatic writes may run again; a pane
+/// another writer holds right now counts as still protected.
+pub(crate) fn draft_released(tmux_session_name: &str) -> bool {
+    let capture = || super::host_input::observe_draft(tmux_session_name);
+    let admit = || composer_admission(tmux_session_name, capture) == ComposerAdmission::Any;
+    try_with_composer_mutation_lock(tmux_session_name, admit).unwrap_or(false)
+}
+
 /// Admits a write that is not a stash transaction: submits, cleanups, clears and plain keys.
 pub(crate) fn admit_composer_write(
     tmux_session_name: &str,

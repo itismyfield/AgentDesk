@@ -90,7 +90,8 @@ pub(crate) trait SendBackend: Send + Sync {
         delete: bool,
     ) -> Result<(), String>;
     fn send_enter(&self, session_name: &str) -> Result<(), String>;
-    /// The pane for the draft-protection check; a backend that cannot read it keeps it protected.
+    /// The pane with its attributes (`capture-pane -e`) for the draft-protection check; a backend
+    /// that cannot read it so keeps a protected pane held.
     fn capture(&self, _session_name: &str) -> Option<String> {
         None
     }
@@ -127,7 +128,7 @@ impl SendBackend for TmuxSendBackend {
     }
 
     fn capture(&self, session_name: &str) -> Option<String> {
-        host_input::observe_legacy(session_name, -80).0
+        host_input::observe_draft(session_name)
     }
 }
 

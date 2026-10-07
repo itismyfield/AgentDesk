@@ -30,6 +30,9 @@ pub(in crate::services::discord) struct BusyFollowupRetryState {
     pub notice_message_id: u64,
     pub busy_retry_count: u32,
     pub first_busy_retry_at_ms: u64,
+    /// The last retry was a pane protecting a person's draft, not a busy turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft_hold: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,6 +369,7 @@ fn bind_notice_if_absent_unfenced(
         notice_message_id,
         busy_retry_count: 0,
         first_busy_retry_at_ms: 0,
+        draft_hold: false,
     };
     save_in_root(&root, provider, channel_id, user_msg_id, state)?;
     Ok(state)
@@ -377,15 +381,36 @@ pub(in crate::services::discord) fn record_busy_retry(
     user_msg_id: u64,
     notice_message_id: u64,
 ) -> Result<BusyRetryDecision, String> {
-    record_busy_retry_at(
+    let now = now_ms();
+    record_retry_at(
         provider,
         channel_id,
         user_msg_id,
         notice_message_id,
-        now_ms(),
+        now,
+        false,
     )
 }
 
+/// A retry refused by a pane protecting a person's draft; `release_draft_holds` lifts its budget.
+pub(in crate::services::discord) fn record_draft_hold_retry(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    notice_message_id: u64,
+) -> Result<BusyRetryDecision, String> {
+    let now = now_ms();
+    record_retry_at(
+        provider,
+        channel_id,
+        user_msg_id,
+        notice_message_id,
+        now,
+        true,
+    )
+}
+
+#[cfg(test)]
 fn record_busy_retry_at(
     provider: &ProviderKind,
     channel_id: u64,
@@ -393,26 +418,52 @@ fn record_busy_retry_at(
     notice_message_id: u64,
     now_ms: u64,
 ) -> Result<BusyRetryDecision, String> {
-    if fence::lookup(provider, channel_id).is_none() {
-        return record_busy_retry_at_unfenced(
-            provider,
-            channel_id,
-            user_msg_id,
-            notice_message_id,
-            now_ms,
-        );
-    }
-    fence::write(provider, channel_id, || {
-        record_busy_retry_at_unfenced(provider, channel_id, user_msg_id, notice_message_id, now_ms)
-    })
+    record_retry_at(
+        provider,
+        channel_id,
+        user_msg_id,
+        notice_message_id,
+        now_ms,
+        false,
+    )
 }
 
+fn record_retry_at(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    notice_message_id: u64,
+    now_ms: u64,
+    draft_hold: bool,
+) -> Result<BusyRetryDecision, String> {
+    let record = || {
+        let ids = (channel_id, user_msg_id, notice_message_id);
+        record_retry_at_unfenced(provider, ids, now_ms, draft_hold)
+    };
+    if fence::lookup(provider, channel_id).is_none() {
+        return record();
+    }
+    fence::write(provider, channel_id, record)
+}
+
+#[cfg(test)]
 fn record_busy_retry_at_unfenced(
     provider: &ProviderKind,
     channel_id: u64,
     user_msg_id: u64,
     notice_message_id: u64,
     now_ms: u64,
+) -> Result<BusyRetryDecision, String> {
+    let ids = (channel_id, user_msg_id, notice_message_id);
+    record_retry_at_unfenced(provider, ids, now_ms, false)
+}
+
+/// `(channel, user message, notice message)`.
+fn record_retry_at_unfenced(
+    provider: &ProviderKind,
+    (channel_id, user_msg_id, notice_message_id): (u64, u64, u64),
+    now_ms: u64,
+    draft_hold: bool,
 ) -> Result<BusyRetryDecision, String> {
     let root = runtime_store::discord_busy_followup_retries_root()
         .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
@@ -424,6 +475,7 @@ fn record_busy_retry_at_unfenced(
             notice_message_id,
             busy_retry_count: 0,
             first_busy_retry_at_ms: now_ms,
+            draft_hold,
         });
     if state.notice_message_id == 0 {
         state.notice_message_id = notice_message_id;
@@ -432,6 +484,7 @@ fn record_busy_retry_at_unfenced(
         state.first_busy_retry_at_ms = now_ms;
     }
     state.busy_retry_count = state.busy_retry_count.saturating_add(1);
+    state.draft_hold = draft_hold;
     let elapsed_ms = now_ms.saturating_sub(state.first_busy_retry_at_ms);
     let max_elapsed_ms = MAX_BUSY_RETRY_ELAPSED.as_millis() as u64;
     let capped = state.busy_retry_count >= MAX_BUSY_RETRY_COUNT || elapsed_ms >= max_elapsed_ms;
@@ -493,6 +546,51 @@ pub(in crate::services::discord) fn sweep_expired() -> usize {
         .unwrap_or(0);
     }
     removed
+}
+
+/// Gives this channel's inputs whose last retry met a draft protection a fresh budget once that
+/// protection is gone; inputs held by busy turns keep theirs. Returns how many were lifted.
+pub(in crate::services::discord) fn release_draft_holds(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> usize {
+    let release = || -> Result<usize, String> {
+        let root = runtime_store::discord_busy_followup_retries_root()
+            .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
+        let _guard = STORE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = root.join(provider.as_str()).join(channel_id.to_string());
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(0);
+        };
+        let mut released = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|stem| stem.to_str());
+            let Some(user_msg_id) = stem.and_then(|stem| stem.parse().ok()) else {
+                continue;
+            };
+            let state = load_in_root(&root, provider, channel_id, user_msg_id);
+            let Some(state) = state.filter(|state| state.draft_hold) else {
+                continue;
+            };
+            let fresh = BusyFollowupRetryState {
+                busy_retry_count: 0,
+                first_busy_retry_at_ms: 0,
+                draft_hold: false,
+                ..state
+            };
+            save_in_root(&root, provider, channel_id, user_msg_id, fresh)?;
+            released += 1;
+        }
+        Ok(released)
+    };
+    let released = match fence::lookup(provider, channel_id) {
+        None => release(),
+        Some(_) => fence::write(provider, channel_id, release),
+    };
+    released.unwrap_or(0)
 }
 
 /// Busy-notice bindings kept for one channel, counted per input file.
@@ -657,6 +755,7 @@ mod tests {
                 notice_message_id: 108,
                 busy_retry_count: 1,
                 first_busy_retry_at_ms: 1,
+                draft_hold: false,
             };
             save_in_root(&root, &provider, protected, 8, state).unwrap();
             save_in_root(&root, &provider, channel, 8, state).unwrap();
@@ -789,6 +888,7 @@ mod tests {
                     notice_message_id: 900,
                     busy_retry_count: 1,
                     first_busy_retry_at_ms: stale_at,
+                    draft_hold: false,
                 },
             )
             .expect("save stale retry");
@@ -801,6 +901,7 @@ mod tests {
                     notice_message_id: 901,
                     busy_retry_count: 1,
                     first_busy_retry_at_ms: stale_at + BUSY_RETRY_STORE_TTL.as_millis() as u64 + 1,
+                    draft_hold: false,
                 },
             )
             .expect("save current retry");
@@ -830,6 +931,7 @@ mod tests {
                     notice_message_id: 902,
                     busy_retry_count: 0,
                     first_busy_retry_at_ms: 0,
+                    draft_hold: false,
                 },
             )
             .expect("save crash-before-retry binding");

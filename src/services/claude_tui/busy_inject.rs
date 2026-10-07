@@ -429,13 +429,10 @@ pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
 pub(crate) const STASH_CHANNELS_ENV: &str = "ADK_BUSY_INJECT_STASH_CHANNELS";
 
-fn stash_allowed(session: &str) -> bool {
+fn stash_channels_configured() -> &'static [u64] {
     static CHANNELS: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
     let raw = || std::env::var(STASH_CHANNELS_ENV).ok();
-    stash_channel_listed(
-        session,
-        CHANNELS.get_or_init(|| stash_channels(raw().as_deref())),
-    )
+    CHANNELS.get_or_init(|| stash_channels(raw().as_deref()))
 }
 
 fn stash_channels(raw: Option<&str>) -> Vec<u64> {
@@ -443,23 +440,40 @@ fn stash_channels(raw: Option<&str>) -> Vec<u64> {
     ids.filter_map(|id| id.trim().parse().ok()).collect()
 }
 
-/// A pane whose channel is unknown or unlisted never takes the stash path.
-fn stash_channel_listed(session: &str, channels: &[u64]) -> bool {
-    let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(session);
-    channel.is_some_and(|channel| channels.contains(&channel))
+/// Only the channel the caller resolved for this input counts; without one nothing is stashed.
+fn stash_channel_listed(channel: Option<u64>, listed: &[u64]) -> bool {
+    channel.is_some_and(|channel| listed.contains(&channel))
 }
 
-/// Tries the composer lock a bounded number of times, then injects under it.
+/// Tries the composer lock a bounded number of times, then injects under it. No channel comes
+/// with this entry, so a person's draft is never stashed: it queues.
 pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Outcome {
-    inject_report(pane, request, timing).outcome
+    inject_report(pane, request, None, timing).outcome
 }
 
-/// `inject` with the draft axis kept apart from the delivery.
-pub(crate) fn inject_report(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
-    inject_gated(pane, request, timing, stash_allowed(request.session))
+/// `inject` with the draft axis kept apart from the delivery, for an input whose channel the
+/// caller resolved, if any.
+pub(crate) fn inject_report(
+    pane: &Pane,
+    request: &Request<'_>,
+    channel: Option<u64>,
+    timing: &Timing,
+) -> Report {
+    inject_listed(pane, request, channel, stash_channels_configured(), timing)
 }
 
-/// `inject_report` with the stash path allowed or not.
+/// `inject_report` against an explicit allowlist.
+fn inject_listed(
+    pane: &Pane,
+    request: &Request<'_>,
+    channel: Option<u64>,
+    listed: &[u64],
+    timing: &Timing,
+) -> Report {
+    inject_gated(pane, request, timing, stash_channel_listed(channel, listed))
+}
+
+/// `inject_listed` with the stash path allowed or not.
 fn inject_gated(pane: &Pane, request: &Request<'_>, timing: &Timing, stash: bool) -> Report {
     let text = frame(request.source, request.author, request.nonce, request.text);
     // Both names reach tmux command strings, so only plain characters are accepted.

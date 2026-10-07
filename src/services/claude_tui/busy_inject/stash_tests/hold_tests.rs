@@ -10,8 +10,8 @@ use crate::services::claude_tui::composer_lock::{
     DraftGuard, DraftRecoveryHold, admit_composer_write, guard_draft,
 };
 use crate::services::claude_tui::host_input::{
-    LegacyTmuxGate, NativeClearSubmission, SpyGuard, SpyState, native_clear_composer_empty,
-    native_clear_once,
+    LegacyTmuxGate, NativeClearSubmission, SpyGuard, SpyState, capture_draft_with,
+    native_clear_composer_empty, native_clear_once,
 };
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, FollowupHost, try_claude_tui_warm_followup,
@@ -29,6 +29,7 @@ const WORKING_HEAD: &str =
     "\u{23fa} Working on it.\n\n\u{273b} Thinking\u{2026} (12s \u{b7} esc to interrupt)\n";
 const FOOTER: &str = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)\n";
 const READY: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
+const PLACEHOLDER: &str = "Try \"edit <filepath> to...\"";
 const RESUME_DIALOG: &str = "\
 ────────────────────────────────────────────────────────────────────────────────
   This session is 10h 50m old and 367.3k tokens.
@@ -150,9 +151,10 @@ impl SendBackend for FakeRelay {
         self.tmux(&["send-keys", "-t", session, "Enter"])
     }
 
+    /// The production draft capture, run against the fake's script.
     fn capture(&self, session: &str) -> Option<String> {
-        let pane = Pane::with_program(session, self.program.clone());
-        if self.blind { None } else { pane.capture() }
+        let capture = || capture_draft_with(&self.program, session, Duration::from_secs(5));
+        if self.blind { None } else { capture() }
     }
 }
 
@@ -184,8 +186,8 @@ fn relay(tui: &Tui, text: &str, blind: bool) -> (StatusCode, serde_json::Value) 
     })
 }
 
-/// The busy inject as deployed: the stash path only on an allowlisted channel.
-fn run_as_configured(tui: &Tui) -> Report {
+/// The busy inject for an input from `channel`, against the allowlist `listed`, or as deployed.
+fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
     let session = tui.session();
     let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
     let request = Request {
@@ -196,7 +198,10 @@ fn run_as_configured(tui: &Tui) -> Report {
         nonce: NONCE,
         text: TEXT,
     };
-    inject_report(&pane, &request, &FAST)
+    match listed {
+        Some(listed) => inject_listed(&pane, &request, channel, listed, &FAST),
+        None => inject_report(&pane, &request, channel, &FAST),
+    }
 }
 
 /// The hold covers the follow-up submit, the cleanup lock and a native `/clear` until a capture
@@ -213,7 +218,8 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
             Delivery::Observed
         )
     );
-    // The turn ends; the draft stays stashed under an empty composer that /clear would accept.
+    // The turn ends; the draft stays stashed under a bare empty prompt that /clear would accept.
+    tui.put("placeholder", "");
     tui.put("head", IDLE_HEAD);
     let held = tui.capture();
     assert!(native_clear_composer_empty(&held));
@@ -231,6 +237,7 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
         &session,
         &LegacyTmuxGate,
         deadline(),
+        |_| Some(held.clone()),
         |_| Some(held.clone()),
         refuse,
     );
@@ -271,6 +278,7 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
         &LegacyTmuxGate,
         deadline(),
         |_| Some(recovered.clone()),
+        |_| Some(recovered.clone()),
         |_, _| {
             sent += 1;
             true
@@ -300,9 +308,14 @@ fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
         assert_eq!(tui.applied(), ["C-s", "paste"], "{text:?} {blind}");
         assert_eq!(tui.drafts(), held, "{text:?} {blind}");
     }
-    // The person sent B and dropped A: exactly one submission, holding exactly C.
-    tui.put("composer", "");
+    // The person sent B and dropped A; typed text that reads like the placeholder is still theirs.
     fs::remove_file(tui.dir.path().join("stash")).unwrap();
+    tui.put("head", IDLE_HEAD);
+    tui.put("composer", PLACEHOLDER);
+    assert_eq!(relay(&tui, "C", false).0, StatusCode::CONFLICT);
+    // The idle placeholder alone, drawn faint: exactly one submission, holding exactly C.
+    tui.put("composer", "");
+    assert!(tui.capture().contains(&format!("\x1b[2m{PLACEHOLDER}")));
     let (status, body) = relay(&tui, "C", false);
     assert_eq!(
         (status, body["submitted"].clone()),
@@ -310,6 +323,7 @@ fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
     );
     assert_eq!(tui.applied(), ["C-s", "paste", "paste", "Enter"]);
     assert_eq!(tui.records(), ["C"]);
+    assert_eq!(tui.drafts(), (String::new(), None));
 }
 
 /// A draft Claude handed back stays the person's: the next follow-up and `/tui/send` hold before
@@ -334,7 +348,9 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
 
     tui.put("composer", "");
     tui.put("head", IDLE_HEAD);
-    let (ended, calls) = warm_follow_up(&tui, &tui.capture());
+    let shown = tui.capture();
+    assert!(shown.contains(&format!("\x1b[2m{PLACEHOLDER}")));
+    let (ended, calls) = warm_follow_up(&tui, &shown);
     assert_eq!(ended, Ok(()));
     assert_eq!(writes(&calls), ["literal:C follow-up", "keys:Enter"]);
     crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -388,45 +404,45 @@ fn a_startup_dialog_is_dismissed_only_where_no_draft_is_protected() {
     assert_eq!(keys, Vec::<String>::new());
 }
 
-/// Only an allowlisted channel's pane takes the stash path; the switch never lifts a protection.
+/// Only an input whose own channel is allowlisted takes the stash path, whatever the pane's cached
+/// owner says; the switch never lifts a protection.
 #[test]
 fn only_an_allowlisted_channel_takes_the_stash_path() {
+    let (e2e, other) = (1_509_350_490_461_180_105, 7);
     let tui = Tui::new("human draft A");
     let queued = report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged);
-    assert_eq!(run_as_configured(&tui), queued);
+    assert_eq!(run_on(&tui, Some(e2e), None), queued);
+    assert_eq!(run_on(&tui, None, Some(&[e2e])), queued);
     assert!(tui.applied().is_empty());
     assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-    assert_eq!(
-        tui.run(),
-        report(Outcome::Injected, DraftState::RestoredObserved)
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    crate::services::tui_prompt_dedupe::register_tmux_channel(&tui.session(), e2e);
+    assert_eq!(run_on(&tui, Some(other), Some(&[e2e])), queued);
+    assert!(tui.applied().is_empty());
+    let fresh = Tui::new("human draft A");
+    let restored = report(Outcome::Injected, DraftState::RestoredObserved);
+    assert_eq!(run_on(&fresh, Some(e2e), Some(&[e2e])), restored);
+    assert_eq!(fresh.applied(), ["C-s", "paste", "Enter"]);
 
     // An empty composer still takes the direct paste, with no C-s.
     let empty = Tui::new("");
-    let _ = run_as_configured(&empty);
+    let _ = run_on(&empty, None, None);
     assert_eq!(empty.applied().first().map(String::as_str), Some("paste"));
     assert!(!empty.applied().contains(&"C-s".to_string()));
 
     let held = Tui::new("human draft A");
     held.put("restore_after", "never");
     assert_eq!(held.run(), report(Outcome::Injected, DraftState::Unknown));
-    assert_eq!(run_as_configured(&held), queued);
+    assert_eq!(run_on(&held, Some(e2e), Some(&[e2e])), queued);
     let admitted = admit_composer_write(&held.session(), || Some(held.capture()));
     assert_eq!(admitted, Err(DraftRecoveryHold));
 
-    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let e2e = 1_509_350_490_461_180_105;
     let listed = stash_channels(Some("1509350490461180105, x ,7"));
     assert_eq!(
         (listed.as_slice(), stash_channels(None)),
-        (&[e2e, 7][..], vec![])
+        (&[e2e, other][..], vec![])
     );
-    let session = tui.session();
-    assert!(!stash_channel_listed(&session, &listed));
-    crate::services::tui_prompt_dedupe::register_tmux_channel(&session, e2e);
-    assert!(stash_channel_listed(&session, &listed));
-    assert!(!stash_channel_listed(&session, &[7]));
 }
