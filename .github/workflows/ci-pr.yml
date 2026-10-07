@@ -266,6 +266,7 @@ jobs:
               - 'src/server/routes/pipeline_stage_save_tests.rs'
               - 'src/server/routes/queue_api.rs'
               - 'src/server/routes/scheduled_messages/postgres_tests.rs'
+              - 'src/server/routes/session_evidence_tests.rs'
               - 'src/server/routes/stats.rs'
               - 'src/server/routes/tests/auto_queue_preflight_harness_tests.rs'
               - 'src/server/task_dispatch_claims.rs'

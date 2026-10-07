@@ -42,7 +42,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,7 +50,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -172,6 +172,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "real_provider_contacted",
     "controlled_harness_evidence",
     "failure_attribution",
+    "autonomous_background_turn",
     "durable_record_probe",
     "dirty_active_residue",
 )
@@ -183,6 +184,16 @@ class PhaseDeadlineExpired(BaseException):
 
 class HarnessEvidenceError(assertions.AssertionError):
     """Required evidence could not be read; not a product root-cause verdict."""
+
+
+@dataclass(frozen=True)
+class ObservationContext:
+    """Bind native evidence to the API/channel actually exercised by the cell."""
+
+    api_base: str
+    channel_id: str
+    provider: str
+    transcript_root: Path | None = None
 
 
 def _arm_phase_deadline(seconds: float):
@@ -262,6 +273,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated scenario ids (exact match, e.g. E-1,E-5).",
     )
+    parser.add_argument("--transcript-root", type=Path, help="Local provider transcript root for native evidence.")
     parser.add_argument("--output", default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -987,7 +999,7 @@ STEP_OPTIONS = {
     "cancel_turn": {"force", "timeout_s"}, "delete_status_panel": {"panel_regex"},
     "inject_discord_failure": {"operation", "count"}, "clear_discord_failure": {"operation"},
     "send_keys_sequence": {"keys", "key_interval_s", "interval_s", "mark_prompt_sent", "diagnostic_prompt", "sleep_s"},
-    "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons"},
+    "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons", "require_status", "allowed_degraded_reasons"},
 }
 ASSERTION_OPTIONS = {
     **{k: None for k in ("text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
@@ -1010,6 +1022,7 @@ ASSERTION_OPTIONS = {
     "fixture_state": {"followup_probe_accepted"},
     "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
+    "autonomous_background_turn": {"armed_marker", "auto_marker"},
 }
 
 
@@ -3554,6 +3567,12 @@ def run_one_cell(
             dry_run=dry_run,
         )
 
+    observation_context = None
+    if any("autonomous_background_turn" in spec for spec in scenario.get("assertions") or []):
+        observation_context = ObservationContext(
+            api_base=client.base_url, channel_id=channel_id, provider=cell_provider(cell),
+            transcript_root=getattr(args, "transcript_root", None),
+        )
     setup_marker = f"### E2E SETUP {scenario_id} cell={cell} run={run_id}"
     marker_targets = [
         str(marker).replace("{run_id}", run_id)
@@ -3656,6 +3675,7 @@ def run_one_cell(
                     record=record,
                     enabled_features=enabled_features,
                     run_id=run_id,
+                    observation_context=observation_context,
                 )
             except assertions.AssertionError:
                 revalidation["failed_assertion"] = next(iter(spec))
@@ -4227,6 +4247,7 @@ def run_one_cell(
                 enabled_features=enabled_features,
                 run_id=run_id,
                 pending_refetch=_pending_refetch,
+                observation_context=observation_context,
             )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
@@ -4616,6 +4637,7 @@ def run_assertion(
     enabled_features: frozenset[str] = frozenset(),
     run_id: str | None = None,
     pending_refetch: Callable[[], None] | None = None,
+    observation_context: ObservationContext | None = None,
 ) -> None:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
@@ -4664,6 +4686,27 @@ def run_assertion(
         params = spec["completion_per_turn"]
         marker = params.get("marker")
         assertions.completion_per_turn(window, exact=params.get("exact", 1), marker=expand_marker(marker) if marker is not None else None)
+    elif "autonomous_background_turn" in spec:
+        params = spec["autonomous_background_turn"]
+        if (not isinstance(params, dict) or set(params) != {"armed_marker", "auto_marker"}
+                or any(not isinstance(value, str) or not value.strip() for value in params.values())):
+            raise assertions.AssertionError("autonomous_background_turn requires armed_marker/auto_marker text")
+        if observation_context is None or record is None:
+            raise HarnessEvidenceError("autonomous_background_turn requires observation context and result record")
+        try:
+            binding = source_compare.resolve_binding(
+                observation_context.api_base, channel_id=observation_context.channel_id,
+                transcript_root=observation_context.transcript_root,
+            )
+            if binding["provider"] != observation_context.provider or binding["provider"] != "claude":
+                raise ValueError("autonomous background evidence requires the exercised Claude binding")
+            evidence = source_compare.autonomous_background_turn(
+                Path(binding["transcript_path"]), armed_marker=expand_marker(params["armed_marker"]),
+                auto_marker=expand_marker(params["auto_marker"]),
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise HarnessEvidenceError(f"autonomous background native evidence failed: {error}") from error
+        record["autonomous_background_turn"] = {"binding": binding, **evidence}
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:

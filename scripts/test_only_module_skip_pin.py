@@ -172,6 +172,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/server/routes/dispatched_sessions_tests.rs",
         "src/server/routes/runtime_profile_tests.rs",
         "src/server/routes/scheduled_messages/postgres_tests.rs",
+        "src/server/routes/session_evidence_tests.rs",
         "src/server/routes/skills_manifest_audit_tests.rs",
         "src/server/routes/tests/auto_queue_preflight_harness_tests.rs",
         "src/services/agent_recovery/durable/postgres_tests.rs",

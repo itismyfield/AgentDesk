@@ -1330,6 +1330,10 @@ server::routes::scheduled_messages::tests::patch_realigns_stale_recurring_time
 server::routes::scheduled_messages::tests::patch_rejects_stale_effective_one_shot_time
 server::routes::scheduled_messages::tests::snapshot_patch_retarget_is_rejected_but_fresh_and_other_fields_pass
 server::routes::scheduled_messages::tests::target_channel_ids_are_normalized_and_invalid_values_rejected
+server::routes::session_evidence::tests::session_evidence_ambiguous_owner_and_sessions_fail_closed_pg
+server::routes::session_evidence::tests::session_evidence_missing_raw_identity_is_null_pg
+server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
+server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::skills_manifest_audit::tests::a_flat_skip_does_not_swallow_the_nested_entries_beside_it
 server::routes::skills_manifest_audit::tests::a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip
 server::routes::skills_manifest_audit::tests::a_padded_wildcard_is_not_the_wildcard_the_distributor_reserves
