@@ -148,6 +148,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::rebind_reap::tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
+  --skip services::discord::placeholder_sweeper::retirement_tests
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -470,6 +471,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
+  services::discord::placeholder_sweeper::retirement_tests::inline_panel_rechecks_retirement_after_owner_probe
+  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
   services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_on_a_withheld_herdr_pane_reports_the_withhold_not_a_reused_watcher
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_repeated_rebind_on_a_withheld_pane_adopts_fences_and_announces_nothing
@@ -876,6 +879,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::inflight::rebind_reap::tests
   services::discord::inflight::removal::custody_notice_tests
   services::discord::placeholder_sweeper::abandon_guard::tests
+  services::discord::placeholder_sweeper::retirement_tests
   services::discord::recovery_engine::host_reconcile::tests
   services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld

@@ -189,9 +189,10 @@ async fn tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg() {
         let _pane =
             InjectedLivenessGuard::set(HostSessionRef::tmux(&name), HostLiveness::DeadOrAbsent);
         let token = busy_turn(&shared, channel_id, &name).await;
-        let state =
+        let mut state =
             crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, channel)
                 .unwrap();
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         let path = seed(&state, 3600);
         let before = fingerprint(&path);
         shared.restart.global_active.store(1, Ordering::Relaxed);

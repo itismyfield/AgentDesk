@@ -848,6 +848,7 @@ src/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── live_agent_recovery.rs
+│   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
@@ -1074,6 +1075,7 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
+│   │   │   ├── retirement_tests.rs
 │   │   │   ├── tick.rs
 │   │   │   └── tick_cleanup_tests.rs
 │   │   ├── prompt_builder/
@@ -1161,6 +1163,7 @@ src/
 │   │   │   │   ├── host_deferred.rs
 │   │   │   │   ├── incarnation_follow_up.rs
 │   │   │   │   ├── orphan_token_finish.rs
+│   │   │   │   ├── retirement.rs
 │   │   │   │   └── unread_tail_seed.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── decision.rs
@@ -1374,8 +1377,10 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_reaper/
+│   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
-│   │   │   └── host_guard_tests.rs
+│   │   │   ├── host_guard_tests.rs
+│   │   │   └── retirement_await_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1478,6 +1483,7 @@ src/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── drain.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── retirement_census_tests.rs
 │   │   │   ├── store.rs
 │   │   │   ├── sweep.rs
 │   │   │   ├── tombstone.rs
@@ -1486,7 +1492,9 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
+│   │   │   ├── retirement_recheck_tests.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
 │   │   │   ├── turn_retirement.rs
@@ -1892,6 +1900,7 @@ src/
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_restart_handoff_mailbox_tests.rs
+│   │   ├── tmux_restart_handoff_retirement_await_tests.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
 │   │   ├── tmux_watcher_registry.rs

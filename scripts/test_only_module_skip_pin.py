@@ -34,6 +34,12 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/health/recovery/retirement_await_tests.rs",
+        "src/services/discord/placeholder_sweeper/retirement_tests.rs",
+        "src/services/discord/tmux_reaper/retirement_await_tests.rs",
+        "src/services/discord/tmux_restart_handoff_retirement_await_tests.rs",
+        "src/services/discord/tui_direct_abort_marker/retirement_census_tests.rs",
+        "src/services/discord/tui_direct_pending_start/retirement_recheck_tests.rs",
         "src/services/claude_tui/hook_server/native_clear_fence_tests.rs",
         "src/services/discord/adk_session_selector_checked_tests.rs",
         "src/services/discord/commands/control/native_tests.rs",
@@ -419,6 +425,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
         "src/services/discord/runtime_bootstrap/gateway_handback_mock.rs",
