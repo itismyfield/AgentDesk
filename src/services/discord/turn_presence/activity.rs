@@ -75,7 +75,7 @@ enum Outcome {
 struct Watch {
     key: Option<Key>,
     generation: u64,
-    /// Moves whenever an effect-point poll changes what this generation would answer.
+    /// Moves whenever an effect-point poll reads new records, halts or finds bytes left unread.
     revision: u64,
     outcome: Outcome,
     through: u64,
@@ -219,8 +219,12 @@ fn observe(
             return observed(Activity::Unknown, "facts_halted");
         }
     };
-    if fact.through > guard.through {
+    let advanced = fact.through > guard.through;
+    if advanced {
         (guard.through, guard.grew_at) = (fact.through, Instant::now());
+    }
+    // New records, or bytes this poll saw but has not finished, both supersede an earlier pane read.
+    if advanced || !caught_up {
         guard.revision += 1;
     }
     if !caught_up {

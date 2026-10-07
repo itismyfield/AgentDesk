@@ -40,7 +40,9 @@ impl Ports for Fake {
         self.present.load(Ordering::SeqCst)
     }
     fn final_ready(&self, _: &str) -> bool {
-        if let Some((started, release)) = lock(&self.pause).take() {
+        // Taken before waiting, so another read meanwhile does not block on this lock.
+        let pause = lock(&self.pause).take();
+        if let Some((started, release)) = pause {
             started.send(()).unwrap();
             let _ = release.recv();
         }
@@ -577,8 +579,8 @@ type Overtaken<'a> = (
     (Activity, &'static str),
 );
 
-/// A pane read that a newer generation, a halt or newly read bytes overtake answers unknown, never
-/// the idle it saw.
+/// A pane read that a newer generation, a halt, newly read records or bytes still unread overtake
+/// answers unknown, never the idle it saw.
 #[test]
 fn a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown() {
     let root = tempfile::tempdir().unwrap();
@@ -590,7 +592,13 @@ fn a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown() {
         let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         writeln!(file, "{{\"type\":\"user\"").unwrap();
     };
-    let cases: [Overtaken; 4] = [
+    let big = json!({"type":"summary","summary":"x".repeat(CHUNK_BUDGET as usize + 1024)});
+    let past_budget = |_: &Probe, path: &Path| write(path, &[big.clone(), prompt("a")]);
+    let unterminated = |_: &Probe, path: &Path| {
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        write!(file, "{}", prompt("a")).unwrap();
+    };
+    let cases: [Overtaken; 6] = [
         {
             let (probe, path) = claude(&dir("rebound"), &rows);
             (probe, path, &rebind, (Activity::Unknown, "catching_up"))
@@ -612,23 +620,50 @@ fn a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown() {
             let (probe, path) = claude(&dir("broken"), &rows);
             (probe, path, &broken, (Activity::Unknown, "facts_halted"))
         },
+        {
+            let (probe, path) = claude(&dir("past-budget"), &rows);
+            (
+                probe,
+                path,
+                &past_budget,
+                (Activity::Unknown, "catching_up"),
+            )
+        },
+        {
+            let (probe, path) = claude(&dir("unterminated"), &rows);
+            (
+                probe,
+                path,
+                &unterminated,
+                (Activity::Unknown, "catching_up"),
+            )
+        },
     ];
+    let (mut observed, mut expected) = (Vec::new(), Vec::new());
     for (probe, path, overtake, later) in &cases {
         assert_eq!(probe.settle(), (Activity::Idle, "no_turn_evidence_ready"));
         let (started, entered) = mpsc::channel();
         let (release, released) = mpsc::channel();
         *lock(&probe.fake.pause) = Some((started, released));
-        std::thread::scope(|scope| {
-            // Owned here so a failed assertion drops it and frees the paused read.
+        let (overtaking, paused) = std::thread::scope(|scope| {
+            // Owned here so a failed step drops it and frees the paused read.
             let release = release;
             let first = scope.spawn(|| probe.ask());
             entered.recv().unwrap();
             overtake(probe, path);
-            assert_eq!(probe.ask(), *later);
+            let overtaking = probe.ask();
             release.send(()).unwrap();
-            assert_eq!(first.join().unwrap(), (Activity::Unknown, "superseded"));
+            (overtaking, first.join().unwrap())
         });
+        let name = path
+            .strip_prefix(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        observed.push((name.clone(), overtaking, paused));
+        expected.push((name, *later, (Activity::Unknown, "superseded")));
     }
+    assert_eq!(observed, expected);
 }
 
 /// A bound transcript gone missing reads unknown beside a ready pane, and the same file put back
