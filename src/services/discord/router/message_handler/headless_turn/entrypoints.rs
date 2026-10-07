@@ -343,7 +343,12 @@ mod input_effect_tests {
         );
         assert!(mailbox.active_user_message_id.is_none());
         assert!(!live_bridge::is_live(&shared.provider, channel.get()));
-        assert!(mock.unhandled.lock().unwrap().is_empty());
+        let unhandled = mock.unhandled.lock().unwrap();
+        assert!(
+            unhandled.is_empty(),
+            "unhandled Discord requests: {unhandled:?}"
+        );
+        drop(unhandled);
         shared.mailboxes.remove_fixture_for_test(channel);
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
