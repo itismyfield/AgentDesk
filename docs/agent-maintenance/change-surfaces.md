@@ -2678,3 +2678,5 @@ reintroducing bespoke clamp expressions.
 `src/services/discord/tmux_watcher/cancel_handoff.rs` owns process-local source/parser/render custody for cooperative replacement, not a journal, receipt writer or detached drain. `src/services/discord/tmux_watcher.rs` has acquisition/adoption/checkpoint wiring at its existing poll/collector/terminal boundaries; `src/services/discord/tmux_watcher/turn_stream_collector.rs` rehydrates the native decoder and enters the existing terminal receipt/lease path.
 
 Root growth is an explicit reviewable cap admission linked to the existing #4712 split issue, not a waiver for future growth. Splitting must retain all downstream identity, epoch/reset, stop/pause, ACK and receipt guards.
+
+- `src/services/tui_prompt_dedupe/binding_events.rs`: shared channel sequence, durable append/rollback, and watch-publication boundary. Provider-specific folds remain in child modules. Optional Codex ownership fields preserve the legacy event shape; changes must verify append faults, full-history integrity, and old-parser compatibility.

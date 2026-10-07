@@ -464,7 +464,7 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
             BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
                 if fold.verified.as_ref().is_some_and(|p| p.source != *source)
                     || !fold.pending.is_empty()
-                    || !neutral_legacy(context, records, source)
+                    || !neutral_legacy(context, records, source, event.seq)
                 {
                     return Err(invalid("conflicting Codex ownership proofs"));
                 }
@@ -477,12 +477,8 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
             BindingTarget::Rejected { .. } => {}
         }
     }
-    fold.conflicted = fold.pending.len() > 1
-        || fold.verified.as_ref().is_some_and(|proof| {
-            fold.pending
-                .iter()
-                .any(|p| !p.claim.same_candidate(&proof.ownership.claim))
-        });
+    fold.conflicted =
+        fold.pending.len() > 1 || (fold.verified.is_some() && !fold.pending.is_empty());
     Ok(fold)
 }
 
@@ -501,10 +497,16 @@ fn same_native(left: &SourceId, right: &SourceId) -> bool {
             .is_some_and(|(left, right)| left == right)
 }
 
-fn neutral_legacy(context: &BindingContext, records: &[Logged], source: &SourceId) -> bool {
+fn neutral_legacy(
+    context: &BindingContext,
+    records: &[Logged],
+    source: &SourceId,
+    through_seq: u64,
+) -> bool {
     let mut same_nonce_seen = false;
     for logged in records
         .iter()
+        .take_while(|logged| logged.event.seq <= through_seq)
         .filter(|l| l.event.provider == "codex" && l.event.tmux_session == context.tmux_session)
     {
         let event = &logged.event;
@@ -580,7 +582,7 @@ pub(crate) fn commit_claim(
                     claim.eligible(context)
                         && fold.verified.is_none()
                         && fold.pending.iter().all(|p| p.claim.same_candidate(claim))
-                        && neutral_legacy(context, &records, source)
+                        && neutral_legacy(context, &records, source, writer.last_seq)
                 }
                 _ => false,
             };
