@@ -144,7 +144,7 @@ impl ChannelStop {
     /// The judged session name, legacy or refused.
     pub(in crate::services::discord) fn session(&self) -> Option<&str> {
         match &self.target {
-            StopTarget::HerdrPending { name, .. } | StopTarget::Refused { name, .. } => Some(name),
+            StopTarget::Refused { name, .. } => Some(name),
             target => target.legacy_name().map(LegacyTmuxName::as_str),
         }
     }
@@ -242,17 +242,25 @@ pub(in crate::services::discord) async fn begin_command_stop(
     channel: ChannelId,
     bind_unbound: bool,
 ) -> CommandStop {
-    let mut judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
-    if let Ok(Some(stop)) = &mut judgement {
-        super::stop_host::admit_herdr_command(
-            &mut stop.target,
-            &stop.token,
+    #[cfg(all(test, unix))]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant("wire_stop")
+        && crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled()
+        && let Some(handle) = shared.mailbox_peek(channel)
+        && let Ok(Some(token)) = handle.cancel_token().await
+        && super::codex_stop_delivery::admit_herdr_command(
+            &token,
+            Some(&token),
             provider,
             channel.get(),
             &shared.token_hash,
-            shared.pg_pool.as_ref(),
-        );
+            "/stop",
+        )
+        .is_ok()
+        && let Some(pool) = shared.pg_pool.as_ref()
+    {
+        let _ = super::codex_stop_delivery::interrupt_herdr(pool, &token, provider).await;
     }
+    let judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
     // A confirmed channel's Discord turn still holds its mailbox token and keeps the channel stop.
     if matches!(judgement, Ok(None))
         && crate::services::tui_o::turn_mode::transcript_turns(channel.get())

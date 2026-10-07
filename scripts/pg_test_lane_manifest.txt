@@ -172,6 +172,7 @@ src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/turn_bridge/resume_pin_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs
+src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
@@ -395,6 +396,7 @@ services::discord::turn_bridge::recovery_text::tests
 services::discord::turn_bridge::resume_pin_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -1418,6 +1420,17 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_delivery_sends_once_for_both_providers
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg

@@ -122,7 +122,7 @@ pub struct RuntimeSettingsConfig {
     /// as an unsupported provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_codex_turn_enabled: Option<bool>,
-    /// Session-preserving Escape for explicit Herdr user stops; unset or false refuses them.
+    /// Requested Herdr Escape switch; delivery stays disabled until terminal settlement is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_cancel_enabled: Option<bool>,
     /// Switch for the `channel-home` delegate, reclaim and force commands and the boot start of

@@ -1,8 +1,7 @@
 //! Real mailbox command admission, canonical PG rows, binding logs and Herdr socket effects.
-use super::super::TmuxCleanupPolicy;
 use super::super::judged_stop::{CommandStop, begin_command_stop};
+use super::super::stop_host::StopTarget;
 use super::super::stop_host::tests::{Fixture, Mark, mark, run};
-use super::super::stop_host::{StopSettlement, StopTarget};
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     HOSTED_EXECUTION_SCHEMA, HostedExecution, HostedLocation, HostedOwner, SourceRef,
@@ -201,15 +200,25 @@ impl Case {
         };
         self.rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","source":"recent_unwrapped","format":"text","text":text,"revision":3,"truncated":false}}));
     }
-    async fn stop(&self, reason: &str) -> super::super::stop_host::StopOutcome {
-        let CommandStop::Stop(stop) =
-            begin_command_stop(&self.shared, &self.provider, self.channel, true).await
-        else {
-            panic!("command did not admit token");
-        };
-        let result = stop.stop(TmuxCleanupPolicy::PreserveSession, reason).await;
-        assert!(!result.may_clear_inflight());
-        result
+    async fn delivery(&self, reason: &str) -> HerdrDelivery {
+        match admit_herdr_command(
+            &self.token,
+            Some(&self.token),
+            &self.provider,
+            self.channel.get(),
+            &self.shared.token_hash,
+            reason,
+        ) {
+            Ok(()) => {
+                interrupt_herdr(
+                    self.shared.pg_pool.as_ref().unwrap(),
+                    &self.token,
+                    &self.provider,
+                )
+                .await
+            }
+            Err(reason) => HerdrDelivery::NotSent(reason),
+        }
     }
     fn escapes(&self) -> usize {
         let writes = self.rig.sends();
@@ -227,116 +236,190 @@ impl Drop for Case {
 }
 
 #[test]
-fn herdr_command_stop_preserves_host_once_for_both_providers() {
+fn herdr_delivery_sends_once_for_both_providers() {
+    with_cases(|case, fx, runtime| {
+        assert_eq!(
+            runtime.block_on(case.delivery("/stop")),
+            HerdrDelivery::Sent
+        );
+        let next = runtime.block_on(interrupt_herdr(
+            case.shared.pg_pool.as_ref().unwrap(),
+            &case.token,
+            &case.provider,
+        ));
+        assert_eq!(
+            case.escapes(),
+            1,
+            "consumed claim must prevent another Escape"
+        );
+        assert_eq!(next, HerdrDelivery::NotSent(HerdrNotSent::Duplicate));
+        assert_eq!(case.escapes(), 1);
+        assert!(!StopTarget::for_token(&case.token).reaches_legacy_host());
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert!(fx.take_calls().is_empty());
+    });
+}
+
+fn with_cases(mut check: impl FnMut(&Case, &Fixture, &tokio::runtime::Runtime)) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let fx = Fixture::new();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _switch = Switch::on();
     let root = tempfile::tempdir().unwrap();
     let _log = TestBindingRoot::enter(Some(root.path()));
-    run(async {
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
-            .into_iter()
-            .enumerate()
-        {
-            let case = Case::new(&pool, root.path(), provider, n as u64 + 1).await;
-            let _registry = case.rig.registry_on_this_thread();
-            assert_eq!(
-                case.stop("/stop").await.settlement,
-                StopSettlement::HostOwned
-            );
-            assert_eq!(case.escapes(), 1, "{}", case.provider.as_str());
-            assert!(matches!(
-                begin_command_stop(&case.shared, &case.provider, case.channel, true).await,
-                CommandStop::AlreadyStopping
+    let db = runtime.block_on(crate::db::auto_queue::test_support::TestPostgresDb::create());
+    let pool = runtime.block_on(db.connect_and_migrate());
+    for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+        .into_iter()
+        .enumerate()
+    {
+        let case = runtime.block_on(Case::new(&pool, root.path(), provider, 10 + n as u64));
+        let _registry = case.rig.registry_on_this_thread();
+        check(&case, &fx, &runtime);
+    }
+    runtime.block_on(pool.close());
+    runtime.block_on(db.drop());
+}
+
+#[test]
+fn herdr_production_stop_unwired_switch_on_matches_off() {
+    with_cases(|case, fx, runtime| {
+        let mut observations = Vec::new();
+        for enabled in [false, true] {
+            HERDR_CANCEL_OVERRIDE.set(Some(enabled));
+            let reply = match runtime.block_on(begin_command_stop(
+                &case.shared,
+                &case.provider,
+                case.channel,
+                true,
+            )) {
+                CommandStop::HostRefused => "host_refused",
+                CommandStop::AlreadyStopping => "already_stopping",
+                CommandStop::NoActiveTurn => "no_active_turn",
+                _ => "admitted",
+            };
+            observations.push((
+                reply,
+                case.token.cancelled.load(Ordering::SeqCst),
+                fx.take_calls(),
             ));
-            let _ = interrupt_herdr(&pool, &case.token, &case.provider).await;
-            assert_eq!(case.escapes(), 1);
-            assert!(!StopTarget::for_token(&case.token).reaches_legacy_host());
-            assert!(fx.take_calls().is_empty());
+            assert_eq!(
+                case.escapes(),
+                0,
+                "production /stop must not deliver Escape"
+            );
+            assert!(case.rig.requests().is_empty(), "stop must not probe Herdr");
         }
-        pool.close().await;
-        db.drop().await;
+        assert_eq!(observations[0], observations[1]);
+        assert_eq!(observations[1], ("host_refused", false, vec![]));
     });
 }
 
 #[test]
-fn herdr_command_stop_refuses_off_idle_unsubmitted_and_nonuser_effects() {
-    let fx = Fixture::new();
-    let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _switch = Switch::on();
-    let root = tempfile::tempdir().unwrap();
-    let _log = TestBindingRoot::enter(Some(root.path()));
-    run(async {
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
-            .into_iter()
-            .enumerate()
-        {
-            for variant in 0..5 {
-                let case = Case::new(
-                    &pool,
-                    root.path(),
-                    provider.clone(),
-                    10 + n as u64 * 10 + variant,
-                )
-                .await;
-                let _registry = case.rig.registry_on_this_thread();
-                match variant {
-                    0 => {
-                        HERDR_CANCEL_OVERRIDE.set(Some(false));
-                        assert!(matches!(
-                            begin_command_stop(&case.shared, &case.provider, case.channel, true)
-                                .await,
-                            CommandStop::HostRefused
-                        ));
-                        assert!(case.rig.requests().is_empty());
-                        HERDR_CANCEL_OVERRIDE.set(Some(true));
-                    }
-                    1 => {
-                        case.screen(false);
-                        let _ = case.stop("!stop").await;
-                    }
-                    2 => {
-                        *case
-                            .token
-                            .herdr_interrupt_state()
-                            .unwrap()
-                            .submission
-                            .lock()
-                            .unwrap() = HerdrSubmission::Unsubmitted;
-                        assert_eq!(
-                            case.stop("/skill stop").await.settlement,
-                            StopSettlement::LocalUnsubmitted
-                        );
-                    }
-                    3 => {
-                        let _ = case.stop("restart").await;
-                    }
-                    _ => {
-                        let _home = crate::services::cluster::channel_home::register_for_test(
-                            case.channel.get(),
-                            None,
-                        );
-                        assert!(matches!(
-                            begin_command_stop(&case.shared, &case.provider, case.channel, true)
-                                .await,
-                            CommandStop::HostRefused
-                        ));
-                    }
-                }
-                assert_eq!(
-                    case.escapes(),
-                    0,
-                    "provider {provider:?}, variant {variant}"
-                );
-                assert!(fx.take_calls().is_empty());
-            }
-        }
-        pool.close().await;
-        db.drop().await;
+fn herdr_typed_refusals_have_no_escape_effects() {
+    with_cases(|case, fx, runtime| {
+        let pool = case.shared.pg_pool.as_ref().unwrap();
+        use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let unavailable = runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider));
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert_eq!(
+            unavailable,
+            HerdrDelivery::NotSent(HerdrNotSent::SettlementUnavailable)
+        );
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
+            HerdrDelivery::NotSent(HerdrNotSent::NotAdmitted)
+        );
+        let other = Arc::new(CancelToken::new());
+        assert_eq!(
+            admit_herdr_command(
+                &case.token,
+                Some(&other),
+                &case.provider,
+                case.channel.get(),
+                &case.shared.token_hash,
+                "/stop"
+            ),
+            Err(HerdrNotSent::Generation)
+        );
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
+            HerdrDelivery::NotSent(HerdrNotSent::NotAdmitted),
+            "stale admission must not write intent"
+        );
+        assert_eq!(
+            runtime.block_on(case.delivery("watchdog")),
+            HerdrDelivery::NotSent(HerdrNotSent::NotAdmitted)
+        );
+        HERDR_CANCEL_OVERRIDE.set(Some(false));
+        assert_eq!(
+            runtime.block_on(case.delivery("/stop")),
+            HerdrDelivery::NotSent(HerdrNotSent::SwitchOff)
+        );
+        HERDR_CANCEL_OVERRIDE.set(Some(true));
+        let home =
+            crate::services::cluster::channel_home::register_for_test(case.channel.get(), None);
+        assert_eq!(
+            runtime.block_on(case.delivery("/stop")),
+            HerdrDelivery::NotSent(HerdrNotSent::Holder)
+        );
+        drop(home);
+        crate::services::cluster::channel_home::unregister(&case.channel.to_string());
+        case.screen(false);
+        assert_eq!(
+            runtime.block_on(case.delivery("/stop")),
+            HerdrDelivery::NotSent(HerdrNotSent::Idle)
+        );
+        let state = case.token.herdr_interrupt_state().unwrap();
+        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
+            HerdrDelivery::NotSent(HerdrNotSent::Pending)
+        );
+        *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        dedupe::clear_tmux_runtime_binding(&case.owner.logical_key);
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
+            HerdrDelivery::NotSent(HerdrNotSent::Pending)
+        );
+        assert_eq!(case.escapes(), 0);
+        assert!(fx.take_calls().is_empty());
+    });
+}
+
+#[test]
+fn herdr_prepare_preserves_consumed_claim_and_intent() {
+    with_cases(|case, fx, runtime| {
+        assert_eq!(
+            runtime.block_on(case.delivery("/stop")),
+            HerdrDelivery::Sent
+        );
+        let before = case.token.herdr_interrupt_state().unwrap();
+        let after = case
+            .token
+            .prepare_herdr_interrupt(case.provider.clone(), &case.owner);
+        assert!(Arc::ptr_eq(&before, &after));
+        let next = runtime.block_on(interrupt_herdr(
+            case.shared.pg_pool.as_ref().unwrap(),
+            &case.token,
+            &case.provider,
+        ));
+        assert_eq!(
+            case.escapes(),
+            1,
+            "consumed claim must prevent another Escape"
+        );
+        assert_eq!(next, HerdrDelivery::NotSent(HerdrNotSent::Duplicate));
+        assert_eq!(
+            case.escapes(),
+            1,
+            "second prepare must not authorize a second write"
+        );
+        assert!(fx.take_calls().is_empty());
     });
 }
 
@@ -377,15 +460,23 @@ fn stale_fence(provider: ProviderKind, identity: bool) {
                 CancelToken::new().prepare_herdr_interrupt(provider, &owner);
             }
         }));
-        let _ = case.stop("/stop").await;
+        let result = case.delivery("/stop").await;
         assert_eq!(case.escapes(), 0, "stale fence must prevent effects");
+        assert_eq!(
+            result,
+            HerdrDelivery::NotSent(if identity {
+                HerdrNotSent::Identity
+            } else {
+                HerdrNotSent::Generation
+            })
+        );
         assert!(fx.take_calls().is_empty());
         pool.close().await;
         db.drop().await;
     });
 }
 #[test]
-fn herdr_http_preserve_keeps_conflict_and_cannot_cancel_token() {
+fn herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg() {
     let fx = Fixture::new();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _switch = Switch::on();
@@ -461,12 +552,30 @@ fn herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing() {
                 } else {
                     case.rig.foreground(&[]);
                 }
+                let result = case.delivery("!cc stop").await;
                 assert_eq!(
-                    case.stop("!cc stop").await.settlement,
-                    StopSettlement::HostOwned
+                    result,
+                    if uncertain {
+                        HerdrDelivery::Indeterminate
+                    } else {
+                        HerdrDelivery::NotSent(HerdrNotSent::Gate)
+                    }
                 );
                 assert_eq!(case.escapes(), usize::from(uncertain));
-                let _ = interrupt_herdr(&pool, &case.token, &case.provider).await;
+                let next = interrupt_herdr(&pool, &case.token, &case.provider).await;
+                assert_eq!(
+                    case.escapes(),
+                    usize::from(uncertain),
+                    "Indeterminate consumes the write claim"
+                );
+                assert_eq!(
+                    next,
+                    HerdrDelivery::NotSent(if uncertain {
+                        HerdrNotSent::Duplicate
+                    } else {
+                        HerdrNotSent::Gate
+                    })
+                );
                 assert_eq!(case.escapes(), usize::from(uncertain));
                 assert!(fx.take_calls().is_empty());
             }
@@ -477,7 +586,7 @@ fn herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing() {
 }
 
 #[test]
-fn herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority() {
+fn herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg() {
     let fx = Fixture::new();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _switch = Switch::on();
@@ -500,10 +609,7 @@ fn herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority(
                 home.refusal(),
                 Some(crate::services::cluster::channel_home::HomeRefusal::Draining)
             );
-            assert_eq!(
-                case.stop("/cc stop").await.settlement,
-                StopSettlement::HostOwned
-            );
+            assert_eq!(case.delivery("/cc stop").await, HerdrDelivery::Sent);
             assert_eq!(case.escapes(), 1);
             case.token.cancel_with_tmux_cleanup();
             assert!(fx.take_calls().is_empty());

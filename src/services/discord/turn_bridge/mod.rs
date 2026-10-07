@@ -42,7 +42,7 @@ pub(in crate::services::discord) use stream_loop::types::publish_retained_termin
 mod terminal_delivery;
 mod terminal_outcome_delivery;
 mod thinking;
-pub(crate) mod tmux_runtime;
+mod tmux_runtime;
 mod turn_analytics;
 mod two_message_panel;
 mod voice_completion;

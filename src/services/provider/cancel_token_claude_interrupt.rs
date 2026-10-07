@@ -26,16 +26,24 @@ impl CancelToken {
         provider: ProviderKind,
         owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
     ) -> Arc<HerdrInterruptState> {
+        let mut slot = self
+            .herdr_interrupt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = slot.as_ref() {
+            #[cfg(test)]
+            if herdr_interrupt_mutant("prepare_reset") {
+                self.claude_interrupt_claim.store(0, Ordering::Release);
+            }
+            return state.clone();
+        }
         let state = Arc::new(HerdrInterruptState {
             owner: owner.clone(),
             submission: Mutex::new(HerdrSubmission::Unsubmitted),
             user_stop: AtomicBool::new(false),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
-        *self
-            .herdr_interrupt
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(state.clone());
+        *slot = Some(state.clone());
         state
     }
 
@@ -47,21 +55,51 @@ impl CancelToken {
     }
 }
 
-/// The live cancel switch has no reads of rows, panes or markers when off.
+/// Provider-terminal settlement is not yet wired; tests exercise only delivery machinery.
+pub(crate) fn herdr_stop_settlement_available() -> bool {
+    #[cfg(all(test, unix))]
+    {
+        HERDR_SETTLEMENT_OVERRIDE.with(|value| value.get())
+    }
+    #[cfg(not(all(test, unix)))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn herdr_interrupt_mutant(name: &str) -> bool {
+    std::env::var("ADK_P10_3_MUTANT").ok().as_deref() == Some(name)
+}
+
+/// A requested switch cannot enable Escape before provider-terminal settlement exists.
 pub(crate) fn herdr_cancel_enabled() -> bool {
     #[cfg(test)]
     if let Some(enabled) = HERDR_CANCEL_OVERRIDE.with(|value| value.get()) {
-        return enabled;
+        return enabled && herdr_stop_settlement_available();
     }
-    cfg!(unix)
+    let enabled = cfg!(unix)
         && crate::config_live_reload::current()
             .and_then(|config| config.runtime.herdr_cancel_enabled)
-            .unwrap_or(false)
+            .unwrap_or(false);
+    if enabled && !herdr_stop_settlement_available() {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                event = "herdr_stop_settlement_unavailable",
+                "herdr stop settlement not available; Escape disabled"
+            );
+        }
+        return false;
+    }
+    enabled
 }
 
 #[cfg(test)]
 thread_local! {
     pub(crate) static HERDR_CANCEL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    #[cfg(unix)]
+    pub(crate) static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {

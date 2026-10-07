@@ -316,17 +316,6 @@ fn first_prompt(
         return Err(format!("herdr turn: codex execution {nonce} is not bound"));
     }
     warn_release(logical, release_hold(nonce));
-    if cancel_requested(turn.cancel.as_deref())
-        && let Some(token) = turn.cancel.as_ref()
-    {
-        runtime.block_on(
-            crate::services::discord::turn_bridge::tmux_runtime::interrupt_herdr(
-                turn.pool,
-                token,
-                &ProviderKind::Codex,
-            ),
-        );
-    }
     let session_id = source.session_id.clone();
     let _ = sender.send(StreamMessage::Init {
         session_id: session_id.clone(),

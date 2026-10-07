@@ -165,7 +165,7 @@ mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
 mod tui_task_card;
-pub(crate) mod turn_bridge;
+mod turn_bridge;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
 pub(crate) mod turn_lease;

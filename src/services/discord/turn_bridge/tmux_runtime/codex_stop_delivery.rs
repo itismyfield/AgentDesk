@@ -8,11 +8,10 @@ use super::claude_stop_delivery::{
     ClaudeStopDeliveryReservation, ClaudeStopTurnIdentity, ClaudeTuiInterruptPhase,
     classify_tui_interrupt_phase,
 };
-use super::interrupt_policy::ProviderTurnInterruptOutcome;
-use super::stop_host::{holder, not_sent};
+
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
 use crate::services::provider::cancel_token_claude_interrupt::{
-    HerdrSubmission, herdr_cancel_enabled,
+    HerdrSubmission, herdr_cancel_enabled, herdr_stop_settlement_available,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::{HerdrMutation, HerdrTarget, HostKey, HostMutation};
@@ -146,12 +145,12 @@ impl Drop for TestBindingRoot {
 #[path = "codex_stop_delivery_tests.rs"]
 mod tests;
 
-enum Identity {
+enum TurnIdentity {
     Claude(ClaudeStopTurnIdentity),
     Codex(CodexStopTurnIdentity),
 }
 
-impl Identity {
+impl TurnIdentity {
     fn capture(provider: &ProviderKind, path: &str) -> Option<Self> {
         match provider {
             ProviderKind::Claude => ClaudeStopTurnIdentity::capture(path).map(Self::Claude),
@@ -183,82 +182,150 @@ fn mutant(name: &str) -> bool {
     }
 }
 
-/// Called only by admitted user commands or their executor's late attach, never by HTTP/recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HerdrNotSent {
+    Idle,
+    Pending,
+    Generation,
+    Identity,
+    Holder,
+    Gate,
+    SwitchOff,
+    Duplicate,
+    NotAdmitted,
+    SettlementUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HerdrDelivery {
+    Sent,
+    NotSent(HerdrNotSent),
+    Indeterminate,
+}
+
+fn holder(channel: u64) -> bool {
+    use crate::services::cluster::channel_home::{HomeRefusal, refusal};
+    channel != 0 && refusal(channel) != Some(HomeRefusal::NotHeld)
+}
+
+/// Called within the future mailbox arm, after checking its current token, not by stop handlers.
+pub(super) fn admit_herdr_command(
+    token: &Arc<CancelToken>,
+    current: Option<&Arc<CancelToken>>,
+    provider: &ProviderKind,
+    channel: u64,
+    token_hash: &str,
+    reason: &str,
+) -> Result<(), HerdrNotSent> {
+    if !current.is_some_and(|current| Arc::ptr_eq(current, token)) {
+        return Err(HerdrNotSent::Generation);
+    }
+    if !herdr_stop_settlement_available() {
+        return Err(HerdrNotSent::SettlementUnavailable);
+    }
+    if !herdr_cancel_enabled() {
+        return Err(HerdrNotSent::SwitchOff);
+    }
+    if !holder(channel) {
+        return Err(HerdrNotSent::Holder);
+    }
+    if !matches!(
+        reason,
+        "/stop" | "!stop" | "!cc stop" | "!skill stop" | "/skill stop" | "/cc stop"
+    ) {
+        return Err(HerdrNotSent::NotAdmitted);
+    }
+    let state = token.herdr_interrupt_state().ok_or(HerdrNotSent::Pending)?;
+    let owner = &state.owner;
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+    if owner.provider != provider.as_str()
+        || owner.channel_id != channel.to_string()
+        || owner.discord_token_hash != token_hash
+        || token.tmux_session_name().as_deref() != Some(&owner.logical_key)
+        || read_host_kind_marker(&owner.logical_key)
+            != HostKindMarker::Known(crate::services::session_host::HostKind::Herdr)
+    {
+        return Err(HerdrNotSent::Identity);
+    }
+    if state.user_stop.swap(true, Ordering::AcqRel) {
+        return Err(HerdrNotSent::Duplicate);
+    }
+    Ok(())
+}
+
+/// Dormant until settlement lands; no production stop or late-attach path calls this executor.
 pub(super) async fn interrupt_herdr(
     pool: &sqlx::PgPool,
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
-) -> ProviderTurnInterruptOutcome {
+) -> HerdrDelivery {
+    use HerdrNotSent::*;
+    if !herdr_stop_settlement_available() {
+        return HerdrDelivery::NotSent(SettlementUnavailable);
+    }
     if !herdr_cancel_enabled() {
-        return not_sent();
+        return HerdrDelivery::NotSent(SwitchOff);
     }
     let Some(state) = token.herdr_interrupt_state() else {
-        return not_sent();
+        return HerdrDelivery::NotSent(Pending);
     };
     let Some(channel) = state.owner.channel_id.parse::<u64>().ok() else {
-        return not_sent();
+        return HerdrDelivery::NotSent(Identity);
     };
-    if !state.user_stop.load(Ordering::Acquire) || !holder(channel) {
-        return not_sent();
+    if !state.user_stop.load(Ordering::Acquire) {
+        return HerdrDelivery::NotSent(NotAdmitted);
+    }
+    if !holder(channel) {
+        return HerdrDelivery::NotSent(Holder);
     }
     let owner = &state.owner;
     if owner.provider != provider.as_str()
         || token.tmux_session_name().as_deref() != Some(&owner.logical_key)
     {
-        return not_sent();
+        return HerdrDelivery::NotSent(Identity);
     }
-    #[cfg(unix)]
-    let found = crate::services::claude::herdr_turn::load(pool, owner).await;
-    #[cfg(not(unix))]
-    let found = {
-        let _ = pool;
-        HostedLookup::Missing
-    };
-    let HostedLookup::Found(found) = found else {
-        return not_sent();
+    let HostedLookup::Found(found) = crate::services::claude::herdr_turn::load(pool, owner).await
+    else {
+        return HerdrDelivery::NotSent(Pending);
     };
     let HostedRecord::Known(record) = found.record else {
-        return not_sent();
+        return HerdrDelivery::NotSent(Pending);
     };
     if record.state != HostedState::Bound || record.owner != *owner {
-        return not_sent();
+        return HerdrDelivery::NotSent(Pending);
     }
     let Some(target) = crate::services::session_host::herdr_endpoints().target(&record) else {
-        return not_sent();
+        return HerdrDelivery::NotSent(Pending);
     };
     if !holder(channel) {
-        return not_sent();
+        return HerdrDelivery::NotSent(Holder);
     }
     let (token, provider) = (token.clone(), provider.clone());
     let home = crate::services::cluster::channel_home::registered_channel(channel);
     #[cfg(test)]
     let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
-    let sent = tokio::task::spawn_blocking(move || {
+    let enabled = herdr_cancel_enabled();
+    tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let _root = TestBindingRoot::enter(binding_root.as_deref());
-        match deliver(
+        #[cfg(test)]
+        crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
+            .set(Some(enabled));
+        let result = deliver(
             &token,
             &provider,
             &target,
             channel,
             home.as_deref(),
             &record.execution_nonce,
-        ) {
-            Ok(sent) => sent,
-            Err(refusal) => {
-                #[cfg(test)]
-                eprintln!("Herdr cancel refused: {refusal}");
-                tracing::debug!(%refusal, "Herdr cancel refused without a legacy fallback");
-                false
-            }
-        }
+            enabled,
+        );
+        #[cfg(test)]
+        crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE.set(None);
+        result
     })
     .await
-    .unwrap_or(false);
-    ProviderTurnInterruptOutcome {
-        sent_keys: sent,
-        ..not_sent()
-    }
+    .unwrap_or(HerdrDelivery::Indeterminate)
 }
 
 fn deliver(
@@ -268,105 +335,129 @@ fn deliver(
     channel: u64,
     home: Option<&crate::services::cluster::channel_home::HomeGate>,
     nonce: &str,
-) -> Result<bool, String> {
-    let held = || {
-        holder(channel)
-            && home.is_none_or(|home| {
-                home.refusal() != Some(crate::services::cluster::channel_home::HomeRefusal::NotHeld)
-            })
-    };
-    let state = token
-        .herdr_interrupt_state()
-        .ok_or("missing input observation")?;
-    // The reservation belongs to the blocking writer, even if its async waiter disappears.
-    let _claim = if mutant("claim") {
-        None
-    } else {
-        Some(ClaudeStopDeliveryReservation::claim(token).ok_or("duplicate stop")?)
-    };
-    let logical = &state.owner.logical_key;
-    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
-        .ok_or("no bound source")?;
-    let source_current = || source_matches(channel, logical, nonce, provider, &binding.output_path);
-    if !source_current() {
-        return Err("source does not name this execution".into());
+    enabled: bool,
+) -> HerdrDelivery {
+    use HerdrNotSent::*;
+    if !enabled {
+        return HerdrDelivery::NotSent(SwitchOff);
     }
-    let identity =
-        Identity::capture(provider, &binding.output_path).ok_or("no active turn identity")?;
-    #[cfg(all(test, unix))]
-    if let Some(action) = tests::AFTER_IDENTITY.lock().unwrap().take() {
-        action();
-    }
-    let write = || {
-        let submission = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-        if *submission == HerdrSubmission::Unsubmitted || !held() {
-            return Err("unsubmitted or not held".into());
-        }
-        let generation = if mutant("generation") {
-            None
-        } else {
-            Some(
-                token
-                    .lock_current_interrupt_session(provider.clone(), logical)
-                    .ok_or("stale generation")?,
-            )
+    let attempt = || -> Result<HerdrDelivery, HerdrNotSent> {
+        let held = || {
+            holder(channel)
+                && home.is_none_or(|home| {
+                    home.refusal()
+                        != Some(crate::services::cluster::channel_home::HomeRefusal::NotHeld)
+                })
         };
-        let current = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
-            .ok_or("source disappeared")?;
-        if current.output_path != binding.output_path
-            || (!mutant("identity") && !identity.current())
-        {
-            return Err("stale source identity".into());
+        let state = token.herdr_interrupt_state().ok_or(Pending)?;
+        // The reservation belongs to the blocking writer, even if its async waiter disappears.
+        let _claim = ClaudeStopDeliveryReservation::claim(token).ok_or(Duplicate)?;
+        let logical = &state.owner.logical_key;
+        let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
+            .ok_or(Pending)?;
+        let source_current =
+            || source_matches(channel, logical, nonce, provider, &binding.output_path);
+        if !source_current() {
+            return Err(Identity);
         }
-        let screen = target.capture(-160).ok_or("screen unreadable")?;
-        let running = match provider {
+        let identity = TurnIdentity::capture(provider, &binding.output_path).ok_or(Idle)?;
+        #[cfg(all(test, unix))]
+        if let Some(action) = tests::AFTER_IDENTITY.lock().unwrap().take() {
+            action();
+        }
+        let write = || {
+            let submission = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+            if *submission == HerdrSubmission::Unsubmitted {
+                return Err(Pending);
+            }
+            if !held() {
+                return Err(Holder);
+            }
+            let generation = if mutant("generation") {
+                None
+            } else {
+                Some(
+                    token
+                        .lock_current_interrupt_session(provider.clone(), logical)
+                        .ok_or(Generation)?,
+                )
+            };
+            let current =
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
+                    .ok_or(Pending)?;
+            if current.output_path != binding.output_path
+                || (!mutant("identity") && !identity.current())
+            {
+                return Err(Identity);
+            }
+            let screen = target.capture(-160).ok_or(Idle)?;
+            let running = match provider {
+                ProviderKind::Claude => {
+                    use crate::services::tmux_common as screen_state;
+                    let structured = crate::services::tui_turn_state::runtime_binding_turn_state(
+                        provider, &current,
+                    );
+                    let ready =
+                        screen_state::tmux_capture_indicates_claude_tui_ready_for_input(&screen)
+                            || screen_state::tmux_capture_indicates_claude_tui_prompt_draft(
+                                &screen,
+                            );
+                    let active =
+                        screen_state::tmux_capture_indicates_claude_tui_actively_streaming(&screen);
+                    !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
+                        && !ready
+                        && classify_tui_interrupt_phase(structured, ready, active)
+                            == ClaudeTuiInterruptPhase::ActiveGeneration
+                }
+                ProviderKind::Codex => {
+                    crate::services::codex_tui::input::herdr_turn_in_progress(&screen)
+                }
+                _ => false,
+            };
+            if !running && !mutant("running") {
+                return Err(Idle);
+            }
+            target.pin(HerdrMutation::Cancel).map_err(|_| Gate)?;
+            if (!mutant("identity") && !identity.current()) || !source_current() {
+                target.discard_pin();
+                return Err(Identity);
+            }
+            if !held() {
+                target.discard_pin();
+                return Err(Holder);
+            }
+            if !herdr_cancel_enabled() {
+                target.discard_pin();
+                return Err(SwitchOff);
+            }
+            let result = match target.send_keys(&[HostKey::Escape]) {
+                Ok(HostMutation::Confirmed) => Ok(HerdrDelivery::Sent),
+                Ok(HostMutation::Indeterminate(_)) => Ok(HerdrDelivery::Indeterminate),
+                _ => Err(Gate),
+            };
+            match generation {
+                Some(_)
+                    if mutant("indeterminate_claim")
+                        && result == Ok(HerdrDelivery::Indeterminate) =>
+                {
+                    result
+                }
+                Some(generation) => generation.commit_success(result),
+                None => result,
+            }
+        };
+        match provider {
             ProviderKind::Claude => {
-                use crate::services::tmux_common as screen_state;
-                let structured =
-                    crate::services::tui_turn_state::runtime_binding_turn_state(provider, &current);
-                let ready =
-                    screen_state::tmux_capture_indicates_claude_tui_ready_for_input(&screen)
-                        || screen_state::tmux_capture_indicates_claude_tui_prompt_draft(&screen);
-                let active =
-                    screen_state::tmux_capture_indicates_claude_tui_actively_streaming(&screen);
-                !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
-                    && !ready
-                    && classify_tui_interrupt_phase(structured, ready, active)
-                        == ClaudeTuiInterruptPhase::ActiveGeneration
+                crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                    logical, write,
+                )
             }
             ProviderKind::Codex => {
-                crate::services::codex_tui::input::herdr_turn_in_progress(&screen)
+                crate::services::codex_tui::input::try_with_composer_mutation_lock(logical, write)
+                    .ok_or(Gate)?
             }
-            _ => false,
-        };
-        if !running && !mutant("running") {
-            return Err("turn not running".into());
-        }
-        target
-            .pin(HerdrMutation::Cancel)
-            .map_err(|e| format!("cancel gate: {e:?}"))?;
-        if (!mutant("identity") && !identity.current()) || !source_current() || !held() {
-            target.discard_pin();
-            return Err("turn changed before write".into());
-        }
-        let result = match target.send_keys(&[HostKey::Escape]) {
-            Ok(HostMutation::Confirmed) => Ok(true),
-            Ok(HostMutation::Indeterminate(_)) => Ok(false),
-            other => Err(format!("Escape refused: {other:?}")),
-        };
-        match generation {
-            Some(generation) => generation.commit_success(result),
-            None => result,
+            _ => Err(NotAdmitted),
         }
     };
-    match provider {
-        ProviderKind::Claude => {
-            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, write)
-        }
-        ProviderKind::Codex => {
-            crate::services::codex_tui::input::try_with_composer_mutation_lock(logical, write)
-                .ok_or("composer busy")?
-        }
-        _ => Err("unsupported provider".into()),
-    }
+    attempt().unwrap_or_else(HerdrDelivery::NotSent)
 }
