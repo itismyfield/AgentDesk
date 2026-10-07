@@ -494,6 +494,9 @@ pub(crate) fn context_for_nonce(
     nonce: Option<&str>,
 ) -> io::Result<Option<BindingContext>> {
     let _logs = lock_logs();
+    if log_path(channel)?.is_none() {
+        return Ok(None);
+    }
     Ok(ownership_records(channel)?
         .into_iter()
         .filter_map(|record| record.codex_ownership)
