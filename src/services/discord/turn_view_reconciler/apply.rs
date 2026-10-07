@@ -209,16 +209,19 @@ impl TurnViewReconciler {
         #[cfg(test)]
         {
             if self.test_http_reactions.load(Ordering::Relaxed) {
+                let http = shared
+                    .serenity_http_or_token_fallback()
+                    .expect("HTTP reaction tests must install a local REST client");
                 let reaction = serenity::ReactionType::Unicode(emoji.to_string());
                 let result = if add {
                     target
                         .channel_id
-                        .create_reaction(&identity.http, target.message_id, reaction)
+                        .create_reaction(&http, target.message_id, reaction)
                         .await
                 } else {
                     target
                         .channel_id
-                        .delete_reaction(&identity.http, target.message_id, None, reaction)
+                        .delete_reaction(&http, target.message_id, None, reaction)
                         .await
                 };
                 return match result {
