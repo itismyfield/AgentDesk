@@ -141,8 +141,8 @@ fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
         | M::HydratePendingQueueFromDisk { persistence, .. }
         | M::MergeRestoredQueueItems { persistence, .. }
         | M::MergeRestoredDispatchMarker { persistence, .. }
-        | M::RestartDrain { persistence, .. }
-        | M::SettleInjectedInput { persistence, .. } => Some(persistence),
+        | M::RestartDrain { persistence, .. } => Some(persistence),
+        M::Injection(injection) => injection.persistence(),
         #[cfg(test)]
         M::ReplaceQueue { persistence, .. } => Some(persistence),
         _ => None,
@@ -184,13 +184,11 @@ pub(super) fn enter(
         });
     }
     fence::require_worker()?;
-    // An injection settles under the permit its owner was admitted with, even while Closing.
     let permit = match msg {
-        M::Enqueue { input_permit, .. }
-        | M::RequeueFront { input_permit, .. }
-        | M::ReserveInjection { input_permit, .. }
-        | M::SettleInjectedInput { input_permit, .. }
-        | M::AbandonInjection { input_permit, .. } => input_permit.take(),
+        M::Enqueue { input_permit, .. } | M::RequeueFront { input_permit, .. } => {
+            input_permit.take()
+        }
+        M::Injection(injection) => injection.take_permit(),
         _ => None,
     }
     .or_else(fence::effect::current);
@@ -321,17 +319,8 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         M::CloseIfIdle { reply } => {
             let _ = reply.send(Err("input-mode-fenced"));
         }
-        M::ReserveInjection { reply, .. } => {
-            let _ = reply.send(super::ReserveOutcome::Unavailable);
-        }
-        M::SettleInjectedInput { ticket, reply, .. } => {
-            let error = format!("input fence: {failure:?}");
-            let _ =
-                reply.send(super::injected_inputs::SettleOutcome::NotCommitted { ticket, error });
-        }
-        // The ticket drops with the message, so its reservation is an orphan.
-        M::AbandonInjection { reply, .. } => {
-            drop(reply);
+        M::Injection(injection) => {
+            injection.refuse(format!("input fence: {failure:?}"));
         }
         M::PurgeQueue { reply, .. } => {
             let _ = reply.send(PurgeQueueResult {

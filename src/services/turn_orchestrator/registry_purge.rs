@@ -98,7 +98,7 @@ pub(super) fn gate_closed_arm(
         | M::CloseIfIdle { .. }
         | M::CommitCapturedReadyDelivery { .. }
         // Clears only its own reservation, which a closed actor cannot hold.
-        | M::AbandonInjection { .. } => return Some(msg),
+        | M::Injection(super::injected_inputs::InjectionMsg::Abandon { .. }) => return Some(msg),
         #[cfg(test)]
         M::AgeActiveTurnForTest { .. }
         | M::AgeInboundWaitsForTest { .. }
@@ -122,15 +122,7 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(EnqueueInterventionResult::refused(refusal, Vec::new()));
             "Enqueue"
         }
-        M::ReserveInjection { reply, .. } => {
-            let _ = reply.send(super::ReserveOutcome::Unavailable);
-            "ReserveInjection"
-        }
-        M::SettleInjectedInput { ticket, reply, .. } => {
-            let error = "actor_closed".to_string();
-            let _ = reply.send(super::injected_inputs::SettleOutcome::NotCommitted { ticket, error });
-            "SettleInjectedInput"
-        }
+        M::Injection(injection) => injection.refuse("actor_closed".to_string()),
         // Restitution callers read `MailboxClosed` and replay on the fresh actor.
         M::RequeueFront { reply, .. } => {
             let _ = reply.send(RequeueInterventionResult {

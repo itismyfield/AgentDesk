@@ -266,13 +266,13 @@ fn fixture(
             received += 1;
             let (
                 Some(actor),
-                ChannelMailboxMsg::SettleInjectedInput {
+                ChannelMailboxMsg::Injection(InjectionMsg::Settle {
                     ticket,
                     settlement,
                     persistence,
                     reply,
                     ..
-                },
+                }),
             ) = (forward.as_ref(), msg)
             else {
                 continue;
@@ -384,10 +384,12 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
         lease: Arc::new(InjectionLease),
     };
     let abandoned = handle
-        .request(|reply| ChannelMailboxMsg::AbandonInjection {
-            input_permit: None,
-            ticket,
-            reply,
+        .request(|reply| {
+            ChannelMailboxMsg::Injection(InjectionMsg::Abandon {
+                input_permit: None,
+                ticket,
+                reply,
+            })
         })
         .await;
     let observed = format!("{removed:?} {reserve:?} {settled} {abandoned:?}");

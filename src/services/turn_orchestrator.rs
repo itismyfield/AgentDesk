@@ -1489,24 +1489,7 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<Result<(), &'static str>>,
     },
     /// Busy-turn injection order; see `injected_inputs.rs`.
-    ReserveInjection {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
-        message_id: Option<MessageId>,
-        expected_claim: ExpectedClaim,
-        reply: oneshot::Sender<ReserveOutcome>,
-    },
-    SettleInjectedInput {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
-        ticket: injected_inputs::InjectionTicket,
-        settlement: InjectionSettlement,
-        persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<injected_inputs::SettleOutcome>,
-    },
-    AbandonInjection {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
-        ticket: injected_inputs::InjectionTicket,
-        reply: oneshot::Sender<()>,
-    },
+    Injection(injected_inputs::InjectionMsg),
 }
 
 /// #3167 — priority class of the mailbox active-turn slot. Lets the external-input
@@ -2773,38 +2756,7 @@ fn input_mailbox_step(
         ChannelMailboxMsg::CloseIfIdle { reply } => {
             let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
         }
-        ChannelMailboxMsg::ReserveInjection {
-            message_id,
-            expected_claim,
-            reply,
-            ..
-        } => {
-            let _ = reply.send(injected_inputs::reserve(
-                &mut state,
-                message_id,
-                &expected_claim,
-            ));
-        }
-        ChannelMailboxMsg::SettleInjectedInput {
-            ticket,
-            settlement,
-            persistence,
-            reply,
-            ..
-        } => {
-            let settle = injected_inputs::settle;
-            let _ = reply.send(settle(
-                &mut state,
-                channel_id,
-                ticket,
-                settlement,
-                &persistence,
-            ));
-        }
-        ChannelMailboxMsg::AbandonInjection { ticket, reply, .. } => {
-            injected_inputs::abandon(&mut state, channel_id, ticket);
-            let _ = reply.send(());
-        }
+        ChannelMailboxMsg::Injection(msg) => injected_inputs::step(&mut state, channel_id, msg),
     }
     state
 }

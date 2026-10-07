@@ -56,6 +56,88 @@ pub(crate) enum SettleOutcome {
     Unknown,
 }
 
+/// One injection's actor messages, each carrying the permit its owner was admitted with.
+pub(crate) enum InjectionMsg {
+    Reserve {
+        input_permit: Option<Permit>,
+        message_id: Option<MessageId>,
+        expected_claim: ExpectedClaim,
+        reply: oneshot::Sender<ReserveOutcome>,
+    },
+    Settle {
+        input_permit: Option<Permit>,
+        ticket: InjectionTicket,
+        settlement: InjectionSettlement,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<SettleOutcome>,
+    },
+    Abandon {
+        input_permit: Option<Permit>,
+        ticket: InjectionTicket,
+        reply: oneshot::Sender<()>,
+    },
+}
+
+impl InjectionMsg {
+    /// The owner's permit: an injection settles under it even while the gate is Closing.
+    pub(super) fn take_permit(&mut self) -> Option<Permit> {
+        match self {
+            Self::Reserve { input_permit, .. }
+            | Self::Settle { input_permit, .. }
+            | Self::Abandon { input_permit, .. } => input_permit.take(),
+        }
+    }
+
+    pub(super) fn persistence(&self) -> Option<&QueuePersistenceContext> {
+        match self {
+            Self::Settle { persistence, .. } => Some(persistence),
+            Self::Reserve { .. } | Self::Abandon { .. } => None,
+        }
+    }
+
+    /// Answers without the actor: nothing is reserved, a settle gets its ticket back uncommitted,
+    /// and an abandon's ticket drops here, orphaning its reservation. Returns the arm name.
+    pub(super) fn refuse(self, error: String) -> &'static str {
+        match self {
+            Self::Reserve { reply, .. } => {
+                let _ = reply.send(ReserveOutcome::Unavailable);
+                "ReserveInjection"
+            }
+            Self::Settle { ticket, reply, .. } => {
+                let _ = reply.send(SettleOutcome::NotCommitted { ticket, error });
+                "SettleInjectedInput"
+            }
+            Self::Abandon { .. } => "AbandonInjection",
+        }
+    }
+}
+
+pub(super) fn step(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: InjectionMsg) {
+    match msg {
+        InjectionMsg::Reserve {
+            message_id,
+            expected_claim,
+            reply,
+            ..
+        } => {
+            let _ = reply.send(reserve(state, message_id, &expected_claim));
+        }
+        InjectionMsg::Settle {
+            ticket,
+            settlement,
+            persistence,
+            reply,
+            ..
+        } => {
+            let _ = reply.send(settle(state, channel_id, ticket, settlement, &persistence));
+        }
+        InjectionMsg::Abandon { ticket, reply, .. } => {
+            abandon(state, channel_id, ticket);
+            let _ = reply.send(());
+        }
+    }
+}
+
 /// Whether a live reservation holds the mailbox order; an orphaned one is dropped here.
 pub(super) fn holds_order(state: &mut ChannelMailboxState) -> bool {
     let orphaned =
@@ -179,11 +261,13 @@ impl ChannelMailboxHandle {
         expected_claim: ExpectedClaim,
         input_permit: Option<Permit>,
     ) -> ReserveOutcome {
-        self.request(|reply| ChannelMailboxMsg::ReserveInjection {
-            input_permit,
-            message_id,
-            expected_claim,
-            reply,
+        self.request(|reply| {
+            ChannelMailboxMsg::Injection(InjectionMsg::Reserve {
+                input_permit,
+                message_id,
+                expected_claim,
+                reply,
+            })
         })
         .await
         .unwrap_or(ReserveOutcome::Unavailable)
@@ -198,17 +282,17 @@ impl ChannelMailboxHandle {
         input_permit: Option<Permit>,
     ) -> SettleOutcome {
         let (reply, answer) = oneshot::channel();
-        let msg = ChannelMailboxMsg::SettleInjectedInput {
+        let msg = ChannelMailboxMsg::Injection(InjectionMsg::Settle {
             input_permit,
             ticket,
             settlement,
             persistence,
             reply,
-        };
+        });
         match self.sender.send((msg, fence::effect::current())) {
             Ok(()) => answer.await.unwrap_or(SettleOutcome::Unknown),
             Err(unsent) => match unsent.0.0 {
-                ChannelMailboxMsg::SettleInjectedInput { ticket, .. } => {
+                ChannelMailboxMsg::Injection(InjectionMsg::Settle { ticket, .. }) => {
                     let error = "mailbox_unreachable".to_string();
                     SettleOutcome::NotCommitted { ticket, error }
                 }
@@ -246,10 +330,12 @@ impl ChannelMailboxHandle {
             }
         }
         let _ = self
-            .request(|reply| ChannelMailboxMsg::AbandonInjection {
-                input_permit,
-                ticket,
-                reply,
+            .request(|reply| {
+                ChannelMailboxMsg::Injection(InjectionMsg::Abandon {
+                    input_permit,
+                    ticket,
+                    reply,
+                })
             })
             .await;
         Err(HANDBACK_NOT_WRITTEN)
