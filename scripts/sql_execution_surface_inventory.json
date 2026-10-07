@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "55b5bd0cae68e4a2540d3815d4ed161ba34e41e9",
+  "measured_at_sha": "188914aa79fca6d4b36ad2b72cac0641f9fd3f14",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26483,29 +26483,29 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/catch_up/too_old_notice.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:735e0a1c3c3bf62e5d1796f3869189d11b910c0f03c7478ccfbf906f6638eaea"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/catch_up/too_old_notice.rs",
+      "path": "src/services/discord/catch_up/too_old_drop_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:1a75195bb79a2d4b4f692191d76be52b9064dc0a9497ad76c4148f40223e4340"
+      "fingerprint": "sha256:8ab3d79917837f8e0397cbc2c7375ababba357d4a5d22451ffda9f36407d573b"
     },
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/catch_up/too_old_notice.rs",
+      "path": "src/services/discord/catch_up/too_old_drop_pg_tests.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:63ee0c691e55c41a05b0b2f5f28c40ef85958079defa86d3a918ed826aed761c"
+      "fingerprint": "sha256:e9e7e47c86b700c2751df203b0ae6a0123f7dbbd04693b07d2712925bd2bcecb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/catch_up/too_old_drop_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f820636708697d67135437a89a83e5c2e01e838449614f92485b341787eff9a0"
     },
     {
       "root": "src",
