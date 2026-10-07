@@ -1,6 +1,5 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_relay_output(
     tmux_session_name: &str,
     rollout_path: &str,

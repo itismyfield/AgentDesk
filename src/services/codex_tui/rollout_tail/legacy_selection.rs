@@ -31,7 +31,6 @@ pub(super) fn wait_for_latest_rollout_for_cwd(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn wait_for_resumed_rollout_for_session(
     cwd: &Path,
     session_id: &str,
