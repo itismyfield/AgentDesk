@@ -467,7 +467,7 @@ class OrderedTextPresent(unittest.TestCase):
 class E4ProviderBodyWait(unittest.TestCase):
     NOTICE_BOT = "1481522187197218816"
 
-    def run_e4(self, cell, bodies):
+    def run_e4(self, cell, bodies, *, delete_bodies_after_first_fetch=False):
         scenario = driver.yaml.safe_load(
             (ROOT / "tests/e2e/tui_relay/scenarios/E-4-direct-input-relay.yaml").read_text())
         driver.validate_scenario_schema(scenario)
@@ -482,8 +482,12 @@ class E4ProviderBodyWait(unittest.TestCase):
         client = MagicMock(base_url="http://offline.invalid")
         client.send_control.side_effect = lambda channel, content: {"id": "10" if "SETUP" in content else "99"}
         client.send_prompt.side_effect = lambda *a, **kw: rows.extend(warmup) or {"id": "10"}
-        client.fetch_messages.side_effect = lambda channel, after_id=None, limit=100: [
-            r for r in rows if int(r["id"]) > int(after_id or 0)]
+        def fetch(channel, after_id=None, limit=100):
+            page = [r for r in rows if int(r["id"]) > int(after_id or 0)]
+            if delete_bodies_after_first_fetch:
+                rows[:] = [r for r in rows if r not in page or int(r["id"]) < 20]
+            return page
+        client.fetch_messages.side_effect = fetch
         client.wait_for_message.side_effect = lambda channel, predicate, after_id=None, **kw: (
             next((r for r in rows if int(r["id"]) > int(after_id or 0) and predicate(r)), None), list(rows))
         args = Namespace(cell=cell, channel_id="41", dry_run=False, base_url="http://offline.invalid",
@@ -517,6 +521,19 @@ class E4ProviderBodyWait(unittest.TestCase):
                                      ("codex-tui", claude, "fail"), ("claude-tui", "999", "fail")):
             with self.subTest(cell=cell, author=author):
                 self.assertEqual(self.run_e4(cell, [author])["status"], status)
+
+    def test_final_assertion_needs_the_provider_body_after_post_idle_refetch(self):
+        claude = assertions.provider_bot_id("claude")
+        result = self.run_e4("claude-tui", [claude], delete_bodies_after_first_fetch=True)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("provider bot", result["reason"])
+        window = _window({"id": "12", "content": "터미널에 직접 주입된 입력 (tmux : `s`):\nDIRECT_E4_OK",
+                          "author": {"id": claude, "bot": True}, "type": 0})
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({"provider_text_present": "DIRECT_E4_OK"}, window=window, provider="claude")
+        with self.assertRaisesRegex(assertions.AssertionError, "cell provider"):
+            driver.run_assertion({"provider_text_present": "DIRECT_E4_OK"},
+                                 window=_window(_relay_msg(1, "DIRECT_E4_OK")))
 
     def test_relay_author_accepts_only_provider(self):
         scenario = {"steps": [{"wait_for_discord_text": "X", "relay_author": "notify"}], "assertions": []}

@@ -218,7 +218,8 @@ class SourceCompareTests(unittest.TestCase):
         self.write([self.user()] + copies + copies[:1])
         self.assertEqual(self.compare()["verdict"], "ok")
         self.assertEqual(self.main_rc(self.messages), 0)
-        for row in [{**copies[0], "message": {"content": MARKER}}, {**copies[0], "lastPrompt": [MARKER]}]:
+        for row in [{**copies[0], "message": {"content": MARKER}}, {**copies[0], "lastPrompt": [MARKER]},
+                    {"type": "last-prompt", "sessionId": MARKER}, {"type": "last-prompt", "lastPrompt": MARKER}]:
             self.write([self.user(), row])
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
                 self.compare()

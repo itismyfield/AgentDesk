@@ -150,6 +150,10 @@ def is_our_send(message: dict[str, Any]) -> bool:
     return str(author.get("id") or "") == OUR_BOT_ID
 
 
+# The direct-input notice quotes the injected text, so it is never a provider body.
+DIRECT_INPUT_NOTICE = re.compile(r"^터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):")
+
+
 def provider_bot_id(provider: str) -> str:
     bot_id = PROVIDER_BOT_IDS.get(provider)
     if not bot_id:
@@ -437,6 +441,25 @@ def no_duplicate_content(window: Window) -> None:
                 f"(ids {seen[body]}, {message_id})"
             )
         seen[body] = message_id
+
+
+def author_relay_body(message: dict[str, Any], author_id: str) -> str | None:
+    """Relay body only for ``author_id`` posts that are not shaped as the direct-input notice."""
+    author = str((message.get("author") or {}).get("id") or "")
+    if author != author_id or DIRECT_INPUT_NOTICE.match(message.get("content") or ""):
+        return None
+    return relay_body(message)
+
+
+def provider_text_present(window: Window, *, needle: str, author_id: str) -> None:
+    for message in window.messages:
+        body = author_relay_body(message, author_id)
+        if body is not None and needle in body:
+            return
+    raise AssertionError(
+        f"expected to find {needle!r} in a provider bot {author_id} relay body, got "
+        f"{len(window.messages)} relay messages (raw observed: {len(window.raw_messages)})"
+    )
 
 
 def text_present(window: Window, *, needle: str) -> None:

@@ -12,11 +12,10 @@ import sys
 import urllib.parse
 import urllib.request
 
-from .assertions import is_our_send, relay_body
+from .assertions import DIRECT_INPUT_NOTICE as DIRECT_NOTICE, is_our_send, relay_body
 from .discord import DiscordClient
 from .normal_intake_evidence import content, tool_result
 
-DIRECT_NOTICE = re.compile(r"^터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):")
 # Discord text command (`!clear ...`): the router consumes it, so no native input or body follows.
 TEXT_COMMAND = re.compile(r"^![a-z][a-z_-]*(?:\s|$)")
 # turn/deliver input has no Discord mirror yet. Started turns carry `human_input` headless-trigger
@@ -25,8 +24,8 @@ WRAPPER = r'\s*(?:<pasted_content id="[^"\n]+">\n)?'
 DELIVER_INPUT = re.compile(WRAPPER + r"\[Headless trigger context\]\n(?:source: [^\n]*\n)?metadata: ([^\n]+)\n")
 AUTHOR_PREFIX = re.compile(WRAPPER + r"\[User: [^\n]*? \(ID: (\d+)\)\]")
 DELIVER_MIRROR_GAP = "#6245 deliver input mirror not implemented"
-# Claude's `last-prompt` row is a copy of an input already recorded as a user row.
-LAST_PROMPT_KEYS = {"type", "lastPrompt", "leafUuid", "sessionId"}
+# Claude's `last-prompt` row is a copy of an input already recorded as a user row; only observed key sets.
+LAST_PROMPT_SHAPES = ({"type", "leafUuid", "sessionId"}, {"type", "lastPrompt", "leafUuid", "sessionId"})
 PASSING_VERDICTS = {"ok", "command", "known_gap"}
 
 
@@ -95,7 +94,7 @@ def native_inputs(path, pattern):
         elif kind == "system":
             known = row.get("subtype") in {"turn_duration", "stop_hook_summary", "task_started", "task_notification", "task_progress", "compact_boundary", "local_command"}
         elif kind == "last-prompt":
-            known = set(row) <= LAST_PROMPT_KEYS and isinstance(row.get("lastPrompt", ""), str)
+            known = set(row) in LAST_PROMPT_SHAPES and isinstance(row.get("lastPrompt", ""), str)
         else:
             known = kind in ignored
         if not known and markers(json.dumps(row, ensure_ascii=False), pattern):
