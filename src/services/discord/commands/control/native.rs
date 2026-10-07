@@ -19,10 +19,14 @@ use crate::services::tui_prompt_dedupe::native_clear::{
     NativeClearHost, NativeClearRestart, judge_native_clear_admission, start_native_clear,
 };
 
+const NATIVE_ADMISSION_CAPTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 type Effect<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 
 /// The provider, pane and selector effects of a native clear; tests replace them per thread.
-pub(super) trait NativeClearEffects: Send + Sync {
+pub(in crate::services::discord) trait NativeClearEffects:
+    Send + Sync
+{
     fn clear_selector<'a>(&'a self, session_key: &'a str) -> Effect<'a>;
     fn save_selector<'a>(
         &'a self,
@@ -74,17 +78,21 @@ impl NativeClearEffects for Production {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_CHANNELS: std::cell::RefCell<Option<Vec<u64>>> = const { std::cell::RefCell::new(None) };
     static TEST_EFFECTS: std::cell::RefCell<Option<Arc<dyn NativeClearEffects>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Installs `effects` as this thread's switched-on native clear until the guard drops.
 #[cfg(test)]
-pub(super) fn switch_on_for_tests(effects: Arc<dyn NativeClearEffects>) -> impl Drop {
+pub(in crate::services::discord) fn switch_on_for_tests(
+    effects: Arc<dyn NativeClearEffects>,
+) -> impl Drop {
     struct Off;
     impl Drop for Off {
         fn drop(&mut self) {
             TEST_EFFECTS.with(|cell| cell.borrow_mut().take());
+            TEST_CHANNELS.with(|cell| cell.borrow_mut().take());
         }
     }
     TEST_EFFECTS.with(|cell| *cell.borrow_mut() = Some(effects));
@@ -119,18 +127,31 @@ pub(super) fn host_effects_for_tests(effects: Arc<dyn NativeClearEffects>) -> im
     Restore
 }
 
-/// The switch, read before any other native-clear work; `None` keeps main's behavior.
-fn switched_on() -> Option<Arc<dyn NativeClearEffects>> {
+/// Reads scope and effects together; disabled keeps the existing host behavior.
+fn switched_on(channel_id: serenity::ChannelId) -> (bool, Option<Arc<dyn NativeClearEffects>>) {
     #[cfg(test)]
     if let Some(effects) = TEST_EFFECTS.with(|cell| cell.borrow().clone()) {
-        return Some(effects);
+        let settings = crate::config::RuntimeSettingsConfig {
+            native_clear_enabled: Some(true),
+            native_clear_channels: TEST_CHANNELS.with(|cell| cell.borrow().clone()),
+            ..Default::default()
+        };
+        let allowed = settings.native_clear_enabled_for_channel(channel_id.get());
+        return (allowed, allowed.then_some(effects));
     }
-    let config = crate::config_live_reload::current()?;
-    config
+    let Some(config) = crate::config_live_reload::current() else {
+        return (true, None);
+    };
+    if !config.runtime.native_clear_enabled.unwrap_or(false) {
+        return (true, None);
+    }
+    let allowed = config
         .runtime
-        .native_clear_enabled
-        .unwrap_or(false)
-        .then(|| Arc::new(Production) as Arc<dyn NativeClearEffects>)
+        .native_clear_enabled_for_channel(channel_id.get());
+    (
+        allowed,
+        allowed.then(|| Arc::new(Production) as Arc<dyn NativeClearEffects>),
+    )
 }
 
 /// A clear whose target, host clearance and canonical baseline were all captured before its
@@ -176,6 +197,22 @@ async fn judged<F: std::future::Future<Output = Option<String>>>(
     key: impl FnOnce() -> F,
 ) -> anyhow::Result<Option<NativeSelection>> {
     use super::super::super::admin_host_guard::{HostAdapter, ResetTarget, clear_reset_target};
+    if !switched_on(channel_id).0 {
+        let refusal = super::super::super::admin_host_guard::managed_reset_refusal;
+        if let Some(reason) = refusal(
+            shared,
+            provider,
+            channel_id,
+            true,
+            false,
+            explicit_session_key,
+        )
+        .await
+        {
+            anyhow::bail!("세션을 초기화하지 못했어요: {reason}");
+        }
+        return Ok(None);
+    }
     let judged = clear_reset_target(shared, provider, channel_id, explicit_session_key, key);
     match judged.await {
         ResetTarget::Refused(reason) => anyhow::bail!("세션을 초기화하지 못했어요: {reason}"),
@@ -289,7 +326,7 @@ pub(super) async fn select(
     if hosted.is_some() {
         return hosted;
     }
-    let effects = switched_on()?;
+    let effects = switched_on(channel_id).1?;
     let tmux = tmux?;
     let owned = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux;
     if *provider != ProviderKind::Claude || owned(channel_id.get(), Some(tmux)) != Ok(true) {
@@ -389,18 +426,21 @@ impl crate::services::session_host::ClearSession for HerdrSession {
     }
     fn save(&mut self, commit: ClearCommit) -> Effect<'_> {
         Box::pin(async move {
-            let (key, channel_id) = (&self.session_key, self.channel_id);
-            let saved = self.effects.save_selector(key, &commit.session, channel_id);
-            let generation = self.generation;
-            saved.await
-                && settle(
-                    &self.shared,
-                    &self.pool,
-                    channel_id,
-                    generation,
-                    Some(&commit),
-                )
+            self.effects
+                .save_selector(&self.session_key, &commit.session, self.channel_id)
                 .await
+        })
+    }
+    fn finish(&mut self, commit: ClearCommit) -> Effect<'_> {
+        Box::pin(async move {
+            settle(
+                &self.shared,
+                &self.pool,
+                self.channel_id,
+                self.generation,
+                Some(&commit),
+            )
+            .await
         })
     }
 }
@@ -434,21 +474,23 @@ impl NativeClearHost for LiveClear {
         _deadline: Instant,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
-            let (shared, channel_id) = (&self.shared, self.channel_id);
             let selection = &self.selection;
-            let key = &selection.session_key;
             selection
                 .effects
-                .save_selector(key, &commit.session, channel_id)
+                .save_selector(&selection.session_key, &commit.session, self.channel_id)
                 .await
-                && settle(
-                    shared,
-                    &self.pool,
-                    channel_id,
-                    self.generation,
-                    Some(&commit),
-                )
-                .await
+        })
+    }
+    fn finish(&mut self, commit: ClearCommit, _deadline: Instant) -> Effect<'_> {
+        Box::pin(async move {
+            settle(
+                &self.shared,
+                &self.pool,
+                self.channel_id,
+                self.generation,
+                Some(&commit),
+            )
+            .await
         })
     }
     fn fallback(&mut self, _deadline: Instant) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
@@ -510,10 +552,15 @@ pub(in crate::services::discord) async fn native_clear_admits(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     state: &mut (Option<String>, bool, String),
+    recovered_fresh: &mut bool,
 ) -> bool {
     // A Herdr channel's clear is native whatever the switch says, so its boundary settles here too.
     let herdr = || crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some();
-    let Some(effects) = switched_on().or_else(|| herdr().then(host_effects)) else {
+    let (allowed, effects) = switched_on(channel_id);
+    if !allowed {
+        return true;
+    }
+    let Some(effects) = effects.or_else(|| herdr().then(host_effects)) else {
         return true;
     };
     let Some(pool) = shared
@@ -558,10 +605,11 @@ pub(in crate::services::discord) async fn native_clear_admits(
     let resolved = super::resolve_session_key_for_clear(http, shared, channel_id, provider).await;
     let settled = match (&verdict, resolved, tmux) {
         (NativeClearRestart::Preserve, _, _) => return true,
-        (NativeClearRestart::CompleteDurable(commit), Some(session_key), _) => {
+        (NativeClearRestart::CompleteDurable(commit), Some(session_key), Some(tmux)) => {
             effects
                 .save_selector(&session_key, &commit.session, channel_id)
                 .await
+                && effects.composer_empty(&tmux, Instant::now() + NATIVE_ADMISSION_CAPTURE_BUDGET)
                 && settle(shared, pool, channel_id, generation, Some(commit)).await
         }
         (NativeClearRestart::ResetUnresolved, Some(session_key), Some(tmux)) => {
@@ -585,8 +633,9 @@ pub(in crate::services::discord) async fn native_clear_admits(
         _ => false,
     };
     if settled {
-        let data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get(&channel_id) {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            *recovered_fresh = std::mem::take(&mut session.cleared);
             state.0 = session.session_id.clone();
             state.1 = session.memento_context_loaded;
         }
@@ -602,7 +651,7 @@ pub(in crate::services::discord) async fn native_clear_admits(
 
 #[cfg(test)]
 #[path = "native_tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;
 
 #[cfg(test)]
 #[path = "native_herdr_tests.rs"]

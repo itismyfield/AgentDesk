@@ -294,6 +294,7 @@ impl Fixture {
             &ProviderKind::Claude,
             self.channel_id,
             &mut state,
+            &mut false,
         )
         .await;
         (admitted, state.0)

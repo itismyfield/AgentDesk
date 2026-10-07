@@ -67,8 +67,9 @@ impl std::fmt::Display for HerdrClearRefusal {
 /// durably before `/clear`, then the cleared session saved and its boundary resolved.
 pub(crate) trait ClearSession: Send + 'static {
     fn clear_selector(&mut self) -> Effect<'_>;
-    /// `false` when the save or the boundary resolve failed; the clear then stays on Hold.
+    /// `false` keeps the clear on Hold.
     fn save(&mut self, commit: ClearCommit) -> Effect<'_>;
+    fn finish(&mut self, commit: ClearCommit) -> Effect<'_>;
 }
 
 /// A Bound execution's clear, judged before anything changed.
@@ -202,6 +203,10 @@ impl<S: ClearSession> NativeClearHost for HerdrClear<S> {
 
     fn save(&mut self, commit: ClearCommit, _deadline: Instant) -> Effect<'_> {
         self.session.save(commit)
+    }
+
+    fn finish(&mut self, commit: ClearCommit, _deadline: Instant) -> Effect<'_> {
+        self.session.finish(commit)
     }
 
     /// The bounded Hold: no reset, kill or tmux call, and no second `/clear`.

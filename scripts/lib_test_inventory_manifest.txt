@@ -216,6 +216,8 @@ config::runtime_hook_registry_config_tests::retired_relay_authority_dial_keys_ar
 config::runtime_profile::tests::omitted_cluster_roles_keep_single_machine_full_runtime
 config::runtime_profile::tests::runner_and_legacy_profiles_have_identical_modules_and_canonical_output
 config::runtime_profile::tests::runner_profile_is_explicit_validated_and_does_not_change_legacy_roles
+config::runtime_settings::tests::native_clear_channel_allowlist_preserves_absent_empty_and_selected_values
+config::runtime_settings::tests::native_clear_channel_policy_requires_enabled_and_matches_optional_allowlist
 config::scheduled_message_required_mention_config_tests::required_mentions_allow_empty_or_valid_lists
 config::scheduled_message_required_mention_config_tests::required_mentions_reject_duplicates_and_invalid_ids
 config::secret_bearing_config_file_tests::load_from_path_hardens_secret_file_before_semantic_validation_error
@@ -3020,6 +3022,9 @@ services::discord::commands::control::native::tests::held_native_clear_holds_inp
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
 services::discord::commands::control::native::tests::native_clear_marks_completion_before_the_worker_releases_admission_pg
 services::discord::commands::control::native::tests::native_clear_without_a_clear_hook_falls_back_to_the_managed_reset_pg
+services::discord::commands::control::native::tests::policy_tests::composer_failure_keeps_native_boundary_unresolved_and_next_input_held_pg
+services::discord::commands::control::native::tests::policy_tests::native_fixture_overrides_and_restores_an_inherited_explicit_config_pg
+services::discord::commands::control::native::tests::policy_tests::scoped_native_clear_selects_only_listed_channels_and_skips_outside_state_pg
 services::discord::commands::control::native::tests::restart_admission_holds_undecidable_rows_until_a_new_clear_pg
 services::discord::commands::control::native::tests::restart_admission_settles_each_unresolved_native_clear_row_pg
 services::discord::commands::control::native::tests::switched_off_or_unowned_clear_keeps_the_managed_reset_pg
@@ -5776,6 +5781,7 @@ services::discord::router::message_handler::intake_turn::intake_outbox_state_bui
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_adopts_worker_intake_outbox_identity
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_cannot_replace_an_already_adopted_intake_outbox_identity
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_persists_every_absorbed_source_message_id
+services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests::restart_native_clear_first_intake_submits_fresh_anchor_prompt_pg
 services::discord::router::message_handler::intake_turn::placeholder_handoff::tests::only_confirmed_missing_replaces_bound_busy_notice_4888
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::cleared_set_covers_every_intake_gate_queue_reaction
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::busy_tui_requeue_preserves_standalone_marker_after_matching_rollback
@@ -5797,6 +5803,8 @@ services::discord::router::message_handler::intake_turn::recovery_context_take_o
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::recovery_context_survives_intake_stale_dispatch_abort
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn
+services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::held_native_boundary_accepts_clear_through_the_text_command_router_pg
+services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::native_hold_requeues_the_real_router_input_and_uploads_durably_pg
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
