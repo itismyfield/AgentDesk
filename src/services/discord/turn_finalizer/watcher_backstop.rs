@@ -59,16 +59,25 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     let inflight_tmux = inflight_state
         .as_ref()
         .and_then(|state| state.tmux_session_name.as_deref());
-    let (tmux_session_name, output_path, paused) = {
+    // A Herdr turn ends only on its own transcript's terminal: without a live watcher that
+    // transcript is read instead of conceding at the deadline, and no pane probe runs.
+    let herdr_hold = herdr_hold_source(inflight_state.as_ref());
+    let (tmux_session_name, output_path, paused) = 'source: {
         let handle = match inflight_tmux {
             Some(tmux) => shared.tmux_watchers.by_tmux_session.get(tmux),
             None => shared.tmux_watchers.get(&channel_id),
         };
         let Some(handle) = handle else {
-            return at_deadline;
+            match herdr_hold.clone() {
+                Some(source) => break 'source source,
+                None => return at_deadline,
+            }
         };
         if handle.cancel.load(std::sync::atomic::Ordering::Relaxed) || handle.heartbeat_stale() {
-            return at_deadline;
+            match herdr_hold.clone() {
+                Some(source) => break 'source source,
+                None => return at_deadline,
+            }
         }
         (
             handle.tmux_session_name.clone(),
@@ -140,7 +149,7 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     }
     watcher_backstop_signal_is_terminal(
         signal,
-        at_deadline,
+        at_deadline && herdr_hold.is_none(),
         delivery_confirmed_or_natural_deadline_escape,
         || {
             crate::services::provider::tmux_session_fallback_ready_for_input(
@@ -151,6 +160,33 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
         },
     )
+}
+
+/// The session and transcript a Herdr turn's backstop reads when no live watcher does. Settlement
+/// is checked first, so nothing else is read while it is unavailable.
+#[cfg(not(unix))]
+fn herdr_hold_source(
+    _: Option<&crate::services::discord::inflight::InflightTurnState>,
+) -> Option<(String, String, bool)> {
+    None
+}
+
+#[cfg(unix)]
+fn herdr_hold_source(
+    inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
+) -> Option<(String, String, bool)> {
+    if !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+    {
+        return None;
+    }
+    let state = inflight_state?;
+    let name = state.tmux_session_name.clone()?;
+    if !crate::services::discord::turn_bridge::herdr_marked(&name) {
+        return None;
+    }
+    // No recorded transcript proves no end: the turn stays held.
+    let path = state.output_path.clone().unwrap_or_default();
+    Some((name, path, false))
 }
 
 fn delivery_confirmed_for_produced_end(
@@ -299,6 +335,77 @@ mod tests {
                 false,
             ));
             let _ = std::fs::remove_file(transcript);
+        })
+        .await;
+    }
+
+    /// With no live watcher a Herdr turn is terminal only on its transcript's terminal, at the
+    /// natural deadline too; without settlement or a Herdr marker the deadline still concedes.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn herdr_turn_without_watcher_ends_only_on_its_transcript() {
+        use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_340_025u64.saturating_add(entropy % 1_000_000));
+            let session = format!("AgentDesk-claude-backstop-herdr-{}", entropy % 1_000_000);
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            let busy = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n";
+            let done = "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n";
+            let path = transcript.to_str().unwrap().to_string();
+            let state = crate::services::discord::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                channel.get(),
+                None,
+                7,
+                310,
+                311,
+                "herdr hold".to_string(),
+                None,
+                Some(session.clone()),
+                Some(path),
+                None,
+                0,
+            );
+            crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            let marker = crate::services::tmux_common::session_temp_path(&session, "host_kind");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            let terminal = |at_deadline| {
+                watcher_backstop_turn_is_terminal(
+                    &shared,
+                    channel,
+                    &ProviderKind::Claude,
+                    at_deadline,
+                )
+            };
+
+            std::fs::write(&transcript, busy).unwrap();
+            assert!(
+                terminal(true),
+                "a tmux turn without a watcher concedes at the deadline"
+            );
+            std::fs::write(&marker, "herdr").unwrap();
+            assert!(
+                !terminal(true),
+                "a running Herdr turn is not ended by the deadline"
+            );
+            assert!(!terminal(false));
+            HERDR_SETTLEMENT_OVERRIDE.set(false);
+            let unsettled = terminal(true);
+            HERDR_SETTLEMENT_OVERRIDE.set(true);
+            assert!(unsettled, "without settlement the deadline still concedes");
+            std::fs::write(&transcript, done).unwrap();
+            assert!(
+                terminal(true),
+                "the transcript's own terminal ends the Herdr turn"
+            );
+
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(&transcript);
         })
         .await;
     }

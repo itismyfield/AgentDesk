@@ -181,8 +181,9 @@ async fn run_skill_slash_command(
                 return Ok(());
             }
             let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-            let begin = super::super::turn_bridge::begin_command_stop;
-            match begin(shared, provider, ctx.channel_id(), false).await {
+            let begin = super::super::turn_bridge::begin_user_stop;
+            let reason = format!("{invoked_as} stop");
+            match begin(shared, provider, ctx.channel_id(), false, &reason).await {
                 CommandStop::Session(stop) => {
                     ctx.say(super::STOPPING_RESPONSE).await?;
                     stop.interrupt(&format!("{invoked_as} stop")).await;
@@ -200,6 +201,9 @@ async fn run_skill_slash_command(
                 }
                 other => {
                     let response = match other {
+                        // The turn stays with its provider; nothing was cancelled.
+                        #[cfg(unix)]
+                        CommandStop::Herdr(stop) => stop.reply(),
                         CommandStop::AlreadyStopping => super::ALREADY_STOPPING_RESPONSE,
                         CommandStop::HostRefused => super::HOST_REFUSED_STOP_RESPONSE,
                         _ => super::NO_ACTIVE_TURN_RESPONSE,

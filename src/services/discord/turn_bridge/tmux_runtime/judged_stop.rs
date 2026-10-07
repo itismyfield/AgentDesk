@@ -233,6 +233,9 @@ pub(in crate::services::discord) enum CommandStop {
     AlreadyStopping,
     Stop(ChannelStop),
     Session(super::SessionStop),
+    /// A Herdr turn's user stop: nothing was cancelled, and the provider still ends the turn.
+    #[cfg(unix)]
+    Herdr(super::codex_stop_delivery::HerdrStop),
 }
 
 /// A user stop: judged before any write, then cancelled only when the host is admitted.
@@ -241,6 +244,28 @@ pub(in crate::services::discord) async fn begin_command_stop(
     provider: &ProviderKind,
     channel: ChannelId,
     bind_unbound: bool,
+) -> CommandStop {
+    begin_stop(shared, provider, channel, bind_unbound, None).await
+}
+
+/// [`begin_command_stop`] for a stop naming its command: a Herdr turn takes the intent and
+/// Escape path instead of any cancel.
+pub(in crate::services::discord) async fn begin_user_stop(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    bind_unbound: bool,
+    reason: &str,
+) -> CommandStop {
+    begin_stop(shared, provider, channel, bind_unbound, Some(reason)).await
+}
+
+async fn begin_stop(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    bind_unbound: bool,
+    reason: Option<&str>,
 ) -> CommandStop {
     #[cfg(all(test, unix))]
     if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant("wire_stop")
@@ -261,6 +286,15 @@ pub(in crate::services::discord) async fn begin_command_stop(
         let _ = super::codex_stop_delivery::interrupt_herdr(pool, &token, provider).await;
     }
     let judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
+    #[cfg(unix)]
+    if let Some(reason) = reason
+        && let Some(token) = herdr_turn(&judgement)
+    {
+        let stop = super::codex_stop_delivery::herdr_command_stop;
+        return CommandStop::Herdr(stop(shared, provider, channel, token, reason).await);
+    }
+    #[cfg(not(unix))]
+    let _ = reason;
     // A confirmed channel's Discord turn still holds its mailbox token and keeps the channel stop.
     if matches!(judgement, Ok(None))
         && crate::services::tui_o::turn_mode::transcript_turns(channel.get())
@@ -279,6 +313,20 @@ pub(in crate::services::discord) async fn begin_command_stop(
         Some(_) if result.already_stopping => CommandStop::AlreadyStopping,
         Some(_) => CommandStop::Stop(stop),
     }
+}
+
+/// The judged token when it is a Herdr turn's; settlement is checked first, so nothing else is
+/// read while it is unavailable.
+#[cfg(unix)]
+fn herdr_turn(judgement: &ChannelJudgement) -> Option<&Arc<CancelToken>> {
+    use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+    if !herdr_stop_settlement_available() {
+        return None;
+    }
+    let Ok(Some(stop)) = judgement else {
+        return None;
+    };
+    stop.token.herdr_interrupt_state().map(|_| &stop.token)
 }
 
 #[cfg(all(test, unix))]

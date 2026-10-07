@@ -2372,6 +2372,7 @@ src/
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
+│   │   ├── herdr_user_stop.rs
 │   │   ├── inbound_order.rs
 │   │   ├── incarnation.rs
 │   │   ├── injected_inputs.rs
