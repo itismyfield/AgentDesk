@@ -2,7 +2,8 @@ id: E-19
 title: dcserver restart preserves live tmux session identity
 agent_mode: real_live
 coverage_class: live
-cells: [claude-tui, codex-tui]
+# Herdr: tmux identity checks are not_applicable; verify same status nonce and published reconnect row.
+cells: [claude-tui, codex-tui, claude-herdr, codex-herdr]
 isolation: required
 destructive: true
 acceptance_criteria:

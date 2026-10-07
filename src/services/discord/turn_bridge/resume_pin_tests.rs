@@ -452,7 +452,7 @@ inflight_state: durable.clone(), };
 }
 
 // Per-channel rendezvous: only the real bridge capture site calls this hook.
-pub(super) static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
+pub(in crate::services::discord) static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
     Option<(
         ChannelId,
         tokio::sync::oneshot::Sender<()>,
@@ -471,6 +471,26 @@ pub(super) async fn after_bridge_capture(channel: ChannelId) {
     if let Some((_, captured, resume)) = probe {
         let _ = captured.send(());
         resume.await.unwrap();
+    }
+}
+
+pub(in crate::services::discord) static BRIDGE_COMPLETION_PROBE: std::sync::Mutex<
+    Option<(ChannelId, tokio::sync::oneshot::Sender<()>)>,
+> = std::sync::Mutex::new(None);
+pub(super) fn observe_bridge_completion(channel: ChannelId, task: tokio::task::JoinHandle<()>) {
+    let probe = {
+        let mut slot = BRIDGE_COMPLETION_PROBE.lock().unwrap();
+        if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, completed)) = probe {
+        tokio::spawn(async move {
+            task.await.unwrap();
+            let _ = completed.send(());
+        });
     }
 }
 

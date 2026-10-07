@@ -854,6 +854,7 @@ src/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── live_agent_recovery.rs
+│   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
@@ -921,7 +922,8 @@ src/
 │   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   ├── boot_reaper.rs
 │   │   │   │   ├── custody_notice.rs
-│   │   │   │   └── custody_notice_tests.rs
+│   │   │   │   ├── custody_notice_tests.rs
+│   │   │   │   └── input_fence_reaper_tests.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
@@ -960,6 +962,7 @@ src/
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── removal.rs
+│   │   │   ├── restart_mark_fence_tests.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
@@ -1080,6 +1083,7 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
+│   │   │   ├── retirement_tests.rs
 │   │   │   ├── tick.rs
 │   │   │   └── tick_cleanup_tests.rs
 │   │   ├── prompt_builder/
@@ -1112,6 +1116,7 @@ src/
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── herdr_withheld_tests.rs
 │   │   │   │   ├── live_bridge_guard.rs
+│   │   │   │   ├── live_bridge_guard_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
 │   │   │   │   ├── test_barriers.rs
@@ -1166,7 +1171,9 @@ src/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   ├── host_deferred.rs
 │   │   │   │   ├── incarnation_follow_up.rs
+│   │   │   │   ├── input_fence.rs
 │   │   │   │   ├── orphan_token_finish.rs
+│   │   │   │   ├── retirement.rs
 │   │   │   │   └── unread_tail_seed.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── decision.rs
@@ -1293,12 +1300,14 @@ src/
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
+│   │   │   ├── queued_recovery_fence_tests.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
+│   │   │   ├── shutdown_input_fence_tests.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
@@ -1381,8 +1390,10 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_reaper/
+│   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
-│   │   │   └── host_guard_tests.rs
+│   │   │   ├── host_guard_tests.rs
+│   │   │   └── retirement_await_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1485,6 +1496,7 @@ src/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── drain.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── retirement_census_tests.rs
 │   │   │   ├── store.rs
 │   │   │   ├── sweep.rs
 │   │   │   ├── tombstone.rs
@@ -1492,8 +1504,11 @@ src/
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
+│   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
+│   │   │   ├── retirement_recheck_tests.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
 │   │   │   ├── turn_retirement.rs
@@ -1899,6 +1914,7 @@ src/
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_restart_handoff_mailbox_tests.rs
+│   │   ├── tmux_restart_handoff_retirement_await_tests.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
 │   │   ├── tmux_watcher_registry.rs

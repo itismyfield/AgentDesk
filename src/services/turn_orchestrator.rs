@@ -1209,6 +1209,10 @@ impl ChannelMailboxRegistry {
         let mut queued_total = 0usize;
         let mut persistence_errors = Vec::new();
         for (channel_id, handle) in handles {
+            // A held input channel's queue is already durable and owned by its transition.
+            if input_fence::held(provider, channel_id.get()) {
+                continue;
+            }
             let persistence = QueuePersistenceContext::new(
                 provider,
                 token_hash,

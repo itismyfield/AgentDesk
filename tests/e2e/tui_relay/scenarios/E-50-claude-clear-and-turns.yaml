@@ -2,7 +2,7 @@ id: E-50
 title: Claude 연속 턴 → !clear → 새 세션 턴, 턴마다 본문 정확히 1회
 agent_mode: real_live
 coverage_class: live
-cells: [claude-tui, claude-pipe]
+cells: [claude-tui, claude-pipe, claude-herdr]
 isolation: required
 acceptance_criteria:
   - T1·T2 are consecutive turns on one live session; each marker arrives exactly once

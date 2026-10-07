@@ -2,7 +2,8 @@ id: E-30
 title: Codex TUI warm follow-up reuses one live pane across turns (#4411)
 agent_mode: real_live
 coverage_class: live
-cells: [codex-tui]
+# Herdr: tmux identity checks are not_applicable; Codex follow-up expected-fail #5340 P10-2.
+cells: [codex-tui, codex-herdr]
 isolation: required
 notes: |
   Optional live scenario; the matrix preflight may skip the codex-tui cell when

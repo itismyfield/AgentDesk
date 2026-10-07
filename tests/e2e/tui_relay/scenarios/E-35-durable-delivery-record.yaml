@@ -2,7 +2,8 @@ id: E-35
 title: 새 normal Discord response의 exact durable receipt + covering frontier
 agent_mode: real_live
 coverage_class: live
-cells: [claude-pipe, claude-tui]
+# Herdr: Discord body/completion checks only; durable receipt/frontier proof is not_applicable.
+cells: [claude-pipe, claude-tui, claude-herdr, codex-herdr]
 isolation: required
 durable_delivery_probe: true
 # #5264 is a hard prerequisite only for default claude-tui live acceptance.

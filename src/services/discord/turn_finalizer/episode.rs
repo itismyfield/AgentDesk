@@ -512,6 +512,7 @@ impl TurnFinalizer {
                 event: event.clone(),
                 ctx,
                 evidence,
+                input_permit: super::super::input_runtime::fence::effect::current(),
                 shared: shared.clone(),
                 ack,
             })
