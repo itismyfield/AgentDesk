@@ -71,6 +71,7 @@ COVERAGE_CLASS_RANK = {
 REAL_PROVIDER_STEP_KEYS: tuple[str, ...] = (
     "send_prompt",
     "send_discord_prompt",
+    "deliver_prompt",
     "send_provider_hold_prompt",
     "send_timed_response_prompt",
     "send_prompts_concurrent",
@@ -127,6 +128,7 @@ TUI_IDLE_DRAFT_GUARD_POLL_S = float(
 )
 DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
+    "deliver_results",
     "discord_prompt_records",
     "e36_acceptance",
     "known_gaps",
@@ -3403,6 +3405,33 @@ def run_scenario(
     return result
 
 
+def post_send_sleep(step):
+    delay = step.get("post_send_sleep_s", 3)
+    if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+        raise ValueError("post_send_sleep_s must be a finite nonnegative number")
+    time.sleep(delay)
+
+
+def deliver_step(client, step, *, cell, run_id, record):
+    author = os.environ.get("AGENTDESK_E2E_DELIVER_AUTHOR_ID", "").strip()
+    if not author:
+        raise assertions.AssertionError("deliver_prompt requires AGENTDESK_E2E_DELIVER_AUTHOR_ID")
+    params = step["deliver_prompt"]
+    if isinstance(params, str):
+        params = {"text": params}
+    if not isinstance(params, dict) or not isinstance(params.get("text"), str) or not params["text"].strip():
+        raise assertions.AssertionError("deliver_prompt requires nonempty text")
+    if "author" in params or "author_discord_user_id" in params:
+        raise assertions.AssertionError("deliver author must come only from AGENTDESK_E2E_DELIVER_AUTHOR_ID")
+    index = len(record.get("deliver_results", []))
+    response = client.deliver(params.get("agent", cell_default_agent(cell)),
+                              params["text"].replace("{run_id}", run_id), author,
+                              params.get("source", "adk-e2e-orchestrator"),
+                              str(params.get("origin_id", f"{run_id}-deliver-{index}")).replace("{run_id}", run_id))
+    record.setdefault("deliver_results", []).append({k: response.get(k) for k in ("delivery", "reason", "inject_veto")})
+    return response
+
+
 def run_one_cell(
     *,
     scenario: dict[str, Any],
@@ -3573,7 +3602,13 @@ def run_one_cell(
             record.setdefault("controlled_harness_evidence", []).append(
                 controlled_evidence
             )
-        if "send_discord_prompt" in step:
+        if "deliver_prompt" in step:
+            _prepare_first_prompt_window()
+            window.mark_prompt_sent()
+            deliver_step(client, step, cell=cell, run_id=run_id, record=record)
+            _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
+            post_send_sleep(step)
+        elif "send_discord_prompt" in step:
             _prepare_first_prompt_window()
             if scenario.get("durable_delivery_probe"):
                 safety = durable_probe_safety_gate(
@@ -3595,7 +3630,7 @@ def run_one_cell(
                     response.get("message_id") or response.get("id") or ""
                 )
             _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
-            time.sleep(3)
+            post_send_sleep(step)
         elif "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
@@ -3614,7 +3649,7 @@ def run_one_cell(
                 response,
                 channel_id=channel_id,
             )
-            time.sleep(3)
+            post_send_sleep(step)
         elif "send_provider_hold_prompt" in step or "send_timed_response_prompt" in step:
             _prepare_first_prompt_window()
             timed_response = "send_timed_response_prompt" in step
@@ -3654,7 +3689,7 @@ def run_one_cell(
                     "turn_identity": dict(last_turn_identity),
                 }
             )
-            time.sleep(3)
+            post_send_sleep(step)
         elif "send_prompts_concurrent" in step:
             _prepare_first_prompt_window()
             params = step["send_prompts_concurrent"]
@@ -4509,6 +4544,26 @@ def run_assertion(
             high=int(params.get("max", 999)),
             include_our_send=bool(params.get("include_our_send", False)),
         )
+    elif "deliver_result" in spec:
+        params = spec["deliver_result"]
+        rows = (record or {}).get("deliver_results")
+        if not isinstance(params, dict) or not params or set(params) - {"delivery", "inject_veto"}:
+            raise assertions.AssertionError("deliver_result requires delivery/inject_veto allowed-value lists")
+        if not rows:
+            raise assertions.AssertionError("deliver_result requires an observed deliver response")
+        for key, allowed in params.items():
+            if not isinstance(allowed, list) or not allowed or any(row.get(key) not in allowed for row in rows):
+                raise assertions.AssertionError(f"deliver_result {key} not in {allowed!r}: {rows!r}")
+    elif spec.get("no_placeholder_left"):
+        if not hasattr(assertions, "no_placeholder_left"):
+            raise assertions.AssertionError("assertion not available yet: no_placeholder_left")
+        assertions.no_placeholder_left(window)
+    elif "completion_per_turn" in spec:
+        if not hasattr(assertions, "completion_per_turn"):
+            raise assertions.AssertionError("assertion not available yet: completion_per_turn")
+        params = spec["completion_per_turn"]
+        marker = params.get("marker")
+        assertions.completion_per_turn(window, exact=params.get("exact", 1), marker=expand_marker(marker) if marker is not None else None)
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:

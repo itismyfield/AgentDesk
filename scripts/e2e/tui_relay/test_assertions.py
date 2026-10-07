@@ -10,6 +10,7 @@ import contextlib
 import copy
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1907,3 +1908,88 @@ class HerdrHealthAssertions(unittest.TestCase):
         health.assert_called_once_with(args.base_url, '/api/health', timeout=5)
         status.assert_called_once_with(['/test/agentdesk', 'herdr', 'status'], capture_output=True, text=True, check=True, timeout=30)
         self.assertEqual(result['row']['nonce'], 'one')
+
+
+class DeliverHarnessContract(unittest.TestCase):
+    def test_deliver_http_route_body_and_response(self):
+        from tui_relay import discord
+        from tui_relay.test_discord_client import _Response
+        payload = {'ok': True, 'delivery': 'queued', 'reason': 'external_turn_active', 'inject_veto': 'not_busy'}
+        with patch.object(discord.urllib.request, 'urlopen', return_value=_Response(payload)) as request:
+            result = discord.DiscordClient('http://unused.test/').deliver('test/agent', 'hello', '123', 'e2e', 'run-1')
+        req = request.call_args.args[0]
+        self.assertEqual(req.full_url, 'http://unused.test/api/agents/test%2Fagent/turn/deliver')
+        self.assertEqual(req.get_method(), 'POST')
+        self.assertEqual(json.loads(req.data), {'text': 'hello', 'author_discord_user_id': '123', 'source': 'e2e', 'origin_id': 'run-1'})
+        self.assertEqual(result, payload)
+        with patch.object(discord.urllib.request, 'urlopen', return_value=_Response({'ok': False})):
+            with self.assertRaisesRegex(RuntimeError, 'invalid/refused'):
+                discord.DiscordClient('http://unused.test').deliver('agent', 'hello', '123', 'e2e', 'run-1')
+
+    def test_author_only_from_environment_and_step_result(self):
+        client = MagicMock()
+        client.deliver.return_value = {'delivery': 'injected', 'reason': None, 'inject_veto': None}
+        record = {}
+        step = {'deliver_prompt': {'text': 'marker {run_id}', 'origin_id': '{run_id}-input'}}
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(assertions.AssertionError, 'AGENTDESK_E2E_DELIVER_AUTHOR_ID'):
+                driver.deliver_step(client, step, cell='claude-herdr', run_id='run', record=record)
+        client.deliver.assert_not_called()
+        with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}):
+            driver.deliver_step(client, step, cell='claude-herdr', run_id='run', record=record)
+            with self.assertRaisesRegex(assertions.AssertionError, 'author must come only'):
+                driver.deliver_step(client, {'deliver_prompt': {'text': 'hello', 'author': '999'}}, cell='claude-herdr', run_id='run', record=record)
+        client.deliver.assert_called_once_with('adk-claude-tui-e2e', 'marker run', '123', 'adk-e2e-orchestrator', 'run-input')
+        self.assertEqual(record['deliver_results'], [{'delivery': 'injected', 'reason': None, 'inject_veto': None}])
+        driver.run_assertion({'deliver_result': {'delivery': ['injected'], 'inject_veto': [None]}}, window=assertions.Window('1'), record=record)
+        for spec in ({'delivery': ['queued']}, {'inject_veto': ['not_busy']}, {'delivery': []}, {}):
+            with self.assertRaises(assertions.AssertionError):
+                driver.run_assertion({'deliver_result': spec}, window=assertions.Window('1'), record=record)
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({'deliver_result': {'delivery': ['injected']}}, window=assertions.Window('1'), record={})
+
+    def test_step_delay_default_override_and_invalid(self):
+        with patch.object(driver.time, 'sleep') as sleep:
+            driver.post_send_sleep({})
+            driver.post_send_sleep({'post_send_sleep_s': 0})
+            driver.post_send_sleep({'post_send_sleep_s': 0.25})
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [3, 0, 0.25])
+            for value in (-1, '3', True, float('inf'), float('nan')):
+                with self.assertRaises(ValueError):
+                    driver.post_send_sleep({'post_send_sleep_s': value})
+
+    def test_bulk_assertions_fail_closed_until_lane_lands(self):
+        from types import SimpleNamespace
+        window = assertions.Window('1')
+        with patch.object(driver, 'assertions', SimpleNamespace(AssertionError=assertions.AssertionError)):
+            for spec in ({'no_placeholder_left': True}, {'completion_per_turn': {'exact': 1}}):
+                with self.assertRaisesRegex(assertions.AssertionError, 'assertion not available yet'):
+                    driver.run_assertion(spec, window=window)
+        no_placeholder, completion = MagicMock(), MagicMock()
+        with patch.object(assertions, 'no_placeholder_left', no_placeholder, create=True), \
+             patch.object(assertions, 'completion_per_turn', completion, create=True):
+            driver.run_assertion({'no_placeholder_left': True}, window=window)
+            driver.run_assertion({'completion_per_turn': {'exact': 2, 'marker': '{run_id}-body'}}, window=window, run_id='run')
+        no_placeholder.assert_called_once_with(window)
+        completion.assert_called_once_with(window, exact=2, marker='run-body')
+
+    def test_deliver_dispatch_in_legacy_and_herdr_runner(self):
+        scenario = {'id': 'deliver-test', 'agent_mode': 'real_live', 'coverage_class': 'live',
+                    'steps': [{'deliver_prompt': 'test {run_id}', 'post_send_sleep_s': 0.5}],
+                    'assertions': [{'deliver_result': {'delivery': ['queued'], 'inject_veto': [None]}}]}
+        for cell in ('claude-pipe', 'claude-herdr'):
+            client = MagicMock()
+            client.send_control.return_value = {'id': '100'}
+            client.fetch_messages.return_value = []
+            client.deliver.return_value = {'delivery': 'queued', 'reason': 'turn_active'}
+            args = Namespace(cell=cell, channel_id='41', dry_run=False, base_url='http://unused.test',
+                             reset_before_each=False, hard_reset_session_each=False, allow_destructive=False,
+                             queue_runtime_root='unused', final_refetches=1, thread_channel_id=None)
+            with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}), \
+                 patch.object(driver, 'assert_cell_idle', return_value={'status': 'idle'}), \
+                 patch.object(driver.herdr, 'observe', return_value={'herdr': {}}), patch.object(driver.time, 'sleep') as sleep:
+                result = driver.run_scenario(scenario, args=args, client=client, run_id='run')
+            self.assertEqual(result['status'], 'pass', result)
+            self.assertEqual(result['deliver_results'][0]['reason'], 'turn_active')
+            client.deliver.assert_called_once()
+            self.assertIn(((0.5,), {}), [(c.args, c.kwargs) for c in sleep.call_args_list])

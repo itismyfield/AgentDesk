@@ -240,7 +240,13 @@ def _run(driver, scenario, args, client, run_id, result):
                         raise
                 continue
             phase = next(iter(step))
-            if "send_prompt" in step or "send_discord_prompt" in step or "send_provider_hold_prompt" in step:
+            if "deliver_prompt" in step:
+                window.mark_prompt_sent()
+                driver.deliver_step(client, step, cell=args.cell, run_id=run_id, record=result)
+                result["real_provider_contacted"] = True
+                prompt_count += 1
+                driver.post_send_sleep(step)
+            elif "send_prompt" in step or "send_discord_prompt" in step or "send_provider_hold_prompt" in step:
                 if scenario["id"] == "E-12":
                     prompt = driver.build_provider_hold_prompt({"ok_marker": "[E2E:E12:OK]", "late_marker": "[E2E:E12:LATE]", "hold_seconds": 60}, scenario_id="E-12")
                 elif "send_provider_hold_prompt" in step:
@@ -255,6 +261,7 @@ def _run(driver, scenario, args, client, run_id, result):
                 result["agent_mode_actual"] = "real_live"
                 try:
                     client.send(args.channel_id, prompt)
+                    driver.post_send_sleep(step)
                 except Exception:
                     # Transport/auth errors are never an expected product gap.
                     gap_failure = False
@@ -292,6 +299,7 @@ def _run(driver, scenario, args, client, run_id, result):
                 if not first_response:
                     raise assertions.AssertionError("text stop requires running hold witness")
                 client.send(args.channel_id, "!stop")  # The same normal Discord transport as prompts.
+                driver.post_send_sleep(step)
                 gap_attempted = True
                 ack = "중지하고 있어요..."
                 refused = "이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요."
