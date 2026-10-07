@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "55b5bd0cae68e4a2540d3815d4ed161ba34e41e9",
+  "measured_at_sha": "309a5e601f13d4bbe295358eef55b14f5e60e299",
   "records": [
     {
       "root": "migrations/postgres",
@@ -30196,6 +30196,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:b75b525fc1453a75f89721661f8ea14eed5fc732a0c3757ee3c58d95b9c7c1a3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7880c734dc63a6edb1ff2947e399d53a307b6727b19121dc9ce6e9f8863e17e2"
     },
     {
       "root": "src",
