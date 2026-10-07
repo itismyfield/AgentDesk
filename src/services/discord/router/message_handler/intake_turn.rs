@@ -33,10 +33,8 @@ mod input_effect_tests {
     #[test]
     fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
         let source = include_str!("intake_turn.rs");
-        let body = source
-            .split_once("\npub(super) async fn handle_text_message(")
-            .unwrap()
-            .1;
+        let handler_marker = ["\npub(super) async fn handle_", "text_message("].concat();
+        let body = source.split_once(handler_marker.as_str()).unwrap().1;
         let start = body
             .find(
                 "    let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit))",
