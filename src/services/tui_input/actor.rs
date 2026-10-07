@@ -1,8 +1,10 @@
 //! Dormant channel input actor: gate, inject and confirm the oldest open ledger row.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::time::{Duration, Instant};
 
+use super::attempt::{Disposition, Tracking};
 use super::ledger::Ledger;
 use super::rows::{AttemptEvidence, DoneReason, Entry, HeldReason, Row, RowState, Rows};
 use crate::services::tui_o::shadow::capture::SourceCapture;
@@ -12,6 +14,7 @@ use crate::services::tui_o::writer::input_facts::{ChannelFact, TurnState};
 
 pub mod gate;
 pub mod pane;
+pub(crate) mod token;
 pub(crate) mod witness;
 
 use gate::{PaneVerdict, judge_pane};
@@ -72,7 +75,9 @@ impl<P: Pane> InputActor<P> {
         fact: Option<&ChannelFact>,
         now: Instant,
     ) -> io::Result<Step> {
-        let rows = ledger.rows()?;
+        let Some((rows, foreign)) = self.observe(ledger)? else {
+            return Ok(Step::Wait("witness_scan"));
+        };
         let Some((key, mut row)) = head(&rows) else {
             self.attempt = None;
             return Ok(Step::Idle);
@@ -103,15 +108,65 @@ impl<P: Pane> InputActor<P> {
             .filter(|fact| fact.binding == self.binding)
             .map(|fact| (&fact.state, fact.through));
         match row.state {
+            // A frame this ledger never registered may be an old delivery: offer nothing new.
+            RowState::Received | RowState::Ready if foreign => Ok(Step::Wait("foreign_frame")),
             RowState::Received | RowState::Ready => self.offer(ledger, key, &row, fact, now).await,
             RowState::AwaitTurn if self.attempt.is_some() => {
                 self.confirm(ledger, key, &row, fact, now)
             }
+            // A tracked row completes only through a matched close in `observe`.
+            RowState::Running if !row.attempts.is_empty() => Ok(Step::Wait("turn_open")),
             RowState::Running => self.finish(ledger, key, &row, fact),
             // This process holds no paste anchor, so the effect cannot be judged; never re-inject.
             RowState::Injecting | RowState::AwaitTurn => self.reconcile(ledger, key, &row),
             state => Ok(Step::Blocked(key, state)),
         }
+    }
+
+    /// Records every registered witness and matched close before any decision. Nothing else runs
+    /// until the read reached the source's end, and a failed append ends the step.
+    fn observe(&self, ledger: &mut Ledger) -> io::Result<Option<(Rows, bool)>> {
+        let rows = ledger.rows()?;
+        if !rows.open_rows().any(|(_, row)| !row.attempts.is_empty()) {
+            return Ok(Some((rows, false)));
+        }
+        let Ok(seen) = witness::scan_tracked(&self.binding, &rows) else {
+            return Ok(None);
+        };
+        for (key, witness) in seen.witnesses {
+            ledger.append_witness(key, witness)?;
+        }
+        let rows = ledger.rows()?;
+        let state = |key| rows.row(key).map(|row| row.state);
+        let mut settled = BTreeSet::new();
+        for (key, aborted) in seen.closed {
+            if state(key) != Some(RowState::Running) || !settled.insert(key) {
+                continue;
+            }
+            let done = RowState::Done(DoneReason::Completed);
+            if aborted {
+                let tracking = Tracking {
+                    disposition: Some(Disposition::Interrupted),
+                    ..Tracking::default()
+                };
+                ledger.append_tracked(key, done, None, &tracking)?;
+            } else {
+                set(ledger, key, done)?;
+            }
+        }
+        // A provider that rewrote our frame leaves an unconfirmed row's effect unknown.
+        for key in seen.altered {
+            if matches!(
+                state(key),
+                Some(RowState::Injecting | RowState::AwaitTurn | RowState::Queued)
+            ) {
+                set(ledger, key, RowState::Held(HeldReason::Ambiguous))?;
+            }
+        }
+        if !seen.complete {
+            return Ok(None);
+        }
+        Ok(Some((ledger.rows()?, seen.foreign > 0)))
     }
 
     async fn offer(

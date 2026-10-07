@@ -433,3 +433,96 @@ fn strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes() 
         .is_err()
     );
 }
+
+fn shape(event: &Ordered) -> String {
+    let id = |id: &Option<String>| id.clone().unwrap_or_else(|| "-".into());
+    match event {
+        Ordered::Opened { native_turn_id, .. } => format!("opened {}", id(native_turn_id)),
+        Ordered::Closed {
+            native_turn_id,
+            aborted,
+            ..
+        } => format!("closed {} aborted={aborted}", id(native_turn_id)),
+        Ordered::Input { record_key, .. } => format!("input {}", id(record_key)),
+    }
+}
+
+fn shapes(facts: &InputFacts) -> Vec<String> {
+    facts.events().iter().map(shape).collect()
+}
+
+// T1's abort, T2's start and a merged user keep record order in one poll, many polls or a torn line.
+#[test]
+fn ordered_events_keep_abort_start_and_input_in_record_order() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("parent.jsonl");
+    let meta = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path()}});
+    std::fs::write(&path, format!("{meta}\n")).unwrap();
+    let parent = binding(&path, ShadowProvider::Codex, 31);
+    append(&path, &[codex("task_started", "t1")]);
+    let resume = std::fs::metadata(&path).unwrap().len();
+    let text = format!(
+        "[adk:tok={}]\nhello\n[adk:end={}]",
+        "a".repeat(32),
+        "a".repeat(32)
+    );
+    let merged = json!({"type":"response_item","payload":{"type":"message",
+        "role":"user","content":[{"type":"input_text","text":text}]}});
+    let lines = [
+        codex("turn_aborted", "t1"),
+        codex("task_started", "t2"),
+        merged,
+    ];
+    append(&path, &lines);
+    let t2 = TurnState::Open {
+        native_turn_id: Some("t2".into()),
+    };
+    let expected = ["closed t1 aborted=true", "opened t2", "input -"];
+
+    let mut facts = InputFacts::open(parent.clone()).unwrap();
+    assert_eq!(facts.poll(u64::MAX).unwrap().state, t2);
+    assert_eq!(
+        shapes(&facts),
+        ["opened t1"]
+            .into_iter()
+            .chain(expected)
+            .collect::<Vec<_>>()
+    );
+
+    let mut facts = InputFacts::open_at(parent.clone(), resume).unwrap();
+    let mut seen = Vec::new();
+    for line in &lines {
+        facts.poll(line.to_string().len() as u64 + 1).unwrap();
+        seen.extend(shapes(&facts));
+    }
+    // Read from inside T1, its abort closes a turn whose opener lies before the read.
+    assert_eq!(seen, ["closed - aborted=true", "opened t2", "input -"]);
+
+    let torn = json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t2"}});
+    let torn = torn.to_string();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&torn.as_bytes()[..10]).unwrap();
+    let mut facts = InputFacts::open(parent.clone()).unwrap();
+    assert_eq!(facts.poll(u64::MAX).unwrap().state, t2);
+    assert!(!facts.caught_up().unwrap());
+    file.write_all(&torn.as_bytes()[10..]).unwrap();
+    file.write_all(b"\n").unwrap();
+    assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
+    assert_eq!(shapes(&facts), ["closed t2 aborted=false"]);
+    assert!(facts.caught_up().unwrap());
+
+    // A Claude prompt that opens its turn is ordered after the opening it causes.
+    let claude = root.path().join("claude.jsonl");
+    std::fs::write(&claude, "").unwrap();
+    let mut facts = InputFacts::open(binding(&claude, ShadowProvider::Claude, 32)).unwrap();
+    let stop = json!({"type":"user","message":{"content":"[Request interrupted by user]"}});
+    append(&claude, &[user("u-1", &text), stop]);
+    facts.poll(u64::MAX).unwrap();
+    assert_eq!(
+        shapes(&facts),
+        ["opened u-1", "input u-1", "closed u-1 aborted=true"]
+    );
+}
