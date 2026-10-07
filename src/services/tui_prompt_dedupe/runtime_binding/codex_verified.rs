@@ -197,7 +197,12 @@ fn commit(
     context: &BindingContext,
     claim: &Claim,
 ) -> io::Result<Fold> {
-    let previous = binding_events::codex::read_ownership(context)?.verified;
+    let prior_fold = binding_events::codex::read_ownership(context)?;
+    let matching_pending = prior_fold
+        .pending
+        .iter()
+        .any(|p| p.claim.same_candidate(claim));
+    let previous = prior_fold.verified;
     let retry = matches!(&claim.evidence, ClaimEvidence::NativeHook { event, .. } if event == "user_prompt_submit")
         && previous
             .as_ref()
@@ -230,7 +235,9 @@ fn commit(
     });
     // A path hint cannot split a retry of the same opened native descriptor.
     let persisted_claim = match (&previous, &decision) {
-        (Some(proof), Decision::Verified(source)) if &proof.source == source => {
+        (Some(proof), Decision::Verified(source))
+            if &proof.source == source && !matching_pending =>
+        {
             &proof.ownership.claim
         }
         _ => claim,
@@ -373,7 +380,6 @@ pub(super) fn publish_proof(
         relay_last_offset: Some(0),
     };
     proof_for_binding(authority, context, &binding)?;
-    let binding = super::codex_cursor::restore(authority, binding)?;
     session::write_codex_tui_rollout_marker_under_source_authority(
         authority,
         &proof.source.path,
@@ -381,6 +387,7 @@ pub(super) fn publish_proof(
         Some(0),
     )
     .map_err(io::Error::other)?;
+    let binding = super::codex_cursor::restore_after_publication(authority, binding)?;
     super::codex_cursor::persist(authority, &binding)?;
     with_runtime_binding_state_under_source_authority(authority, |state| {
         state.runtime_by_tmux.insert(

@@ -981,3 +981,107 @@ fn typed_proof_does_not_activate_or_replace_legacy_mtime_selection() {
         Err("SourceModeVerifiedNotLanded")
     );
 }
+
+#[test]
+fn optional_path_pending_reuses_the_exact_durable_source_proof() {
+    for initial_path in [false, true] {
+        let fixture = Fixture::new();
+        let source = fixture.source(PARENT);
+        let mut initial = fixture.claim(&source);
+        if !initial_path {
+            initial.path = None;
+        }
+        let first = fixture.commit(&initial, Decision::Verified(source.clone()));
+        let mut retry = fixture.claim(&source);
+        if initial_path {
+            retry.path = None;
+        }
+        let pending = fixture.commit(&retry, Decision::Pending);
+        assert_eq!(pending.pending[0].seq, 2);
+        forget_channel_for_tests(584_503);
+        let resolved = fixture.commit(&retry, Decision::Verified(source.clone()));
+        let proof = resolved.verified.as_ref().unwrap();
+        assert_eq!(proof.seq, 3);
+        assert_eq!(proof.ownership.pending_seq, Some(2));
+        assert_eq!(proof.ownership.reused_proof_seq, Some(1));
+        assert_eq!(proof.ownership.claim, retry);
+        assert_eq!(proof.source, source);
+        assert!(resolved.pending.is_empty());
+        assert!(!resolved.conflicted);
+        assert_eq!(
+            codex::proof_at_seq(&fixture.context, 1).unwrap(),
+            first.verified
+        );
+        assert!(codex::proof_at_seq(&fixture.context, 2).unwrap().is_none());
+        assert!(codex::proof_at_seq(&fixture.context, 99).unwrap().is_none());
+        let mut foreign = fixture.context.clone();
+        foreign.execution_nonce = "b".repeat(32);
+        assert!(codex::proof_at_seq(&foreign, 1).unwrap().is_none());
+        forget_channel_for_tests(584_503);
+        assert_eq!(codex::read_ownership(&fixture.context).unwrap(), resolved);
+        let bytes = fixture.bytes();
+        fixture.commit(&retry, Decision::Verified(source));
+        assert_eq!(fixture.bytes(), bytes);
+    }
+}
+
+#[test]
+fn reused_proof_witness_rejects_missing_pending_and_wrong_history() {
+    for damage in 0..9 {
+        let fixture = Fixture::new();
+        let source = fixture.source(PARENT);
+        let mut initial = fixture.claim(&source);
+        initial.path = None;
+        fixture.commit(&initial, Decision::Verified(source.clone()));
+        let retry = fixture.claim(&source);
+        fixture.commit(&retry, Decision::Pending);
+        fixture.commit(&retry, Decision::Verified(source));
+        let mut records: Vec<serde_json::Value> = fixture
+            .bytes()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        match damage {
+            0 => {
+                records[2]["codex_ownership"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("reused_proof_seq");
+            }
+            1 => records[2]["codex_ownership"]["reused_proof_seq"] = 0.into(),
+            2 => records[2]["codex_ownership"]["reused_proof_seq"] = 2.into(),
+            3 => records[2]["codex_ownership"]["reused_proof_seq"] = 3.into(),
+            4 => records[2]["codex_ownership"]["reused_proof_seq"] = 99.into(),
+            5 => records[2]["codex_ownership"]["pending_seq"] = 1.into(),
+            6 => records[2]["old"]["ino"] = 7.into(),
+            7 => {
+                records[2]["codex_ownership"]["claim"]["path"] =
+                    serde_json::json!(fixture.root.path().join("sessions/foreign.jsonl"))
+            }
+            _ => {
+                records[0]["execution_nonce"] = "b".repeat(32).into();
+                records[0]["codex_ownership"]["context"]["execution_nonce"] = "b".repeat(32).into();
+            }
+        }
+        let bytes: Vec<u8> = records
+            .into_iter()
+            .flat_map(|record| {
+                let mut bytes = serde_json::to_vec(&record).unwrap();
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect();
+        fs::write(fixture.path(), &bytes).unwrap();
+        forget_channel_for_tests(584_503);
+        assert!(
+            codex::read_ownership(&fixture.context).is_err(),
+            "damage {damage}"
+        );
+        assert!(
+            codex::proof_at_seq(&fixture.context, 1).is_err(),
+            "damage {damage}"
+        );
+        assert_eq!(fixture.bytes(), bytes);
+    }
+}

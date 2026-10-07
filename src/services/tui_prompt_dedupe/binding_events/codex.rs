@@ -192,6 +192,9 @@ pub(crate) struct Ownership {
     pub context: BindingContext,
     pub claim: Claim,
     pub pending_seq: Option<u64>,
+    // A revalidated source may reuse eligibility without changing the exact Pending claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_proof_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canonical_witnesses: Vec<CanonicalWitness>,
 }
@@ -232,9 +235,18 @@ impl Claim {
             if event == "user_prompt_submit" || (event == "session_start" && source.as_deref() == Some("startup")))
     }
 
-    fn same_candidate(&self, other: &Self) -> bool {
+    pub(crate) fn same_candidate(&self, other: &Self) -> bool {
         self.session_id == other.session_id
             && self.path == other.path
+            && ((self.fresh() && other.fresh()) || self.evidence == other.evidence)
+    }
+
+    fn same_source_candidate(&self, other: &Self, source: &SourceId) -> bool {
+        self.session_id == other.session_id
+            && self.session_id == source.session_id
+            && [self.path.as_ref(), other.path.as_ref()]
+                .into_iter()
+                .all(|path| path.is_none_or(|path| path == &source.path))
             && ((self.fresh() && other.fresh()) || self.evidence == other.evidence)
     }
 
@@ -384,7 +396,7 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
             }
             let (session, path) = match &event.new {
                 BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-                    if !proof.claim.eligible(&proof.context)
+                    if (!proof.claim.eligible(&proof.context) && proof.reused_proof_seq.is_none())
                         || !claim_path(&proof.context, &source.path)
                     {
                         return Err(invalid("ineligible Codex ownership proof"));
@@ -417,6 +429,7 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
             {
                 return Err(invalid("Codex claim/source mismatch"));
             }
+            validate_reused_proof(proof, event, &read.records)?;
             validate_witnesses(proof, event, &read.records)?;
         }
     }
@@ -474,8 +487,12 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
                 });
             }
             BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-                if fold.verified.as_ref().is_some_and(|p| p.source != *source)
-                    || !fold.pending.is_empty()
+                if fold.verified.as_ref().is_some_and(|p| {
+                    p.source != *source
+                        || ownership.reused_proof_seq.is_some_and(|seq| seq != p.seq)
+                        || (!p.ownership.claim.same_candidate(&ownership.claim)
+                            && ownership.reused_proof_seq != Some(p.seq))
+                }) || !fold.pending.is_empty()
                     || !neutral_legacy(context, records, source, event.seq, |seq, observed| {
                         recorded_native(seq, observed, source, &ownership.canonical_witnesses)
                     })
@@ -500,6 +517,30 @@ pub(crate) fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
     let channel = ownership_context(context)?;
     let _logs = lock_logs();
     fold_records(context, &ownership_records(channel)?)
+}
+
+pub(crate) fn proof_at_seq(
+    context: &BindingContext,
+    seq: u64,
+) -> io::Result<Option<VerifiedProof>> {
+    let channel = ownership_context(context)?;
+    let _logs = lock_logs();
+    Ok(ownership_records(channel)?.into_iter().find_map(|logged| {
+        let ownership = logged.codex_ownership?;
+        if logged.event.seq != seq || ownership.context != *context {
+            return None;
+        }
+        match logged.event.new {
+            BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
+                Some(VerifiedProof {
+                    seq,
+                    source,
+                    ownership,
+                })
+            }
+            _ => None,
+        }
+    }))
 }
 
 pub(crate) fn context_for_nonce(
@@ -547,6 +588,44 @@ fn recorded_native(
                     && witness.observed == *observed
                     && witness.source == *source
             }))
+}
+
+fn validate_reused_proof(
+    ownership: &Ownership,
+    event: &BindingEvent,
+    records: &[Logged],
+) -> io::Result<()> {
+    let Some(seq) = ownership.reused_proof_seq else {
+        return Ok(());
+    };
+    let BindingTarget::Resolved { source, .. } = &event.new else {
+        return Err(invalid("reused Codex proof without resolution"));
+    };
+    let prior = seq
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| records.get(index))
+        .filter(|record| record.event.seq == seq && seq < event.seq)
+        .ok_or_else(|| invalid("invalid reused Codex proof sequence"))?;
+    let prior_ownership = prior
+        .codex_ownership
+        .as_ref()
+        .filter(|prior| prior.context == ownership.context)
+        .ok_or_else(|| invalid("reused Codex proof incarnation mismatch"))?;
+    let prior_source = match &prior.event.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => source,
+        _ => return Err(invalid("reused Codex record is not a proof")),
+    };
+    if ownership.pending_seq.is_none()
+        || prior_source != source
+        || event.old.as_ref() != Some(source)
+        || !prior_ownership
+            .claim
+            .same_source_candidate(&ownership.claim, source)
+    {
+        return Err(invalid("reused Codex proof candidate mismatch"));
+    }
+    Ok(())
 }
 
 fn validate_witnesses(
@@ -662,6 +741,7 @@ pub(crate) fn commit_claim(
             }
             let pending = fold.pending.iter().find(|p| p.claim.same_candidate(claim));
             let mut canonical_witnesses = Vec::new();
+            let mut reused_proof_seq = None;
             let verified = match &decision {
                 Decision::Verified(source) => {
                     if !claim_path(context, &source.path)
@@ -671,13 +751,24 @@ pub(crate) fn commit_claim(
                     {
                         return Err(invalid("stale Codex claim descriptor"));
                     }
+                    reused_proof_seq = fold
+                        .verified
+                        .as_ref()
+                        .filter(|proof| {
+                            pending.is_some()
+                                && proof.source == *source
+                                && proof.ownership.claim.same_source_candidate(claim, source)
+                        })
+                        .map(|proof| proof.seq);
                     let same_proof = fold.verified.as_ref().is_some_and(|p| {
-                        p.source == *source && p.ownership.claim.same_candidate(claim)
+                        p.source == *source
+                            && (p.ownership.claim.same_candidate(claim)
+                                || reused_proof_seq.is_some())
                     });
                     if same_proof && pending.is_none() {
                         return Ok(Planned::Keep(Committed::Unchanged));
                     }
-                    claim.eligible(context)
+                    (claim.eligible(context) || reused_proof_seq.is_some())
                         && (fold.verified.is_none() || same_proof)
                         && fold.pending.iter().all(|p| p.claim.same_candidate(claim))
                         && neutral_legacy(
@@ -772,6 +863,7 @@ pub(crate) fn commit_claim(
                     context: context.clone(),
                     claim: claim.clone(),
                     pending_seq,
+                    reused_proof_seq: verified.then_some(reused_proof_seq).flatten(),
                     canonical_witnesses: if verified {
                         canonical_witnesses
                     } else {

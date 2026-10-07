@@ -658,6 +658,120 @@ fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
 }
 
 #[test]
+fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors() {
+    for restart in [false, true] {
+        for normalized in [false, true] {
+            let h = Fixture::new("fresh", None);
+            h.header(ID, false);
+            h.send("session-start", ID, Value::Null, None);
+            let first = h.fold().verified.unwrap();
+            let relay =
+                crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
+            if normalized {
+                fs::write(&relay, "delivered\nunread relay bytes\n").unwrap();
+                let mut binding = h.binding();
+                binding.relay_output_path = Some(relay.clone());
+                register_tmux_runtime_binding(&h.context.tmux_session, binding);
+            }
+            assert!(advance_tmux_runtime_binding_offset(
+                &h.context.tmux_session,
+                h.path(ID).to_str().unwrap(),
+                12
+            ));
+            if normalized {
+                assert!(advance_tmux_runtime_binding_offset(
+                    &h.context.tmux_session,
+                    &relay,
+                    10
+                ));
+            }
+            let m = if normalized { 10 } else { 12 };
+            let held = h.path(ID).with_extension("held");
+            fs::rename(h.path(ID), &held).unwrap();
+            h.send("user-prompt-submit", ID, json!("later prompt"), None);
+            let pending = h.fold();
+            assert_eq!(pending.pending.len(), 1);
+            assert!(pending.conflicted);
+            assert!(h.consumer().is_none());
+            let pending_seq = pending.pending[0].seq;
+            assert_eq!(h.raw().unwrap().last_offset, 12);
+            fs::rename(&held, h.path(ID)).unwrap();
+            if restart {
+                dedupe::reset_state_for_tests();
+                binding_events::forget_channel_for_tests(584_504);
+                register_tmux_channel(&h.context.tmux_session, 584_504);
+            }
+            codex_verified::resolve_registered_claims();
+            let resolved = h.fold();
+            assert!(resolved.pending.is_empty() && !resolved.conflicted);
+            let latest = resolved.verified.as_ref().unwrap();
+            assert!(latest.seq > pending_seq && pending_seq > first.seq);
+            assert_eq!(latest.ownership.pending_seq, Some(pending_seq));
+            assert_eq!(latest.source, first.source);
+            let raw = h.raw().unwrap();
+            assert_eq!(h.consumer(), Some(raw.clone()));
+            assert_eq!(raw.last_offset, 12);
+            assert_eq!(raw.relay_last_offset, Some(m));
+            let marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
+            assert_eq!(marker["rollout_start_offset"], 12);
+            assert_eq!(marker["codex_ownership"]["proof_seq"], latest.seq);
+            if normalized {
+                assert_eq!(marker["codex_relay"]["last_offset"], 10);
+                assert_eq!(raw.relay_output_path, Some(relay));
+            }
+            binding_events::forget_channel_for_tests(584_504);
+            assert_eq!(h.fold(), resolved);
+            h.send("user-prompt-submit", ID, json!("later retry"), None);
+            codex_verified::resolve_registered_claims();
+            assert_eq!(h.fold(), resolved);
+            assert_eq!(h.consumer(), Some(raw));
+        }
+    }
+}
+
+#[test]
+fn proof_refresh_rejects_foreign_source_nonce_and_nonproof_marker_sequences() {
+    for corruption in 0..4 {
+        let h = Fixture::new("fresh", None);
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        assert!(advance_tmux_runtime_binding_offset(
+            &h.context.tmux_session,
+            h.path(ID).to_str().unwrap(),
+            12
+        ));
+        let held = h.path(ID).with_extension("held");
+        fs::rename(h.path(ID), &held).unwrap();
+        h.send("user-prompt-submit", ID, json!("later prompt"), None);
+        let pending = h.fold().pending[0].seq;
+        let mut marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
+        match corruption {
+            0 => marker["codex_ownership"]["execution_nonce"] = json!("b".repeat(32)),
+            1 => marker["codex_ownership"]["proof_seq"] = json!(9999),
+            2 => {
+                h.header(CHILD, false);
+                use std::os::unix::fs::MetadataExt;
+                let metadata = fs::metadata(h.path(CHILD)).unwrap();
+                marker["rollout_path"] = json!(h.path(CHILD));
+                marker["session_id"] = json!(CHILD);
+                marker["codex_ownership"]["dev"] = json!(metadata.dev());
+                marker["codex_ownership"]["ino"] = json!(metadata.ino());
+            }
+            _ => marker["codex_ownership"]["proof_seq"] = json!(pending),
+        }
+        fs::write(h.marker(), serde_json::to_vec(&marker).unwrap()).unwrap();
+        fs::rename(held, h.path(ID)).unwrap();
+        codex_verified::resolve_registered_claims();
+        assert!(h.fold().pending.is_empty());
+        let binding = h.consumer().unwrap();
+        assert_eq!(binding.last_offset, 0);
+        assert_eq!(binding.relay_last_offset, Some(0));
+        let marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
+        assert_eq!(marker["rollout_start_offset"], 0);
+    }
+}
+
+#[test]
 fn revoked_permission_blocks_both_getters_with_an_intact_proof_and_marker() {
     for permission in [DeliveryPermission::Unknown, DeliveryPermission::Cancelled] {
         let h = Fixture::new("fresh", None);
@@ -933,5 +1047,58 @@ fn same_native_hook_retries_with_optional_path_hints_do_not_append() {
         without_path("session-start");
         h.assert_proof();
         assert_eq!(h.fold(), before);
+        let held = h.path(ID).with_extension("held");
+        fs::rename(h.path(ID), &held).unwrap();
+        if missing_first {
+            h.send("user-prompt-submit", ID, json!(PROMPT), None);
+        } else {
+            without_path("user-prompt-submit");
+        }
+        let pending = h.fold();
+        assert_eq!(pending.pending.len(), 1);
+        assert!(pending.conflicted);
+        assert!(h.consumer().is_none());
+        let exact_pending = pending.pending[0].clone();
+        fs::rename(held, h.path(ID)).unwrap();
+        codex_verified::resolve_registered_claims();
+        let resolved = h.fold();
+        assert!(resolved.pending.is_empty() && !resolved.conflicted);
+        let proof = resolved.verified.as_ref().unwrap();
+        assert_eq!(proof.ownership.pending_seq, Some(exact_pending.seq));
+        assert_eq!(proof.ownership.claim, exact_pending.claim);
+        assert_eq!(
+            proof.ownership.reused_proof_seq,
+            Some(before.verified.as_ref().unwrap().seq)
+        );
+        assert!(proof.seq > exact_pending.seq);
+        binding_events::forget_channel_for_tests(584_504);
+        assert_eq!(h.fold(), resolved);
+        without_path("user-prompt-submit");
+        h.send("user-prompt-submit", ID, json!(PROMPT), None);
+        codex_verified::resolve_registered_claims();
+        assert_eq!(h.fold(), resolved);
+        h.assert_proof();
+    }
+}
+
+#[test]
+fn optional_path_pending_does_not_merge_replaced_descriptors_or_other_parents() {
+    for other_parent in [false, true] {
+        let h = Fixture::new("fresh", None);
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        let original = h.fold().verified.unwrap();
+        let candidate = if other_parent { CHILD } else { ID };
+        if !other_parent {
+            fs::rename(h.path(ID), h.path(ID).with_extension("held")).unwrap();
+        }
+        h.send("session-start", candidate, Value::Null, None);
+        let pending = h.fold();
+        assert_eq!(pending.pending.len(), 1);
+        h.header(candidate, false);
+        codex_verified::resolve_registered_claims();
+        assert_eq!(h.fold(), pending);
+        assert_eq!(h.fold().verified.as_ref(), Some(&original));
+        assert!(h.consumer().is_none());
     }
 }

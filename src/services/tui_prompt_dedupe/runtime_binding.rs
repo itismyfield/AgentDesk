@@ -7,7 +7,10 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
-pub(crate) use codex_cursor::advance_tmux_runtime_binding_offset_under_source_authority;
+pub(crate) use codex_cursor::{
+    advance_tmux_runtime_binding_offset_under_source_authority,
+    preservable_marker as codex_verified_preservable_marker,
+};
 mod codex_hook;
 pub use binding_access::register_provider_session;
 pub(crate) use binding_access::{

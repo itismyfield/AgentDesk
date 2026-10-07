@@ -143,16 +143,16 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
         tmux_session_name,
         crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
     );
-    let owned_marker = ownership.as_ref().and_then(|proof| {
-        std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .filter(|marker| {
-                marker["codex_ownership"] == *proof
-                    && marker["rollout_path"].as_str() == rollout_path.to_str()
-                    && marker["session_id"].as_str() == session_id
-            })
-    });
+    let owned_marker = if ownership.is_some() {
+        crate::services::tui_prompt_dedupe::codex_verified_preservable_marker(
+            authority,
+            rollout_path,
+            session_id,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
     let rollout_start_offset = if ownership.is_some() && owned_marker.is_none() {
         Some(0)
     } else {

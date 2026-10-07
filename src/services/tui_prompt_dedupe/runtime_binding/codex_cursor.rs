@@ -27,6 +27,43 @@ fn linked_marker(
         }))
 }
 
+pub(crate) fn preservable_marker(
+    authority: &TmuxSourceAuthority<'_>,
+    path: &Path,
+    session_id: Option<&str>,
+) -> io::Result<Option<Value>> {
+    let Some(context) = codex_verified::current_context(authority)? else {
+        return Ok(None);
+    };
+    let binding = TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::CodexTui,
+        output_path: path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: session_id.map(str::to_owned),
+        last_offset: 0,
+        relay_last_offset: Some(0),
+    };
+    let current = codex_verified::proof_for_binding(authority, &context, &binding)?;
+    let marker = fs::read(marker_path(authority))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let Some(marker) = marker else {
+        return Ok(None);
+    };
+    let Some(seq) = marker["codex_ownership"]["proof_seq"].as_u64() else {
+        return Ok(None);
+    };
+    let Some(previous) = binding_events::codex::proof_at_seq(&context, seq)? else {
+        return Ok(None);
+    };
+    Ok((previous.source == current.source
+        && marker["codex_ownership"] == codex_verified::marker_proof(&context, &previous)
+        && marker["rollout_path"].as_str() == current.source.path.to_str()
+        && marker["session_id"].as_str() == Some(&current.source.session_id))
+    .then_some(marker))
+}
+
 fn relay_identity(authority: &TmuxSourceAuthority<'_>, path: &str) -> Option<(u64, u64, u64)> {
     let expected = tc::session_temp_path(authority.session(), "jsonl");
     if Path::new(path).canonicalize().ok()? != Path::new(&expected).canonicalize().ok()? {
@@ -67,7 +104,22 @@ fn saved_relay(
 
 pub(super) fn restore(
     authority: &TmuxSourceAuthority<'_>,
+    binding: TuiRuntimeBinding,
+) -> io::Result<TuiRuntimeBinding> {
+    restore_checkpoint(authority, binding, false)
+}
+
+pub(super) fn restore_after_publication(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: TuiRuntimeBinding,
+) -> io::Result<TuiRuntimeBinding> {
+    restore_checkpoint(authority, binding, true)
+}
+
+fn restore_checkpoint(
+    authority: &TmuxSourceAuthority<'_>,
     mut binding: TuiRuntimeBinding,
+    from_marker: bool,
 ) -> io::Result<TuiRuntimeBinding> {
     let marker = linked_marker(authority, &binding)?;
     let checkpoint = saved_relay(authority, marker.as_ref());
@@ -78,7 +130,8 @@ pub(super) fn restore(
             .map(|entry| entry.value.clone())
     })
     .filter(|old| {
-        old.output_path == binding.output_path
+        !from_marker
+            && old.output_path == binding.output_path
             && old.session_id == binding.session_id
             && codex_verified::consumer_allowed(authority, old)
     });
@@ -114,6 +167,13 @@ pub(super) fn restore(
     if let Some((path, offset)) = checkpoint {
         binding.relay_output_path = Some(path);
         binding.relay_last_offset = Some(offset);
+    } else if binding.relay_output_path.is_none()
+        && marker
+            .as_ref()
+            .is_some_and(|marker| marker.get("codex_relay").is_none())
+    {
+        // With no normalized spool, relay reads the native cursor's own namespace.
+        binding.relay_last_offset = Some(binding.last_offset);
     }
     Ok(binding)
 }
