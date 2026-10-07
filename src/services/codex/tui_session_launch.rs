@@ -169,8 +169,8 @@ pub(super) fn codex_herdr_launch_admissible()
     use crate::services::claude_tui::hook_bundle::{
         codex_hook_capability, probe_codex_cli_version_with_path,
     };
-    let policy = codex_source_mode_snapshot()
-        .launch_policy()
+    // Herdr launches are outside the tmux canary.
+    let policy = crate::services::codex_tui::canary::launch_policy("", None)
         .map_err(CodexHerdrLaunchRefused::SourceModeInvalid)?;
     let resolution = resolve_codex_binary();
     let codex_bin = resolution.resolved_path.clone();
@@ -508,6 +508,10 @@ mod tests {
             CodexSourceMode::Verified,
         ] {
             SOURCE_MODE_TEST.with(|slot| slot.set(Some(mode)));
+            assert!(matches!(
+                codex_herdr_launch_admissible(),
+                Err(CodexHerdrLaunchRefused::HooksUnavailable)
+            ));
             for (tmux, channel) in [
                 (CANARY_TMUX, Some(CANARY_CHANNEL)),
                 (CANARY_TMUX, Some(CANARY_CHANNEL + 1)),
