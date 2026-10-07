@@ -62,6 +62,11 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// seeds it, which is the "nothing to catch up" answer.
     pub(super) history: Arc<Mutex<Vec<Value>>>,
     pub(super) history_queries: Arc<Mutex<Vec<HistoryQuery>>>,
+    /// When set, the next history `GET` waits for `release_held_history`
+    /// after signalling `history_held`, then pages over the history as it is then.
+    pub(super) hold_next_history: Arc<AtomicBool>,
+    pub(super) history_held: Arc<Notify>,
+    pub(super) release_held_history: Arc<Notify>,
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
@@ -84,6 +89,9 @@ impl DiscordMockState {
             unhandled: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
+            hold_next_history: Arc::new(AtomicBool::new(false)),
+            history_held: Arc::new(Notify::new()),
+            release_held_history: Arc::new(Notify::new()),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -392,6 +400,10 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
                 .lock()
                 .expect("history queries")
                 .push(query.clone());
+            if state.hold_next_history.swap(false, Ordering::SeqCst) {
+                state.history_held.notify_one();
+                state.release_held_history.notified().await;
+            }
             let history = state.history.lock().expect("mock history");
             if let Some(page) = history_page(&history, &query) {
                 return Json(Value::Array(page)).into_response();

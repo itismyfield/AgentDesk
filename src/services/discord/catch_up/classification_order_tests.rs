@@ -2824,3 +2824,6 @@ mod frontier_sweep_tests;
 
 #[path = "handled_command_tests.rs"]
 mod handled_command_tests;
+
+#[path = "consumed_commands_tests.rs"]
+mod consumed_commands_tests;

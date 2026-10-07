@@ -75,6 +75,7 @@ pub(in crate::services) struct CatchUpRetryState {
 
 mod api;
 mod classification;
+pub(in crate::services::discord) mod consumed_commands;
 mod frontier_evidence;
 mod handled_command;
 mod phase2;
@@ -92,7 +93,7 @@ use classification::{
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
     is_restart_gap_notice, too_old_is_actionable,
 };
-use handled_command::{TextCommandEvidence, defer_unrecognized_command, text_command_evidence};
+use handled_command::{TextCommandEvidence, defer_unrecognized_command};
 use phase2::{
     Phase2EnqueueCommit, Phase2Frontier, Phase2RecoveryStats, advance_phase2_checkpoint,
     catch_up_last_item_dedup_is_checkpoint_safe, catch_up_remaining_queue_capacity,
@@ -959,6 +960,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // The completed-turn ledger prevents DLQ for delivered ids and restores absorbed arms.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
+        let consumed = consumed_commands::read(provider, channel_id);
 
         let allowed_bot_ids: Vec<u64> = {
             let settings = shared.settings.read().await;
@@ -1043,9 +1045,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             let mid = msg.id.get();
             // A replied command was consumed live; replaying it would prompt the provider.
             let command =
-                text_command_evidence(&intervention_text, msg.id, &messages, current_bot_user_id);
+                consumed.evidence(&intervention_text, msg.id, &messages, current_bot_user_id);
             let outcome = match (outcome, command) {
-                (CatchUpClassification::Recover, TextCommandEvidence::Replied) => {
+                (CatchUpClassification::Recover, TextCommandEvidence::Consumed) => {
                     CatchUpClassification::Settled
                 }
                 (CatchUpClassification::Recover, TextCommandEvidence::ReplierUnknown) => {
@@ -1148,8 +1150,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     voice_announcement: None,
                 },
                 known_snapshot.claim_observation,
-            )
-            .await;
+            );
+            let enqueue = consumed.guard(enqueue, msg.id, &intervention_text).await;
             match classify_phase2_enqueue_commit(&enqueue) {
                 Phase2EnqueueCommit::Accepted => {
                     stats.record(CatchUpClassification::Recover);
@@ -1370,6 +1372,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // skips (no enqueue): an answered message is never re-surfaced.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&mailbox, &mut known_arms, &mut existing_ids);
+        let consumed = consumed_commands::read(provider, channel_id);
         let barrier = open_barriers.get(&channel_id).map(|r| r.barrier);
         let mut frontier = Phase2Frontier::new(barrier, last_bot_response_id);
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
@@ -1460,7 +1463,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     );
                     break;
                 }
-                CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover) => {}
+                CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover)
+                    if !consumed.settles(&intervention_text, mid) => {}
                 CatchUpClassificationDecision::Determinate(_) => {
                     stats.skipped += 1;
                     continue;
@@ -1526,8 +1530,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     voice_announcement: None,
                 },
                 mailbox.claim_observation,
-            )
-            .await;
+            );
+            let enqueue = consumed.guard(enqueue, msg.id, &intervention_text).await;
             match classify_phase2_enqueue_commit(&enqueue) {
                 Phase2EnqueueCommit::Accepted => {
                     existing_ids.insert(mid);
