@@ -205,6 +205,70 @@ class SourceCompareTests(unittest.TestCase):
              patch.object(sc, "fetch_messages", return_value=self.messages), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(sc.main(["--agent-id", "worker", "--run-id", "fixture"]), 1)
 
+    def main_rc(self, messages, *extra):
+        binding = {"channel_id": "123", "transcript_path": str(self.path)}
+        with patch.object(sc, "resolve_binding", return_value=binding), \
+             patch.object(sc, "fetch_messages", return_value=messages), contextlib.redirect_stdout(io.StringIO()):
+            return sc.main(["--agent-id", "worker", "--run-id", "fixture", *extra])
+
+    def test_claude_last_prompt_copy_is_ignored_not_counted(self):
+        # Shapes observed in the Phase A Claude transcript: with and without the prompt copy.
+        copies = [{"type": "last-prompt", "lastPrompt": "[User: x] " + MARKER, "leafUuid": "a", "sessionId": "s"},
+                  {"type": "last-prompt", "leafUuid": "b", "sessionId": "s"}]
+        self.write([self.user()] + copies + copies[:1])
+        self.assertEqual(self.compare()["verdict"], "ok")
+        self.assertEqual(self.main_rc(self.messages), 0)
+        for row in [{**copies[0], "message": {"content": MARKER}}, {**copies[0], "lastPrompt": [MARKER]},
+                    {"type": "last-prompt", "sessionId": MARKER}, {"type": "last-prompt", "lastPrompt": MARKER}]:
+            self.write([self.user(), row])
+            with self.subTest(row=row), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
+                self.compare()
+
+    def test_text_command_marker_is_command_not_lost(self):
+        command = message(1, "!clear " + MARKER, author=OUR_BOT_ID)
+        self.write([])
+        self.assertEqual(self.compare([command])["verdict"], "command")
+        self.assertEqual(self.main_rc([command]), 0)
+        # A command that reached the provider or relay is a defect, and plain prompts stay strict.
+        self.write([self.user("!clear " + MARKER)])
+        self.assertEqual(self.compare([command])["verdict"], "command_forwarded")
+        self.assertEqual(self.main_rc([command]), 1)
+        self.write([])
+        self.assertEqual(self.compare([message(1, "clear " + MARKER, author=OUR_BOT_ID)])["verdict"], "lost")
+        self.assertEqual(self.compare([command, message(3, "!clear " + MARKER, author=OUR_BOT_ID)])["verdict"],
+                         "duplicated")
+
+    def test_deliver_input_without_mirror_is_known_gap_but_relay_loss_stays_strict(self):
+        header = ('[Headless trigger context]\nsource: e2e\nmetadata: {"human_input":{"origin_id":"%s"}}\n\n'
+                  "[User: e2e:1 (ID: 1)] reply %s" % (MARKER, MARKER))
+        codex = {"type": "response_item", "payload": {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": header}]}}
+        claude = self.user('\n\n<pasted_content id="e1">\n' + header + '\n</pasted_content id="e1">\n')
+        body = [message(2)]
+        for row in (codex, claude):
+            self.write([row])
+            with self.subTest(row=row["type"]):
+                result = self.compare(body)
+                self.assertEqual((result["verdict"], result["known_gap"]), ("known_gap", sc.DELIVER_MIRROR_GAP))
+                self.assertEqual(self.main_rc(body), 0)
+                self.assertEqual(self.compare([])["verdict"], "missing_relay")
+                self.assertEqual(self.main_rc([]), 1)
+                self.assertEqual(self.compare(body + [message(3)])["verdict"], "duplicated")
+        queued = self.user("[User: owner (ID: 77)] reply " + MARKER)
+        self.write([queued])
+        result = sc.compare(self.path, body, run_id="fixture", deliver_author_ids=("77",))[MARKER]
+        self.assertEqual(result["verdict"], "known_gap")
+        self.assertEqual((self.main_rc(body, "--deliver-author-id", "77"), self.main_rc(body)), (0, 1))
+        self.assertEqual(sc.compare(self.path, [], run_id="fixture", deliver_author_ids=("77",))[MARKER]["verdict"],
+                         "missing_relay")
+        for text in (header.replace("human_input", "other_input"), "[User: e2e] reply " + MARKER,
+                     "[User: owner (ID: 77)] reply " + MARKER):
+            self.write([self.user(text)])
+            with self.subTest(text=text[:30]):
+                self.assertEqual(self.compare(body)["verdict"], "lost")
+        self.assertEqual(sc.compare(self.path, body, run_id="fixture", deliver_author_ids=("78",))[MARKER]["verdict"],
+                         "lost")
+
     def test_json_transport_uses_get_without_claiming_server_purity(self):
         with patch.object(sc.urllib.request, "urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value = io.StringIO('{}')

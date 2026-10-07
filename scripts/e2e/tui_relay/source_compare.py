@@ -12,11 +12,21 @@ import sys
 import urllib.parse
 import urllib.request
 
-from .assertions import is_our_send, relay_body
+from .assertions import DIRECT_INPUT_NOTICE as DIRECT_NOTICE, is_our_send, relay_body
 from .discord import DiscordClient
 from .normal_intake_evidence import content, tool_result
 
-DIRECT_NOTICE = re.compile(r"^터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):")
+# Discord text command (`!clear ...`): the router consumes it, so no native input or body follows.
+TEXT_COMMAND = re.compile(r"^![a-z][a-z_-]*(?:\s|$)")
+# turn/deliver input has no Discord mirror yet. Started turns carry `human_input` headless-trigger
+# metadata (its only producer); queued ones keep only the `[User: … (ID: author)]` prefix.
+WRAPPER = r'\s*(?:<pasted_content id="[^"\n]+">\n)?'
+DELIVER_INPUT = re.compile(WRAPPER + r"\[Headless trigger context\]\n(?:source: [^\n]*\n)?metadata: ([^\n]+)\n")
+AUTHOR_PREFIX = re.compile(WRAPPER + r"\[User: [^\n]*? \(ID: (\d+)\)\]")
+DELIVER_MIRROR_GAP = "#6245 deliver input mirror not implemented"
+# Claude's `last-prompt` row is a copy of an input already recorded as a user row; only observed key sets.
+LAST_PROMPT_SHAPES = ({"type", "leafUuid", "sessionId"}, {"type", "lastPrompt", "leafUuid", "sessionId"})
+PASSING_VERDICTS = {"ok", "command", "known_gap"}
 
 
 def marker_pattern(*, marker_regex=None, run_id=None):
@@ -83,6 +93,8 @@ def native_inputs(path, pattern):
             known = isinstance(payload, dict) and payload.get("type") in events
         elif kind == "system":
             known = row.get("subtype") in {"turn_duration", "stop_hook_summary", "task_started", "task_notification", "task_progress", "compact_boundary", "local_command"}
+        elif kind == "last-prompt":
+            known = set(row) in LAST_PROMPT_SHAPES and isinstance(row.get("lastPrompt", ""), str)
         else:
             known = kind in ignored
         if not known and markers(json.dumps(row, ensure_ascii=False), pattern):
@@ -91,11 +103,29 @@ def native_inputs(path, pattern):
             yield text
 
 
-def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_author_ids=()):
+def is_deliver_input(text, deliver_author_ids=()):
+    author = AUTHOR_PREFIX.match(text)
+    if author and author[1] in deliver_author_ids:
+        return True
+    match = DELIVER_INPUT.match(text)
+    try:
+        metadata = json.loads(match[1]) if match else None
+    except ValueError:
+        return False
+    return isinstance(metadata, dict) and isinstance(metadata.get("human_input"), dict)
+
+
+def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_author_ids=(),
+            deliver_author_ids=()):
     """Return per-marker counts; same-ID Discord edits count only their last snapshot."""
     pattern = marker_pattern(marker_regex=marker_regex, run_id=run_id)
-    native = Counter(marker for text in native_inputs(path, pattern) for marker in markers(text, pattern))
-    mirrors, bodies, notices = Counter(), Counter(), Counter()
+    native, delivered = Counter(), Counter()
+    for text in native_inputs(path, pattern):
+        found = markers(text, pattern)
+        native.update(found)
+        if is_deliver_input(text, {str(a) for a in deliver_author_ids}):
+            delivered.update(found)
+    mirrors, bodies, notices, commands = Counter(), Counter(), Counter(), Counter()
     final = {}
     for message in messages:
         if not str(message.get("id", "")).isdigit():
@@ -109,6 +139,8 @@ def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_auth
         elif (not author.get("bot") or is_our_send(message)
               or str(author.get("id")) in input_mirror_author_ids):
             target = mirrors
+            if TEXT_COMMAND.match(text):
+                commands.update(markers(text, pattern))
         else:
             text = relay_body(message) or ""
             target = bodies
@@ -118,6 +150,10 @@ def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_auth
         n, m, b, d = native[marker], mirrors[marker], bodies[marker], notices[marker]
         if max(n, m, b, d) > 1 or m + d > 1:
             verdict = "duplicated"
+        elif commands[marker]:
+            verdict = "command" if (n, b, d) == (0, 0, 0) else "command_forwarded"
+        elif delivered[marker] and m + d == 0:
+            verdict = "known_gap" if b == 1 else "missing_relay"
         elif n == 0 or m + d == 0:
             verdict = "lost"
         elif b == 0:
@@ -126,6 +162,8 @@ def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_auth
             verdict = "ok"
         result[marker] = dict(native_user_count=n, discord_input_mirror_count=m,
                               relay_body_count=b, direct_input_notice_count=d, verdict=verdict)
+        if verdict == "known_gap":
+            result[marker]["known_gap"] = DELIVER_MIRROR_GAP
     if not result:
         raise ValueError("no markers found; empty evidence cannot pass")
     return result
@@ -284,6 +322,8 @@ def main(argv=None):
     parser.add_argument("--transcript-root", help="local provider projects/sessions root")
     parser.add_argument("--input-mirror-author-id", action="append", default=[],
                         help="additional bot/webhook input-mirror author ID; repeatable")
+    parser.add_argument("--deliver-author-id", action="append", default=[],
+                        help="turn/deliver author ID whose queued inputs lack a Discord mirror; repeatable")
     parser.add_argument("--after-id", default="0", help="Discord lower cursor; default scans full history")
     parser.add_argument("--max-pages", type=int, default=100)
     args = parser.parse_args(argv)
@@ -306,9 +346,10 @@ def main(argv=None):
                                   max_pages=args.max_pages)
         result = compare(binding["transcript_path"], messages,
                          marker_regex=args.marker_regex, run_id=args.run_id,
-                         input_mirror_author_ids=args.input_mirror_author_id)
+                         input_mirror_author_ids=args.input_mirror_author_id,
+                         deliver_author_ids=args.deliver_author_id)
         print(json.dumps({"binding": binding, "markers": result}, ensure_ascii=False, indent=2))
-        return int(any(row["verdict"] != "ok" for row in result.values()))
+        return int(any(row["verdict"] not in PASSING_VERDICTS for row in result.values()))
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, re.error) as error:
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 2

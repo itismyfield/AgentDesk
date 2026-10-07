@@ -21,6 +21,13 @@ from typing import Any, Sequence
 #   - Override via `AGENTDESK_E2E_OUR_BOT_ID` if the deployment uses a different
 #     announce bot.
 OUR_BOT_ID = os.environ.get("AGENTDESK_E2E_OUR_BOT_ID", "1479017284805722200")
+# Response bots per provider. Other bots (the notify bot's direct-input notice)
+# can quote the same text, so a wait scoped with `relay_author: provider`
+# accepts only these authors. Override per deployment like OUR_BOT_ID.
+PROVIDER_BOT_IDS = {
+    "claude": os.environ.get("AGENTDESK_E2E_CLAUDE_BOT_ID", "1474932782395293736"),
+    "codex": os.environ.get("AGENTDESK_E2E_CODEX_BOT_ID", "1479425196824989758"),
+}
 
 # Status/header chrome the TUI relay posts around real responses. These are
 # legitimate ADK output but they repeat across turns by design, so excluding
@@ -141,6 +148,17 @@ class CompletionOrderError(AssertionError):
 def is_our_send(message: dict[str, Any]) -> bool:
     author = message.get("author") or {}
     return str(author.get("id") or "") == OUR_BOT_ID
+
+
+# The direct-input notice quotes the injected text, so it is never a provider body.
+DIRECT_INPUT_NOTICE = re.compile(r"^터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):")
+
+
+def provider_bot_id(provider: str) -> str:
+    bot_id = PROVIDER_BOT_IDS.get(provider)
+    if not bot_id:
+        raise AssertionError(f"no response bot id known for provider {provider!r}")
+    return bot_id
 
 
 def is_status_chrome(message: dict[str, Any]) -> bool:
@@ -423,6 +441,25 @@ def no_duplicate_content(window: Window) -> None:
                 f"(ids {seen[body]}, {message_id})"
             )
         seen[body] = message_id
+
+
+def author_relay_body(message: dict[str, Any], author_id: str) -> str | None:
+    """Relay body only for ``author_id`` posts that are not shaped as the direct-input notice."""
+    author = str((message.get("author") or {}).get("id") or "")
+    if author != author_id or DIRECT_INPUT_NOTICE.match(message.get("content") or ""):
+        return None
+    return relay_body(message)
+
+
+def provider_text_present(window: Window, *, needle: str, author_id: str) -> None:
+    for message in window.messages:
+        body = author_relay_body(message, author_id)
+        if body is not None and needle in body:
+            return
+    raise AssertionError(
+        f"expected to find {needle!r} in a provider bot {author_id} relay body, got "
+        f"{len(window.messages)} relay messages (raw observed: {len(window.raw_messages)})"
+    )
 
 
 def text_present(window: Window, *, needle: str) -> None:

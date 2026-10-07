@@ -1007,7 +1007,7 @@ STEP_OPTIONS = {
     "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons", "require_status", "allowed_degraded_reasons"},
 }
 ASSERTION_OPTIONS = {
-    **{k: None for k in ("text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
+    **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
                          "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
                          "no_control_chars", "body_not_overwritten", "fixture_followup_ready",
                          "fixture_no_health_degradation", "no_placeholder_left")},
@@ -1047,6 +1047,10 @@ def validate_scenario_schema(scenario):
             metadata = {"requires_feature"} if kind == "assertions" else set()
             if action in {"wait_for_discord_text", "wait_for_raw_discord_text"}:
                 metadata.add("timeout_s")
+            if action == "wait_for_discord_text":
+                metadata.add("relay_author")
+                if entry.get("relay_author", "provider") != "provider":
+                    raise ValueError("relay_author supports only provider")
             if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
                 metadata.add("post_send_sleep_s")
             if action == "send_discord_prompt" and scenario.get("e36_normal_intake"):
@@ -1059,7 +1063,7 @@ def validate_scenario_schema(scenario):
             scalar_or_mapping = {"deliver_prompt", "assert_session_preserved", "provider_hold_marker_seen", "raw_text_absent", "marker_absent", "relay_latency_within", "completion_chrome_after_body", "single_status_panel"}
             if allowed is not None and action not in scalar_or_mapping and not isinstance(value, dict):
                 raise ValueError(f"{action} requires mapping options")
-            if action in {"send_prompt", "send_discord_prompt", "send_keys", "send_keys_no_enter", "wait_for_discord_text", "wait_for_raw_discord_text"} and not isinstance(value, str):
+            if action in {"send_prompt", "send_discord_prompt", "send_keys", "send_keys_no_enter", "wait_for_discord_text", "wait_for_raw_discord_text", "provider_text_present"} and not isinstance(value, str):
                 raise ValueError(f"{action} requires text")
             if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome"} and value is not True:
                 raise ValueError(f"{action} must be true")
@@ -2809,6 +2813,7 @@ def _expected_markers_for_wait(scenario: dict[str, Any], needle: str) -> list[st
         if not isinstance(spec, dict):
             continue
         add_marker(spec.get("text_present"))
+        add_marker(spec.get("provider_text_present"))
         add_marker(spec.get("no_duplicate_marker"))
         ordered = spec.get("ordered_text_present")
         if isinstance(ordered, list):
@@ -3054,6 +3059,7 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     thread_channel_id: str | None,
     timeout_s: float,
     debug_label: str,
+    author_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     deadline = time.monotonic() + timeout_s
     guard_after_s = min(TUI_IDLE_DRAFT_GUARD_AFTER_S, max(timeout_s, 0.0))
@@ -3061,7 +3067,8 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     observed: list[dict[str, Any]] = []
     observed_by_id: dict[str, dict[str, Any]] = {}
     predicate = lambda message: (  # noqa: E731
-        (body := assertions.relay_body(message)) is not None and needle in body
+        (body := assertions.relay_body(message) if author_id is None
+         else assertions.author_relay_body(message, author_id)) is not None and needle in body
     )
     while time.monotonic() < deadline:
         messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)
@@ -3709,6 +3716,7 @@ def run_one_cell(
                     enabled_features=enabled_features,
                     run_id=run_id,
                     observation_context=observation_context,
+                    provider=cell_provider(cell),
                 )
             except assertions.AssertionError:
                 revalidation["failed_assertion"] = next(iter(spec))
@@ -3890,7 +3898,10 @@ def run_one_cell(
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
             needle = str(step["wait_for_discord_text"]).replace("{run_id}", run_id)
+            author_id = (assertions.provider_bot_id(cell_provider(cell))
+                         if step.get("relay_author") == "provider" else None)
             found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
+                author_id=author_id,
                 client=client,
                 channel_id=channel_id,
                 cell=cell,
@@ -4282,6 +4293,7 @@ def run_one_cell(
                 run_id=run_id,
                 pending_refetch=_pending_refetch,
                 observation_context=observation_context,
+                provider=cell_provider(cell),
             )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
@@ -4671,6 +4683,7 @@ def run_assertion(
     run_id: str | None = None,
     pending_refetch: Callable[[], None] | None = None,
     observation_context: ObservationContext | None = None,
+    provider: str | None = None,
 ) -> None:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
@@ -4744,6 +4757,11 @@ def run_assertion(
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:
         assertions.text_present(window, needle=expand_marker(spec["text_present"]))
+    elif "provider_text_present" in spec:
+        if provider is None:
+            raise assertions.AssertionError("provider_text_present needs the exercised cell provider")
+        assertions.provider_text_present(window, needle=expand_marker(spec["provider_text_present"]),
+                                         author_id=assertions.provider_bot_id(provider))
     elif "provider_hold_marker_seen" in spec:
         marker = spec["provider_hold_marker_seen"]
         if isinstance(marker, dict):
@@ -4804,7 +4822,7 @@ def run_assertion(
             raise assertions.AssertionError(
                 f"ordered_text_present must be a list of needles: {spec!r}"
             )
-        assertions.ordered_text_present(window, needles=needles)
+        assertions.ordered_text_present(window, needles=[expand_marker(str(n)) for n in needles])
     elif gap_key in spec:
         params = spec[gap_key]
         if not isinstance(params, dict) or params != {"marker": known_gap.PRE, "known_gap": known_gap.PROFILE}:
