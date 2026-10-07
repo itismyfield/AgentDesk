@@ -39,7 +39,7 @@ pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
 
 /// One-shot test pause: parks `channel`'s claim until the test resumes it.
 #[cfg(test)]
-pub(super) async fn pause_for_test(
+pub(in crate::services::discord::tui_prompt_relay) async fn pause_for_test(
     slot: &Mutex<Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     channel: ChannelId,
 ) {

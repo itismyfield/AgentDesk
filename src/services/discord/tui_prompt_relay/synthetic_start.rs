@@ -2659,16 +2659,16 @@ pub(super) fn tui_direct_watcher_can_own_output(
 }
 
 /// Owner stamped on a new TUI-direct synthetic row. The sink only gets a session-bound
-/// turn's frames from a live tmux watcher, so without one the bridge tail must deliver.
+/// turn's frames from a live tmux watcher reading this output, else the bridge tail delivers.
 pub(super) fn tui_direct_synthetic_relay_owner(
     watcher_can_own: bool,
     session_bound_discord_delivery_enabled: bool,
     live_producer_present: bool,
-    tmux_watcher_live: bool,
+    covers_output: bool,
 ) -> ExternalInputRelayOwner {
     if watcher_can_own {
         ExternalInputRelayOwner::TmuxWatcher
-    } else if session_bound_discord_delivery_enabled && live_producer_present && tmux_watcher_live {
+    } else if session_bound_discord_delivery_enabled && live_producer_present && covers_output {
         ExternalInputRelayOwner::SessionBoundRelay
     } else {
         ExternalInputRelayOwner::BridgeAdapter
@@ -2777,14 +2777,19 @@ pub(super) async fn wait_for_tui_direct_synthetic_non_bridge_claim(
 ) -> bool {
     let deadline = tokio::time::Instant::now() + TUI_DIRECT_SYNTHETIC_CLAIM_WAIT;
     loop {
-        // The sink only hears frames a live tmux watcher forwards to the producer.
+        let state = super::super::inflight::load_inflight_state(provider, channel_id.get());
+        let output = state
+            .as_ref()
+            .and_then(|row| row.output_path.as_deref())
+            .map(Path::new);
+        // The sink only hears frames a live tmux watcher reading the row's output forwards.
         let session_bound_relay_has_live_producer =
             crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
                 .get_live_producer(tmux_session_name)
                 .is_some()
-                && watchers.tmux_session_live_for_relay(tmux_session_name) == Some(true);
+                && claim::tui_direct_watcher_covers_output(watchers, tmux_session_name, output);
         if tui_direct_synthetic_non_bridge_owner_matches(
-            super::super::inflight::load_inflight_state(provider, channel_id.get()).as_ref(),
+            state.as_ref(),
             tmux_session_name,
             session_bound_relay_has_live_producer,
         ) {
