@@ -34,6 +34,7 @@ pub mod prompt_manifests;
 pub mod relay_dead_letter;
 pub mod scheduled_messages;
 pub(crate) mod session_agent_resolution;
+pub(crate) mod session_evidence;
 pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;

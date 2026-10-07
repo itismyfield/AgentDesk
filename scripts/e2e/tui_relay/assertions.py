@@ -852,3 +852,122 @@ def no_resume_prompt_chrome(window: Window) -> None:
                     "Claude auto-resume prompt chrome leaked into relay body "
                     f"({chrome!r}): {body[:120]!r}"
                 )
+
+
+def no_placeholder_left(window: Window) -> None:
+    """Reject a surviving placeholder in the final relay body snapshot."""
+    ids = [str(row.get("id") or "") for row in _raw_assertion_messages(window)
+           if str(row.get("id") or "") not in window.deleted_ids
+           and re.fullmatch(r"[\s\u200b\ufeff\u2060]*(?:\.\.\.|…)[\s\u200b\ufeff\u2060]*",
+                            relay_body(row) or "")]
+    if ids:
+        raise AssertionError(f"relay placeholders remain in final snapshot: {ids}")
+
+
+def completion_per_turn(window: Window, *, exact: int = 1, marker: str | None = None) -> None:
+    """Count cards by sequential send timestamps, falling back to E2E body boundaries.
+    Queued/concurrent turns require caller-supplied request-owned windows.
+    """
+    from .normal_intake_evidence import completion_candidates, completion_id
+
+    if isinstance(exact, bool) or not isinstance(exact, int) or exact < 0:
+        raise AssertionError("completion_per_turn exact must be a nonnegative integer")
+    if marker is not None and (not isinstance(marker, str) or not marker):
+        raise AssertionError("completion_per_turn marker must be a nonempty literal string")
+    rows = [row for row in _raw_assertion_messages(window)
+            if str(row.get("id") or "") not in window.deleted_ids
+            and (row.get("author") or {}).get("bot")
+            and row.get("type") in (None, 0, 19)]
+    rows.sort(key=_message_order_key)
+    groups: list[list[dict[str, Any]]] = []
+    if window.prompt_sent_at:
+        starts = sorted(window.prompt_sent_at)
+        groups = [[] for _ in starts]
+        for row in rows:
+            timestamp = _parse_discord_ts(str(row.get("timestamp") or ""))
+            if timestamp is None:
+                raise AssertionError("completion_per_turn requires Discord timestamps for prompt attribution")
+            owners = [index for index, start in enumerate(starts) if timestamp >= start]
+            if owners:
+                groups[owners[-1]].append(row)
+    else:
+        # A body marker is the fallback boundary when the caller has no prompt clock.
+        anchors = []
+        for index, row in enumerate(rows):
+            body = relay_body(row) or ""
+            found = set(re.findall(r"\[E2E:[^\]\r\n]+\]", body))
+            if not found and marker is not None and marker in body:
+                found.add(marker)
+            if len(found) > 1:
+                raise AssertionError("completion_per_turn ambiguous body markers; supply prompt timestamps")
+            if found:
+                anchors.append(index)
+        if not anchors:
+            raise AssertionError("completion_per_turn has no turn markers or prompt timestamps")
+        groups = [rows[0 if index == 0 else start:anchors[index + 1] if index + 1 < len(anchors) else len(rows)]
+                  for index, start in enumerate(anchors)]
+    if marker is not None:
+        hits = sum((relay_body(row) or "").count(marker) for row in rows)
+        if hits != 1:
+            raise AssertionError(f"completion_per_turn body marker {marker!r} must occur once, got {hits}")
+        groups = [group for group in groups if any(marker in (relay_body(row) or "") for row in group)]
+    if not groups:
+        raise AssertionError("completion_per_turn has no attributable turns")
+    for index, group in enumerate(groups, 1):
+        sub = Window(window.setup_marker_id)
+        for row in group:
+            sub.add(row)
+        observed = {str(row["id"]): row for row in group}
+        final_inline_ids, observed_inline_ids = set(), set()
+        views = sub.messages + [{**observed[str(update["id"])], "content": update.get(field) or ""}
+                                for update in window.message_updates if str(update["id"]) in observed
+                                for field in ("before", "after")]
+        for snapshot, inline_ids in ((sub.messages, final_inline_ids), (views, observed_inline_ids)):
+            for row in snapshot:
+                content = row.get("content") or ""
+                stripped = _strip_completion_chrome_tail(content)
+                footer = content[len(stripped):] if stripped != content else ""
+                if any(re.fullmatch(r"-# (?:✅|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) (?:완료|백그라운드 완료)", line.strip())
+                       for line in footer.splitlines()):
+                    inline_ids.add(str(row["id"]))
+        final_completion_ids = completion_candidates(sub) | final_inline_ids
+        observed_completion_ids = (final_completion_ids | observed_inline_ids
+                                   | edited_completion_candidates(window, observed))
+        if len(final_completion_ids) != exact:
+            raise AssertionError(f"completion_per_turn turn {marker or index!r}: expected {exact}, got {len(final_completion_ids)} final IDs {sorted(final_completion_ids)}")
+        if len(observed_completion_ids) > exact:
+            raise AssertionError(f"completion_per_turn turn {marker or index!r}: expected {exact}, got {len(observed_completion_ids)} observed IDs {sorted(observed_completion_ids)}")
+        if exact and final_completion_ids:
+            if final_inline_ids:
+                bodies = [row for row in sub.messages if relay_body(row)
+                          and (marker is None or marker in (relay_body(row) or ""))]
+                if not bodies:
+                    raise AssertionError(f"completion_per_turn turn {index}: no relay body")
+                first_card = min((row for row in group if str(row["id"]) in final_completion_ids), key=_message_order_key)
+                if _message_order_key(first_card) < _message_order_key(bodies[0]):
+                    raise CompletionOrderError("completion chrome appeared before body marker")
+            elif marker is not None:
+                if exact == 1:
+                    completion_id(sub, {"body_marker": marker})
+                else:
+                    completion_chrome_after_body(sub, body_marker=marker, required=True)
+            else:
+                bodies = [relay_body(row) for row in sub.messages if relay_body(row)]
+                if not bodies:
+                    raise AssertionError(f"completion_per_turn turn {index}: no relay body")
+                completion_chrome_after_body(sub, body_marker=bodies[0], required=True)
+
+
+def edited_completion_candidates(window, observed, after_id=None):
+    """Chrome already observed cannot be retired by a later edit of the same ID."""
+    ids = set()
+    for update in window.message_updates:
+        mid = str(update["id"])
+        if (row := observed.get(mid)) is None or is_our_send(row):
+            continue
+        if after_id is not None and int(mid) <= after_id:
+            continue
+        if any(p.search(update.get(field) or "") for field in ("before", "after")
+               for p in _COMPLETION_CHROME_PATTERNS):
+            ids.add(mid)
+    return ids

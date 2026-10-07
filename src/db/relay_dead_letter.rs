@@ -1,7 +1,6 @@
 //! `relay_dead_letter` table primitives — #4260 durable dead-letter sink for
 //! the silent message-loss vectors (catch-up "too old" drop + intervention-queue
-//! capacity-overflow evict). Preserves the lost original content so an operator,
-//! or the user prompted by the aggregate notice, can recover it.
+//! capacity-overflow evict). Preserves dropped content for operator recovery.
 //!
 //! All recording is FIRE-AND-FORGET: a dead-letter write must never block or
 //! fail the origin path (the message was already lost — failing to record it
