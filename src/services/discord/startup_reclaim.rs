@@ -984,4 +984,119 @@ mod tests {
             "{legacy_calls:?}"
         );
     }
+
+    #[tokio::test]
+    async fn startup_outer_sweep_builds_durable_plan_and_preserves_retired_channels() {
+        use super::super::health::legacy_supervision::RetiredForTest;
+        use super::super::health::legacy_supervision::test_support::{
+            MockDiscord, fingerprint, message_json, seed_backfill_row,
+        };
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let (retired, legacy) = (6_325_513_001u64, 6_325_513_002u64);
+        let config_path = crate::runtime_layout::config_file_path(temp.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let agents: Vec<_> = [retired, legacy].into_iter().map(|channel| serde_json::json!({
+            "id": format!("startup-{channel}"), "name": "startup test", "provider": "codex",
+            "channels": {"codex": {"id": channel.to_string(), "name": format!("test-{channel}")}}
+        })).collect();
+        std::fs::write(
+            &config_path,
+            serde_json::to_string(&serde_json::json!({
+                "server": {"port": 8791}, "agents": agents
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let boot = chrono::Utc::now().timestamp();
+        let paths: Vec<_> = [retired, legacy]
+            .into_iter()
+            .map(|channel| {
+                let (mut row, _) =
+                    row_with(channel, channel * 10 + 3, None, boot - 600, false, false);
+                row.provider = "codex".into();
+                seed_backfill_row(&row)
+            })
+            .collect();
+        let before: Vec<_> = paths.iter().map(|path| fingerprint(path)).collect();
+        let answer = reclaim_answer(Vec::new());
+        let discord = MockDiscord::start_with(Arc::new(move |method, path| {
+            let (status, mut body) = answer(method, path)?;
+            if let Some(page) = body.as_array_mut() {
+                let channel = page[0]["channel_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                page.push(message_json(
+                    channel * 10 + 3,
+                    channel,
+                    BOT,
+                    "...",
+                    "2026-01-01T00:00:00+00:00",
+                ));
+            }
+            Some((status, body))
+        }))
+        .await;
+        let _retired = RetiredForTest::new("codex", retired);
+        for pass in [ReclaimPass::FrozenPanels, ReclaimPass::OrphanPlaceholders] {
+            let report =
+                run_startup_reclaim_sweep(&discord.http, &shared, &ProviderKind::Codex, boot, pass)
+                    .await;
+            assert_eq!(report.channels_scanned, 1, "{pass:?}: {report:?}");
+            match pass {
+                ReclaimPass::FrozenPanels => assert_eq!(report.messages_finalized, 1),
+                ReclaimPass::OrphanPlaceholders => {
+                    assert_eq!(report.orphan_placeholders_deleted, 1)
+                }
+            }
+            assert!(!claimed(pass, retired));
+            assert!(claimed(pass, legacy));
+            assert_eq!(
+                run_startup_reclaim_sweep(&discord.http, &shared, &ProviderKind::Codex, boot, pass)
+                    .await,
+                ReclaimReport::default(),
+                "each pass retains its own one-shot claim"
+            );
+        }
+        assert!(discord.calls_for(retired).is_empty());
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| fingerprint(path))
+                .collect::<Vec<_>>(),
+            before
+        );
+        let calls = discord.calls_for(legacy);
+        assert!(
+            calls.iter().any(|call| call
+                == &format!(
+                    "PATCH /api/v10/channels/{legacy}/messages/{}",
+                    legacy * 10 + 1
+                )),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| call
+                == &format!(
+                    "DELETE /api/v10/channels/{legacy}/messages/{}",
+                    legacy * 10 + 2
+                )),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call
+                == &format!(
+                    "DELETE /api/v10/channels/{legacy}/messages/{}",
+                    legacy * 10 + 3
+                )),
+            "durable-linked placeholder must survive: {calls:?}"
+        );
+    }
 }
