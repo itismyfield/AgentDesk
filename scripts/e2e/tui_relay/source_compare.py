@@ -94,7 +94,10 @@ def native_inputs(path, pattern):
         elif kind == "system":
             known = row.get("subtype") in {"turn_duration", "stop_hook_summary", "task_started", "task_notification", "task_progress", "compact_boundary", "local_command"}
         elif kind == "last-prompt":
-            known = set(row) in LAST_PROMPT_SHAPES and isinstance(row.get("lastPrompt", ""), str)
+            # Only the lastPrompt copy may carry a marker; marked metadata stays fail-closed.
+            known = set(row) in LAST_PROMPT_SHAPES and isinstance(row.get("lastPrompt", ""), str) and not any(
+                markers(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), pattern)
+                for key, value in row.items() if key != "lastPrompt")
         else:
             known = kind in ignored
         if not known and markers(json.dumps(row, ensure_ascii=False), pattern):
