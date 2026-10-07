@@ -271,6 +271,14 @@ fn user_line() -> String {
         "type": "message", "role": "user", "content": [{"type": "input_text", "text": PROMPT}]}}))
 }
 
+/// The record Codex writes right after the prompt; the scanner reads it as a non-prompt line.
+fn prompt_item_completed_line() -> String {
+    rollout_line(
+        serde_json::json!({"type": "event_msg", "payload": {"type": "item_completed",
+        "item": {"type": "UserMessage", "content": [{"type": "text", "text": PROMPT}]}}}),
+    )
+}
+
 fn answer_lines() -> String {
     answer_lines_with(RESPONSE)
 }
@@ -327,7 +335,7 @@ impl CodexChannel {
                 output_path: rollout.to_str().unwrap().to_string(),
                 relay_output_path: Some(relay.clone()),
                 input_fifo_path: None,
-                session_id: None,
+                session_id: Some("s-5704".to_string()),
                 last_offset: header.len() as u64,
                 relay_last_offset: Some(0),
             },
@@ -783,4 +791,176 @@ async fn codex_direct_answer_scenario(root: &Path) {
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&codex.tmux);
     }
     drop(relays);
+}
+
+/// Production's direct-input order: the hook fires, Codex writes the prompt and its
+/// `item_completed` record, the idle loop polls past both, then the observer claims.
+#[test]
+fn codex_direct_answer_reaches_discord_after_the_cursor_passes_the_prompt_record() {
+    run_codex_cursor_past_prompt(false);
+}
+
+/// The same order when the whole answer lands before the observer's claim.
+#[test]
+fn codex_direct_answer_reaches_discord_when_it_finishes_before_the_claim() {
+    run_codex_cursor_past_prompt(true);
+}
+
+fn run_codex_cursor_past_prompt(answer_before_claim: bool) {
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("isolated root");
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(codex_cursor_past_prompt_scenario(
+            root.path(),
+            answer_before_claim,
+        ));
+}
+
+async fn codex_cursor_past_prompt_scenario(root: &Path, answer_before_claim: bool) {
+    enable_session_bound_delivery();
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    // The observer announces direct input through the notify utility bot.
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    Arc::get_mut(&mut shared)
+        .expect("fresh shared")
+        .health_registry = Arc::downgrade(&registry);
+    // Each variant has its own session: the dedupe ledger outlives a test.
+    let (channel, tmux) = if answer_before_claim {
+        (5_704_800, "AgentDesk-codex-5704-finished")
+    } else {
+        (5_704_700, "AgentDesk-codex-5704-booked")
+    };
+    let codex = CodexChannel::new(&shared, root, channel, tmux);
+    let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+        crate::services::cluster::session_matcher::MatchedChannel {
+            channel_id: codex.channel.get().to_string(),
+            agent_id: "agent-5704".to_string(),
+            provider: ProviderKind::Codex,
+            expected_session_name: codex.tmux.clone(),
+            expected_rollout_path: codex.rollout.to_str().unwrap().to_string(),
+        },
+        Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
+    );
+    crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+        .register(codex.tmux.clone(), relay.producer());
+    let mut finalized = shared.inflight_signals.subscribe();
+    let (requests, http, _server) = recording_discord(codex.channel.get()).await;
+    registry
+        .set_utility_bot_http_for_tests(
+            crate::services::discord::bot_role::UtilityBotRole::Notify,
+            http.clone(),
+        )
+        .await;
+    let _rest = crate::services::discord::shared_state::test_rest::install(http);
+    super::super::CODEX_IDLE_ROLLOUT_RELAY_STARTED.store(false, Ordering::Release);
+    super::super::spawn_codex_idle_rollout_relay(shared.clone());
+
+    let observed_at = chrono::Utc::now();
+    crate::services::tui_prompt_dedupe::observe_hook_prompt_by_tmux_with_prompt_id_at(
+        "codex",
+        &codex.tmux,
+        PROMPT,
+        None,
+        observed_at,
+    );
+    append(&codex.rollout, &user_line());
+    let prompt_end = std::fs::metadata(&codex.rollout).unwrap().len();
+    let mut after_prompt = prompt_item_completed_line();
+    if answer_before_claim {
+        after_prompt += &answer_lines();
+    }
+    append(&codex.rollout, &after_prompt);
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&codex.tmux)
+                .is_some_and(|binding| binding.last_offset >= prompt_end)
+        })
+        .await,
+        "the idle loop never scanned the prompt"
+    );
+    // Two more polls, as the observer's announcement and placeholder take in production.
+    let visits = poll_notes(&codex.tmux, PollNote::Visit);
+    assert!(
+        wait_for(Duration::from_secs(5), || poll_notes(
+            &codex.tmux,
+            PollNote::Visit
+        ) >= visits + 2)
+        .await,
+        "polls stopped visiting the session"
+    );
+    super::super::relay_observed_prompt(
+        &shared,
+        ObservedTuiPrompt {
+            provider: ProviderKind::Codex.as_str().to_string(),
+            tmux_session_name: codex.tmux.clone(),
+            prompt: PROMPT.to_string(),
+            source_event_id: None,
+            observed_at,
+            external_input_lease_generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation:
+                crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+            hook_prompt_id: None,
+        },
+    )
+    .await;
+    let row = codex.row().unwrap_or_else(|| {
+        panic!(
+            "the observer claims a synthetic row: {:?} binding={:?}",
+            requests.lock().unwrap(),
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&codex.tmux)
+        )
+    });
+    let anchor = format!(
+        "/channels/{}/messages/{}",
+        codex.channel.get(),
+        row.user_msg_id
+    );
+    if !answer_before_claim {
+        append(&codex.rollout, &answer_lines());
+    }
+    assert!(
+        wait_for(Duration::from_secs(15), || !deliveries(
+            &requests,
+            codex.channel
+        )
+        .is_empty())
+        .await,
+        "answer never reached Discord: {:?}",
+        requests.lock().unwrap()
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let sent = deliveries(&requests, codex.channel);
+    assert_eq!(sent.len(), 1, "one answer edit: {sent:?}");
+    assert!(
+        sent[0].0 == "PATCH" && sent[0].1.ends_with(&anchor),
+        "{sent:?}"
+    );
+    let mut turns = 0;
+    while let Ok(signal) = finalized.try_recv() {
+        if matches!(signal, inflight::InflightSignal::Completed { channel_id, .. } if channel_id == codex.channel.get())
+        {
+            turns += 1;
+        }
+    }
+    assert_eq!(turns, 1, "one bridge turn delivers");
+    assert!(codex.row().is_none(), "row cleared");
+    crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+        .deregister(&codex.tmux);
+    crate::services::tmux_diagnostics::set_pane_liveness_override_for_tests(&codex.tmux, None);
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&codex.tmux);
+    drop(relay);
 }
