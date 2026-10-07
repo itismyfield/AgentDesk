@@ -80,7 +80,7 @@ SESSION_ID_ALLOWLIST: set[tuple[str, str]] = {
     ("services/discord/voice_lifecycle.rs", "data.session_id"),
     # Raw provider-CLI hook session id (HookEvent.session_id) observed off the
     # UserPromptSubmit hook — the provider's own session, not adk_session_key.
-    ("services/discord/tui_prompt_relay.rs", "%event.session_id"),
+    ("services/discord/tui_prompt_relay/hook_observer.rs", "%event.session_id"),
 }
 
 

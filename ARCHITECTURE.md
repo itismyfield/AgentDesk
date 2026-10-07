@@ -1532,6 +1532,7 @@ src/
 │   │   │   ├── headless_tests.rs
 │   │   │   ├── herdr_source.rs
 │   │   │   ├── herdr_source_tests.rs
+│   │   │   ├── hook_observer.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs

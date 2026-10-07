@@ -116,6 +116,22 @@ pub struct HookEvent {
     pub kind: HookEventKind,
     pub received_at: DateTime<Utc>,
     pub payload: Value,
+    #[serde(skip)]
+    pub(crate) fanout: Option<HookFanout>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HookFanout {
+    pub(crate) origin_session_id: String,
+    pub(crate) primary_discarded: bool,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct HookBroadcastProbe {
+    pub(crate) primary_discarded: std::sync::atomic::AtomicBool,
+    pub(crate) primary_sent: tokio::sync::Notify,
+    pub(crate) release_alias: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
@@ -124,6 +140,8 @@ pub struct HookServerState {
     memento_feedback: PendingMementoFeedbackTracker,
     relay_receipts: RelayReceiptLedger,
     claude_projects_root: Option<PathBuf>,
+    #[cfg(test)]
+    pub(crate) broadcast_probe: Option<std::sync::Arc<HookBroadcastProbe>>,
 }
 
 impl HookServerState {
@@ -133,6 +151,8 @@ impl HookServerState {
             event_tx,
             memento_feedback: PendingMementoFeedbackTracker::default(),
             relay_receipts: RelayReceiptLedger::default(),
+            #[cfg(test)]
+            broadcast_probe: None,
             claude_projects_root:
                 crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
         }
@@ -386,9 +406,14 @@ async fn receive_hook(
         kind,
         received_at: Utc::now(),
         payload,
+        fanout: None,
     };
     let alias_event = alias_session_id.map(|alias_session_id| HookEvent {
         session_id: alias_session_id,
+        fanout: Some(HookFanout {
+            origin_session_id: event.session_id.clone(),
+            primary_discarded: false,
+        }),
         ..event.clone()
     });
     let event_name = event.kind.as_str().to_string();
@@ -538,8 +563,21 @@ async fn receive_hook(
         );
     } else {
         let primary_discarded = state.event_tx.send(event).is_err();
+        #[cfg(test)]
+        if let Some(probe) = state.broadcast_probe.as_ref() {
+            probe
+                .primary_discarded
+                .store(primary_discarded, std::sync::atomic::Ordering::SeqCst);
+            probe.primary_sent.notify_one();
+            probe.release_alias.notified().await;
+        }
         let alias_discarded = alias_event
-            .map(|alias_event| state.event_tx.send(alias_event).is_err())
+            .map(|mut alias_event| {
+                if let Some(fanout) = alias_event.fanout.as_mut() {
+                    fanout.primary_discarded = primary_discarded;
+                }
+                state.event_tx.send(alias_event).is_err()
+            })
             .unwrap_or(true);
         if primary_discarded && alias_discarded {
             tracing::debug!(

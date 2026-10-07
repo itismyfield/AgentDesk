@@ -115,9 +115,25 @@ pub fn observe_prompt_by_provider_session_with_prompt_id_at(
 ) -> PromptObservation {
     let tmux_session_name = resolve_tmux_session_name(provider, provider_session_id)
         .unwrap_or_else(|| provider_session_id.trim().to_string());
-    observe_prompt_candidates_by_tmux_inner(
+    observe_hook_prompt_by_tmux_with_prompt_id_at(
         provider,
         &tmux_session_name,
+        prompt,
+        prompt_id,
+        observed_at,
+    )
+}
+
+pub(crate) fn observe_hook_prompt_by_tmux_with_prompt_id_at(
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+    prompt_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
         &[prompt.to_string()],
         None,
         prompt_id.map(ClaudePromptId::HookSubmit),
@@ -247,14 +263,17 @@ fn observe_prompt_candidates_by_tmux_inner(
         let _ = OBSERVED_PROMPTS.send(event);
         return PromptObservation::PublishedTaskNotification;
     }
-    // The prompt_id text check runs before the uuid return so a known row that
-    // pairs the id with other text still marks the id ambiguous.
-    let prompt_id_match = prompt_id.map(|prompt_id| {
-        let prompt_id = prompt_id.value().trim();
-        let found =
-            check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]);
-        (prompt_id, found)
-    });
+    // Check rows before uuid dedupe so rewritten rows still mark conflicting ids ambiguous.
+    // Hooks skip this check: separate queued submissions share the running prompt's id.
+    let prompt_id_match = match prompt_id {
+        Some(ClaudePromptId::TranscriptRow(prompt_id)) => {
+            let prompt_id = prompt_id.trim();
+            let found =
+                check_relayed_prompt_id(&provider, tmux_session_name, prompt_id, &candidates[0]);
+            Some((prompt_id, found))
+        }
+        _ => None,
+    };
     // #3540 (root cause): suppress by STABLE entry identity BEFORE any pending /
     // recent / lease bookkeeping or synthetic-turn mint. If this JSONL entry
     // `uuid` was already relayed for this `(provider, tmux)` pair it is a

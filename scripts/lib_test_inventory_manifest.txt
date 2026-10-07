@@ -1763,6 +1763,7 @@ services::claude_tui::hook_registry::tests::deliver_before_claim_replays_once
 services::claude_tui::hook_registry::tests::deliver_sweeps_expired_empty_keys_without_snapshot
 services::claude_tui::hook_registry::tests::empty_stop_is_counted_but_non_qualifying
 services::claude_tui::hook_registry::tests::expired_events_are_swept_and_not_replayed
+services::claude_tui::hook_registry::tests::hidden_fanout_origin_counts_toward_buffered_bytes
 services::claude_tui::hook_registry::tests::key_prefers_provider_session_then_tmux_then_none
 services::claude_tui::hook_registry::tests::newest_unclaimed_stop_replaces_older
 services::claude_tui::hook_registry::tests::oversized_payload_is_not_retained_in_replay_buffer
@@ -2130,6 +2131,7 @@ services::claude_tui::tui_relay::tests::handle_send_records_not_before_for_follo
 services::claude_tui::tui_relay::tests::handle_send_rejects_control_characters_with_bad_request
 services::claude_tui::tui_relay::tests::handle_send_rejects_empty_session_name
 services::claude_tui::tui_relay::tests::handle_send_valid_input_returns_success
+services::claude_tui::tui_relay::tests::http_fanout_preserves_alias_only_live_and_registry_waits
 services::claude_tui::tui_relay::tests::payload_contains_searches_arrays_and_objects
 services::claude_tui::tui_relay::tests::provider_filter_rejects_mismatch
 services::claude_tui::tui_relay::tests::session_id_filter_rejects_mismatch
@@ -7514,6 +7516,7 @@ services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fa
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::checkpointed_catch_up_reads_the_page_just_past_the_cursor
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::recent_catch_up_pages_back_to_a_buried_user_message_and_stops
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_returns_the_ids_nearest_the_cursor_newest_first
+services::discord::tui_prompt_relay::relay_e2e::discord_mock::unregistered_channels_are_unhandled_until_explicitly_allowed
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
@@ -7524,12 +7527,17 @@ services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_manual_rebind
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_without_a_lease
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_resent_after_a_relay_without_a_post_is_announced_once
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_primary_send_to_another_waiter_does_not_claim_observer_receipt
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_an_owner_channel_is_announced_once_the_owner_returns
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_announcement_leaves_the_prompt_to_the_idle_scanner
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_read_during_a_refused_announcement_is_announced_afterwards
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_http_alias_keeps_its_distinct_pane_channel
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_http_alias_survives_an_explicit_primary_discard
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_unresolved_alias_is_not_a_same_pane_clone
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::input_queued_into_a_running_prompt_does_not_reannounce_its_opening
 services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
@@ -10731,12 +10739,14 @@ services::tui_prompt_dedupe::pending::tests::verified_adoption::an_unreadable_un
 services::tui_prompt_dedupe::prompt_identity::tests::a_known_row_with_other_text_still_makes_its_prompt_id_ambiguous
 services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_match_also_records_the_row_uuid
 services::tui_prompt_dedupe::prompt_identity::tests::a_prompt_id_seen_with_other_text_stops_suppressing_either_text
+services::tui_prompt_dedupe::prompt_identity::tests::a_queued_hook_settles_only_its_own_submission
 services::tui_prompt_dedupe::prompt_identity::tests::a_repeated_hook_for_the_same_prompt_id_does_not_extend_its_lifetime
 services::tui_prompt_dedupe::prompt_identity::tests::a_row_read_before_the_announcement_result_still_makes_its_prompt_id_ambiguous
 services::tui_prompt_dedupe::prompt_identity::tests::a_scanner_row_first_then_a_late_hook_is_not_suppressed_by_prompt_id
 services::tui_prompt_dedupe::prompt_identity::tests::an_unannounced_prompt_id_leaves_the_row_to_the_content_window
 services::tui_prompt_dedupe::prompt_identity::tests::fork_rewritten_prompt_ids_never_hide_the_new_input
 services::tui_prompt_dedupe::prompt_identity::tests::hook_prompt_id_suppresses_a_scanner_replay_after_the_recent_window
+services::tui_prompt_dedupe::prompt_identity::tests::hooks_sharing_a_running_prompt_id_are_each_announced_and_the_opening_row_is_not
 services::tui_prompt_dedupe::prompt_identity::tests::hooks_without_prompt_id_keep_only_the_thirty_second_content_window
 services::tui_prompt_dedupe::prompt_identity::tests::prompt_ids_outlive_the_uuid_window_until_the_four_hour_budget
 services::tui_prompt_dedupe::prompt_identity::tests::suppressed_hook_observations_do_not_record_their_prompt_id

@@ -2406,6 +2406,7 @@ mod claude_tui_ready_probe_tests {
             kind: crate::services::claude_tui::hook_server::HookEventKind::Stop,
             received_at: chrono::Utc::now(),
             payload: serde_json::json!({}),
+            fanout: None,
         })
         .unwrap();
 
@@ -2431,6 +2432,7 @@ mod claude_tui_ready_probe_tests {
             kind: crate::services::claude_tui::hook_server::HookEventKind::Stop,
             received_at: hook_events_after - chrono::Duration::milliseconds(1),
             payload: serde_json::json!({}),
+            fanout: None,
         })
         .unwrap();
 
