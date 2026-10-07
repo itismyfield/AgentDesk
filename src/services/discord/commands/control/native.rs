@@ -78,9 +78,21 @@ impl NativeClearEffects for Production {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_SWITCH_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_CHANNELS: std::cell::RefCell<Option<Vec<u64>>> = const { std::cell::RefCell::new(None) };
     static TEST_EFFECTS: std::cell::RefCell<Option<Arc<dyn NativeClearEffects>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn switch_off_for_tests() -> impl Drop {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_SWITCH_OFF.with(|cell| cell.set(self.0));
+        }
+    }
+    Restore(TEST_SWITCH_OFF.with(|cell| cell.replace(true)))
 }
 
 /// Installs `effects` as this thread's switched-on native clear until the guard drops.
@@ -129,6 +141,10 @@ pub(super) fn host_effects_for_tests(effects: Arc<dyn NativeClearEffects>) -> im
 
 /// Reads scope and effects together; disabled keeps the existing host behavior.
 fn switched_on(channel_id: serenity::ChannelId) -> (bool, Option<Arc<dyn NativeClearEffects>>) {
+    #[cfg(test)]
+    if TEST_SWITCH_OFF.with(|cell| cell.get()) {
+        return (true, None);
+    }
     #[cfg(test)]
     if let Some(effects) = TEST_EFFECTS.with(|cell| cell.borrow().clone()) {
         let settings = crate::config::RuntimeSettingsConfig {
@@ -578,7 +594,7 @@ pub(in crate::services::discord) async fn native_clear_admits(
             return false;
         }
     };
-    let NativeClearBoundary::Unresolved { generation, .. } = &boundary else {
+    let NativeClearBoundary::Unresolved { generation, ticket } = &boundary else {
         return true;
     };
     let generation = *generation;
@@ -606,10 +622,33 @@ pub(in crate::services::discord) async fn native_clear_admits(
     let settled = match (&verdict, resolved, tmux) {
         (NativeClearRestart::Preserve, _, _) => return true,
         (NativeClearRestart::CompleteDurable(commit), Some(session_key), Some(tmux)) => {
+            let composer_empty = async {
+                let deadline = Instant::now() + NATIVE_ADMISSION_CAPTURE_BUDGET;
+                if herdr() {
+                    #[cfg(unix)]
+                    {
+                        let Ok(ticket) = serde_json::from_value::<ClearTicket>(ticket.clone())
+                        else {
+                            return false;
+                        };
+                        return crate::services::session_host::recovery_composer_empty(
+                            pool,
+                            &session_key,
+                            channel_id.get(),
+                            &ticket,
+                            deadline,
+                        )
+                        .await;
+                    }
+                    #[cfg(not(unix))]
+                    return false;
+                }
+                effects.composer_empty(&tmux, deadline)
+            };
             effects
                 .save_selector(&session_key, &commit.session, channel_id)
                 .await
-                && effects.composer_empty(&tmux, Instant::now() + NATIVE_ADMISSION_CAPTURE_BUDGET)
+                && composer_empty.await
                 && settle(shared, pool, channel_id, generation, Some(commit)).await
         }
         (NativeClearRestart::ResetUnresolved, Some(session_key), Some(tmux)) => {

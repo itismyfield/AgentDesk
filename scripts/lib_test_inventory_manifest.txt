@@ -3017,6 +3017,8 @@ services::discord::commands::control::native::herdr_tests::e2e::a_crash_after_th
 services::discord::commands::control::native::herdr_tests::e2e::a_crash_before_the_clears_pending_is_logged_completes_at_boot_without_a_second_line_pg
 services::discord::commands::control::native::herdr_tests::e2e::o_actor::the_clear_entry_follows_a_hosted_actors_projection_until_its_rotation_settles_pg
 services::discord::commands::control::native::herdr_tests::e2e::two_clears_from_the_entry_take_the_next_turn_to_the_latest_cleared_session_pg
+services::discord::commands::control::native::herdr_tests::held_herdr_recovery_reads_the_composer_with_native_switch_off_pg
+services::discord::commands::control::native::herdr_tests::held_herdr_recovery_requires_the_ticket_durable_execution_pg
 services::discord::commands::control::native::herdr_tests::the_herdr_clear_holds_the_channel_until_its_commit_is_settled_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg

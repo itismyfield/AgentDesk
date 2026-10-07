@@ -455,6 +455,7 @@ eligible; `native_clear_channels: []` selects none. An unset or false enabled sw
 keeps managed restart behavior regardless of the list. These keys have no environment
 variable override and require no process restart. Channels outside the list keep the
 existing managed-host refusal rules and do not read or write native clear boundaries.
+Shrinking the list does not complete an unresolved clear for a removed channel. Complete any unresolved clear with `!clear` before removing that channel from the list.
 
 For example, `onboarding.provider_suffix_map: {"-gem": gemini, "-cc": codex, "-gm": null}` adds `-gem`, changes `-cc` to Codex, and removes `-gm`; other registry suffixes remain available. Keys are normalized to lowercase with a leading `-`; channel names still match exactly, and the longest matching suffix wins. Unknown providers and overlapping suffixes produce warnings; invalid provider entries are ignored, preserving any registry entry at that key. Unknown keys under `onboarding` are rejected. `onboarding.default_provider` sets the provider fallback when there is no explicit provider or matching suffix; an invalid value warns and uses the registry default. The offline session-name command still requires a suffix or explicit `--provider`.
 

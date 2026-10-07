@@ -9,13 +9,16 @@ use tokio::time::Instant;
 
 use super::herdr_gate::{HerdrGateRefusal, HerdrTarget, Mutation};
 use super::model::HostMutation;
-use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
+};
 use crate::services::claude::herdr_turn::input_held;
 use crate::services::claude_tui::host_input::{
     MutationGate, NativeClearSubmission, native_clear_composer_empty,
 };
 use crate::services::tui_prompt_dedupe::native_clear::{
-    CanonicalClearWaiter, ClearCommit, ClearDecision, NativeClearHost, capture_live_clear,
+    CanonicalClearWaiter, ClearCommit, ClearDecision, ClearTicket, NativeClearHost,
+    capture_live_clear,
 };
 
 type Effect<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
@@ -135,6 +138,49 @@ fn not_held(nonce: &str) -> Result<(), HerdrClearRefusal> {
     }
 }
 
+fn composer_empty_now(target: &HerdrTarget) -> bool {
+    target
+        .capture(-80)
+        .is_some_and(|capture| native_clear_composer_empty(&capture))
+}
+
+/// Reads the committed clear's recorded execution without planning or sending another clear.
+pub(crate) async fn recovery_composer_empty(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    channel: u64,
+    ticket: &ClearTicket,
+    deadline: Instant,
+) -> bool {
+    tokio::time::timeout_at(deadline, async {
+        let lookup = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(session_key)).await;
+        let HostedLookup::Found(observation) = lookup else {
+            return false;
+        };
+        let HostedRecord::Known(record) = observation.record else {
+            return false;
+        };
+        let context = &ticket.context;
+        if record.state != HostedState::Bound
+            || context.channel_id != Some(channel)
+            || record.owner.channel_id != channel.to_string()
+            || record.owner.provider != context.provider
+            || record.owner.logical_key != context.tmux_session
+            || record.execution_nonce != context.execution_nonce
+        {
+            return false;
+        }
+        let Some(target) = super::herdr_registry::registry().target(&record) else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || target.execution_alive() && composer_empty_now(&target))
+            .await
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// The helper's host for one planned Herdr clear.
 pub(crate) struct HerdrClear<S> {
     plan: HerdrClearPlan,
@@ -147,8 +193,7 @@ impl<S: ClearSession> HerdrClear<S> {
     }
 
     fn composer_empty_now(&self) -> bool {
-        let capture = self.plan.target.capture(-80);
-        capture.is_some_and(|capture| native_clear_composer_empty(&capture))
+        composer_empty_now(&self.plan.target)
     }
 }
 
