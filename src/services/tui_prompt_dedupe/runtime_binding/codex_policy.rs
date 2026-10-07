@@ -127,6 +127,12 @@ pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
     })
 }
 
+pub(crate) fn codex_verified_channel_requires_proof(channel: u64) -> bool {
+    verified_panes(channel)
+        .into_iter()
+        .any(|tmux| codex_verified_requires_proof(&tmux))
+}
+
 pub(crate) fn codex_verified_channel_delivery_allowed(channel: u64) -> bool {
     let panes = verified_panes(channel);
     panes
