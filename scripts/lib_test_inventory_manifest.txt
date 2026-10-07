@@ -5792,7 +5792,8 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_modal_on_a_cold_start_refuses_its_first_prompt_at_once_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_replaced_root_shell_restores_no_codex_source_and_takes_no_input_pg
-services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_no_codex_source_without_its_logged_file_or_baseline_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_no_codex_rollout_replaced_since_it_was_logged_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_no_codex_source_behind_a_later_pending_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_the_logged_rollout_of_a_matched_codex_pane_for_its_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg

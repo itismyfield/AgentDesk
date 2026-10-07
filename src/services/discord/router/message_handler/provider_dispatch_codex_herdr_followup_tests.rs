@@ -27,14 +27,8 @@ fn launch(fx: &Fixture, ports: &Ports<'_>) -> (String, PathBuf) {
     launched.into_inner().unwrap().unwrap()
 }
 
-/// Held from before a test's restart to its end, after the fixture's env lock, so the dedupe
-/// reset wipes no other dedupe test's mapping.
-fn dedupe_lock() -> std::sync::MutexGuard<'static, ()> {
-    let lock = &crate::services::tui_prompt_dedupe::TEST_LOCK;
-    lock.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
-/// What a dcserver restart forgets, then `provider`'s restart pass on this node's endpoint.
+/// What a dcserver restart forgets, then `provider`'s restart pass on this node's endpoint; the
+/// fixture's hook ingress holds the dedupe test lock, so no other dedupe test sees the reset.
 fn restart_and_reconnect(fx: &Fixture, provider: &ProviderKind) -> ReconnectCounts {
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
     crate::services::tui_prompt_dedupe::binding_events::forget_channel_for_tests(CHANNEL);
@@ -129,7 +123,6 @@ fn an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg() {
 #[test]
 fn a_restart_restores_the_logged_rollout_of_a_matched_codex_pane_for_its_next_prompt_pg() {
     let fx = Fixture::admitted("reconnect");
-    let _dedupe = dedupe_lock();
     let launcher = Arc::new(Launcher::default());
     let (nonce, path) = launch(&fx, &fx.ports(&launcher));
     assert_eq!(
@@ -179,7 +172,6 @@ fn a_restart_restores_the_logged_rollout_of_a_matched_codex_pane_for_its_next_pr
 #[test]
 fn a_replaced_root_shell_restores_no_codex_source_and_takes_no_input_pg() {
     let fx = Fixture::admitted("root-replaced");
-    let _dedupe = dedupe_lock();
     let launcher = Arc::new(Launcher::default());
     let (nonce, _) = launch(&fx, &fx.ports(&launcher));
     fx.rig.restart_shell(&context_of(&nonce));
@@ -199,52 +191,58 @@ fn a_replaced_root_shell_restores_no_codex_source_and_takes_no_input_pg() {
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
 }
 
-// A restart restores no Codex source whose rollout file was replaced since its hook logged it,
-// nor one whose latest record is a later Pending of the same execution; its next prompt is refused.
+/// A bound pane whose log `change` leaves without its logged source restores nothing on restart,
+/// and its next prompt is refused with nothing written.
+fn restart_restores_nothing(tag: &str, change: impl FnOnce(&Fixture, &Path)) {
+    let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
+    let fx = Fixture::admitted(tag);
+    let launcher = Arc::new(Launcher::default());
+    let (_, path) = launch(&fx, &fx.ports(&launcher));
+    change(&fx, &path);
+    assert_eq!(
+        restart_and_reconnect(&fx, &ProviderKind::Codex),
+        counts(0, 1)
+    );
+    assert_eq!(binding(&fx), None);
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    assert!(second.unwrap_err().contains("NoSource"));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+}
+
+// A rollout file replaced since its hook logged it is not the logged source.
 #[test]
-fn a_restart_restores_no_codex_source_without_its_logged_file_or_baseline_pg() {
+fn a_restart_restores_no_codex_rollout_replaced_since_it_was_logged_pg() {
+    restart_restores_nothing("replaced-rollout", |_, path| {
+        let text = std::fs::read(path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::write(path, text).unwrap();
+    });
+}
+
+// A later Pending of the same execution leaves no baseline; Codex has no clear to wait on.
+#[test]
+fn a_restart_restores_no_codex_source_behind_a_later_pending_pg() {
     use crate::services::tui_prompt_dedupe::binding_events::{
         self, BindingCause, CauseSource, HookSignal, Proposal,
     };
-    let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
-    for case in ["replaced", "pending"] {
-        let fx = Fixture::admitted(&format!("no-baseline-{case}"));
-        let _dedupe = dedupe_lock();
-        let launcher = Arc::new(Launcher::default());
-        let (_, path) = launch(&fx, &fx.ports(&launcher));
-        if case == "replaced" {
-            let text = std::fs::read(&path).unwrap();
-            std::fs::remove_file(&path).unwrap();
-            std::fs::write(&path, text).unwrap();
-        } else {
-            let text = path.display().to_string();
-            let payload =
-                json!({"source": "clear", "session_id": "later", "transcript_path": text});
-            let hook = HookSignal::from_payload("session_start", &payload);
-            let proposal = Proposal {
-                channel_id: CHANNEL,
-                provider: "codex",
-                tmux_session: fx.logical(),
-                session_id: Some("later"),
-                path: &text,
-                replaced: None,
-                cause: CauseSource::Hook(BindingCause::Clear),
-                hook: Some(&hook),
-            };
-            crate::services::tmux_common::with_tmux_source_authority(fx.logical(), |_| {
-                binding_events::record_pending(&proposal).unwrap();
-            });
-        }
-        assert_eq!(
-            restart_and_reconnect(&fx, &ProviderKind::Codex),
-            counts(0, 1),
-            "{case}"
-        );
-        assert_eq!(binding(&fx), None, "{case}");
-        let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
-        assert!(second.unwrap_err().contains("NoSource"), "{case}");
-        assert_eq!(fx.rig.sends(), prompt_sends(), "{case}");
-    }
+    restart_restores_nothing("later-pending", |fx, path| {
+        let text = path.display().to_string();
+        let payload = json!({"source": "clear", "session_id": "later", "transcript_path": text});
+        let hook = HookSignal::from_payload("session_start", &payload);
+        let proposal = Proposal {
+            channel_id: CHANNEL,
+            provider: "codex",
+            tmux_session: fx.logical(),
+            session_id: Some("later"),
+            path: &text,
+            replaced: None,
+            cause: CauseSource::Hook(BindingCause::Clear),
+            hook: Some(&hook),
+        };
+        crate::services::tmux_common::with_tmux_source_authority(fx.logical(), |_| {
+            binding_events::record_pending(&proposal).unwrap();
+        });
+    });
 }
 
 // T2-8: O posts what a turn wrote before a restart once, and after the restart and the pane's
@@ -252,7 +250,6 @@ fn a_restart_restores_no_codex_source_without_its_logged_file_or_baseline_pg() {
 #[test]
 fn o_posts_only_the_rest_of_a_turn_across_a_restart_and_its_restore_pg() {
     let fx = Fixture::admitted("o-restart");
-    let _dedupe = dedupe_lock();
     let launcher = Arc::new(Launcher::default());
     let o = Mutex::new(None);
     let mut ports = fx.ports(&launcher);
