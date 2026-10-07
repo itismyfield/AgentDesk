@@ -6,11 +6,14 @@ use crate::services::discord::recovery_engine::herdr_reader::{
     ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
 };
 
-/// A ready screen whose boxed composer holds the `body` lines.
+/// The status row Codex draws at the bottom of the screen.
+const STATUS: &str = "  gpt-5.5 xhigh · /fixture/workspace";
+
+/// A ready screen whose boxed composer holds the `body` lines, its status row below.
 fn composer(body: &str) -> String {
     let edge = "─".repeat(30);
     format!(
-        "earlier output\n╭{edge}╮\n{body}\n╰{edge}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send"
+        "earlier output\n╭{edge}╮\n{body}\n╰{edge}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send\n{STATUS}"
     )
 }
 
@@ -89,8 +92,8 @@ fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg()
         composer(&format!(
             "│ 남은 초안                    │\n╰{edge}╯\n╭{edge}╮\n│ ▌                            │"
         )),
-        format!("╭{edge}\n│ ▌                            │\n╰{edge}╯\n{footer}"),
-        format!("╭{edge}╮\n│ ▌                            │\n╰{edge}\n{footer}"),
+        format!("╭{edge}\n│ ▌                            │\n╰{edge}╯\n{footer}\n{STATUS}"),
+        format!("╭{edge}╮\n│ ▌                            │\n╰{edge}\n{footer}\n{STATUS}"),
     ];
     let refused = drafts.iter().map(|body| (composer(body), "ComposerDraft"));
     for (screen_text, why) in refused.chain(unread.into_iter().map(|s| (s, "ComposerUnread"))) {
@@ -117,6 +120,51 @@ fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg()
         assert_eq!(taken, Ok(()), "{body}");
         assert_eq!(texts(&messages), [turn], "{body}");
     }
+}
+
+// T2-2b: only the bottom-most composer is read. A box with other rows below its footer, or a
+// compact prompt not shown whole above the status row, refuses the follow-up with nothing written.
+#[test]
+fn a_composer_other_than_the_bottom_one_refuses_the_follow_up_pg() {
+    let fx = Fixture::admitted("region");
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, path) = launch(&fx, &fx.ports(&launcher));
+    let edge = "─".repeat(20);
+    let footer = "Esc to interrupt   Ctrl+J newline   ⏎ send";
+    let unread = [
+        "› Please explain this prompt symbol:\n  ›\ngpt-5.4 high · /workspace".to_string(),
+        format!(
+            "╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n\n› draft line one\n  draft line two\ngpt-5.4 high · /workspace"
+        ),
+        format!("earlier output\n  남은 초안\n›\n\n{STATUS}"),
+        format!("╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n› 남은 초안\n{STATUS}"),
+        format!("╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n  loading plugins…"),
+        format!("earlier output\n  › 남은 초안\n\n›\n\n{STATUS}"),
+        format!("earlier output\n› 남은 초안\n\n›\n\n{STATUS}"),
+        format!("earlier output\n\n  ›\n\n{STATUS}"),
+    ];
+    for screen_text in unread {
+        fx.rig.answer("pane.read", screen(&screen_text));
+        let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+        assert_eq!(
+            fx.rig.sends(),
+            prompt_sends(),
+            "no write and no key: {screen_text}"
+        );
+        assert!(!hold_of(&nonce).exists(), "{screen_text}");
+        assert_eq!(fx.row(), Some(HostedState::Bound), "{screen_text}");
+        let second = second.unwrap_err();
+        assert!(second.contains("ComposerUnread"), "{screen_text}: {second}");
+    }
+    fx.rig.answer(
+        "pane.read",
+        screen(&format!("earlier output\n\n›\n\n{STATUS}")),
+    );
+    let (taken, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        reply(&fx, &path, 4, "t2", "t2")
+    });
+    assert_eq!(taken, Ok(()));
+    assert_eq!(texts(&messages), ["t2"]);
 }
 
 // T2-3: a follow-up whose launch options are not the pane's, whose kept options name another

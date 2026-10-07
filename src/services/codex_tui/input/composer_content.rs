@@ -3,8 +3,8 @@
 
 use super::{
     COMPOSER_EDGE_BOTTOM_WINDOW, COMPOSER_FOOTER_ADJACENCY_LINES, FOOTER_HINT_BOTTOM_WINDOW,
-    PROMPT_READY_SCAN_LINES, line_is_codex_composer_edge, line_is_codex_footer_hint,
-    recent_has_codex_compact_composer,
+    PROMPT_READY_SCAN_LINES, line_is_codex_compact_status_line, line_is_codex_composer_edge,
+    line_is_codex_fast_context_status, line_is_codex_footer_hint,
 };
 
 /// The body lines of the bottom-most boxed composer, bottom first; `None` unless its edges sit
@@ -51,26 +51,23 @@ const DRAWN_PLACEHOLDERS: &[&str] = &[
     "Message",
 ];
 
-/// The Herdr turn's composer reading: `Empty` only for a blank input or a placeholder drawn
-/// right after its one cursor; any other text is a draft, and an uncertain layout is unread.
+/// The Herdr turn's reading of the bottom-most composer, box or compact; `Empty` only for a blank
+/// input or a placeholder right after its one cursor, and any other screen is a draft or unread.
 pub(crate) fn active_composer_content_in_pane(pane: &str) -> ComposerContent {
-    let recent: Vec<&str> = pane
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
+    let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
+    let recent: Vec<usize> = (0..lines.len())
         .rev()
+        .filter(|&i| !lines[i].trim().is_empty())
         .take(PROMPT_READY_SCAN_LINES)
         .collect();
-    if recent_has_codex_compact_composer(&recent) {
-        let prompt = recent[1].trim_matches(blank).trim_start_matches('›');
-        return match prompt.trim_matches(blank) {
-            "" => ComposerContent::Empty,
-            prompt => cursor_row_content(prompt),
-        };
+    let rows: Vec<&str> = recent.iter().map(|&i| lines[i]).collect();
+    match herdr_composer_body(&rows) {
+        Some(body) => boxed_content(body),
+        None => compact_content(&lines, &recent, &rows),
     }
-    let Some(body) = herdr_composer_body(&recent) else {
-        return ComposerContent::Unread;
-    };
+}
+
+fn boxed_content(body: &[&str]) -> ComposerContent {
     let (mut rows, mut cursors) = (Vec::new(), 0);
     for line in body {
         let trimmed = line.trim();
@@ -90,6 +87,35 @@ pub(crate) fn active_composer_content_in_pane(pane: &str) -> ComposerContent {
     }
 }
 
+/// A compact composer is one unindented `›` row right above the status row, the only `›` row
+/// in view, with a blank row above it; Codex indents a draft's later rows below its first.
+fn compact_content(lines: &[&str], recent: &[usize], rows: &[&str]) -> ComposerContent {
+    let [status, prompt, ..] = rows else {
+        return ComposerContent::Unread;
+    };
+    let blank_above = recent[1]
+        .checked_sub(1)
+        .is_none_or(|above| lines[above].trim_matches(blank).is_empty());
+    let prompts = rows
+        .iter()
+        .filter(|row| row.trim_start_matches(blank).starts_with('›'))
+        .count();
+    let Some(input) = prompt.strip_prefix('›') else {
+        return ComposerContent::Unread;
+    };
+    if !line_is_status(status) || prompts != 1 || !blank_above {
+        return ComposerContent::Unread;
+    }
+    match input.trim_matches(blank) {
+        "" => ComposerContent::Empty,
+        input => cursor_row_content(input),
+    }
+}
+
+fn line_is_status(line: &str) -> bool {
+    line_is_codex_compact_status_line(line) || line_is_codex_fast_context_status(line)
+}
+
 /// A trimmed input row: empty when it is the cursor alone or the cursor then a drawn placeholder.
 fn cursor_row_content(row: &str) -> ComposerContent {
     match row.strip_prefix('▌') {
@@ -104,8 +130,8 @@ fn blank(ch: char) -> bool {
     ch.is_whitespace() || ch == '\u{00a0}'
 }
 
-/// The body of the one boxed composer right above the footer hint, bottom first: its edges are
-/// `╰─…─╯` and `╭─…─╮`, every row between is `│…│`, and no other border sits above it.
+/// The body, bottom first, of the one `╭─…─╮`/`╰─…─╯` box with only `│…│` rows inside, no border
+/// above it, and only footer hint and status rows below it.
 fn herdr_composer_body<'r, 'a>(recent: &'r [&'a str]) -> Option<&'r [&'a str]> {
     let footer_idx = recent
         .iter()
@@ -118,6 +144,9 @@ fn herdr_composer_body<'r, 'a>(recent: &'r [&'a str]) -> Option<&'r [&'a str]> {
     if !line_is_box_rule(recent[bottom_idx], '╰', '╯')
         || footer_idx > bottom_idx
         || bottom_idx - footer_idx > COMPOSER_FOOTER_ADJACENCY_LINES
+        || !recent[..bottom_idx]
+            .iter()
+            .all(|line| line_is_codex_footer_hint(line) || line_is_status(line))
     {
         return None;
     }
