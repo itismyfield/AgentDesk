@@ -60,43 +60,63 @@ fn binding(fx: &Fixture) -> Option<crate::services::tui_prompt_dedupe::TuiRuntim
     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical())
 }
 
-// T2-2: composer text on either side of the cursor, or an unread composer, refuses the follow-up
-// with nothing written, cleared or held and the pane Bound; an empty one then takes it.
+// T2-2: any composer text but a blank input or a placeholder right after its one cursor, or a box
+// not read as exactly one composer, refuses the follow-up with nothing written, held or unbound.
 #[test]
 fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg() {
     let fx = Fixture::admitted("draft");
     let launcher = Arc::new(Launcher::default());
     let (nonce, path) = launch(&fx, &fx.ports(&launcher));
-    for (body, why) in [
-        ("│ 남은 초안▌                   │", "ComposerDraft"),
-        ("│ ▌남은 초안                   │", "ComposerDraft"),
-        (
-            "│ 남은 초안                    │\n│ ▌                            │",
-            "ComposerDraft",
-        ),
-        ("│                              │", "ComposerUnread"),
-    ] {
-        fx.rig.answer("pane.read", screen(&composer(body)));
+    let edge = "─".repeat(30);
+    let footer = "  Esc to interrupt   Ctrl+J newline   ⏎ send";
+    let drafts = [
+        "│ 남은 초안▌                   │",
+        "│ ▌남은 초안                   │",
+        "│ 남은 초안                    │\n│ ▌                            │",
+        "│ message▌                     │",
+        "│ MESSAGE▌                     │",
+        "│ send▌a message               │",
+        "│ Send▌a message               │",
+        "│ ▌send a message              │",
+        "│ ▌send a message!             │",
+        "│ ▌Send a message!             │",
+        "│ Send a message▌              │",
+        "│ Send a message               │\n│ ▌                            │",
+        "│ 남은 초안                    │\n│ ──────────────────────────── │\n│ ▌                            │",
+    ];
+    let unread = [
+        composer("│                              │"),
+        composer(&format!(
+            "│ 남은 초안                    │\n╰{edge}╯\n╭{edge}╮\n│ ▌                            │"
+        )),
+        format!("╭{edge}\n│ ▌                            │\n╰{edge}╯\n{footer}"),
+        format!("╭{edge}╮\n│ ▌                            │\n╰{edge}\n{footer}"),
+    ];
+    let refused = drafts.iter().map(|body| (composer(body), "ComposerDraft"));
+    for (screen_text, why) in refused.chain(unread.into_iter().map(|s| (s, "ComposerUnread"))) {
+        fx.rig.answer("pane.read", screen(&screen_text));
         let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
         assert_eq!(
             fx.rig.sends(),
             prompt_sends(),
-            "no write and no key: {body}"
+            "no write and no key: {screen_text}"
         );
-        assert!(!hold_of(&nonce).exists(), "{body}");
-        assert_eq!(fx.row(), Some(HostedState::Bound), "{body}");
+        assert!(!hold_of(&nonce).exists(), "{screen_text}");
+        assert_eq!(fx.row(), Some(HostedState::Bound), "{screen_text}");
         let second = second.unwrap_err();
-        assert!(second.contains(why), "{body}: {second}");
+        assert!(second.contains(why), "{screen_text}: {second}");
     }
-    fx.rig.answer(
-        "pane.read",
-        screen(&composer("│ ▌                            │")),
-    );
-    let (third, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
-        reply(&fx, &path, 4, "t2", "둘째")
-    });
-    assert_eq!(third, Ok(()));
-    assert_eq!(texts(&messages), ["둘째"]);
+    for (body, sends, turn) in [
+        ("│ ▌Send a message…             │", 4, "t2"),
+        ("│ ▌                            │", 6, "t3"),
+    ] {
+        fx.rig.answer("pane.read", screen(&composer(body)));
+        let (taken, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+            reply(&fx, &path, sends, turn, turn)
+        });
+        assert_eq!(taken, Ok(()), "{body}");
+        assert_eq!(texts(&messages), [turn], "{body}");
+    }
 }
 
 // T2-3: a follow-up whose launch options are not the pane's, whose kept options name another
@@ -171,15 +191,8 @@ fn an_unanswered_follow_up_enter_keeps_the_hold_and_sends_nothing_again_pg() {
     let fx = Fixture::admitted("unclear-enter");
     let launcher = Arc::new(Launcher::default());
     let (nonce, _) = launch(&fx, &fx.ports(&launcher));
-    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
-        if wait_for(&fx.finished, "the follow-up text", || {
-            fx.rig.sends().len() == 3
-        }) {
-            // The text is answered at once; its Enter waits out a 200ms settle first.
-            std::thread::sleep(Duration::from_millis(60));
-            fx.rig.leave_sends_unanswered(true);
-        }
-    });
+    fx.rig.answer_sends_then_leave_unanswered(1);
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
     assert!(second.is_err());
     held_after(
         &fx,
