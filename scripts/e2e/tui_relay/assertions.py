@@ -21,6 +21,13 @@ from typing import Any, Sequence
 #   - Override via `AGENTDESK_E2E_OUR_BOT_ID` if the deployment uses a different
 #     announce bot.
 OUR_BOT_ID = os.environ.get("AGENTDESK_E2E_OUR_BOT_ID", "1479017284805722200")
+# Response bots per provider. Other bots (the notify bot's direct-input notice)
+# can quote the same text, so a wait scoped with `relay_author: provider`
+# accepts only these authors. Override per deployment like OUR_BOT_ID.
+PROVIDER_BOT_IDS = {
+    "claude": os.environ.get("AGENTDESK_E2E_CLAUDE_BOT_ID", "1474932782395293736"),
+    "codex": os.environ.get("AGENTDESK_E2E_CODEX_BOT_ID", "1479425196824989758"),
+}
 
 # Status/header chrome the TUI relay posts around real responses. These are
 # legitimate ADK output but they repeat across turns by design, so excluding
@@ -141,6 +148,13 @@ class CompletionOrderError(AssertionError):
 def is_our_send(message: dict[str, Any]) -> bool:
     author = message.get("author") or {}
     return str(author.get("id") or "") == OUR_BOT_ID
+
+
+def provider_bot_id(provider: str) -> str:
+    bot_id = PROVIDER_BOT_IDS.get(provider)
+    if not bot_id:
+        raise AssertionError(f"no response bot id known for provider {provider!r}")
+    return bot_id
 
 
 def is_status_chrome(message: dict[str, Any]) -> bool:

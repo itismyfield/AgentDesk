@@ -1047,6 +1047,10 @@ def validate_scenario_schema(scenario):
             metadata = {"requires_feature"} if kind == "assertions" else set()
             if action in {"wait_for_discord_text", "wait_for_raw_discord_text"}:
                 metadata.add("timeout_s")
+            if action == "wait_for_discord_text":
+                metadata.add("relay_author")
+                if entry.get("relay_author", "provider") != "provider":
+                    raise ValueError("relay_author supports only provider")
             if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
                 metadata.add("post_send_sleep_s")
             if action == "send_discord_prompt" and scenario.get("e36_normal_intake"):
@@ -3054,14 +3058,18 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     thread_channel_id: str | None,
     timeout_s: float,
     debug_label: str,
+    author_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     deadline = time.monotonic() + timeout_s
     guard_after_s = min(TUI_IDLE_DRAFT_GUARD_AFTER_S, max(timeout_s, 0.0))
     next_guard_at = time.monotonic() + max(guard_after_s, 0.0)
     observed: list[dict[str, Any]] = []
     observed_by_id: dict[str, dict[str, Any]] = {}
+    # A provider-scoped wait also refuses the direct-input notice shape, whichever bot posts it.
     predicate = lambda message: (  # noqa: E731
-        (body := assertions.relay_body(message)) is not None and needle in body
+        (author_id is None or (str((message.get("author") or {}).get("id") or "") == author_id
+                               and not source_compare.DIRECT_NOTICE.match(message.get("content") or "")))
+        and (body := assertions.relay_body(message)) is not None and needle in body
     )
     while time.monotonic() < deadline:
         messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)
@@ -3890,7 +3898,10 @@ def run_one_cell(
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
             needle = str(step["wait_for_discord_text"]).replace("{run_id}", run_id)
+            author_id = (assertions.provider_bot_id(cell_provider(cell))
+                         if step.get("relay_author") == "provider" else None)
             found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
+                author_id=author_id,
                 client=client,
                 channel_id=channel_id,
                 cell=cell,
@@ -4804,7 +4815,7 @@ def run_assertion(
             raise assertions.AssertionError(
                 f"ordered_text_present must be a list of needles: {spec!r}"
             )
-        assertions.ordered_text_present(window, needles=needles)
+        assertions.ordered_text_present(window, needles=[expand_marker(str(n)) for n in needles])
     elif gap_key in spec:
         params = spec[gap_key]
         if not isinstance(params, dict) or params != {"marker": known_gap.PRE, "known_gap": known_gap.PROFILE}:

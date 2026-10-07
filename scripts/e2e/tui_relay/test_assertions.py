@@ -140,6 +140,7 @@ class E36EvidenceContract(unittest.TestCase):
             path = Path(root) / "intake"
             reader = object.__new__(e36.Evidence)
             reader.log, reader.channel = path, "42"
+            reader.record, reader.log_format_evidence = {"e36_acceptance": {}}, "pre_run_tail"
             reader.watcher = lambda: {"mailbox_active_user_msg_id": 100}
             for name, fields, error in (
                 ("accepted", 'message_id=200 source="busy_active_turn" outcome="enqueued" persistence_error="none"', None),
@@ -164,6 +165,52 @@ class E36EvidenceContract(unittest.TestCase):
                         self.assertEqual(request["queue"]["active_prior_message_id"], "100")
                     if name in ("wrong_id", "unavailable"):
                         self.assertNotIn("queue", request)
+
+    def test_busy_log_format_is_proven_by_the_run_segment_not_only_the_pre_run_tail(self):
+        from types import SimpleNamespace
+        row = ('\x1b[2m2026-10-07T11:08:58Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2m%s\x1b[0m: %s '
+               'channel_id=%s message_id=%s source="busy_active_turn" author_class="allowed_bot" '
+               'outcome="enqueued" persistence_error="none"\n')
+        noise = "INFO agentdesk::other: unrelated %s\n" % ("x" * 200)
+        with tempfile.TemporaryDirectory() as root:
+            log, native = Path(root) / "dcserver.log", Path(root) / "native.jsonl"
+            native.write_text("")
+            state = {"bound_output_path": str(native), "bound_session_id": "s", "tmux_session": "t",
+                     "unread_bytes": 0, "has_pending_queue": False, "mailbox_active_user_msg_id": 100}
+            clock = [0.0]
+            d = SimpleNamespace(_read_api_json=lambda base, path: (200, state),
+                                assert_cell_idle=lambda **kwargs: {"status": "idle"},
+                                time=SimpleNamespace(monotonic=lambda: clock[0],
+                                                     sleep=lambda t: clock.__setitem__(0, clock[0] + t)))
+            args = Namespace(queue_runtime_root=root, e36_intake_log=str(log), base_url="http://offline.invalid",
+                             cell="claude-tui")
+            for name, prior_rows, run_rows, outcome in (
+                    ("busy_log", [row % (e36.LOG_TARGET, e36.LOG_MESSAGE, 7, 1)], [("42", 200)], "run_segment"),
+                    ("quiet_log", [row % (e36.LOG_TARGET, e36.LOG_MESSAGE, 7, 1)], [], "unavailable"),
+                    ("foreign_row_only", [], [("7", 300)], "commit_missing"),
+                    ("never_seen", [], [], "unavailable")):
+                with self.subTest(case=name):
+                    clock[0] = 0.0
+                    log.write_text("".join(prior_rows) + noise * (e36.LOG_SAMPLE_BYTES // len(noise) + 1)
+                                   if name != "quiet_log" else "".join(prior_rows))
+                    record = {"e36_acceptance": {}}
+                    evidence = e36.Evidence(d, args, "42", record)
+                    pre_run = record["e36_acceptance"]["intake_log_format_evidence"]
+                    self.assertEqual(pre_run, "pre_run_tail" if name == "quiet_log" else None)
+                    request = {"inbound_message_id": "200", "log_before": e36.cursor(log)}
+                    with log.open("a") as stream:
+                        stream.writelines(row % (e36.LOG_TARGET, e36.LOG_MESSAGE, c, m) for c, m in run_rows)
+                    prior = {"inbound_message_id": "100", "deadline": 20}
+                    if outcome == "run_segment":
+                        evidence.queue(request, prior)
+                        self.assertEqual(request["queue"]["source"], "busy_active_turn")
+                        self.assertEqual(record["e36_acceptance"]["intake_log_format_evidence"], "run_segment")
+                        continue
+                    message = "INFO/format evidence unavailable" if outcome == "unavailable" and pre_run is None \
+                        else "exact QB commit unavailable"
+                    with self.assertRaisesRegex(ValueError, message):
+                        evidence.queue(request, prior)
+                    self.assertNotIn("queue", request)
 
     def test_request_window_filters_prior_and_shared_chrome_and_detects_deleted_body(self):
         global_window = _window(_relay_msg(11, "old"), _raw_bot_msg(12, "✅ 응답 완료"),
@@ -233,6 +280,7 @@ class E36EvidenceContract(unittest.TestCase):
             path = Path(root) / "intake"
             reader = object.__new__(e36.Evidence)
             reader.log, reader.channel = path, "42"
+            reader.record, reader.log_format_evidence = {"e36_acceptance": {}}, "pre_run_tail"
             reader.d = SimpleNamespace(time=SimpleNamespace(monotonic=lambda: 0, sleep=MagicMock()))
             for active in (200, None):
                 with self.subTest(active=active):
@@ -403,6 +451,77 @@ class OrderedTextPresent(unittest.TestCase):
         window = _window(_relay_msg(1, "alpha"))
         with self.assertRaises(assertions.AssertionError):
             assertions.ordered_text_present(window, needles=["alpha", "beta"])
+
+
+    def test_dispatcher_expands_run_id_like_text_present(self):
+        window = _window(_relay_msg(1, "[E2E:X:run-1:A]"), _relay_msg(2, "[E2E:X:run-1:B]"))
+        spec = {"ordered_text_present": ["[E2E:X:{run_id}:A]", "[E2E:X:{run_id}:B]"]}
+        driver.run_assertion(spec, window=window, run_id="run-1")
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion(spec, window=window, run_id="run-2")
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({"ordered_text_present": spec["ordered_text_present"][::-1]},
+                                 window=window, run_id="run-1")
+
+
+class E4ProviderBodyWait(unittest.TestCase):
+    NOTICE_BOT = "1481522187197218816"
+
+    def run_e4(self, cell, bodies):
+        scenario = driver.yaml.safe_load(
+            (ROOT / "tests/e2e/tui_relay/scenarios/E-4-direct-input-relay.yaml").read_text())
+        driver.validate_scenario_schema(scenario)
+        bot = assertions.provider_bot_id(driver.cell_provider(cell))
+        warmup = [{"id": "11", "content": "[E2E:E4:WARMUP]", "author": {"id": bot, "bot": True}, "type": 0}]
+        direct = [{"id": "12", "content": "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n"
+                   "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK\n```",
+                   "author": {"id": self.NOTICE_BOT, "bot": True}, "type": 0}]
+        direct += [{"id": str(20 + i), "content": "DIRECT_E4_OK", "author": {"id": author, "bot": True}, "type": 0}
+                   for i, author in enumerate(bodies)]
+        rows = []
+        client = MagicMock(base_url="http://offline.invalid")
+        client.send_control.side_effect = lambda channel, content: {"id": "10" if "SETUP" in content else "99"}
+        client.send_prompt.side_effect = lambda *a, **kw: rows.extend(warmup) or {"id": "10"}
+        client.fetch_messages.side_effect = lambda channel, after_id=None, limit=100: [
+            r for r in rows if int(r["id"]) > int(after_id or 0)]
+        client.wait_for_message.side_effect = lambda channel, predicate, after_id=None, **kw: (
+            next((r for r in rows if int(r["id"]) > int(after_id or 0) and predicate(r)), None), list(rows))
+        args = Namespace(cell=cell, channel_id="41", dry_run=False, base_url="http://offline.invalid",
+                         reset_before_each=False, hard_reset_session_each=False, allow_destructive=False,
+                         queue_runtime_root="unused", final_refetches=1, thread_channel_id=None)
+        clock = [0.0]
+        with patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(driver.time, "sleep", side_effect=lambda t: clock.__setitem__(0, clock[0] + t)), \
+             patch.object(driver.tmux, "send_keys", side_effect=lambda session, keys: (
+                 keys != "C-m" or rows.extend(direct) or True)) as keys, \
+             patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
+             patch.object(driver, "_raise_if_tui_prompt_stuck_while_idle"), \
+             patch.object(driver, "_collect_wait_timeout_diagnostics", return_value={}):
+            result = driver.run_scenario(scenario, args=args, client=client, run_id="run")
+        keys.assert_called()
+        return result
+
+    def test_notice_quoting_the_expected_text_does_not_satisfy_the_body_wait(self):
+        for cell, notice_bot in (("claude-tui", None), ("codex-tui", None),
+                                 ("claude-tui", assertions.provider_bot_id("claude"))):
+            with self.subTest(cell=cell, notice_bot=notice_bot):
+                if notice_bot:
+                    self.NOTICE_BOT = notice_bot
+                result = self.run_e4(cell, [])
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn("timeout waiting for Discord text 'DIRECT_E4_OK'", result["reason"])
+
+    def test_response_bot_body_satisfies_the_wait_and_other_bots_do_not(self):
+        claude, codex = (assertions.provider_bot_id(p) for p in ("claude", "codex"))
+        for cell, author, status in (("claude-tui", claude, "pass"), ("codex-tui", codex, "pass"),
+                                     ("codex-tui", claude, "fail"), ("claude-tui", "999", "fail")):
+            with self.subTest(cell=cell, author=author):
+                self.assertEqual(self.run_e4(cell, [author])["status"], status)
+
+    def test_relay_author_accepts_only_provider(self):
+        scenario = {"steps": [{"wait_for_discord_text": "X", "relay_author": "notify"}], "assertions": []}
+        with self.assertRaisesRegex(ValueError, "relay_author"):
+            driver.validate_scenario_schema(scenario)
 
 
 class NoDuplicateMarker(unittest.TestCase):

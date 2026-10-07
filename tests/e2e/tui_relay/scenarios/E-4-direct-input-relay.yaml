@@ -16,7 +16,9 @@ steps:
   - send_keys: "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK"
   - wait_for_raw_discord_text: "터미널에 직접 주입된 입력"
     timeout_s: 60
+  # The notify bot's direct-input notice quotes DIRECT_E4_OK; only the response bot's body counts.
   - wait_for_discord_text: "DIRECT_E4_OK"
+    relay_author: provider
     timeout_s: 240
 assertions:
   - raw_message_count_between_markers:
