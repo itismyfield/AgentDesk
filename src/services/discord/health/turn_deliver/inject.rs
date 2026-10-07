@@ -322,9 +322,12 @@ impl Owner {
             input: permit,
         } = target;
         let mailbox = shared.mailbox(channel_id);
+        let discord = crate::services::discord::queue_persistence_context;
+        let persistence = discord(&shared, &provider, channel_id);
         #[cfg(test)]
         test_hook::before_reserve(input.channel).await;
-        let ticket = match mailbox.reserve_injection(None, claim, permit.clone()).await {
+        let reserve = mailbox.reserve_injection(None, claim, persistence.clone(), permit.clone());
+        let ticket = match reserve.await {
             ReserveOutcome::Reserved(ticket) => ticket,
             ReserveOutcome::HolderChanged => return InjectAttempt::NotSent(HOLDER_CHANGED),
             ReserveOutcome::Backlog => return InjectAttempt::NotSent(QUEUE_NONEMPTY),
@@ -340,8 +343,6 @@ impl Owner {
             // The effect panicked outside its catch_unwind or never started, so it recorded nothing.
             Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
         };
-        let discord = crate::services::discord::queue_persistence_context;
-        let persistence = discord(&shared, &provider, channel_id);
         let attempt = match attempt {
             InjectAttempt::NotSent(veto) => {
                 let source = [handback.message_id.get()];
@@ -517,6 +518,39 @@ pub(crate) mod test_hook {
     static FINAL_LOOKUP: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
     type Park = (Arc<Notify>, Arc<Notify>);
     static BEFORE_RESERVE: Mutex<Option<HashMap<u64, Park>>> = Mutex::new(None);
+    static GATEWAYLESS: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
+
+    /// Lets the channel's deliver start run without a gateway context: the headless start's own
+    /// transition wait and mailbox claim, nothing after. The signal fires as each start begins.
+    pub(crate) fn start_without_gateway(channel_id: u64) -> Arc<Notify> {
+        let mut starts = GATEWAYLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let starts = starts.get_or_insert_with(HashMap::new);
+        starts.entry(channel_id).or_default().clone()
+    }
+
+    pub(in crate::services::discord::health::turn_deliver) fn start<'a>(
+        shared: &'a crate::services::discord::SharedData,
+        request: &'a super::HumanInputRequest,
+        reservation: &'a crate::services::discord::router::HeadlessTurnReservation,
+    ) -> Option<impl std::future::Future<Output = super::super::StartAttempt> + 'a> {
+        use super::super::StartAttempt;
+        let starts = GATEWAYLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let begun = starts.as_ref()?.get(&request.channel_id.get())?.clone();
+        Some(async move {
+            begun.notify_one();
+            let channel = request.channel_id;
+            let owner = poise::serenity_prelude::UserId::new(request.author_id);
+            let identity = (request.provider.clone(), None);
+            let claim = crate::services::discord::router::claim_reserved_headless_turn;
+            match claim(shared, channel, owner, reservation, identity).await {
+                Ok(_) => StartAttempt::Started(reservation.turn_id(channel)),
+                Err(crate::services::discord::router::HeadlessTurnStartError::Conflict(_)) => {
+                    StartAttempt::Busy
+                }
+                Err(error) => StartAttempt::Unavailable(error.to_string()),
+            }
+        })
+    }
 
     /// Parks the channel's next owner before its reservation: `(reached, resume)`.
     pub(crate) fn park_before_reserve(channel_id: u64) -> Park {
@@ -569,6 +603,10 @@ pub(crate) mod test_hook {
         }
         let mut crashing = CRASHING.lock().unwrap_or_else(|e| e.into_inner());
         crashing.retain(|channel| *channel != channel_id);
+        let mut starts = GATEWAYLESS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(starts) = starts.as_mut() {
+            starts.remove(&channel_id);
+        }
     }
 
     /// Makes the channel's effect panic outside its own `catch_unwind`, as a dying executor would.

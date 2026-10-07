@@ -1071,6 +1071,7 @@ server::routes::agents_setup::config_secret_tests::apply_config_step_keeps_disk_
 server::routes::agents_turn_deliver::pg_tests::an_external_tui_turn_row_is_busy_for_start_and_deliver_pg
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg
+server::routes::agents_turn_deliver::pg_tests::the_switch_off_keeps_every_route_answer_field_for_field_pg
 server::routes::agents_turn_deliver::tests::each_delivery_carries_only_its_documented_fields
 server::routes::agents_turn_deliver::tests::invalid_turn_target_is_422
 server::routes::agents_turn_deliver::tests::malformed_input_is_rejected_before_any_lookup
@@ -3652,6 +3653,7 @@ services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_inp
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
 services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
+services::discord::health::turn_deliver::inject_tests::a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_handback_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_onto_a_full_queue_records_its_one_overflow_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg
 services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
@@ -3662,6 +3664,7 @@ services::discord::health::turn_deliver::inject_tests::a_vetoed_paste_hands_the_
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
 services::discord::health::turn_deliver::inject_tests::an_idle_transcript_stops_before_the_reservation_and_the_pane
 services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
+services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
 services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
@@ -11131,6 +11134,7 @@ services::turn_orchestrator::inbound_order::tests::nothing_ahead_of_the_claim_cl
 services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_three_idle_queue_backstop_rounds
 services::turn_orchestrator::injected_inputs::tests::a_closed_actor_refuses_reserve_and_settle_and_passes_abandon
 services::turn_orchestrator::injected_inputs::tests::a_handback_lands_under_its_owner_permit_while_the_gate_closes
+services::turn_orchestrator::injected_inputs::tests::a_reservation_checks_the_queue_and_dispatch_marker_a_fresh_actor_has_not_loaded
 services::turn_orchestrator::injected_inputs::tests::a_reservation_holds_past_the_fail_open_and_the_dequeued_head_exceptions
 services::turn_orchestrator::injected_inputs::tests::a_sent_handback_without_an_answer_is_unknown_and_never_resent
 services::turn_orchestrator::injected_inputs::tests::an_unwritten_handback_keeps_the_reservation_until_the_same_ticket_lands

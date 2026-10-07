@@ -193,6 +193,17 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_start(&self) -> StartAttempt {
+        // With injection on, human input claims behind input queued or reserved before it.
+        let reservation = match self.inject_mode() {
+            InjectMode::Off => router::reserve_headless_turn(),
+            InjectMode::External | InjectMode::All => {
+                router::reserve_headless_turn().behind_queue()
+            }
+        };
+        #[cfg(test)]
+        if let Some(attempt) = inject::test_hook::start(&self.shared, &self.request, &reservation) {
+            return attempt.await;
+        }
         let (ctx, token) = match &self.runtime {
             Ok(runtime) => runtime,
             Err(error) => return StartAttempt::Unavailable(error.clone()),
@@ -211,7 +222,7 @@ impl DeliveryPorts for LivePorts {
             request.channel_name_hint.clone(),
             None,
             None,
-            router::reserve_headless_turn(),
+            reservation,
         )
         .await;
         match result {

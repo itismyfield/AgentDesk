@@ -40,7 +40,10 @@ async fn reserved(
     message_id: Option<MessageId>,
     claim: ExpectedClaim,
 ) -> InjectionTicket {
-    match handle.reserve_injection(message_id, claim, None).await {
+    match handle
+        .reserve_injection(message_id, claim, context(), None)
+        .await
+    {
         ReserveOutcome::Reserved(ticket) => ticket,
         other => panic!("reservation refused: {other:?}"),
     }
@@ -180,6 +183,64 @@ async fn close_if_idle_refuses_a_live_reservation_and_admits_an_orphaned_one() {
             "discord: RefusedLiveWork(\"injection_reserved\")",
             "imessage: RefusedLiveWork(\"injection_reserved\")",
             "orphan: Removed",
+        ]
+    );
+}
+
+/// A fresh actor that has not loaded the disk reserves nothing past input queued there or a
+/// dequeued head's marker, and nothing at all when either file cannot be read.
+#[tokio::test]
+async fn a_reservation_checks_the_queue_and_dispatch_marker_a_fresh_actor_has_not_loaded() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Claude;
+    let token_hash = "inject-order-test";
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root();
+    let dir = root
+        .expect("pending queue root")
+        .join(provider.as_str())
+        .join(token_hash);
+    std::fs::create_dir_all(&dir).expect("queue dir");
+    let mut observed = Vec::new();
+    for (n, case) in [
+        "empty",
+        "queued",
+        "dispatched",
+        "queue_unreadable",
+        "marker_unreadable",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = ChannelId::new(6_845_341 + n as u64);
+        let file = |ext: &str| dir.join(format!("{}.{ext}", channel.get()));
+        match case {
+            "queued" => {
+                let earlier = ChannelMailboxRegistry::default().handle(channel);
+                assert!(earlier.enqueue(item(1), context()).await.enqueued);
+            }
+            "dispatched" => {
+                let save = save_channel_pending_dispatch_marker;
+                save(&provider, token_hash, channel, &item(1), None).expect("marker");
+            }
+            "queue_unreadable" => std::fs::write(file("json"), "not json").expect("queue"),
+            "marker_unreadable" => std::fs::write(file("dispatch"), "not json").expect("marker"),
+            _ => {}
+        }
+        let fresh = ChannelMailboxRegistry::default().handle(channel);
+        let outcome = match fresh.reserve_injection(None, None, context(), None).await {
+            ReserveOutcome::Reserved(_) => "Reserved".to_string(),
+            refused => format!("{refused:?}"),
+        };
+        observed.push(format!("{case}: {outcome}"));
+    }
+    assert_eq!(
+        observed,
+        [
+            "empty: Reserved",
+            "queued: Backlog",
+            "dispatched: Backlog",
+            "queue_unreadable: Unavailable",
+            "marker_unreadable: Unavailable",
         ]
     );
 }
@@ -331,7 +392,7 @@ async fn a_handback_lands_under_its_owner_permit_while_the_gate_closes() {
     let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let handle = ChannelMailboxRegistry::default().handle(channel);
     let permit = gate.admit().expect("legacy open admits the owner");
-    let reserve = handle.reserve_injection(None, None, Some(permit.clone()));
+    let reserve = handle.reserve_injection(None, None, context(), Some(permit.clone()));
     let ReserveOutcome::Reserved(ticket) = reserve.await else {
         panic!("reservation under the owner permit");
     };
@@ -368,7 +429,7 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
     let registry = ChannelMailboxRegistry::default();
     let handle = registry.handle(channel);
     let removed = registry.remove_idle_entry(channel).await;
-    let reserve = handle.reserve_injection(None, None, None).await;
+    let reserve = handle.reserve_injection(None, None, context(), None).await;
     let ticket = InjectionTicket {
         lease: Arc::new(InjectionLease),
     };

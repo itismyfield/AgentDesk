@@ -62,6 +62,7 @@ pub(crate) enum InjectionMsg {
         input_permit: Option<Permit>,
         message_id: Option<MessageId>,
         expected_claim: ExpectedClaim,
+        persistence: QueuePersistenceContext,
         reply: oneshot::Sender<ReserveOutcome>,
     },
     Settle {
@@ -90,8 +91,10 @@ impl InjectionMsg {
 
     pub(super) fn persistence(&self) -> Option<&QueuePersistenceContext> {
         match self {
-            Self::Settle { persistence, .. } => Some(persistence),
-            Self::Reserve { .. } | Self::Abandon { .. } => None,
+            Self::Reserve { persistence, .. } | Self::Settle { persistence, .. } => {
+                Some(persistence)
+            }
+            Self::Abandon { .. } => None,
         }
     }
 
@@ -117,10 +120,12 @@ pub(super) fn step(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: 
         InjectionMsg::Reserve {
             message_id,
             expected_claim,
+            persistence,
             reply,
             ..
         } => {
-            let _ = reply.send(reserve(state, message_id, &expected_claim));
+            let reserved = reserve(state, channel_id, message_id, &expected_claim, &persistence);
+            let _ = reply.send(reserved);
         }
         InjectionMsg::Settle {
             ticket,
@@ -163,8 +168,10 @@ pub(super) fn head_withheld(state: &ChannelMailboxState) -> TakeNextSoftResult {
 
 pub(super) fn reserve(
     state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
     message_id: Option<MessageId>,
     expected: &ExpectedClaim,
+    persistence: &QueuePersistenceContext,
 ) -> ReserveOutcome {
     let claim = state.cancel_token.as_ref();
     let same_claim = match (claim, expected) {
@@ -185,9 +192,31 @@ pub(super) fn reserve(
     {
         return ReserveOutcome::Backlog;
     }
+    match disk_backlog(channel_id, persistence) {
+        Ok(false) => {}
+        Ok(true) => return ReserveOutcome::Backlog,
+        Err(error) => {
+            tracing::warn!(channel = channel_id.get(), %error, "injection reservation refused");
+            return ReserveOutcome::Unavailable;
+        }
+    }
     let lease = Arc::new(InjectionLease);
     state.injection_reserved = Some((message_id, lease.clone()));
     ReserveOutcome::Reserved(InjectionTicket { lease })
+}
+
+/// Queued input or a dequeued head this actor has not loaded still runs first; an error when the
+/// queue file or the dispatch marker cannot be read.
+fn disk_backlog(
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<bool, String> {
+    use super::pending_queue_persistence as disk;
+    let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
+    let (queued, _) = disk::load_channel_pending_queue_checked(provider, token_hash, channel_id)?;
+    let marker =
+        disk::load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id)?;
+    Ok(!queued.is_empty() || marker.is_some())
 }
 
 fn release(state: &mut ChannelMailboxState, ticket: &InjectionTicket) {
@@ -254,11 +283,12 @@ pub(super) fn abandon(
 
 impl ChannelMailboxHandle {
     /// Reserves the mailbox order for one injection when the claim is still `expected_claim` and
-    /// nothing waits ahead; later input queues behind it until the ticket settles or drops.
+    /// nothing waits ahead in memory or on disk; later input queues behind it until it settles.
     pub(crate) async fn reserve_injection(
         &self,
         message_id: Option<MessageId>,
         expected_claim: ExpectedClaim,
+        persistence: QueuePersistenceContext,
         input_permit: Option<Permit>,
     ) -> ReserveOutcome {
         self.request(|reply| {
@@ -266,6 +296,7 @@ impl ChannelMailboxHandle {
                 input_permit,
                 message_id,
                 expected_claim,
+                persistence,
                 reply,
             })
         })

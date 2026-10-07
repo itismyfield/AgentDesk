@@ -4,7 +4,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
@@ -16,6 +16,8 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{ActiveTurnKind, ChannelMailboxSnapshot, Intervention};
+pub(crate) use test_hook::start_without_gateway;
+use tokio::sync::Notify;
 
 const BORDER: &str = "────────────────────────────────────────────────────────────";
 const FOOTER: &str = "  ⏵⏵ bypass permissions on (shift+tab to cycle)";
@@ -209,10 +211,14 @@ pub(crate) async fn register_inject_runtime(
 
 /// `<delivery> <reason> [veto=..]` for compact expectations.
 async fn deliver(registry: &HealthRegistry, channel: u64) -> String {
+    deliver_text(registry, channel, "status?").await
+}
+
+async fn deliver_text(registry: &HealthRegistry, channel: u64, text: &str) -> String {
     let request = HumanInputRequest {
         channel_id: ChannelId::new(channel),
         provider: ProviderKind::Claude,
-        text: "status?".to_string(),
+        text: text.to_string(),
         author_id: 200,
         source: "imessage".to_string(),
         metadata: None,
@@ -224,8 +230,18 @@ async fn deliver(registry: &HealthRegistry, channel: u64) -> String {
             inject_veto,
             ..
         }) => format!("queued {reason} veto={}", inject_veto.unwrap_or_default()),
+        Ok(HumanInputDelivery::Started { .. }) => "started".to_string(),
         other => format!("{other:?}"),
     }
+}
+
+/// Ends the turn holding the channel's mailbox slot.
+pub(crate) async fn end_turn(shared: &SharedData, channel: u64) {
+    shared
+        .mailboxes
+        .handle(ChannelId::new(channel))
+        .hard_stop()
+        .await;
 }
 
 pub(crate) async fn queue_texts(shared: &SharedData, channel: u64) -> Vec<String> {
@@ -1086,8 +1102,8 @@ async fn a_handback_onto_a_full_queue_records_its_one_overflow_pg() {
     );
 }
 
-/// A held session transition, as an injection owner holds it to its last mailbox write, keeps the
-/// registry purge off a channel whose mailbox is otherwise idle.
+/// With the switch off and nothing reserved, a held session transition still keeps the registry
+/// purge off an idle mailbox (`transition_busy`); once it is released the purge removes it.
 #[tokio::test(flavor = "current_thread")]
 async fn a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox() {
     let registry = HealthRegistry::new();
@@ -1095,6 +1111,7 @@ async fn a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox() {
     let channel = ChannelId::new(ch);
     let shared = register_inject_runtime(&registry, &[ch], None).await;
     let _ = shared.mailboxes.handle(channel).snapshot().await;
+    assert_eq!(inject::mode(ch), InjectMode::Off);
     let purge = crate::services::discord::health::purge_idle_channel_mailbox_registry_entry;
     let held = shared.session_transition_lock(channel).try_lock_owned();
     let held = held.expect("transition free");
@@ -1161,4 +1178,116 @@ async fn an_idle_transcript_stops_before_the_reservation_and_the_pane() {
     let outcome = inject::attempt(&shared, &request).await;
     let refused = inject::InjectAttempt::NotSent("not_busy");
     assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
+}
+
+/// Input a mailbox has not loaded from disk yet still goes first: the deliver reserves nothing and
+/// never reaches the pane.
+#[tokio::test(flavor = "current_thread")]
+async fn input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let ch = 6_845_271;
+    let channel = ChannelId::new(ch);
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
+    let pane = InjectPane::new(ch, "all");
+    let provider = ProviderKind::Claude;
+    let persistence =
+        crate::services::discord::queue_persistence_context(&shared, &provider, channel);
+    let earlier = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let written = earlier
+        .handle(channel)
+        .enqueue(queued(ch + 10), persistence)
+        .await;
+    assert!(written.enqueued);
+    let outcome = deliver(&registry, ch).await;
+    let queue = queue_texts(&shared, ch).await.join(",");
+    assert_eq!(
+        format!(
+            "{outcome} [{queue}] tmux={} keys={}",
+            pane.tmux_calls(),
+            pane.keys().len()
+        ),
+        "queued external_turn_active veto=queue_nonempty [earlier input,status?] tmux=0 keys=0"
+    );
+}
+
+/// With the switch on, a deliver whose start waits out another input's handback claims behind it:
+/// B is vetoed once A has ended and takes the queue front, C queues behind B, and the kick runs B.
+#[tokio::test(flavor = "current_thread")]
+async fn a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_handback_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let ch = 6_845_281;
+    let channel = ChannelId::new(ch);
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
+    let pane = InjectPane::new(ch, "all");
+    let starts = start_without_gateway(ch);
+    claim(&shared, ch).await;
+    pane.reseat_row(TurnSource::Managed, ch + 10);
+    let (c_done, runs) = (Arc::new(Notify::new()), Arc::new(Mutex::new(Vec::new())));
+    let (after_c, seen) = (c_done.clone(), runs.clone());
+    let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests;
+    let _hook = hook(Arc::new(move |shared, provider, kicked, _| {
+        let (after_c, seen) = (after_c.clone(), seen.clone());
+        Box::pin(async move {
+            if kicked != channel {
+                return None;
+            }
+            after_c.notified().await;
+            let take = crate::services::discord::idle_queue_take_next_soft_if_ready;
+            let ran = match take(&shared, &provider, kicked).await.into_intervention() {
+                Some((head, _, lease)) => {
+                    let start =
+                        crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue;
+                    let token = Arc::new(CancelToken::new());
+                    let claimed = start(&shared, kicked, token, head.author_id, head.message_id);
+                    let claimed = claimed.await;
+                    drop(lease);
+                    format!("{} claimed={claimed}", head.text)
+                }
+                None => "nothing dequeued".to_string(),
+            };
+            seen.lock().unwrap().push(ran);
+            Some(Default::default())
+        })
+    }));
+    let b = deliver_parked(&registry, &pane).await;
+    end_turn(&shared, ch).await;
+    pane.idle();
+    pane.set(
+        "transcript.jsonl",
+        &format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n"),
+    );
+    let c = tokio::spawn({
+        let registry = registry.clone();
+        async move { deliver_text(&registry, ch, "later").await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), starts.notified())
+        .await
+        .expect("C's start waits on the transition B holds");
+    pane.set("go", "");
+    let (b, c) = (b.await.expect("B"), c.await.expect("C"));
+    c_done.notify_one();
+    let ran = async {
+        while runs.lock().unwrap().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), ran)
+        .await
+        .expect("the handback's kick ran");
+    let queue = queue_texts(&shared, ch).await.join(",");
+    let ran = runs.lock().unwrap().clone();
+    assert_eq!(
+        format!(
+            "B: {b} | C: {c} | kick: {ran:?} [{queue}] keys={}",
+            pane.keys().len()
+        ),
+        "B: queued handed_back veto=not_busy | C: queued session_transition veto=not_busy \
+         | kick: [\"status? claimed=true\"] [later] keys=0"
+    );
 }

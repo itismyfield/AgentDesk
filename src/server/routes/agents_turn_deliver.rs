@@ -445,6 +445,64 @@ mod pg_tests {
         assert_eq!(channels.map(alerted), [false, false, false, true]);
     }
 
+    /// With the switch off the route answers as it did before injection existed: a start claims
+    /// at once even past queued input, and no answer carries `inject_veto` or `detail`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_switch_off_keeps_every_route_answer_field_for_field_pg() {
+        use crate::services::discord::health::{
+            end_turn, queue_texts, register_inject_runtime, start_without_gateway,
+        };
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let agents = [
+            ("off-idle", 6_845_291_u64),
+            ("off-row", 6_845_292),
+            ("off-nogw", 6_845_293),
+        ];
+        for (agent, channel) in agents {
+            let seed = crate::db::agents::insert_agent_channels_for_tests;
+            seed(&pool, agent, Some(&channel.to_string()), None).await;
+        }
+        let registry = Arc::new(HealthRegistry::new());
+        let channels = agents.map(|(_, channel)| channel);
+        let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
+        let _starts = start_without_gateway(channels[0]);
+        seed_external_turn_row_for_tests(&ProviderKind::Claude, channels[1]);
+        let app = router(Some(pool), Some(registry));
+        let input = json!({"text": "status?", "author_discord_user_id": "200"}).to_string();
+        let answer = |(status, mut body): (StatusCode, Value), channel: u64| {
+            let prefix = format!("discord:{channel}:");
+            if body["turn_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with(&prefix))
+            {
+                body["turn_id"] = json!(format!("{prefix}*"));
+            }
+            format!("{} {body}", status.as_u16())
+        };
+        let (idle, row, nogw) = (channels[0], channels[1], channels[2]);
+        let mut observed = vec![answer(deliver(&app, "off-idle", &input).await, idle)];
+        observed.push(answer(deliver(&app, "off-idle", &input).await, idle));
+        end_turn(&shared, idle).await;
+        observed.push(answer(deliver(&app, "off-idle", &input).await, idle));
+        observed.push(format!("left={}", queue_texts(&shared, idle).await.len()));
+        observed.push(answer(deliver(&app, "off-row", &input).await, row));
+        observed.push(answer(deliver(&app, "off-nogw", &input).await, nogw));
+        assert_eq!(
+            observed,
+            [
+                r#"200 {"channel_id":"6845291","delivery":"started","ok":true,"reason":null,"turn_id":"discord:6845291:*"}"#,
+                r#"200 {"channel_id":"6845291","delivery":"queued","ok":true,"reason":"turn_active","turn_id":"discord:6845291:*"}"#,
+                r#"200 {"channel_id":"6845291","delivery":"started","ok":true,"reason":null,"turn_id":"discord:6845291:*"}"#,
+                "left=1",
+                r#"200 {"channel_id":"6845292","delivery":"queued","ok":true,"reason":"external_turn_active","turn_id":"discord:6845292:*"}"#,
+                r#"503 {"detail":"provider runtime is not ready","error":"runtime_unavailable","ok":false}"#,
+            ]
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn target_and_author_gates_run_at_the_route_boundary_pg() {
         let pg_db = TestPostgresDb::create().await;

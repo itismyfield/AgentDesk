@@ -777,20 +777,34 @@ pub(crate) fn load_channel_pending_dispatch_marker(
     token_hash: &str,
     channel_id: ChannelId,
 ) -> Option<(Intervention, Option<ChannelId>)> {
-    let path = pending_dispatch_marker_file_path(provider, token_hash, channel_id)?;
-    let Ok(content) = fs::read_to_string(&path) else {
-        return None;
+    load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id)
+        .ok()
+        .flatten()
+}
+
+/// Like `load_channel_pending_dispatch_marker`, but only a missing marker reads as none; a root,
+/// read or parse failure is an error.
+pub(super) fn load_channel_pending_dispatch_marker_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Result<Option<(Intervention, Option<ChannelId>)>, String> {
+    let path = pending_dispatch_marker_file_path(provider, token_hash, channel_id)
+        .ok_or_else(|| format!("pending queue root unavailable for channel_id={channel_id}"))?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read dispatch marker {}: {error}", path.display())),
     };
-    let Ok(item) = serde_json::from_str::<PendingQueueItem>(&content) else {
-        return None;
-    };
+    let item = serde_json::from_str::<PendingQueueItem>(&content)
+        .map_err(|error| format!("parse dispatch marker {}: {error}", path.display()))?;
     let restored_override = item.override_channel_id.map(ChannelId::new);
     let reference_instant = Instant::now();
     let reference_wall_time = SystemTime::now();
-    Some((
+    Ok(Some((
         pending_queue_item_to_intervention(item, reference_wall_time, reference_instant),
         restored_override,
-    ))
+    )))
 }
 
 fn pending_queue_items_to_interventions(
