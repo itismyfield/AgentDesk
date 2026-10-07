@@ -7,7 +7,7 @@ against a single (provider, runtime) cell — e.g. ``claude-pipe`` against the
 ``adk-e2e-orchestrator`` agent, which invokes this script once per cell.
 
 Cell format: ``<provider>-<runtime>`` (e.g. ``claude-pipe``, ``claude-tui``,
-``codex-pipe``, ``codex-tui``). A scenario is executed only when
+``codex-pipe``, ``codex-tui``, ``claude-herdr``, ``codex-herdr``). A scenario is executed only when
 its ``cells:`` list includes the requested cell.
 
 Safety guards:
@@ -49,7 +49,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, known_gap, lease, normal_intake_evidence, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -57,6 +57,8 @@ SUPPORTED_CELLS: tuple[str, ...] = (
     "claude-tui",
     "codex-pipe",
     "codex-tui",
+    "claude-herdr",
+    "codex-herdr",
 )
 AGENT_MODES: tuple[str, ...] = ("none", "controlled", "real_live")
 AGENT_MODE_RANK = {mode: rank for rank, mode in enumerate(AGENT_MODES)}
@@ -226,6 +228,9 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
+    parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
+    parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
+    parser.add_argument("--herdr-status-bin", default="agentdesk", help="AgentDesk CLI on the target node (read-only herdr status).")
     parser.add_argument("--e36-intake-log", help="Explicit readable adk-tracing-text-v1 dcserver log for E36")
     parser.add_argument(
         "--cell",
@@ -414,12 +419,14 @@ def cell_runtime(cell: str) -> str:
 
 def cell_session_name(cell: str, *, thread_channel_id: str | None = None) -> str:
     """tmux session name owned by the cell's worker agent."""
+    if cell_runtime(cell) == "herdr":
+        raise ValueError("Herdr cells have no tmux session")
     suffix = f"-t{thread_channel_id}" if thread_channel_id else ""
     return f"AgentDesk-{cell_provider(cell)}-adk-{cell}-e2e{suffix}"
 
 
 def cell_default_agent(cell: str) -> str:
-    return f"adk-{cell}-e2e"
+    return f"adk-{cell.replace('-herdr', '-tui')}-e2e"
 
 
 def cell_channel_kind(cell: str) -> str:
@@ -3042,6 +3049,9 @@ def run_scenario(
     if partial_result_sink is not None:
         partial_result_sink["result"] = result
 
+    if cell_runtime(cell) == "herdr":
+        return herdr.run(sys.modules[__name__], scenario, args, client, run_id, result)
+
     target_channel_id = scenario_channel_id(scenario, args)
     if target_channel_id is None:
         result["reason"] = "requires --thread-channel-id or AGENTDESK_E2E_THREAD_CHANNEL_ID"
@@ -4833,14 +4843,15 @@ def main() -> int:
         args._e36_phase_started = time.monotonic()
         if len(scenarios) != 1:
             raise ValueError("E36 requires an exclusive single-scenario phase")
-        normal_intake_evidence.validate(scenarios[0], args)
+        if cell_runtime(cell) != "herdr":
+            normal_intake_evidence.validate(scenarios[0], args)
     results: list[dict[str, Any]] = []
     partial_result_sink: dict[str, Any] = {}
     active_scenario: dict[str, Any] | None = None
     deferred_failure: dict[str, Any] | None = None
     previous_alarm = _arm_phase_deadline(args.phase_deadline_s) if args.phase_deadline_s else None
     try:
-        with lease.acquire(lease_token, cell=cell) if not args.dry_run else _null_lease(run_id):
+        with lease.acquire(lease_token, cell=cell.replace("-herdr", "-tui")) if not args.dry_run else _null_lease(run_id):
             for scenario in scenarios:
                 active_scenario, partial_result_sink = scenario, {}
                 print(f"[e2e] running {scenario.get('id')} cell={cell}")
@@ -4904,6 +4915,8 @@ def main() -> int:
             "pass": sum(1 for r in results if r["status"] == "pass"),
             "fail": sum(1 for r in results if r["status"] == "fail"),
             "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            **{status: sum(r["status"] == status for r in results)
+               for status in ("not_applicable", "known_gap", "unexpected_pass", "dry_run")},
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

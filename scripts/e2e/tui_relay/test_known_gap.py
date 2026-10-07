@@ -400,3 +400,179 @@ class E22KnownGapContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HerdrExpectedFailure(unittest.TestCase):
+    def test_profiles_are_cell_and_scenario_scoped(self):
+        from tui_relay import known_gap as gaps
+        for cell in ('claude-herdr', 'codex-herdr'):
+            self.assertEqual(gaps.herdr_profile('E-18', cell)['issue'], '#5340 HTTP HostOwned follow-up (not P10-3)')
+            self.assertEqual(gaps.herdr_profile('E-12', cell)['issue'], '#5340 P11')
+        for scenario in ('E-2', 'E-5', 'E-8', 'E-19', 'E-30', 'E-36', 'E-51'):
+            self.assertEqual(gaps.herdr_profile(scenario, 'codex-herdr')['issue'], '#5340 P10-2')
+            self.assertIsNone(gaps.herdr_profile(scenario, 'claude-herdr'))
+        self.assertIsNone(gaps.herdr_profile('E-1', 'codex-herdr'))
+        self.assertIsNone(gaps.herdr_profile('E-18', 'claude-tui'))
+
+    def test_gap_and_unexpected_pass_never_become_pass(self):
+        from tui_relay import known_gap as gaps
+        for passed, status, label in [(False, 'known_gap', 'KNOWN_GAP'), (True, 'unexpected_pass', 'UNEXPECTED_PASS')]:
+            result = {'reason': 'original observation'}
+            gaps.apply_herdr_result(result, gaps.herdr_profile('E-18', 'claude-herdr'), passed=passed)
+            self.assertEqual(result['status'], status)
+            self.assertEqual(result['known_gaps'][0]['classification'], label)
+            self.assertEqual(result['known_gaps'][0]['observed_reason'], 'original observation')
+
+    def execute(self, scenario, *, cell='claude-herdr', cancel_error=None, missing=None, preflight_error=None):
+        from unittest.mock import patch, Mock
+        from argparse import Namespace
+        import run_tui_relay as driver
+        from tui_relay import herdr, assertions
+        class NoTmux:
+            def __getattr__(self, name):
+                raise AssertionError('tmux used: ' + name)
+        rows = []
+        client = Mock(base_url='http://unused.test')
+        client.send_control.return_value = {'id': '100'}
+        client.send.return_value = {'id': '101'}
+        def wait(channel, **kwargs):
+            marker = 'OK' if not rows else 'NEXT'
+            row = {'id': str(102 + len(rows)), 'content': marker, 'author': {'id': '42', 'bot': True}}
+            rows.append(row)
+            return (None if marker == missing else row), list(rows)
+        client.wait_for_message.side_effect = wait
+        client.fetch_messages.side_effect = lambda *a, **kw: list(rows)
+        args = Namespace(cell=cell, channel_id='41', base_url='http://unused.test', dry_run=False,
+                         hard_reset_session_each=False, reset_before_each=True, allow_destructive=True,
+                         phase_deadline_s=None, final_refetches=1, herdr_endpoint='local')
+        full = {'id': 'E-18', 'agent_mode': 'real_live', 'coverage_class': 'live', 'steps': [], 'assertions': [], **scenario}
+        with patch.object(driver, 'tmux', NoTmux()), patch.object(driver, 'reset_channel_state', side_effect=AssertionError('reset')), \
+             patch.object(herdr, 'observe', side_effect=preflight_error, return_value={'herdr': {}}), \
+             patch.object(herdr.time, 'sleep'), patch.object(driver, 'cancel_turn', side_effect=cancel_error) as cancel, \
+             patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
+            result = driver.run_scenario(full, args=args, client=client, run_id='test')
+        return result, cancel, client
+
+    def test_stop_and_forced_termination_errors_are_not_skipped_or_hidden(self):
+        from tui_relay import assertions
+        for scenario_id, operation, issue in [('E-18', {'cancel_turn': {'force': True}}, '#5340 HTTP HostOwned follow-up (not P10-3)'),
+                                               ('E-12', {'kill_pane': {}}, '#5340 P11')]:
+            result, cancel, client = self.execute({'id': scenario_id, 'steps': [
+                {'send_prompt': 'OK'}, {'wait_for_discord_text': 'OK'}, operation]},
+                cancel_error=assertions.AssertionError('unsupported Herdr cancellation'))
+            self.assertEqual(result['status'], 'fail')
+            self.assertIn(issue, result['expected_gap']['issue'])
+            cancel.assert_called_once()
+            client.send.assert_called_once()
+
+    def test_unexpected_pass_is_explicit(self):
+        result, cancel, _ = self.execute({'steps': [{'send_prompt': 'OK'}, {'wait_for_discord_text': 'OK'}, {'cancel_turn': {}}]})
+        cancel.assert_called_once()
+        self.assertEqual(result['status'], 'unexpected_pass')
+
+    def test_preflight_failure_is_not_a_known_gap(self):
+        from tui_relay import assertions
+        result, cancel, client = self.execute({'steps': [{'cancel_turn': {}}]},
+                                              preflight_error=assertions.AssertionError('admission stopped'))
+        self.assertEqual(result['status'], 'fail')
+        self.assertNotIn('known_gaps', result)
+        cancel.assert_not_called()
+        client.send.assert_not_called()
+
+    def test_followup_runs_before_known_gap(self):
+        scenario = {'id': 'E-2', 'steps': [{'send_prompt': 'OK'}, {'wait_for_discord_text': 'OK'},
+                                         {'send_prompt': 'NEXT'}, {'wait_for_discord_text': 'NEXT'}]}
+        result, _, client = self.execute(scenario, cell='codex-herdr', missing='NEXT')
+        self.assertEqual(client.send.call_count, 2)
+        self.assertEqual(result['status'], 'known_gap')
+        self.assertIn('P10-2', result['reason'])
+        result, _, _ = self.execute(scenario, cell='codex-herdr', missing='OK')
+        self.assertEqual(result['status'], 'fail')
+        self.assertNotIn('known_gaps', result)
+
+    def test_partial_tmux_coverage_never_counts_as_pass(self):
+        result, _, _ = self.execute({'id': 'E-19', 'steps': [{'capture_session_identity': {}}]})
+        self.assertEqual(result['status'], 'not_applicable')
+        self.assertTrue(result['not_applicable'])
+
+    def test_successful_http_cancel_with_late_output_is_regression(self):
+        result, cancel, _ = self.execute({'steps': [{'send_prompt': 'OK'}, {'wait_for_discord_text': 'OK'},
+                {'cancel_turn': {}}], 'assertions': [{'marker_absent': {'marker': 'OK', 'surface': 'relay'}}]})
+        cancel.assert_called_once_with(base_url='http://unused.test', channel_id='41', force=False)
+        self.assertEqual(result['status'], 'fail')
+        self.assertNotIn('known_gaps', result)
+
+    def test_forced_cancel_missing_exit_witness_is_known_gap(self):
+        result, cancel, _ = self.execute({'id': 'E-12', 'steps': [{'send_prompt': 'OK'},
+                {'wait_for_discord_text': 'OK'}, {'kill_pane': {}}, {'wait_for_discord_text': 'NEXT'}]}, missing='NEXT')
+        cancel.assert_called_once_with(base_url='http://unused.test', channel_id='41', force=True)
+        self.assertEqual(result['status'], 'known_gap')
+        self.assertIn('P11', result['reason'])
+
+    def test_http_cancel_error_is_a_regression_not_known_gap(self):
+        from tui_relay import assertions
+        result, cancel, _ = self.execute({'steps': [{'send_prompt': 'OK'}, {'wait_for_discord_text': 'OK'}, {'cancel_turn': {}}]},
+                cancel_error=assertions.AssertionError('cancel_turn HTTP 401'))
+        cancel.assert_called_once()
+        self.assertEqual(result['status'], 'fail')
+        self.assertNotIn('known_gaps', result)
+
+    def test_exact_http_host_guard_conflict_is_known_gap_after_real_attempt(self):
+        import io
+        import urllib.error
+        from tui_relay import assertions
+        for scenario_id, operation in [('E-18', {'cancel_turn': {}}), ('E-12', {'kill_pane': {}})]:
+            for code, reason, expected in [(409, 'session host is not legacy tmux', 'known_gap'),
+                                            (409, 'stop_unobserved', 'fail'), (403, 'session host is not legacy tmux', 'fail')]:
+                error = assertions.AssertionError(f'cancel_turn HTTP {code}: {reason}')
+                error.__cause__ = urllib.error.HTTPError('http://unused.test', code, reason, {}, io.BytesIO())
+                result, cancel, _ = self.execute({'id': scenario_id, 'steps': [{'send_prompt': 'OK'},
+                        {'wait_for_discord_text': 'OK'}, operation]}, cancel_error=error)
+                cancel.assert_called_once()
+                self.assertEqual(result['status'], expected)
+
+    def test_text_stop_uses_discord_midturn_and_keeps_http_gap_separate(self):
+        import io
+        import urllib.error
+        from unittest.mock import Mock
+        from tui_relay import herdr
+        for refused, duplicate, expected in [(False, False, 'unexpected_pass'), (True, False, 'known_gap'), (False, True, 'fail')]:
+            scenario = driver.yaml.safe_load((Path(__file__).resolve().parents[3] / 'tests/e2e/tui_relay/scenarios/E-18-stop-mid-turn-cancel.yaml').read_text())
+            args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+                             hard_reset_session_each=False, reset_before_each=False, allow_destructive=True, final_refetches=1)
+            rows, sends = [], []
+            client = Mock()
+            client.send_control.side_effect = [{'id': '100'}, {'id': '200'}, {'id': '300'}, {'id': '400'}]
+            def add(text):
+                r = {'id': str(501 + len(rows)), 'content': text, 'author': {'id': '42', 'bot': True}}
+                rows.append(r)
+            def send(channel, text):
+                sends.append(text)
+                if text == '!stop':
+                    add('이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요.' if refused else '중지하고 있어요...')
+                    if duplicate:
+                        add('중지하고 있어요...')
+                elif 'E18S:NEXT' in text:
+                    add('[E2E:E18S:NEXT]')
+                elif 'E18S:OK' in text:
+                    rows.clear()
+                    add('[E2E:E18S:OK]')
+                else:
+                    add('[E2E:E18:OK]')
+                return {'id': '450'}
+            client.send.side_effect = send
+            client.wait_for_message.side_effect = lambda channel, **k: (next((r for r in rows if k['predicate'](r)), None), list(rows))
+            client.fetch_messages.side_effect = lambda *a, **k: list(rows)
+            error = assertions.AssertionError('cancel_turn HTTP 409: session host is not legacy tmux')
+            error.__cause__ = urllib.error.HTTPError('http://unused.test', 409, 'conflict', {}, io.BytesIO())
+            with patch.object(herdr, 'observe', return_value={'herdr': {}}), patch.object(herdr.time, 'sleep'), \
+                 patch.object(driver, 'tmux', None), patch.object(driver, 'cancel_turn', side_effect=error), \
+                 patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
+                result = driver.run_scenario(scenario, args=args, client=client, run_id='stop')
+            self.assertEqual(result['subcases'][0]['status'], 'known_gap')
+            self.assertIn('HTTP HostOwned follow-up (not P10-3)', result['subcases'][0]['reason'])
+            self.assertEqual(result['subcases'][1]['status'], expected, result)
+            self.assertEqual(sends.count('!stop'), 1)
+            self.assertEqual(sum('E18S:OK' in x for x in sends), 1)
+            if not refused:
+                self.assertEqual(len(sends), 4)  # HTTP hold, command hold, !stop, one next prompt; no resend.

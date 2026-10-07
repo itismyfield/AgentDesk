@@ -28,7 +28,7 @@ from tui_relay import assertions  # noqa: E402
 
 DEFAULT_CONFIG = Path.home() / ".adk" / "release" / "config" / "agentdesk.yaml"
 DEFAULT_SCENARIOS = Path("tests/e2e/tui_relay/scenarios")
-DEFAULT_CELLS = cell_driver.SUPPORTED_CELLS
+DEFAULT_CELLS = tuple(c for c in cell_driver.SUPPORTED_CELLS if not c.endswith("-herdr"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--scenarios", default=str(DEFAULT_SCENARIOS))
     parser.add_argument("--cells", default=",".join(DEFAULT_CELLS))
+    parser.add_argument("--phase-deadline-s", type=int, default=None, help="Exclusive E-36 phase: 3540 seconds.")
+    parser.add_argument("--herdr-isolated-server", action="store_true")
+    parser.add_argument("--herdr-endpoint", help="Endpoint key for selected Herdr cells; they reuse the TUI worker channels.")
+    parser.add_argument("--herdr-status-bin", default="agentdesk")
     parser.add_argument("--filter", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--twice", action="store_true")
@@ -110,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def load_channel_ids(config_path: Path) -> dict[str, str]:
+def load_channel_ids(config_path: Path, cells=None) -> dict[str, str]:
     with config_path.open("r", encoding="utf-8") as fp:
         config = yaml.safe_load(fp)
     agents = config.get("agents") if isinstance(config, dict) else None
@@ -118,7 +122,7 @@ def load_channel_ids(config_path: Path) -> dict[str, str]:
         raise ValueError(f"{config_path} has no agents list")
 
     resolved: dict[str, str] = {}
-    for cell in DEFAULT_CELLS:
+    for cell in DEFAULT_CELLS if cells is None else cells:
         agent_id = cell_driver.cell_default_agent(cell)
         provider = cell_driver.cell_provider(cell)
         agent = next(
@@ -185,7 +189,7 @@ def load_restart_guard_scenarios(scenarios_dir: Path) -> list[dict[str, Any]]:
 
 def parse_cells(raw: str) -> list[str]:
     cells = [cell.strip() for cell in raw.split(",") if cell.strip()]
-    unknown = [cell for cell in cells if cell not in DEFAULT_CELLS]
+    unknown = [cell for cell in cells if cell not in cell_driver.SUPPORTED_CELLS]
     if unknown:
         raise ValueError(f"unsupported cell(s): {', '.join(unknown)}")
     return cells
@@ -228,6 +232,14 @@ def run_cell(
         "--turn-start-timeout-s",
         str(args.turn_start_timeout_s),
     ]
+    if getattr(args, "phase_deadline_s", None):
+        cmd.extend(["--phase-deadline-s", str(args.phase_deadline_s)])
+    if getattr(args, "herdr_isolated_server", False):
+        cmd.append("--herdr-isolated-server")
+    if getattr(args, "herdr_endpoint", None):
+        cmd.extend(["--herdr-endpoint", args.herdr_endpoint])
+    if getattr(args, "herdr_status_bin", None):
+        cmd.extend(["--herdr-status-bin", args.herdr_status_bin])
     if args.filter:
         cmd.extend(["--filter", args.filter])
     if args.dry_run:
@@ -1597,7 +1609,9 @@ def main() -> int:
         print(f"[matrix] invalid --filter: {error}", file=sys.stderr)
         return 2
     cells = parse_cells(args.cells)
-    channel_ids = load_channel_ids(Path(args.config).expanduser())
+    if any(c.endswith("-herdr") and c.replace("-herdr", "-tui") in cells for c in cells):
+        raise ValueError("Herdr and tmux cells must not share one channel in a matrix run")
+    channel_ids = load_channel_ids(Path(args.config).expanduser(), cells)
     cross_scenarios = load_cross_channel_scenarios(scenarios_dir)
     restart_guard_scenarios = load_restart_guard_scenarios(scenarios_dir)
     if wanted:

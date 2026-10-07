@@ -958,3 +958,40 @@ class RestartGuardOrchestration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HerdrMatrix(unittest.TestCase):
+    def test_herdr_cells_are_opt_in_and_reuse_tui_channels(self):
+        self.assertEqual(matrix.parse_cells('claude-herdr,codex-herdr'), ['claude-herdr', 'codex-herdr'])
+        self.assertNotIn('claude-herdr', matrix.DEFAULT_CELLS)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'test-config.yaml'
+            path.write_text('agents:\n  - id: adk-claude-tui-e2e\n    channels:\n      claude: {id: "41"}\n')
+            self.assertEqual(matrix.load_channel_ids(path, ['claude-herdr']), {'claude-herdr': '41'})
+
+    def test_matrix_forwards_herdr_flags_and_partial_totals(self):
+        import json
+        args = Namespace(base_url='http://unused.test', scenarios='unused', filter='E-19', dry_run=True,
+                         required_agent_mode=None, required_coverage_class=None, allow_destructive=False,
+                         reset_before_each=False, hard_reset_session_each=False, queue_runtime_root='/unused',
+                         turn_start_timeout_s=5, herdr_endpoint='local', herdr_status_bin='/test/agentdesk',
+                         herdr_isolated_server=True)
+        def fake_run(cmd, **kwargs):
+            self.assertIn('--herdr-endpoint', cmd)
+            self.assertIn('--herdr-status-bin', cmd)
+            self.assertIn('--herdr-isolated-server', cmd)
+            directory = Path(cmd[cmd.index('--output') + 1])
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / 'report.claude-herdr.json').write_text(json.dumps({'totals': {'not_applicable': 1, 'pass': 0}}))
+            return Namespace(returncode=0)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(matrix.subprocess, 'run', side_effect=fake_run):
+            result = matrix.run_cell(cell='claude-herdr', channel_id='41', args=args, output_dir=Path(tmp), pass_index=1)
+        self.assertEqual(result['totals'], {'not_applicable': 1, 'pass': 0})
+
+    def test_same_channel_tui_herdr_mix_rejected_before_config_read(self):
+        args = Namespace(scenarios=str(ROOT / 'tests/e2e/tui_relay/scenarios'), filter='E-1',
+                         cells='claude-tui,claude-herdr')
+        with patch.object(matrix, 'parse_args', return_value=args), patch.object(matrix, 'load_channel_ids') as config:
+            with self.assertRaisesRegex(ValueError, 'share one channel'):
+                matrix.main()
+        config.assert_not_called()

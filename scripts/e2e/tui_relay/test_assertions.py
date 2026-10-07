@@ -1293,7 +1293,7 @@ class ScenarioFilterFailClosed(unittest.TestCase):
                          [("claude-tui", "claude-tui"), ("codex-tui", "codex-tui")])
         for row in cells:
             self.assertTrue(row["ok"])
-            self.assertEqual(row["totals"], {"pass": 0, "fail": 0, "skipped": 0})
+            self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run"), 0))
         restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
         self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
                          [("E-17", "pass", True)])
@@ -1396,7 +1396,7 @@ class TargetHealthContract(unittest.TestCase):
                     consumers.append((scenario["id"], step))
         self.assertTrue(consumers)
         for sid, step in consumers:
-            for cell in driver.SUPPORTED_CELLS:
+            for cell in (c for c in driver.SUPPORTED_CELLS if not c.endswith("-herdr")):
                 with self.subTest(scenario=sid, cell=cell):
                     provider = driver.cell_provider(cell)
                     foreign = "claude" if provider == "codex" else "codex"
@@ -1502,23 +1502,30 @@ class E35CurrentRunContract(unittest.TestCase):
                     client.send_control.return_value = {"id": "1"}
                     client.send.return_value = {"id": "2"}
                     # The real wait first sees the current marker; final edits must still pass assertions.
-                    client.fetch_messages.side_effect = [[], [body], messages]
+                    client.wait_for_message.return_value = (body, [body])
+                    client.fetch_messages.side_effect = [messages] if cell.endswith("-herdr") else [[], [body], messages]
                     args = Namespace(base_url=client.base_url, cell=cell, channel_id="42", thread_channel_id=None,
-                                     dry_run=False, reset_before_each=True, hard_reset_session_each=True,
+                                     dry_run=False, reset_before_each=True, hard_reset_session_each=not cell.endswith("-herdr"),
                                      allow_destructive=False, queue_runtime_root="unused", final_refetches=1)
-                    with patch.object(driver, "durable_probe_safety_gate", return_value={"status": "idle"}) as safety, \
+                    with patch.object(driver.herdr, "observe", return_value={"herdr": {}}), \
+                         patch.object(driver, "durable_probe_safety_gate", return_value={"status": "idle"}) as safety, \
                          patch.object(driver.durable_delivery, "poll_records", return_value={"status": "evaluated"}) as receipt, \
                          patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
                          patch.object(driver, "reset_channel_state") as reset, \
                          patch.object(driver, "hard_reset_provider_session") as hard_reset, patch.object(driver.time, "sleep"):
                         result = driver.run_scenario(scenario, args=args, run_id="current-run", client=client)
-                    self.assertEqual(result["status"], expected, result)
+                    expected_status = "not_applicable" if cell.endswith("-herdr") and expected == "pass" else expected
+                    self.assertEqual(result["status"], expected_status, result)
                     if expected == "fail":
-                        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+                        self.assertIn(result["failure_attribution"]["source"], ("assertion", "assertions"))
                     client.send.assert_called_once_with("42", original["steps"][0]["send_discord_prompt"].replace("{run_id}", "current-run"))
                     client.send_prompt.assert_not_called()
-                    receipt.assert_called_once_with(Path("unused"), provider="claude", channel_id="42", message_id="3")
-                    self.assertEqual(safety.call_count, 2)
+                    if cell.endswith("-herdr"):
+                        receipt.assert_not_called()
+                        safety.assert_not_called()
+                    else:
+                        receipt.assert_called_once_with(Path("unused"), provider="claude", channel_id="42", message_id="3")
+                        self.assertEqual(safety.call_count, 2)
                     reset.assert_not_called()
                     hard_reset.assert_not_called()
         self.assertEqual(scenario, original)
@@ -1824,3 +1831,79 @@ class RequiredCompletionWait(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HerdrHealthAssertions(unittest.TestCase):
+    def fixture(self):
+        return {'herdr': {'admission': 'open', 'restart_required': False,
+                'configured_channels': ['41'], 'endpoints': {'test': {'local': True}},
+                'input_holds': 0, 'reconnect': {'channels': 1, 'published': 1,
+                'withheld': 0, 'unknown': 0, 'pending': 0}}}
+
+    def row(self):
+        return {'executions': [{'channel': '41', 'provider': 'claude', 'state': 'bound',
+                 'pane': 'provider_running', 'launch_evidence': 'recorded', 'nonce': 'one', 'input_hold': None}]}
+
+    def test_ready_and_clean_and_published(self):
+        from tui_relay import herdr
+        block = herdr.ready(self.fixture(), endpoint='test', channel='41')
+        herdr.clean_turn(block)
+        self.assertEqual(herdr.published_row(block, self.row(), channel='41', provider='claude')['nonce'], 'one')
+
+    def test_preflight_fails_closed(self):
+        from tui_relay import herdr
+        for key, value in [('admission', 'stopped(env)'), ('restart_required', True),
+                           ('restart_required', None), ('configured_channels', ['42']),
+                           ('endpoints', {'other': {'local': True}}), ('endpoints', None)]:
+            data = self.fixture()
+            data['herdr'][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(assertions.AssertionError):
+                herdr.ready(data, endpoint='test', channel='41')
+        with self.assertRaises(assertions.AssertionError):
+            herdr.ready({}, endpoint='test', channel='41')
+
+    def test_input_holds_unknown_is_not_zero(self):
+        from tui_relay import herdr
+        for value in (None, False, '0', 'unreadable', 'not_counted_yet', 1, -1):
+            with self.subTest(value=value), self.assertRaises(assertions.AssertionError):
+                herdr.clean_turn({'input_holds': value})
+
+    def test_restart_counts_do_not_prove_target_row_alone(self):
+        from tui_relay import herdr
+        for status in ({}, {'executions': []}, {'executions': self.row()['executions'] * 2}):
+            with self.assertRaises(assertions.AssertionError):
+                herdr.published_row(self.fixture()['herdr'], status, channel='41', provider='claude')
+        for key, value in [('channel', '42'), ('provider', 'codex'), ('state', 'pending'),
+                           ('pane', 'root_replaced'), ('pane', 'unreadable'), ('launch_evidence', 'none'),
+                           ('input_hold', {}), ('nonce', '')]:
+            status = self.row()
+            status['executions'][0][key] = value
+            with self.subTest(key=key), self.assertRaises(assertions.AssertionError):
+                herdr.published_row(self.fixture()['herdr'], status, channel='41', provider='claude')
+
+    def test_restart_rejects_incomplete_or_ambiguous_aggregate(self):
+        from tui_relay import herdr
+        for key, value in [('withheld', 1), ('unknown', 1), ('pending', 1), ('published', 0),
+                           ('published', True), ('channels', 2), ('unknown', None)]:
+            block = self.fixture()['herdr']
+            block['reconnect'][key] = value
+            with self.subTest(key=key), self.assertRaises(assertions.AssertionError):
+                herdr.published_row(block, self.row(), channel='41', provider='claude')
+
+    def test_local_key_cannot_bless_mixed_remote_mapping(self):
+        from tui_relay import herdr
+        payload = self.fixture()
+        payload['herdr']['endpoints']['remote'] = {'local': False}
+        with self.assertRaisesRegex(assertions.AssertionError, 'locality'):
+            herdr.ready(payload, endpoint='test', channel='41')
+
+    def test_observe_uses_only_health_and_readonly_status(self):
+        from tui_relay import herdr
+        args = Namespace(base_url='http://unused.test', channel_id='41', cell='claude-herdr',
+                         herdr_endpoint='test', herdr_status_bin='/test/agentdesk')
+        with patch.object(driver, '_read_api_json', return_value=(200, self.fixture())) as health, \
+             patch.object(herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps(self.row()))) as status:
+            result = herdr.observe(driver, args, clean=True, reconnected=True)
+        health.assert_called_once_with(args.base_url, '/api/health', timeout=5)
+        status.assert_called_once_with(['/test/agentdesk', 'herdr', 'status'], capture_output=True, text=True, check=True, timeout=30)
+        self.assertEqual(result['row']['nonce'], 'one')
