@@ -9,6 +9,8 @@ const UNMEASURED_CHIPS: [&str; 3] = [
 ];
 const STASHED: &str = "\u{203a} stashed";
 const MIN_BORDER: usize = 10;
+/// The footer measured under the box with `--dangerously-skip-permissions`.
+const FOOTER: &str = "  \u{23f5}\u{23f5} bypass permissions on";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Composer {
@@ -102,7 +104,7 @@ fn sgr_faint(params: &str, mut faint: bool) -> bool {
     faint
 }
 
-/// The bottom-most `❯` row between two equal full borders, with footer chrome below the box.
+/// The bottom-most `❯` row between two equal full borders, with only a measured footer below.
 pub(super) fn read(capture: &str) -> Screen {
     let rows: Vec<Row> = capture.lines().map(row).collect();
     let border = |index: usize| -> Option<usize> {
@@ -122,14 +124,12 @@ pub(super) fn read(capture: &str) -> Screen {
     let Some(bottom) = (prompt + 1..rows.len()).find(|&index| border(index).is_some()) else {
         return UNKNOWN;
     };
-    // A box that closes at another width, has nothing under it, or has another box below it (a
-    // `!` bash-mode prompt) is cut, stale or not Claude's.
-    let below = bottom + 1..rows.len();
+    // A box that closes at another width, or whose footer is cut, unmeasured or followed by more
+    // rows (another box, a `!` bash-mode prompt), is stale or not a layout read here.
+    let mut below = rows[bottom + 1..].iter().map(|row| row.plain.trim_end());
     if border(bottom) != Some(width)
-        || rows[below.clone()]
-            .iter()
-            .all(|r| r.plain.trim().is_empty())
-        || below.into_iter().any(|index| border(index).is_some())
+        || !below.next().is_some_and(footer)
+        || below.any(|row| !row.is_empty())
     {
         return UNKNOWN;
     }
@@ -137,6 +137,15 @@ pub(super) fn read(capture: &str) -> Screen {
         composer: composer(&rows[prompt..bottom]),
         stash: stash(&rows[status].plain, width),
     }
+}
+
+/// The bypass-mode footer, its cycle hint and the busy hint; a footer cut at the edge is not.
+fn footer(row: &str) -> bool {
+    let Some(rest) = row.strip_prefix(FOOTER) else {
+        return false;
+    };
+    let rest = rest.strip_prefix(" (shift+tab to cycle)").unwrap_or(rest);
+    matches!(rest, "" | " \u{b7} esc to interrupt")
 }
 
 fn composer(rows: &[Row]) -> Composer {
@@ -166,6 +175,10 @@ fn composer(rows: &[Row]) -> Composer {
             } else {
                 Composer::Unknown
             };
+        }
+        // An attachment chip stands for a payload the rows do not show.
+        if UNMEASURED_CHIPS.iter().any(|chip| plain.contains(chip)) {
+            return Composer::Unknown;
         }
         lines.push(plain);
     }
@@ -215,10 +228,7 @@ pub(super) fn stashable(
     let Composer::Text(rows) = screen.composer else {
         return None;
     };
-    let chips = rows
-        .iter()
-        .any(|row| UNMEASURED_CHIPS.iter().any(|chip| row.contains(chip)));
-    (!chips && screen.stash == Stash::AbsentInRecognizedLayout).then_some(rows)
+    (screen.stash == Stash::AbsentInRecognizedLayout).then_some(rows)
 }
 
 /// Claude folds a paste over 800 UTF-16 units or with more newlines than clamp(rows-10, 0, 2),

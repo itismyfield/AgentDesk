@@ -39,7 +39,7 @@ pub(crate) fn submit_native_clear_tmux(
     .unwrap_or(NativeClearSubmission::NotSent)
 }
 
-fn native_clear_once(
+pub(super) fn native_clear_once(
     session: &str,
     gate: &dyn MutationGate,
     deadline: tokio::time::Instant,
@@ -61,6 +61,7 @@ fn native_clear_once(
     };
     if !native_clear_composer_empty(&before)
         || remaining().is_zero()
+        || super::composer_lock::admit_composer_write(session, || Some(before.clone())).is_err()
         || gate.admit(session).is_err()
     {
         return NativeClearSubmission::NotSent;

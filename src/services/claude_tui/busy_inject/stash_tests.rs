@@ -10,8 +10,13 @@ const NONCE: &str = "abcd1234";
 const TEXT: &str = "are you there?";
 
 /// Windows only bound the waits for evidence that never comes; found evidence returns at once.
+/// Lock retries ride out a map shard another test holds for an instant.
 const FAST: Timing = Timing {
-    lock_retries: &[Duration::ZERO],
+    lock_retries: &[
+        Duration::ZERO,
+        Duration::from_millis(5),
+        Duration::from_millis(10),
+    ],
     settle: Duration::ZERO,
     rechecks: 3,
     recheck_interval: Duration::from_millis(5),
@@ -20,8 +25,8 @@ const FAST: Timing = Timing {
     restore_window: Duration::from_millis(600),
 };
 
-/// A scripted Claude TUI behind `tmux`: composer and stash files, the single-slot C-s, the
-/// submit that hands a stash back, attach generation, and a person acting after capture N.
+/// A scripted Claude TUI behind `tmux`: composer and stash files, the single-slot C-s, the submit
+/// that hands a stash back, attach generation, a person after capture N, a `barrier` after Enter.
 const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -56,6 +61,11 @@ display-message) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$
 capture-pane)
   n=$(($(cat "$d/cap.n" 2>/dev/null || echo 0) + 1)); echo $n > "$d/cap.n"
   [ -f "$d/fail.cap.$n" ] && exit 1
+  # With a barrier, the first capture after Enter waits for go, 3s at most.
+  if [ -f "$d/barrier" ] && grep -qx Enter "$d/applied" 2>/dev/null; then
+    rm "$d/barrier"; : > "$d/reached"; i=0
+    while [ ! -f "$d/go" ] && [ $i -lt 300 ]; do sleep 0.01; i=$((i+1)); done
+  fi
   if [ -f "$d/restore_in" ]; then
     k=$(cat "$d/restore_in")
     if [ "$k" = 0 ]; then mv "$d/stash" "$d/composer"; rm "$d/restore_in"
@@ -168,6 +178,12 @@ impl Tui {
 
     fn run(&self) -> Report {
         self.run_text(TEXT, &FAST)
+    }
+
+    /// The pane as the fake shows it now.
+    fn capture(&self) -> String {
+        let pane = Pane::with_program(&self.session(), self.dir.path().join("tmux"));
+        pane.capture().unwrap()
     }
 
     /// Keys the server applied for AgentDesk, in order.
@@ -351,16 +367,20 @@ fn delivery_and_draft_outcomes_stay_apart_and_an_unrecovered_pane_is_held() {
 fn a_second_input_waits_out_the_whole_stash_transaction() {
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
-    let slow = Timing {
-        restore_window: Duration::from_secs(2),
-        ..FAST
-    };
+    tui.put("barrier", "");
     std::thread::scope(|scope| {
-        let first = scope.spawn(|| tui.run_text(TEXT, &slow));
-        while !tui.applied().contains(&"Enter".to_string()) {
+        let first = scope.spawn(|| tui.run());
+        // The first input is parked inside its restore watch, the lock still held.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while tui.get("reached").is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no restore watch began"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         let second = tui.run();
+        tui.put("go", "");
         assert_eq!(
             second,
             report(Outcome::NotSent(Veto::LockContended), DraftState::Unchanged)
@@ -373,6 +393,124 @@ fn a_second_input_waits_out_the_whole_stash_transaction() {
         report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
     );
     assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+}
+
+/// The hold covers every automatic writer: the follow-up submit and a native `/clear` send no key
+/// until a capture shows the stash gone and the composer readable.
+#[test]
+fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
+    use crate::services::claude_tui::composer_lock::{DraftRecoveryHold, admit_composer_write};
+    use crate::services::claude_tui::host_input::{
+        LegacyTmuxGate, NativeClearSubmission, SpyGuard, SpyState, native_clear_composer_empty,
+        native_clear_once,
+    };
+    use crate::services::claude_tui::input::{
+        is_prompt_ready_timeout_error, send_followup_prompt_or_idle_transcript as follow_up,
+        with_composer_cleanup_lock,
+    };
+    const BUSY: &str = "\u{2733} Architecting\u{2026}";
+    let tui = Tui::new("human draft A");
+    tui.put("restore_after", "never");
+    let got = tui.run();
+    assert_eq!(
+        (got, got.delivery()),
+        (
+            report(Outcome::Injected, DraftState::Unknown),
+            Delivery::Observed
+        )
+    );
+    // The turn ends; the draft stays stashed under an empty composer that /clear would accept.
+    tui.put("head", "\u{23fa} Done.\n\n");
+    let held = tui.capture();
+    assert!(native_clear_composer_empty(&held));
+    let (session, idle) = (tui.session(), tui.dir.path().join("idle.jsonl"));
+    fs::write(
+        &idle,
+        r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+    )
+    .unwrap();
+    let spy = |pane: &str| {
+        let captures = [pane, pane, pane, BUSY].map(|c| Some(c.to_string()));
+        SpyGuard::install(SpyState {
+            captures: captures.into(),
+            ..SpyState::default()
+        })
+    };
+    let keys = |calls: Vec<String>| -> Vec<String> {
+        let key = |c: &String| {
+            ["keys:", "literal:", "load:", "paste:"]
+                .iter()
+                .any(|k| c.starts_with(k))
+        };
+        calls.into_iter().filter(key).collect()
+    };
+    let deadline = || tokio::time::Instant::now() + Duration::from_secs(20);
+
+    let guard = spy(&held);
+    let error = follow_up(&session, "follow-up", None, &idle).unwrap_err();
+    let requeued = is_prompt_ready_timeout_error(&error)
+        && error.contains("follow-up prompt input readiness")
+        && error.contains("prompt_marker_detected=true");
+    assert!(requeued, "{error}");
+    let cleanup = with_composer_cleanup_lock(&session, || -> bool { panic!("held pane cleaned") });
+    assert_eq!(cleanup, None);
+    assert_eq!(keys(guard.calls()), Vec::<String>::new());
+    drop(guard);
+    let refuse = |_: &[&str], _: Duration| -> bool { panic!("a held pane took /clear") };
+    let clear = native_clear_once(
+        &session,
+        &LegacyTmuxGate,
+        deadline(),
+        |_| Some(held.clone()),
+        refuse,
+    );
+    assert_eq!(clear, NativeClearSubmission::NotSent);
+
+    // No stash, but an attachment chip or a footer this reader has not measured: still held.
+    fs::remove_file(tui.dir.path().join("stash")).unwrap();
+    let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)\n";
+    let unreadable = [
+        ("[Image #1]", footer),
+        ("look at [Image #2]", footer),
+        ("[...Truncated text #1 +40 lines...]", footer),
+        ("human draft A", "  ? for shortcuts\n"),
+        (
+            "human draft A",
+            "  \u{23f5}\u{23f5} bypass permissions on (shift+tab \n",
+        ),
+    ];
+    for (composer, row) in unreadable {
+        tui.put("composer", composer);
+        tui.put("footer", row);
+        let admitted = admit_composer_write(&session, || Some(tui.capture()));
+        assert_eq!(admitted, Err(DraftRecoveryHold), "{composer:?} {row:?}");
+    }
+
+    // The person took the draft back and sent it: that capture releases the hold.
+    tui.put("composer", "");
+    tui.put("footer", footer);
+    let recovered = tui.capture();
+    let guard = spy(&recovered);
+    assert_eq!(follow_up(&session, "follow-up", None, &idle), Ok(()));
+    assert!(keys(guard.calls()).contains(&"keys:Enter".to_string()));
+    drop(guard);
+    let mut sent = 0;
+    let clear = native_clear_once(
+        &session,
+        &LegacyTmuxGate,
+        deadline(),
+        |_| Some(recovered.clone()),
+        |_, _| {
+            sent += 1;
+            true
+        },
+    );
+    assert_eq!((clear, sent), (NativeClearSubmission::Confirmed, 1));
+    for prompt in ["follow-up", "/clear"] {
+        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+            "claude", &session, prompt,
+        );
+    }
 }
 
 /// Only a frame Claude shows unfolded and unwrapped may displace a draft.
@@ -457,6 +595,7 @@ fn pane(width: usize, status: &str, rows: &[&str], footer: bool) -> String {
 fn the_stash_is_read_from_the_status_row_above_the_active_box_only() {
     let draft = ["❯\u{00a0}half typed"];
     let empty = ["❯\u{00a0}"];
+    let on = "  ⏵⏵ bypass permissions on";
     let text = |rows: &[&str]| Composer::Text(rows.iter().map(|row| row.to_string()).collect());
     let old_box = format!("{}\n❯\u{00a0}old\n{}\n", "─".repeat(60), "─".repeat(60));
     let scrollback = format!("{:>58}\n{old_box}", "› stashed") + &pane(60, "", &draft, true);
@@ -541,6 +680,54 @@ fn the_stash_is_read_from_the_status_row_above_the_active_box_only() {
         (
             "a bash-mode box below an older one",
             pane(60, "", &draft, true) + &pane(60, "", &["! ls"], true),
+            Composer::Unknown,
+            Stash::Unknown,
+        ),
+        (
+            "image alone",
+            pane(60, "", &["❯\u{00a0}[Image #1]"], true),
+            Composer::Unknown,
+            Stash::AbsentInRecognizedLayout,
+        ),
+        (
+            "text and an image",
+            pane(60, "", &["❯\u{00a0}look at", "  this [Image #2]"], true),
+            Composer::Unknown,
+            Stash::AbsentInRecognizedLayout,
+        ),
+        (
+            "truncated text chip",
+            pane(
+                60,
+                "",
+                &["❯\u{00a0}[...Truncated text #1 +40 lines...]"],
+                true,
+            ),
+            Composer::Unknown,
+            Stash::AbsentInRecognizedLayout,
+        ),
+        (
+            "footer with both hints",
+            pane(60, "", &draft, true)
+                .replace(on, &format!("{on} (shift+tab to cycle) · esc to interrupt")),
+            text(&["half typed"]),
+            Stash::AbsentInRecognizedLayout,
+        ),
+        (
+            "footer cut at the edge",
+            pane(60, "", &draft, true).replace(on, &format!("{on} (shift+tab ")),
+            Composer::Unknown,
+            Stash::Unknown,
+        ),
+        (
+            "unmeasured footer",
+            pane(60, "", &draft, true).replace(on, "  ? for shortcuts"),
+            Composer::Unknown,
+            Stash::Unknown,
+        ),
+        (
+            "a row under the footer",
+            pane(60, "", &draft, true) + "  Context left until auto-compact: 9%\n",
             Composer::Unknown,
             Stash::Unknown,
         ),

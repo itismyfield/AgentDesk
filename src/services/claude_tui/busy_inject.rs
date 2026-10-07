@@ -1,6 +1,5 @@
-//! One external human input pasted into a busy hosted Claude TUI composer. Nothing here
-//! enqueues: after the paste the only outcomes are Injected or Unconfirmed. A person's draft
-//! is first moved into Claude's stash (`stash`), so NotSent can follow that one key.
+//! Pastes one external human input into a busy hosted Claude TUI composer; nothing here enqueues.
+//! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
 mod screen;
 mod stash;
@@ -412,6 +411,13 @@ fn judge_before_paste(
     Ok(plan)
 }
 
+/// A pane held for draft recovery is released by this capture: no stash, a readable composer.
+pub(crate) fn draft_recovered(capture: &str) -> bool {
+    let screen = screen::read(capture);
+    screen.stash == screen::Stash::AbsentInRecognizedLayout
+        && screen.composer != screen::Composer::Unknown
+}
+
 /// Tries the composer lock a bounded number of times, then injects under it.
 pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Outcome {
     inject_report(pane, request, timing).outcome
@@ -496,7 +502,8 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
     let Some(before) = pane.capture() else {
         return Report::not_sent(Veto::PaneUnavailable);
     };
-    if stash::held(request.session, &before) {
+    let capture = || Some(before.clone());
+    if super::composer_lock::admit_composer_write(request.session, capture).is_err() {
         return Report::not_sent(Veto::Draft);
     }
     let plan = match judge_before_paste(&before, request.transcript, text, state.size) {

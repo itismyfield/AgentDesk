@@ -391,6 +391,18 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     prompt_readiness_snapshot_from_capture(pane.as_deref(), alive)
 }
 
+/// A pane held for draft recovery refuses the write before any key, with an error in the
+/// follow-up readiness family that the turn bridge requeues while keeping the session.
+fn admit_automatic_write(session_name: &str, readiness: PromptReadinessKind) -> Result<(), String> {
+    let capture = || host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK).0;
+    super::composer_lock::admit_composer_write(session_name, capture).map_err(|_| {
+        format!(
+            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness held; reason=draft_recovery_hold; previous_tui_turn_still_running=false; prompt_marker_detected=true",
+            readiness.label()
+        )
+    })
+}
+
 pub(super) fn prompt_readiness_snapshot_from_capture(
     pane: Option<&str>,
     tmux_pane_alive: bool,
@@ -426,6 +438,7 @@ fn send_prompt_with_readiness(
     // `/compact` and a normal follow-up cannot interleave their key mutations.
     wait_for_prompt_ready(session_name, readiness, cancel_token)?;
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        admit_automatic_write(session_name, readiness)?;
         let snapshot = prompt_readiness_snapshot(session_name);
         if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Err("claude tui composer changed before follow-up mutation".to_string());
@@ -458,6 +471,9 @@ fn send_prompt_with_readiness(
 /// This function deliberately contains no retry Enter, Escape, or Ctrl-U cleanup:
 /// after the first tmux mutation starts, every uncertainty stays disarmed.
 pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
+    if admit_automatic_write(session_name, PromptReadinessKind::Followup).is_err() {
+        return CompactSubmitOutcome::PreMutationRefused;
+    }
     let snapshot = prompt_readiness_snapshot(session_name);
     if compact_steering_decision(&snapshot).is_err() {
         return CompactSubmitOutcome::PreMutationRefused;
@@ -604,6 +620,7 @@ pub(crate) fn steering_snapshot_decision(
 pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        admit_automatic_write(session_name, PromptReadinessKind::Followup)?;
         let snapshot = prompt_readiness_snapshot(session_name);
         steering_snapshot_decision(&snapshot).map_err(str::to_string)?;
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
@@ -656,6 +673,7 @@ pub fn send_selector_followup(
     let result = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         session_name,
         || {
+            admit_automatic_write(session_name, PromptReadinessKind::Followup)?;
             let snapshot = prompt_readiness_snapshot(session_name);
             if !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
                 return Err("claude tui composer changed before selector mutation".to_string());
@@ -1064,8 +1082,15 @@ fn clear_prompt_draft_before_error(session_name: &str) {
 /// `hosting::followup_support`. Callers MUST NOT already hold the composer lock —
 /// every readiness/warm-followup wait acquires it only AFTER the wait returns,
 /// so this is the outermost composer acquisition on those paths (no re-entry).
-pub(crate) fn with_composer_cleanup_lock<R>(session_name: &str, cleanup: impl FnOnce() -> R) -> R {
-    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, cleanup)
+/// A pane held for draft recovery takes no cleanup key; `None` reports the skipped cleanup.
+pub(crate) fn with_composer_cleanup_lock<R>(
+    session_name: &str,
+    cleanup: impl FnOnce() -> R,
+) -> Option<R> {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        let admitted = admit_automatic_write(session_name, PromptReadinessKind::Followup);
+        admitted.ok().map(|()| cleanup())
+    })
 }
 
 fn prompt_draft_cleanup_actions(snapshot: &PromptReadinessSnapshot) -> Vec<TuiInputAction> {
@@ -1161,6 +1186,7 @@ pub fn send_followup_prompt_or_idle_transcript(
         transcript_path,
     )?;
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        admit_automatic_write(session_name, PromptReadinessKind::ProvenWarmFollowup)?;
         let snapshot = prompt_readiness_snapshot(session_name);
         if !proven_warm_followup_revalidates_prompt_ready(&snapshot, transcript_path) {
             return Err("claude tui composer changed before follow-up mutation".to_string());

@@ -5,8 +5,10 @@
 //! Keeping them distinct lets an auto `/compact` steer a busy pane without
 //! waiting behind a normal turn's readiness phase.
 
+use std::collections::HashSet;
 #[cfg(unix)]
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 #[cfg(unix)]
 static SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, Arc<Mutex<()>>>> =
@@ -67,6 +69,40 @@ pub(crate) fn try_with_composer_mutation_lock<R>(
     _operation: impl FnOnce() -> R,
 ) -> Option<R> {
     None
+}
+
+/// Panes where a person's draft may still sit in Claude's stash; in memory only.
+static DRAFT_RECOVERY_HOLDS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+/// An automatic composer write refused because the pane awaits a person's draft recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DraftRecoveryHold;
+
+fn draft_recovery_holds() -> MutexGuard<'static, HashSet<String>> {
+    DRAFT_RECOVERY_HOLDS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Holds every automatic composer write to this pane until a capture shows the draft recovered.
+pub(crate) fn hold_for_draft_recovery(tmux_session_name: &str) {
+    draft_recovery_holds().insert(tmux_session_name.to_string());
+}
+
+/// Admits one automatic composer write; callers ask under the composer lock, before any key.
+/// Only a held pane is captured; no stash and a readable composer in that capture release it.
+pub(crate) fn admit_composer_write(
+    tmux_session_name: &str,
+    capture: impl FnOnce() -> Option<String>,
+) -> Result<(), DraftRecoveryHold> {
+    if !draft_recovery_holds().contains(tmux_session_name) {
+        return Ok(());
+    }
+    if !capture().is_some_and(|capture| super::busy_inject::draft_recovered(&capture)) {
+        return Err(DraftRecoveryHold);
+    }
+    draft_recovery_holds().remove(tmux_session_name);
+    Ok(())
 }
 
 /// Run a blocking hosted-turn operation under the pane's full turn lock.

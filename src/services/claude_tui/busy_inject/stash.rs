@@ -1,35 +1,10 @@
 //! The stash path: park a person's draft in Claude's single stash slot, submit the frame, and
 //! watch Claude hand the draft back on the submit. No key is ever retried.
 
-use std::collections::HashSet;
-use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Instant;
 
 use super::screen::{self, Composer, Stash};
 use super::{Attempt, Delivery, DraftState, Guard, Outcome, Report, Unconfirmed, Veto, modal};
-
-/// Panes whose draft an earlier transaction left unaccounted for; in memory only.
-static RECOVERY: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-
-fn recovery() -> MutexGuard<'static, HashSet<String>> {
-    RECOVERY.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
-/// Holds automatic writes to a pane in recovery until a capture shows no stash and a readable
-/// composer.
-pub(super) fn held(session: &str, capture: &str) -> bool {
-    let mut panes = recovery();
-    if !panes.contains(session) {
-        return false;
-    }
-    let screen = screen::read(capture);
-    let settled =
-        screen.stash == Stash::AbsentInRecognizedLayout && screen.composer != Composer::Unknown;
-    if settled {
-        panes.remove(session);
-    }
-    !settled
-}
 
 /// One stash transaction; recovery is decided before the caller releases the composer lock.
 pub(super) fn run(attempt: &Attempt<'_>, draft: &[String]) -> Report {
@@ -39,7 +14,7 @@ pub(super) fn run(attempt: &Attempt<'_>, draft: &[String]) -> Report {
         report.draft,
         DraftState::Unchanged | DraftState::RestoredObserved
     ) {
-        recovery().insert(attempt.request.session.to_string());
+        super::super::composer_lock::hold_for_draft_recovery(attempt.request.session);
         alert(attempt, &report, last.as_deref());
     }
     report
