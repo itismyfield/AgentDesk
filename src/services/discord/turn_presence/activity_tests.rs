@@ -385,7 +385,7 @@ fn bytes_past_the_chunk_budget_read_catching_up_before_any_judgment() {
     let big = json!({"type":"summary","summary":"x".repeat(CHUNK_BUDGET as usize + 1024)});
     let (probe, path) = claude(root.path(), &[summary()]);
     assert_eq!(probe.settle(), (Activity::Idle, "no_turn_evidence_ready"));
-    write(&path, &[big.clone()]);
+    write(&path, std::slice::from_ref(&big));
     assert_eq!(probe.ask(), (Activity::Unknown, "catching_up"));
     assert_eq!(probe.ask(), (Activity::Idle, "no_turn_evidence_ready"));
     write(&path, &[prompt("a"), big]);
