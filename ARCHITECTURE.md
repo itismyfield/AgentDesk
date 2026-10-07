@@ -1540,6 +1540,7 @@ src/
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
 │   │   │   │   ├── stale_resume_retry_e2e.rs
+│   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs

@@ -936,6 +936,14 @@ pub(in crate::services::discord) async fn handle_event(
             // `LazyLock`, avoiding a per-message compile cost in the hot path.
             let cmd_text = strip_leading_bot_mention(text);
             if cmd_text.starts_with('!') {
+                // Live intake consumes the command whether or not it replies; a
+                // silent one left behind the checkpoint replays as a catch-up prompt.
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    new_message.id,
+                );
                 // Skill prompts enter central admission with their upload paths
                 // still in the submission. Do not inject them into this
                 // gateway's local session before owner routing has admitted

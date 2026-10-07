@@ -21,6 +21,7 @@ mod prompt_identity_e2e;
 mod queue_recovery_e2e;
 mod registered_bootstrap_e2e;
 mod stale_resume_retry_e2e;
+mod stop_command_catch_up_e2e;
 #[cfg(unix)]
 mod thread_guard_host_e2e;
 
