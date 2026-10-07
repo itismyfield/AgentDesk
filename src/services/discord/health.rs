@@ -65,7 +65,7 @@ pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_sessio
 // API surface, same convention as the recovery/snapshot blocks below.
 #[cfg(all(test, unix))]
 pub(crate) use super::turn_presence::activity::tests::{
-    BindingRoot, bind_turn_mode_transcript, settled_reason,
+    BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,
 };
 pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutboundDeliveryId;
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
@@ -96,7 +96,9 @@ pub use turn_deliver::{
     external_turn_hold_for_start,
 };
 #[cfg(test)]
-pub(crate) use turn_deliver::{register_bot_auth_for_tests, seed_external_turn_row_for_tests};
+pub(crate) use turn_deliver::{
+    inflight_rows_for_tests, register_bot_auth_for_tests, seed_external_turn_row_for_tests,
+};
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.

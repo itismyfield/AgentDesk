@@ -75,6 +75,8 @@ enum Outcome {
 struct Watch {
     key: Option<Key>,
     generation: u64,
+    /// Moves whenever an effect-point poll changes what this generation would answer.
+    revision: u64,
     outcome: Outcome,
     through: u64,
     grew_at: Instant,
@@ -85,6 +87,7 @@ impl Default for Watch {
         Self {
             key: None,
             generation: 0,
+            revision: 0,
             outcome: Outcome::Rebuilding,
             through: 0,
             grew_at: Instant::now(),
@@ -184,7 +187,11 @@ fn observe(
     }
     let (facts, from_start) = match &mut guard.outcome {
         Outcome::Rebuilding => return observed(Activity::Unknown, "catching_up"),
-        Outcome::NoSource => return no_turn_evidence(ports.as_ref(), &key),
+        Outcome::NoSource => {
+            return ask_pane(watch, guard, &key, || {
+                no_turn_evidence(ports.as_ref(), &key)
+            });
+        }
         Outcome::Pending => return observed(Activity::Unknown, "binding_pending"),
         Outcome::Unreadable { .. } => return observed(Activity::Unknown, "binding_unreadable"),
         Outcome::Halted => return observed(Activity::Unknown, "facts_halted"),
@@ -208,11 +215,13 @@ fn observe(
         }
         (Err(_), _) => {
             guard.outcome = Outcome::Halted;
+            guard.revision += 1;
             return observed(Activity::Unknown, "facts_halted");
         }
     };
     if fact.through > guard.through {
         (guard.through, guard.grew_at) = (fact.through, Instant::now());
+        guard.revision += 1;
     }
     if !caught_up {
         return observed(Activity::Unknown, "catching_up");
@@ -223,19 +232,35 @@ fn observe(
             observed(Activity::Busy, "open")
         }
         TurnState::Open { .. } if provider == ShadowProvider::Claude => {
-            drop(guard);
-            match ports.pane_busy(&key.session) {
+            ask_pane(watch, guard, &key, || match ports.pane_busy(&key.session) {
                 true => observed(Activity::Busy, "open_pane_busy"),
                 false => observed(Activity::Unknown, "open_without_progress"),
-            }
+            })
         }
         TurnState::Open { .. } => observed(Activity::Unknown, "open_without_progress"),
         TurnState::Unknown if awaiting => observed(Activity::Unknown, "facts_resumed"),
-        TurnState::Unknown if from_start && !evidence => {
-            drop(guard);
+        TurnState::Unknown if from_start && !evidence => ask_pane(watch, guard, &key, || {
             no_turn_evidence(ports.as_ref(), &key)
-        }
+        }),
         TurnState::Unknown => observed(Activity::Unknown, "no_turn_boundary"),
+    }
+}
+
+/// Reads the pane outside the channel's lock; if the key, generation or read moved on meanwhile the
+/// answer reads unknown, so a superseded read never grants a start.
+fn ask_pane(
+    watch: &Mutex<Watch>,
+    guard: MutexGuard<'_, Watch>,
+    key: &Key,
+    ask: impl FnOnce() -> Observed,
+) -> Observed {
+    let read = (guard.generation, guard.revision);
+    drop(guard);
+    let answer = ask();
+    let guard = lock(watch);
+    match guard.key.as_ref() == Some(key) && (guard.generation, guard.revision) == read {
+        true => answer,
+        false => observed(Activity::Unknown, "superseded"),
     }
 }
 
@@ -308,13 +333,14 @@ fn locate(ports: &dyn Ports, channel: u64, key: &Key) -> (Outcome, Grown) {
     let source = match logged(&events) {
         Ok((sources, _)) => sources.last().map(|source| (*source).clone()),
         Err(refused) if refused.hold == Hold::Binding => return (Outcome::Pending, None),
+        Err(refused) if refused.hold == Hold::Final => return (Outcome::NoSource, None),
         Err(_) => None,
     };
+    // Only a log that binds nothing reads as no source; a bound file gone missing may come back.
     let Some(source) = source else {
-        return (Outcome::NoSource, None);
+        return (unreadable(), None);
     };
     match std::fs::metadata(&source.path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Outcome::NoSource, None),
         Err(_) => (unreadable(), None),
         Ok(meta) if meta.len() > MAX_TRANSCRIPT_BYTES => (Outcome::TooLarge, None),
         Ok(_) => {
@@ -418,6 +444,10 @@ impl Ports for LivePorts {
     }
 
     fn final_ready(&self, session: &str) -> bool {
+        #[cfg(all(test, unix))]
+        if tests::pane_ready_for_tests(session) {
+            return true;
+        }
         use crate::services::claude_tui::input::{final_prompt_ready, prompt_readiness_snapshot};
         final_prompt_ready(&prompt_readiness_snapshot(session))
     }

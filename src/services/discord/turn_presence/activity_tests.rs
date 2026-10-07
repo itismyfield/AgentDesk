@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 use serde_json::json;
 
@@ -23,6 +24,8 @@ struct Fake {
     folds: AtomicUsize,
     jobs: Mutex<Vec<Job>>,
     spawns: AtomicUsize,
+    /// The next pane read reports it started, then waits until released.
+    pause: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl Ports for Fake {
@@ -37,6 +40,10 @@ impl Ports for Fake {
         self.present.load(Ordering::SeqCst)
     }
     fn final_ready(&self, _: &str) -> bool {
+        if let Some((started, release)) = lock(&self.pause).take() {
+            started.send(()).unwrap();
+            let _ = release.recv();
+        }
         self.ready.load(Ordering::SeqCst)
     }
     fn pane_busy(&self, _: &str) -> bool {
@@ -68,6 +75,7 @@ impl Probe {
             folds: AtomicUsize::new(0),
             jobs: Mutex::new(Vec::new()),
             spawns: AtomicUsize::new(0),
+            pause: Mutex::new(None),
         });
         let target = Target::Bound(SESSION.into());
         let watch = Arc::default();
@@ -274,9 +282,9 @@ fn every_observation_maps_to_its_activity_and_reason() {
         probe.fake.ready.store(ready, Ordering::SeqCst);
         note(name, probe.settle());
     }
-    let (probe, path) = claude(&dir("unwritten"), &[]);
+    let (probe, path) = claude(&dir("missing"), &[]);
     std::fs::remove_file(&path).unwrap();
-    note("bound file not written yet", probe.settle());
+    note("bound file missing, ready pane", probe.settle());
 
     let (probe, _) = claude(&dir("closed"), &[prompt("a"), end()]);
     note("closed", probe.settle());
@@ -337,7 +345,7 @@ fn every_observation_maps_to_its_activity_and_reason() {
         ("no source, ready", (Idle, "no_turn_evidence_ready")),
         ("no source, not ready", (Unknown, "no_turn_evidence")),
         ("codex no source", (Unknown, "no_turn_evidence")),
-        ("bound file not written yet", (Idle, "no_turn_evidence_ready")),
+        ("bound file missing, ready pane", (Unknown, "binding_unreadable")),
         ("closed", (Idle, "closed")),
         ("open", (Busy, "open")),
         ("stale open, pane idle", (Unknown, "open_without_progress")),
@@ -561,6 +569,87 @@ fn a_superseded_worker_installs_nothing() {
     assert_eq!(probe.ask(), (Activity::Busy, "open"));
 }
 
+/// A paused probe, its transcript, what overtakes its pane read and what the overtaking ask reads.
+type Overtaken<'a> = (
+    Probe,
+    std::path::PathBuf,
+    &'a dyn Fn(&Probe, &Path),
+    (Activity, &'static str),
+);
+
+/// A pane read that a newer generation, a halt or newly read bytes overtake answers unknown, never
+/// the idle it saw.
+#[test]
+fn a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = |name: &str| root.path().join(name);
+    let rows = [summary()];
+    let rebind = |probe: &Probe, _: &Path| *lock(&probe.fake.seq) = Ok(9);
+    let opened = |_: &Probe, path: &Path| write(path, &[prompt("a")]);
+    let broken = |_: &Probe, path: &Path| {
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{{\"type\":\"user\"").unwrap();
+    };
+    let cases: [Overtaken; 4] = [
+        {
+            let (probe, path) = claude(&dir("rebound"), &rows);
+            (probe, path, &rebind, (Activity::Unknown, "catching_up"))
+        },
+        {
+            let probe = Probe::new(ShadowProvider::Claude, Vec::new());
+            (
+                probe,
+                dir("none"),
+                &rebind,
+                (Activity::Unknown, "catching_up"),
+            )
+        },
+        {
+            let (probe, path) = claude(&dir("opened"), &rows);
+            (probe, path, &opened, (Activity::Busy, "open"))
+        },
+        {
+            let (probe, path) = claude(&dir("broken"), &rows);
+            (probe, path, &broken, (Activity::Unknown, "facts_halted"))
+        },
+    ];
+    for (probe, path, overtake, later) in &cases {
+        assert_eq!(probe.settle(), (Activity::Idle, "no_turn_evidence_ready"));
+        let (started, entered) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *lock(&probe.fake.pause) = Some((started, released));
+        std::thread::scope(|scope| {
+            // Owned here so a failed assertion drops it and frees the paused read.
+            let release = release;
+            let first = scope.spawn(|| probe.ask());
+            entered.recv().unwrap();
+            overtake(probe, path);
+            assert_eq!(probe.ask(), *later);
+            release.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), (Activity::Unknown, "superseded"));
+        });
+    }
+}
+
+/// A bound transcript gone missing reads unknown beside a ready pane, and the same file put back
+/// is read again on the unreadable retry.
+#[test]
+fn a_bound_transcript_gone_missing_reads_unknown_until_it_is_back() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, path) = claude(root.path(), &[prompt("a")]);
+    let aside = root.path().join("aside.jsonl");
+    std::fs::rename(&path, &aside).unwrap();
+    assert_eq!(probe.settle(), (Activity::Unknown, "binding_unreadable"));
+    assert_eq!(probe.ask(), (Activity::Unknown, "binding_unreadable"));
+    assert_eq!(probe.counts(), (1, 1), "no retry before the delay");
+    std::fs::rename(&aside, &path).unwrap();
+    if let Outcome::Unreadable { retry_at } = &mut lock(&probe.watch).outcome {
+        *retry_at = Instant::now();
+    }
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    assert_eq!(probe.counts(), (2, 2), "one retry reads the file again");
+}
+
 /// An untyped output block at an effect point resumes on a worker and keeps the carried turn; a
 /// broken record halts for good.
 #[test]
@@ -610,6 +699,29 @@ impl Drop for BindingRoot {
     fn drop(&mut self) {
         crate::services::tui_prompt_dedupe::binding_events::set_test_root(self.0.as_deref());
     }
+}
+
+static READY_PANES: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
+
+/// Live probes read this tmux session's pane as passing the final send check while it lives.
+pub(crate) struct ReadyPane(String);
+
+impl ReadyPane {
+    pub(crate) fn mark(session: &str) -> Self {
+        lock(&READY_PANES).insert(session.into());
+        Self(session.into())
+    }
+}
+
+impl Drop for ReadyPane {
+    fn drop(&mut self) {
+        lock(&READY_PANES).remove(&self.0);
+    }
+}
+
+pub(super) fn pane_ready_for_tests(session: &str) -> bool {
+    lock(&READY_PANES).contains(session)
 }
 
 /// A confirmed turn-mode channel whose live watcher and one-record binding log name `path`, as

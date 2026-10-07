@@ -8759,8 +8759,10 @@ services::discord::turn_lease::tests::restart_mode_row_still_refuses_operator_in
 services::discord::turn_lease::tests::successor_normal_complete_preserves_negative_admission_after_operator_release_r2
 services::discord::turn_lease::tests::unbound_message_id_lease_is_inspectable_and_refuses_release_without_effects
 services::discord::turn_lease::tests::unbound_message_id_lease_with_its_own_row_is_inspectable
+services::discord::turn_presence::activity::tests::a_bound_transcript_gone_missing_reads_unknown_until_it_is_back
 services::discord::turn_presence::activity::tests::a_channel_outside_turn_mode_never_reaches_the_probe
 services::discord::turn_presence::activity::tests::a_finished_rebuild_is_kept_for_its_key
+services::discord::turn_presence::activity::tests::a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown
 services::discord::turn_presence::activity::tests::a_rebuilt_open_turn_takes_its_age_from_the_file
 services::discord::turn_presence::activity::tests::a_replaced_or_shrunk_transcript_reads_facts_halted
 services::discord::turn_presence::activity::tests::a_superseded_worker_installs_nothing

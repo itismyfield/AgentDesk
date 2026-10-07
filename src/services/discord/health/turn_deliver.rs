@@ -450,6 +450,15 @@ pub(crate) fn seed_external_turn_row_for_tests(provider: &ProviderKind, channel_
         .expect("external turn row");
 }
 
+/// How many of `channels` hold an inflight row file on disk.
+#[cfg(test)]
+pub(crate) fn inflight_rows_for_tests(provider: &ProviderKind, channels: &[u64]) -> usize {
+    use crate::services::discord::inflight::{inflight_runtime_root, inflight_state_path};
+    let root = inflight_runtime_root().expect("test runtime root");
+    let row = |channel: &&u64| inflight_state_path(&root, provider, **channel).exists();
+    channels.iter().filter(row).count()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
