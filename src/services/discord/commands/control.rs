@@ -187,7 +187,8 @@ fn build_fallback_session_key_for_clear(
     super::super::adk_session::build_namespaced_session_key(token_hash, provider, &tmux_name)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod codex_verified_clear_tests;
 
 #[allow(clippy::too_many_arguments)]
