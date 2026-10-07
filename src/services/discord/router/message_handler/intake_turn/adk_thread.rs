@@ -108,6 +108,11 @@ pub(super) async fn redirect_dispatch(
                             "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
                             alt_ch
                         );
+                        let final_provider = resolve_role_binding(alt_ch, None)
+                            .and_then(|binding| binding.provider)
+                            .unwrap_or_else(|| provider.clone());
+                        redirected_permit =
+                            final_admission(&final_provider, channel_id, redirected_permit.take())?;
                         shared.dispatch.role_overrides.insert(channel_id, alt_ch);
                     }
                 }
@@ -172,6 +177,14 @@ pub(super) async fn redirect_dispatch(
                                     "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
                                     alt_ch
                                 );
+                                let final_provider = resolve_role_binding(alt_ch, None)
+                                    .and_then(|binding| binding.provider)
+                                    .unwrap_or_else(|| provider.clone());
+                                redirected_permit = final_admission(
+                                    &final_provider,
+                                    tid,
+                                    redirected_permit.take(),
+                                )?;
                                 shared.dispatch.role_overrides.insert(tid, alt_ch);
                             }
                         }
@@ -321,6 +334,76 @@ mod tests {
     use super::*;
     use crate::services::discord::input_runtime::fence::{self, Gate, Mode};
     use futures::FutureExt;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn c1b_final_refusal_preserves_existing_thread_role_override() {
+        if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+            "services::discord::router::message_handler::intake_turn::adk_thread::tests::",
+            "c1b_final_refusal_preserves_existing_thread_role_override"
+        )) {
+            return;
+        }
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_539);
+        let alt = ChannelId::new(6_325_540);
+        let previous = ChannelId::new(6_325_541);
+        let path = crate::services::discord::runtime_store::role_map_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({"byChannelId": {alt.to_string(): {
+                "roleId": "c1b-refused-role", "promptFile": "", "provider": "codex"
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let gate = Gate::protect(ProviderKind::Codex, channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let closing = gate.close().unwrap();
+        shared.dispatch.role_overrides.insert(channel, previous);
+        let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(
+            Arc::new(move |_, path| {
+                path.ends_with(&format!("/channels/{channel}")).then(|| {
+                    serde_json::json!({
+                        "id": channel.to_string(), "type": 0, "name": "c1b-input", "position": 0
+                    })
+                })
+            }),
+        )
+        .await;
+        let info = crate::services::discord::router::thread_binding::DispatchInfo {
+            discord_channel_alt: Some(alt.to_string()),
+            ..Default::default()
+        };
+        let mut uploads = Vec::new();
+        let result = redirect_dispatch(RedirectDispatch {
+            http: &api.http,
+            cache: None,
+            shared: &shared,
+            provider: &shared.provider,
+            channel_id: channel,
+            original_channel_id: channel,
+            dispatch_id_for_thread: &Some("c1b-refused-dispatch".into()),
+            dispatch_info_cached: &Some(info),
+            dispatch_type_str: Some("review"),
+            dispatch_uses_thread_routing: true,
+            is_already_thread: true,
+            user_text: "review",
+            dispatch_effective_path: "/unreachable",
+            pending_uploads: &mut uploads,
+            session_was_cleared: Some(false),
+        })
+        .await;
+        assert!(result.err().unwrap().to_string().contains("Closing"));
+        assert_eq!(
+            *shared.dispatch.role_overrides.get(&channel).unwrap(),
+            previous,
+            "refused final identity must not replace the prior override"
+        );
+        closing.drain().await;
+    }
 
     #[tokio::test]
     async fn c1b_final_identity_separates_original_and_execution_provider() {

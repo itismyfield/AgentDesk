@@ -30,6 +30,41 @@ mod input_effect_tests {
     use crate::services::discord::input_runtime::fence::{self, Gate};
     use futures::FutureExt;
 
+    #[test]
+    fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
+        let source = include_str!("intake_turn.rs");
+        let body = source
+            .split_once("\npub(super) async fn handle_text_message(")
+            .unwrap()
+            .1;
+        let start = body
+            .find(
+                "    let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit))",
+            )
+            .unwrap();
+        let end = body[start..]
+            .find("    let (mut session_id, mut memento_context_loaded")
+            .unwrap()
+            + start;
+        let transition = &body[start..end];
+        assert!(
+            !transition.contains("let provider ="),
+            "role override must not shadow the original native-clear provider"
+        );
+        assert!(
+            transition.contains("final_admission(&final_provider, channel_id, redirected_permit)")
+        );
+        assert!(
+            transition.contains("(http, shared, token, &provider)"),
+            "runtime transition and native-clear admission retain settings.provider"
+        );
+        let runtime = include_str!("intake_turn/runtime_transition.rs");
+        assert!(
+            runtime
+                .contains("Ok(mut t) => admits(http, shared, provider, channel_id, &mut t.state)")
+        );
+    }
+
     #[tokio::test]
     async fn c1b_worker_core_refuses_closing_before_settings_or_voice_consumption() {
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -870,14 +905,15 @@ async fn handle_text_message_admitted(
     else {
         return Ok(());
     };
-    let provider = if let Some(override_channel) = shared.dispatch.role_overrides.get(&channel_id) {
-        resolve_role_binding(*override_channel, None)
-            .and_then(|binding| binding.provider)
-            .unwrap_or(provider)
-    } else {
-        provider
-    };
-    let final_permit = adk_thread::final_admission(&provider, channel_id, redirected_permit)?;
+    let final_provider =
+        if let Some(override_channel) = shared.dispatch.role_overrides.get(&channel_id) {
+            resolve_role_binding(*override_channel, None)
+                .and_then(|binding| binding.provider)
+                .unwrap_or_else(|| provider.clone())
+        } else {
+            provider.clone()
+        };
+    let final_permit = adk_thread::final_admission(&final_provider, channel_id, redirected_permit)?;
     let (http_owned, cache_owned, ctx_owned, shared_owned, token_owned) = (
         http.clone(),
         cache.cloned(),
