@@ -5821,6 +5821,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_boxed_composer_on_a_cold_start_refuses_its_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_cancel_between_the_follow_up_text_and_its_enter_keeps_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_composer_other_than_the_bottom_one_refuses_the_follow_up_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_composer_that_never_turns_ready_stops_the_cold_start_at_its_deadline_pg

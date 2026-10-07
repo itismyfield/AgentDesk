@@ -33,7 +33,12 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 const CHANNEL: u64 = O_CHANNEL;
 const TOKEN: &str = "discord_0123456789abcdef";
 const LIMIT: Duration = Duration::from_secs(30);
-const READY: &str = "earlier output\n\
+/// The status row Codex draws at the bottom of the screen.
+const STATUS: &str = "  gpt-5.5 xhigh · /fixture/workspace";
+/// An empty compact composer as Codex 0.160 draws it: a bare `›` with the status row below.
+const READY: &str = "earlier output\n\n›\n\n  gpt-5.5 xhigh · /fixture/workspace";
+/// The boxed composer the Herdr tests showed before; the Herdr reader reads no boxed form.
+const BOXED_READY: &str = "earlier output\n\
 ╭──────────────────────────────────────────────────────────────╮\n\
 │ ▌                                                            │\n\
 ╰──────────────────────────────────────────────────────────────╯\n\

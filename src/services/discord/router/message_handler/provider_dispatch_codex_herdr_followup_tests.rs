@@ -6,15 +6,18 @@ use crate::services::discord::recovery_engine::herdr_reader::{
     ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
 };
 
-/// The status row Codex draws at the bottom of the screen.
-const STATUS: &str = "  gpt-5.5 xhigh · /fixture/workspace";
-
 /// A ready screen whose boxed composer holds the `body` lines, its status row below.
 fn composer(body: &str) -> String {
     let edge = "─".repeat(30);
     format!(
         "earlier output\n╭{edge}╮\n{body}\n╰{edge}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send\n{STATUS}"
     )
+}
+
+/// A compact composer holding `input`, under output whose rule and footer text pass readiness.
+fn drafted(input: &str) -> String {
+    let rule = "─".repeat(30);
+    format!("earlier output\n{rule}\n  Ctrl+J newline   ⏎ send\n\n› {input}\n\n{STATUS}")
 }
 
 const SIGN_IN: &str = "Welcome to Codex\n\n  Sign in with ChatGPT to use Codex as part of your plan\n\n\
@@ -63,8 +66,8 @@ fn binding(fx: &Fixture) -> Option<crate::services::tui_prompt_dedupe::TuiRuntim
     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical())
 }
 
-// T2-2: any composer text but a blank input or a placeholder right after its one cursor, or a box
-// not read as exactly one composer, refuses the follow-up with nothing written, held or unbound.
+// T2-2: text in the compact composer, even one readiness passes, or any boxed composer, refuses
+// the follow-up with nothing written, held or unbound; a bare `›` then takes it.
 #[test]
 fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg() {
     let fx = Fixture::admitted("draft");
@@ -73,57 +76,53 @@ fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg()
     let edge = "─".repeat(30);
     let footer = "  Esc to interrupt   Ctrl+J newline   ⏎ send";
     let drafts = [
+        "남은 초안",
+        "message▌",
+        "MESSAGE▌",
+        "send▌a message",
+        "Send▌a message",
+        "▌send a message",
+        "▌Send a message…",
+        "▌",
+        "Send a message▌",
+        "Explain Ctrl+J newline",
+    ];
+    let boxed = [
         "│ 남은 초안▌                   │",
         "│ ▌남은 초안                   │",
         "│ 남은 초안                    │\n│ ▌                            │",
         "│ message▌                     │",
         "│ MESSAGE▌                     │",
         "│ send▌a message               │",
-        "│ Send▌a message               │",
-        "│ ▌send a message              │",
         "│ ▌send a message!             │",
-        "│ ▌Send a message!             │",
         "│ Send a message▌              │",
         "│ Send a message               │\n│ ▌                            │",
         "│ 남은 초안                    │\n│ ──────────────────────────── │\n│ ▌                            │",
+        "│                              │",
+        "│ ▌Send a message…             │",
+        "│ ▌                            │",
     ];
-    let unread = [
-        composer("│                              │"),
+    let mut unread: Vec<String> = boxed.iter().map(|body| composer(body)).collect();
+    unread.extend([
         composer(&format!(
             "│ 남은 초안                    │\n╰{edge}╯\n╭{edge}╮\n│ ▌                            │"
         )),
         format!("╭{edge}\n│ ▌                            │\n╰{edge}╯\n{footer}\n{STATUS}"),
         format!("╭{edge}╮\n│ ▌                            │\n╰{edge}\n{footer}\n{STATUS}"),
-    ];
-    let refused = drafts.iter().map(|body| (composer(body), "ComposerDraft"));
-    for (screen_text, why) in refused.chain(unread.into_iter().map(|s| (s, "ComposerUnread"))) {
-        fx.rig.answer("pane.read", screen(&screen_text));
-        let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
-        assert_eq!(
-            fx.rig.sends(),
-            prompt_sends(),
-            "no write and no key: {screen_text}"
-        );
-        assert!(!hold_of(&nonce).exists(), "{screen_text}");
-        assert_eq!(fx.row(), Some(HostedState::Bound), "{screen_text}");
-        let second = second.unwrap_err();
-        assert!(second.contains(why), "{screen_text}: {second}");
-    }
-    for (body, sends, turn) in [
-        ("│ ▌Send a message…             │", 4, "t2"),
-        ("│ ▌                            │", 6, "t3"),
-    ] {
-        fx.rig.answer("pane.read", screen(&composer(body)));
-        let (taken, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
-            reply(&fx, &path, sends, turn, turn)
-        });
-        assert_eq!(taken, Ok(()), "{body}");
-        assert_eq!(texts(&messages), [turn], "{body}");
-    }
+    ]);
+    let refused = drafts.iter().map(|input| (drafted(input), "ComposerDraft"));
+    let unread = unread.into_iter().map(|s| (s, "ComposerUnread"));
+    refused_untouched(&fx, &launcher, &nonce, refused.chain(unread).collect());
+    fx.rig.answer("pane.read", screen(READY));
+    let (taken, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        reply(&fx, &path, 4, "t2", "t2")
+    });
+    assert_eq!(taken, Ok(()));
+    assert_eq!(texts(&messages), ["t2"]);
 }
 
-// T2-2b: only the bottom-most composer is read. A box with other rows below its footer, or a
-// compact prompt not shown whole above the status row, refuses the follow-up with nothing written.
+// T2-2b: a compact composer is read only when it is proven whole: the one unindented `›` right
+// above the status row, on a screen within the scan window with no box; else nothing is written.
 #[test]
 fn a_composer_other_than_the_bottom_one_refuses_the_follow_up_pg() {
     let fx = Fixture::admitted("region");
@@ -131,10 +130,19 @@ fn a_composer_other_than_the_bottom_one_refuses_the_follow_up_pg() {
     let (nonce, path) = launch(&fx, &fx.ports(&launcher));
     let edge = "─".repeat(20);
     let footer = "Esc to interrupt   Ctrl+J newline   ⏎ send";
+    let status = "  gpt-5.4 high · /workspace";
+    let long = |indent: &str| {
+        let body: Vec<String> = (1..=13).map(|n| format!("{indent}본문 {n:02}")).collect();
+        let body = body.join("\n");
+        format!("› 실제 초안 시작\n{body}\n\n{indent}›\n\n{indent}gpt-5.4 high · /workspace")
+    };
     let unread = [
         "› Please explain this prompt symbol:\n  ›\ngpt-5.4 high · /workspace".to_string(),
         format!(
             "╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n\n› draft line one\n  draft line two\ngpt-5.4 high · /workspace"
+        ),
+        format!(
+            "╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n\n› Explain Ctrl+J newline\n{status}"
         ),
         format!("earlier output\n  남은 초안\n›\n\n{STATUS}"),
         format!("╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n› 남은 초안\n{STATUS}"),
@@ -145,29 +153,50 @@ fn a_composer_other_than_the_bottom_one_refuses_the_follow_up_pg() {
         format!("earlier output\n  › 남은 초안\n\n›\n\n{STATUS}"),
         format!("earlier output\n› 남은 초안\n\n›\n\n{STATUS}"),
         format!("earlier output\n\n  ›\n\n{STATUS}"),
+        format!("╭{edge}╮\n│ ▌                  │\n╰{edge}╯\n{footer}\n\n›\n\n{STATUS}"),
+        long("  "),
+        long(""),
+        long("").split_once('\n').unwrap().1.to_string(),
+        format!("{BOXED_READY}\n{STATUS}"),
+        BOXED_READY.to_string(),
     ];
-    for screen_text in unread {
+    let unread = unread.into_iter().map(|s| (s, "ComposerUnread"));
+    refused_untouched(&fx, &launcher, &nonce, unread.collect());
+    fx.rig.answer("pane.read", screen(READY));
+    let (taken, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        reply(&fx, &path, 4, "t2", "t2")
+    });
+    assert_eq!(taken, Ok(()));
+    assert_eq!(fx.rig.sends(), [prompt_sends(), prompt_sends()].concat());
+    assert!(!hold_of(&nonce).exists());
+    assert_eq!(texts(&messages), ["t2"]);
+}
+
+/// Each follow-up on its screen writes, holds and unbinds nothing; the refusal reasons are checked
+/// after every screen's effects, so a refusal for another reason cannot hide a later write.
+fn refused_untouched(
+    fx: &Fixture,
+    launcher: &Arc<Launcher>,
+    nonce: &str,
+    cases: Vec<(String, &str)>,
+) {
+    let mut reasons = Vec::new();
+    for (screen_text, why) in cases {
         fx.rig.answer("pane.read", screen(&screen_text));
-        let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+        let (second, _) = fx.turn(&fx.record(), &fx.ports(launcher), || {});
         assert_eq!(
             fx.rig.sends(),
             prompt_sends(),
             "no write and no key: {screen_text}"
         );
-        assert!(!hold_of(&nonce).exists(), "{screen_text}");
+        assert!(!hold_of(nonce).exists(), "{screen_text}");
         assert_eq!(fx.row(), Some(HostedState::Bound), "{screen_text}");
-        let second = second.unwrap_err();
-        assert!(second.contains("ComposerUnread"), "{screen_text}: {second}");
+        reasons.push((screen_text, why, second));
     }
-    fx.rig.answer(
-        "pane.read",
-        screen(&format!("earlier output\n\n›\n\n{STATUS}")),
-    );
-    let (taken, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
-        reply(&fx, &path, 4, "t2", "t2")
-    });
-    assert_eq!(taken, Ok(()));
-    assert_eq!(texts(&messages), ["t2"]);
+    for (screen_text, why, second) in reasons {
+        let second = second.unwrap_err();
+        assert!(second.contains(why), "{screen_text}: {second}");
+    }
 }
 
 // T2-3: a follow-up whose launch options are not the pane's, whose kept options name another
@@ -439,6 +468,24 @@ fn a_modal_on_a_cold_start_refuses_its_first_prompt_at_once_pg() {
     let nonce = launcher.nonces.lock().unwrap()[0].clone();
     assert!(!hold_of(&nonce).exists());
     assert_eq!(fx.row(), Some(HostedState::Pending));
+}
+
+// A cold start whose pane shows the boxed composer refuses its first prompt as unread, before
+// its hold and any write; the Pending pane is kept.
+#[test]
+fn a_boxed_composer_on_a_cold_start_refuses_its_first_prompt_pg() {
+    let fx = Fixture::admitted("boxed-cold");
+    let launcher = Arc::new(Launcher::default());
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
+        if fx.start_provider(&launcher, false).is_some() {
+            fx.rig.answer("pane.read", screen(BOXED_READY));
+        }
+    });
+    assert!(fx.rig.sends().is_empty());
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    assert!(!hold_of(&nonce).exists());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    assert!(first.unwrap_err().contains("ComposerUnread"));
 }
 
 // A cold start whose composer never turns ready stops at its deadline with nothing written or
