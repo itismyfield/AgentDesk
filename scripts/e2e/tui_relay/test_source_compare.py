@@ -3,13 +3,17 @@
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from . import source_compare as sc
 from .assertions import OUR_BOT_ID
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import run_tui_relay as driver  # noqa: E402
 
 
 MARKER = "[E2E:S5:fixture:ONE]"
@@ -314,6 +318,110 @@ class AutonomousEvidenceTests(unittest.TestCase):
         with patch.object(sc, "resolve_binding", return_value=binding), patch.object(sc, "fetch_messages") as fetch, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(sc.main(["--agent-id", "worker", "--run-id", "fixture", "--autonomous-background-turn"]), 0)
             fetch.assert_not_called()
+
+
+class AutonomousDispatchTests(unittest.TestCase):
+    write = SourceCompareTests.write
+    user = SourceCompareTests.user
+    ARMED, AUTO = AutonomousEvidenceTests.ARMED, AutonomousEvidenceTests.AUTO
+
+    def setUp(self):
+        AutonomousEvidenceTests.setUp(self)
+        project = self.root / "project"
+        project.mkdir()
+        self.path = project / "native-session.jsonl"
+        self.identity = {"agent_id": "adk-claude-tui-e2e", "channel_id": "123", "provider": "claude",
+                         "session_key": "claude:123", "raw_provider_session_id": "native-session"}
+        self.context = driver.ObservationContext("http://fixture", "123", "claude", self.root)
+        self.spec = {"autonomous_background_turn": {"armed_marker": "[E2E:S4:{run_id}:ARMED]",
+                                                    "auto_marker": "[E2E:S4:{run_id}:AUTO]"}}
+
+    def dispatch(self):
+        self.write(self.rows)
+        record = {}
+        with patch.object(driver.source_compare, "get_json", return_value=self.identity) as get:
+            driver.run_assertion(self.spec, window=driver.assertions.Window("100"), record=record,
+                                 run_id="fixture", observation_context=self.context)
+        get.assert_called_once_with("http://fixture", "/api/agents/123/session-evidence")
+        return record["autonomous_background_turn"]
+
+    def test_actual_dispatch_records_linked_native_evidence(self):
+        evidence = self.dispatch()
+        self.assertEqual({k: evidence[k] for k in ("bash_tool_use_id", "task_id", "armed_uuid",
+                                                  "notification_uuid", "auto_uuid")},
+                         {"bash_tool_use_id": "tool-1", "task_id": "task-1", "armed_uuid": "armed",
+                          "notification_uuid": "notice", "auto_uuid": "auto"})
+        self.assertEqual(evidence["binding"]["transcript_path"], str(self.path))
+
+    def test_native_evidence_survives_final_result_json(self):
+        evidence = self.dispatch()
+        result = {"assertions": []}
+        driver._merge_record_into_result(result, {"autonomous_background_turn": evidence})
+        emitted = json.loads(json.dumps(result))["autonomous_background_turn"]
+        for key in ("bash_tool_use_id", "task_id", "armed_uuid", "notification_uuid", "auto_uuid"):
+            self.assertEqual(emitted[key], evidence[key])
+        self.assertEqual(emitted["binding"]["transcript_path"], str(self.path))
+
+    def test_actual_dispatch_rejects_missing_notification(self):
+        self.rows.pop(4)
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "matching completion notice"):
+            self.dispatch()
+
+    def test_actual_dispatch_rejects_wrong_task_and_tool_identity(self):
+        original = self.rows[4]["message"]["content"]
+        for identifier in ("task-1", "tool-1"):
+            self.rows[4]["message"]["content"] = original.replace(identifier, "wrong-id")
+            with self.subTest(identifier=identifier), self.assertRaisesRegex(driver.HarnessEvidenceError, "matching completion notice"):
+                self.dispatch()
+
+    def test_actual_dispatch_rejects_same_turn_auto(self):
+        self.rows[3]["message"]["content"][0]["text"] += " " + self.AUTO
+        self.rows[5]["message"]["content"] = []
+        with self.assertRaises(driver.HarnessEvidenceError):
+            self.dispatch()
+
+    def test_actual_dispatch_rejects_foreground_bash(self):
+        self.rows[1]["message"]["content"][0]["input"]["run_in_background"] = False
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "background Bash"):
+            self.dispatch()
+
+    def test_actual_dispatch_requires_context_and_exercised_provider(self):
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "observation context"):
+            driver.run_assertion(self.spec, window=driver.assertions.Window("100"), record={})
+        self.identity["provider"] = "codex"
+        with self.assertRaises(driver.HarnessEvidenceError):
+            self.dispatch()
+
+    def test_run_one_cell_passes_observation_context_to_actual_dispatch(self):
+        from argparse import Namespace
+        self.write(self.rows)
+        client = Mock(base_url="http://fixture")
+        client.send_control.return_value = {"id": "100"}
+        client.fetch_messages.return_value = []
+        scenario = {"id": "native-proof", "agent_mode": "none", "coverage_class": "fixture",
+                    "steps": [], "assertions": [self.spec]}
+        args = Namespace(queue_runtime_root=self.root, transcript_root=self.root, final_refetches=1)
+        with patch.object(driver.source_compare, "get_json", return_value=self.identity), \
+             patch.object(driver.time, "sleep"), patch.object(driver, "assert_cell_idle", return_value={}):
+            record = driver.run_one_cell(scenario=scenario, cell="claude-tui", channel_id="123",
+                                         client=client, run_id="fixture", dry_run=False, args=args)
+        self.assertEqual(record["autonomous_background_turn"]["task_id"], "task-1")
+        self.assertTrue(record["assertions"][0]["passed"])
+
+    def test_all_scenario_cells_load_without_network(self):
+        scenarios = Path(__file__).resolve().parents[3] / "tests/e2e/tui_relay/scenarios"
+        with patch.object(driver.urllib.request, "urlopen", side_effect=AssertionError("unexpected network")):
+            loaded = {cell: driver.load_scenarios(scenarios, cell=cell) for cell in driver.SUPPORTED_CELLS}
+        self.assertTrue(all(loaded.values()))
+        self.assertIn("E-53", {scenario["id"] for scenario in loaded["claude-tui"]})
+        self.assertIn("E-36", {scenario["id"] for scenario in loaded["claude-tui"]})
+
+    def test_health_and_autonomous_schema_still_reject_unknown_options(self):
+        for kind, action, params in (("steps", "assert_health", {"require_status": ["healthy"]}),
+                                     ("assertions", "autonomous_background_turn", self.spec["autonomous_background_turn"])):
+            driver.validate_scenario_schema({kind: [{action: params}]})
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, "unsupported"):
+                driver.validate_scenario_schema({kind: [{action: {**params, "unexpected": True}}]})
 
 
 if __name__ == "__main__":

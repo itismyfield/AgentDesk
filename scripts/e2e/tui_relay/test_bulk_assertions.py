@@ -170,6 +170,33 @@ class CompletionContracts(unittest.TestCase):
                 with self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
                     a.completion_per_turn(value)
 
+    def test_only_inline_completion_must_survive_in_final_snapshot(self):
+        marker = "[E2E:T:ONE]"
+        for final in (marker, marker + "\n\n-# ⠸ 진행 중"):
+            value = window(message(101, marker + "\n\n-# ✅ 완료"))
+            value.add(message(101, final))
+            for selected in (None, marker):
+                with self.subTest(final=final, marker=selected), self.assertRaisesRegex(
+                        a.AssertionError, "expected 1, got 0 final IDs" if final == marker else "completion_per_turn"):
+                    a.completion_per_turn(value, marker=selected)
+
+    def test_inline_completion_retained_after_edit_is_final_evidence(self):
+        marker = "[E2E:T:ONE]"
+        value = window(message(101, marker + "\n\n-# ✅ 완료"))
+        value.add(message(101, marker + " updated\n\n-# ✅ 완료"))
+        a.completion_per_turn(value)
+        a.completion_per_turn(value, marker=marker)
+
+    def test_inline_completion_history_still_rejects_duplicate_after_edit(self):
+        marker = "[E2E:T:ONE]"
+        value = window(message(101, marker + "\n\n-# ✅ 완료"))
+        value.add(message(101, marker))
+        value.add(message(102, "✅ 완료"))
+        for selected in (None, marker):
+            with self.subTest(marker=selected), self.assertRaisesRegex(
+                    a.AssertionError, "expected 1, got 2 observed IDs"):
+                a.completion_per_turn(value, marker=selected)
+
     def test_footer_like_prose_and_active_footer_are_not_completions(self):
         for suffix in ("\n\n-# ✅ 완료\nordinary prose", "\n\n-# ⠸ 진행 중", "\n-# ✅ 완료"):
             with self.subTest(suffix=suffix), self.assertRaises(a.AssertionError):

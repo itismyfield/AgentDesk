@@ -918,39 +918,44 @@ def completion_per_turn(window: Window, *, exact: int = 1, marker: str | None = 
         for row in group:
             sub.add(row)
         observed = {str(row["id"]): row for row in group}
-        ids = completion_candidates(sub) | edited_completion_candidates(window, observed)
-        inline_ids = set()
+        final_inline_ids, observed_inline_ids = set(), set()
         views = sub.messages + [{**observed[str(update["id"])], "content": update.get(field) or ""}
                                 for update in window.message_updates if str(update["id"]) in observed
                                 for field in ("before", "after")]
-        for row in views:
-            content = row.get("content") or ""
-            stripped = _strip_completion_chrome_tail(content)
-            footer = content[len(stripped):] if stripped != content else ""
-            if any(re.fullmatch(r"-# (?:✅|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) (?:완료|백그라운드 완료)", line.strip())
-                   for line in footer.splitlines()):
-                inline_ids.add(str(row["id"]))
-        ids |= inline_ids
-        if len(ids) != exact:
-            raise AssertionError(f"completion_per_turn turn {marker or index!r}: expected {exact}, got {len(ids)} IDs {sorted(ids)}")
-        if exact and inline_ids:
-            bodies = [row for row in sub.messages if relay_body(row)
-                      and (marker is None or marker in (relay_body(row) or ""))]
-            if not bodies:
-                raise AssertionError(f"completion_per_turn turn {index}: no relay body")
-            first_card = min((row for row in group if str(row["id"]) in ids), key=_message_order_key)
-            if _message_order_key(first_card) < _message_order_key(bodies[0]):
-                raise CompletionOrderError("completion chrome appeared before body marker")
-        elif exact and marker is not None:
-            if exact == 1:
-                completion_id(sub, {"body_marker": marker})
+        for snapshot, inline_ids in ((sub.messages, final_inline_ids), (views, observed_inline_ids)):
+            for row in snapshot:
+                content = row.get("content") or ""
+                stripped = _strip_completion_chrome_tail(content)
+                footer = content[len(stripped):] if stripped != content else ""
+                if any(re.fullmatch(r"-# (?:✅|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) (?:완료|백그라운드 완료)", line.strip())
+                       for line in footer.splitlines()):
+                    inline_ids.add(str(row["id"]))
+        final_completion_ids = completion_candidates(sub) | final_inline_ids
+        observed_completion_ids = (final_completion_ids | observed_inline_ids
+                                   | edited_completion_candidates(window, observed))
+        if len(final_completion_ids) != exact:
+            raise AssertionError(f"completion_per_turn turn {marker or index!r}: expected {exact}, got {len(final_completion_ids)} final IDs {sorted(final_completion_ids)}")
+        if len(observed_completion_ids) > exact:
+            raise AssertionError(f"completion_per_turn turn {marker or index!r}: expected {exact}, got {len(observed_completion_ids)} observed IDs {sorted(observed_completion_ids)}")
+        if exact and final_completion_ids:
+            if final_inline_ids:
+                bodies = [row for row in sub.messages if relay_body(row)
+                          and (marker is None or marker in (relay_body(row) or ""))]
+                if not bodies:
+                    raise AssertionError(f"completion_per_turn turn {index}: no relay body")
+                first_card = min((row for row in group if str(row["id"]) in final_completion_ids), key=_message_order_key)
+                if _message_order_key(first_card) < _message_order_key(bodies[0]):
+                    raise CompletionOrderError("completion chrome appeared before body marker")
+            elif marker is not None:
+                if exact == 1:
+                    completion_id(sub, {"body_marker": marker})
+                else:
+                    completion_chrome_after_body(sub, body_marker=marker, required=True)
             else:
-                completion_chrome_after_body(sub, body_marker=marker, required=True)
-        elif exact:
-            bodies = [relay_body(row) for row in sub.messages if relay_body(row)]
-            if not bodies:
-                raise AssertionError(f"completion_per_turn turn {index}: no relay body")
-            completion_chrome_after_body(sub, body_marker=bodies[0], required=True)
+                bodies = [relay_body(row) for row in sub.messages if relay_body(row)]
+                if not bodies:
+                    raise AssertionError(f"completion_per_turn turn {index}: no relay body")
+                completion_chrome_after_body(sub, body_marker=bodies[0], required=True)
 
 
 def edited_completion_candidates(window, observed, after_id=None):
