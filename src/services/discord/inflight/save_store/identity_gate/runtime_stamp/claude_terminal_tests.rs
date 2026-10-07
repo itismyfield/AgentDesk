@@ -113,6 +113,7 @@ impl Fixture {
                     source_file_ino: self.file.1,
                     actor: Arc::downgrade(&self.actor),
                 }),
+                kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
             };
         }
         StreamMessage::ClaudeTuiTerminalDone {
@@ -127,6 +128,7 @@ impl Fixture {
             source_file_dev: self.file.0,
             source_file_ino: self.file.1,
             actor: Arc::downgrade(&self.actor),
+            kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
         }
     }
 
@@ -532,6 +534,67 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                                 ))
                         );
                     }
+                }
+            }
+        });
+}
+
+fn with_kind(mut frame: StreamMessage, to: NativeTerminalKind) -> StreamMessage {
+    if let StreamMessage::ClaudeTuiTerminalDone { kind, .. }
+    | StreamMessage::CodexTuiTerminalDone { kind, .. } = &mut frame
+    {
+        *kind = to;
+    }
+    frame
+}
+
+/// An admitted native terminal hands its provider's kind to the bridge in the admitted range; an
+/// uncaptured abort the legacy gate cannot verify keeps the obligation instead of becoming Done.
+#[test]
+fn an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let _dedupe = dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cases = [
+                (40, ProviderKind::Claude, NativeTerminalKind::Aborted),
+                (41, ProviderKind::Codex, NativeTerminalKind::Aborted),
+                (42, ProviderKind::Claude, NativeTerminalKind::Completed),
+            ];
+            for (index, provider, kind) in cases {
+                let mut fixture = Fixture::new(temp.path(), index, provider).await;
+                let frame = with_kind(fixture.frame(), kind);
+                let (done, range, _) = fixture.admit(frame).await.unwrap();
+                assert!(matches!(done, StreamMessage::Done { .. }));
+                assert_eq!(range.unwrap().kind, kind);
+            }
+            for (index, kind) in [
+                (43, NativeTerminalKind::Completed),
+                (44, NativeTerminalKind::Aborted),
+            ] {
+                let mut fixture = Fixture::new(temp.path(), index, ProviderKind::Codex).await;
+                let mut frame = with_kind(fixture.frame(), kind);
+                if let StreamMessage::CodexTuiTerminalDone {
+                    captured_source, ..
+                } = &mut frame
+                {
+                    *captured_source = None;
+                }
+                let admitted = fixture.admit(frame).await;
+                if kind == NativeTerminalKind::Completed {
+                    let (done, range, _) = admitted.unwrap();
+                    assert!(matches!(done, StreamMessage::Done { .. }) && range.is_none());
+                } else {
+                    assert!(
+                        admitted.is_err(),
+                        "an unverified abort is never a plain Done"
+                    );
                 }
             }
         });

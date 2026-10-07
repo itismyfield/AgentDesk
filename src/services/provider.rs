@@ -12,6 +12,7 @@ pub(crate) mod channel_rules;
 mod output_reader;
 mod registry;
 pub(crate) mod session_probe;
+pub(crate) use output_reader::herdr_provider_terminal_only;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
 pub(crate) mod read_fault;

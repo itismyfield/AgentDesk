@@ -443,7 +443,7 @@ const CLAUDE_INTERRUPT_MARKERS: [&str; 2] = [
 /// `content` may also be a plain string (older shape); the same exact check
 /// applies. Coincidental conversation text or `tool_result` payloads that merely
 /// mention "interrupted" therefore never match.
-fn claude_user_envelope_is_interrupt_marker(json: &Value) -> bool {
+pub(crate) fn claude_user_envelope_is_interrupt_marker(json: &Value) -> bool {
     let Some(content) = json
         .get("message")
         .and_then(|message| message.get("content"))

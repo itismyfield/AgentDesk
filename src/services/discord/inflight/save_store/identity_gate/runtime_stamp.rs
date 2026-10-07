@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
 use crate::services::discord::turn_bridge::{tmux_generation_file_mtime_ns, tmux_runtime_paths};
@@ -12,6 +12,9 @@ pub(in crate::services::discord) struct TuiTerminalRange {
     pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
     #[serde(default)]
     pub(in crate::services::discord) source_file_identity: Option<(u64, u64)>,
+    /// How the admitted frame's provider record ended the turn; older ranges read as `Completed`.
+    #[serde(default)]
+    pub(in crate::services::discord) kind: NativeTerminalKind,
     // Only reconstruction from the durable captured Codex row grants this;
     // serialized frames and live admissions cannot widen cursor authority.
     #[serde(skip)]
@@ -76,6 +79,7 @@ impl InflightTurnState {
             source_start,
             complete_record_end,
             captured_source: None,
+            kind,
         } = message
         else {
             return (message, None, false);
@@ -96,7 +100,7 @@ impl InflightTurnState {
             (&tmux_session_name, &turn_nonce),
             (source_start, complete_record_end),
         );
-        (done, admitted.ok(), true)
+        (done, admitted.ok().map(|range| range.of_kind(kind)), true)
     }
 }
 fn admit_codex_terminal_range_in_root(
@@ -217,6 +221,7 @@ fn persist_terminal_range(
     local.save_generation = persisted.save_generation;
     Ok(TuiTerminalRange {
         retained_codex_terminal: false,
+        kind: NativeTerminalKind::Completed,
         identity: InflightTurnIdentity::from_state(&persisted),
         result: result.to_string(),
         rollout_path: canonical,
@@ -251,7 +256,12 @@ impl TuiTerminalRange {
             source,
             source_file_identity,
             retained_codex_terminal: false,
+            kind: NativeTerminalKind::Completed,
         }
+    }
+
+    fn of_kind(self, kind: NativeTerminalKind) -> Self {
+        Self { kind, ..self }
     }
 
     /// Reconstruct only previously admitted evidence; live validation remains
@@ -264,6 +274,7 @@ impl TuiTerminalRange {
         }
         let captured = Self {
             retained_codex_terminal: row.provider_kind() == Some(ProviderKind::Codex),
+            kind: NativeTerminalKind::Completed,
             identity: InflightTurnIdentity::from_state(row),
             result: row.full_response.clone(),
             rollout_path: row.output_path.clone()?,
@@ -794,6 +805,7 @@ mod tests {
                 turn_nonce: nonce.into(),
                 source_start: start,
                 complete_record_end: end,
+                kind: NativeTerminalKind::Completed,
             };
             let rejected = local.admit_codex_tui_terminal_frame(
                 &mut baseline,
@@ -1303,6 +1315,7 @@ impl InflightTurnState {
             source_file_dev,
             source_file_ino,
             actor,
+            kind,
         }
         | StreamMessage::CodexTuiTerminalDone {
             result,
@@ -1319,6 +1332,7 @@ impl InflightTurnState {
                     source_file_ino,
                     actor,
                 }),
+            kind,
         }) = message
         else {
             return captured_terminal_admission::admit_uncaptured_terminal(
@@ -1370,6 +1384,7 @@ impl InflightTurnState {
             source_file_ino,
             captured,
             can_deliver_directly,
+            kind,
         };
         let mut local = self.clone();
         let mut persisted = baseline.clone();

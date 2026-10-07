@@ -908,6 +908,14 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         }
         match file.read(&mut buf) {
             Ok(0) => {
+                let turn = (seek_offset, terminal_range.1);
+                let token = cancel_token.as_deref();
+                let tail = (&mut state, &mut partial_line);
+                match parser::herdr_eof(&sender, tail, rollout_path, turn, token, &mut is_alive) {
+                    Some(Some(ended)) => return Ok((ended, outcome(&state, seek_offset))),
+                    Some(None) => continue,
+                    None => {}
+                }
                 if try_process_complete_partial_line(&mut partial_line, &sender, &mut state) {
                     last_output_at = Some(Instant::now());
                     continue;
@@ -1131,6 +1139,10 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 // enforcement point: once the shared cancel flag flips,
                 // every `send` call drops on the floor.
                 while let Some(pos) = partial_line.iter().position(|byte| *byte == b'\n') {
+                    // A Herdr turn's reply stops at its terminal record; later lines are another turn's.
+                    if parser::herdr_reply_ended(cancel_token.as_deref(), &state) {
+                        break;
+                    }
                     if let Some(pin) = &source_pin
                         && !pin.wait(cancel_token.as_deref(), source_identity)
                     {

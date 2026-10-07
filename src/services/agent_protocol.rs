@@ -146,6 +146,14 @@ pub enum RuntimeHandoff {
     },
 }
 
+/// How a provider's own terminal record ended its turn; every pre-existing producer is `Completed`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeTerminalKind {
+    #[default]
+    Completed,
+    Aborted,
+}
+
 /// Source captured by a native reader before an idle bridge claims its actor.
 #[derive(Debug, Clone)]
 pub struct CapturedTuiTerminalSource {
@@ -220,6 +228,7 @@ pub enum StreamMessage {
         source_start: u64,
         complete_record_end: u64,
         captured_source: Option<CapturedTuiTerminalSource>,
+        kind: NativeTerminalKind,
     },
     /// Claude terminal read from the captured file descriptor and actor.
     ClaudeTuiTerminalDone {
@@ -234,6 +243,7 @@ pub enum StreamMessage {
         source_file_dev: u64,
         source_file_ino: u64,
         actor: std::sync::Weak<crate::services::provider::CancelToken>,
+        kind: NativeTerminalKind,
     },
     /// Error
     Error {

@@ -335,6 +335,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             source_start: 0,
             complete_record_end: native.len() as u64,
             captured_source: None,
+            kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
         };
         let producer = tokio::task::spawn_blocking(move || {
             let _registration = producer_registration;

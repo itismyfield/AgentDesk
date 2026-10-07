@@ -17,7 +17,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLookup, HostedLookupKey,
     HostedOwner, HostedRecord, HostedState, bind_pg, load_hosted_execution_pg,
 };
-use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
+use crate::services::agent_protocol::{
+    NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
+};
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
@@ -27,8 +29,13 @@ use crate::services::herdr_launch::{
     HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
 };
 use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
-use crate::services::session_backend::read_output_file_until_result_with_harvest;
+use crate::services::provider::{
+    CancelToken, ProviderKind, ReadOutputResult, cancel_requested, herdr_provider_terminal_only,
+    poll_output_file_until_result,
+};
+use crate::services::session_backend::{
+    StreamLineState, process_stream_line, read_output_file_until_result_with_harvest,
+};
 use crate::services::session_host::{
     EvidenceGap, HerdrTarget, RestoreResume, SocketHerdrLaunchHost, herdr_endpoints,
 };
@@ -629,14 +636,20 @@ fn prompt_and_read(
         let probe =
             super::host_gate::host_poll_probe(None, ProviderKind::Claude, kind, &transcript);
         let cancel = turn.cancel.clone();
-        read_output_file_until_result_with_harvest(
-            &transcript,
-            start,
-            sender.clone(),
-            cancel,
-            probe,
-        )
-        .map_err(|failure| failure.error)?;
+        if let Some(token) = cancel.as_ref()
+            && herdr_provider_terminal_only(Some(token)).is_some()
+        {
+            read_to_provider_terminal(&transcript, start, &sender, token, probe.is_alive)?;
+        } else {
+            read_output_file_until_result_with_harvest(
+                &transcript,
+                start,
+                sender.clone(),
+                cancel,
+                probe,
+            )
+            .map_err(|failure| failure.error)?;
+        }
     }
     // The tmux handoff's launch registration; with the transcript now written it resolves a cold
     // start's Pending source.
@@ -663,6 +676,63 @@ fn prompt_and_read(
     Ok(())
 }
 
+/// Under settlement the transcript is read to its provider's own record: the turn's result, or its
+/// interrupt marker sent as a typed abort. Neither idleness, EOF nor a dead pane ends the turn.
+fn read_to_provider_terminal(
+    transcript: &str,
+    start: u64,
+    sender: &Sender<StreamMessage>,
+    token: &Arc<CancelToken>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<(), String> {
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    let mut state = StreamLineState::new();
+    let mut opened = SourceFileIdentity::Unavailable;
+    let (offsets, lines) = (sender.clone(), sender.clone());
+    let read = poll_output_file_until_result(
+        transcript,
+        start,
+        Some(token.clone()),
+        &mut state,
+        is_alive,
+        || false,
+        move |offset| {
+            let _ = offsets.send(StreamMessage::OutputOffset { offset });
+        },
+        move |line, state| process_stream_line(line, &lines, state),
+        |state| state.final_result.is_some() || state.interrupted,
+        |_| false,
+        |_| {},
+        |file| opened = SourceFileIdentity::from_open_file(file),
+    )
+    .map_err(|failure| failure.error)?;
+    let (ReadOutputResult::Completed { offset }, None, true) =
+        (read, &state.final_result, state.interrupted)
+    else {
+        return Ok(());
+    };
+    let (source_file_dev, source_file_ino) = match opened {
+        SourceFileIdentity::Unix { dev, ino } => (dev, ino),
+        _ => (0, 0),
+    };
+    // No tmux generation names a Herdr pane, so admission keeps this abort unadmitted, never Done.
+    let _ = sender.send(StreamMessage::ClaudeTuiTerminalDone {
+        result: String::new(),
+        session_id: state.last_session_id.clone(),
+        transcript_path: transcript.to_owned(),
+        tmux_session_name: herdr_provider_terminal_only(Some(token)).unwrap_or_default(),
+        turn_nonce: token.turn_nonce().unwrap_or_default().to_owned(),
+        source_start: start,
+        complete_record_end: offset,
+        generation_mtime_ns: 0,
+        source_file_dev,
+        source_file_ino,
+        actor: Arc::downgrade(token),
+        kind: NativeTerminalKind::Aborted,
+    });
+    Ok(())
+}
+
 /// The row turns Bound once the pane's latest logged source is this execution's; until then it
 /// stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
@@ -684,3 +754,6 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod provider_terminal_tests;

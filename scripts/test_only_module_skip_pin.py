@@ -448,6 +448,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/drain_projection_tests.rs",
         "src/services/discord/commands/control/native_herdr_e2e_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
+        "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
+        "src/services/claude/herdr_turn/provider_terminal_tests.rs",
     }
 )
 
