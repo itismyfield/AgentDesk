@@ -442,6 +442,14 @@ impl Rows {
         self.rows.get(&key)
     }
 
+    /// Every tracked attempt with its row key and whether that row is still open.
+    pub fn attempts(&self) -> impl Iterator<Item = (u64, bool, &AttemptMeta)> {
+        (self.rows.iter()).flat_map(|(key, row)| {
+            let open = !row.state.is_terminal();
+            row.attempts.iter().map(move |meta| (*key, open, meta))
+        })
+    }
+
     pub fn open_rows(&self) -> impl Iterator<Item = (u64, &Row)> {
         self.rows
             .iter()

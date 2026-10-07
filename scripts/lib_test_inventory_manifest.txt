@@ -10269,6 +10269,13 @@ services::tui_input::actor_tests::merged_sources_require_the_whole_exact_persist
 services::tui_input::actor_tests::modal_and_unknown_screens_never_receive_input
 services::tui_input::actor_tests::optional_attempt_roundtrip_and_terminal_immutability
 services::tui_input::actor_tests::slow_success_starts_accept_window_after_enter_not_offer_time
+services::tui_input::actor_tests::tracked::a_failed_append_inside_a_merged_record_resumes_without_another_enter
+services::tui_input::actor_tests::tracked::a_merged_codex_user_confirms_every_framed_row_once
+services::tui_input::actor_tests::tracked::a_tracked_row_settles_only_at_its_own_turn_close
+services::tui_input::actor_tests::tracked::an_altered_frame_holds_its_row_and_a_foreign_one_stops_new_offers
+services::tui_input::actor_tests::tracked::claude_queue_records_and_a_prompt_attachment_witness_in_order
+services::tui_input::actor_tests::tracked::frames_parse_only_complete_marker_lines
+services::tui_input::actor_tests::tracked::only_an_exact_registered_frame_after_its_anchor_names_a_row
 services::tui_input::actor_tests::unconfirmed_or_indeterminate_inputs_are_never_injected_again
 services::tui_input::bounded_tmux_tests::bounded_tmux_caller_cancellation_preserves_deadline_cleanup
 services::tui_input::bounded_tmux_tests::bounded_tmux_effect_uncertainty_is_independent_of_cleanup
@@ -10462,6 +10469,7 @@ services::tui_o::writer::input_facts::tests::claude_parent_tools_and_background_
 services::tui_o::writer::input_facts::tests::codex_parent_stays_open_during_child_completion_and_foreign_closer
 services::tui_o::writer::input_facts::tests::delayed_supply_replays_order_and_never_exposes_backlog_idle
 services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_supply_only_the_new_parent
+services::tui_o::writer::input_facts::tests::ordered_events_keep_abort_start_and_input_in_record_order
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
