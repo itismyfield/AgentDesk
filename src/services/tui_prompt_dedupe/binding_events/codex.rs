@@ -192,6 +192,17 @@ pub(crate) struct Ownership {
     pub context: BindingContext,
     pub claim: Claim,
     pub pending_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canonical_witnesses: Vec<CanonicalWitness>,
+}
+
+/// Canonical equivalence checked at append time, bound to both recorded descriptors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CanonicalWitness {
+    pub observation_seq: u64,
+    pub observed: SourceId,
+    pub source: SourceId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,6 +417,7 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
             {
                 return Err(invalid("Codex claim/source mismatch"));
             }
+            validate_witnesses(proof, event, &read.records)?;
         }
     }
     let mut checked = std::collections::HashSet::new();
@@ -464,7 +476,9 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
             BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
                 if fold.verified.as_ref().is_some_and(|p| p.source != *source)
                     || !fold.pending.is_empty()
-                    || !neutral_legacy(context, records, source, event.seq)
+                    || !neutral_legacy(context, records, source, event.seq, |seq, observed| {
+                        recorded_native(seq, observed, source, &ownership.canonical_witnesses)
+                    })
                 {
                     return Err(invalid("conflicting Codex ownership proofs"));
                 }
@@ -508,13 +522,71 @@ pub(crate) fn context_for_nonce(
         .map(|record| record.context))
 }
 
+fn same_identity(left: &SourceId, right: &SourceId) -> bool {
+    left.session_id == right.session_id && (left.dev, left.ino) == (right.dev, right.ino)
+}
+
 fn same_native(left: &SourceId, right: &SourceId) -> bool {
-    left.session_id == right.session_id
-        && (left.dev, left.ino) == (right.dev, right.ino)
+    same_identity(left, right)
         && fs::canonicalize(&left.path)
             .ok()
             .zip(fs::canonicalize(&right.path).ok())
             .is_some_and(|(left, right)| left == right)
+}
+
+fn recorded_native(
+    seq: u64,
+    observed: &SourceId,
+    source: &SourceId,
+    witnesses: &[CanonicalWitness],
+) -> bool {
+    same_identity(observed, source)
+        && (observed.path == source.path
+            || witnesses.iter().any(|witness| {
+                witness.observation_seq == seq
+                    && witness.observed == *observed
+                    && witness.source == *source
+            }))
+}
+
+fn validate_witnesses(
+    proof: &Ownership,
+    event: &BindingEvent,
+    records: &[Logged],
+) -> io::Result<()> {
+    let mut seen = Vec::new();
+    for witness in &proof.canonical_witnesses {
+        let source = match &event.new {
+            BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => source,
+            _ => return Err(invalid("canonical witness without Codex proof")),
+        };
+        let observation = witness
+            .observation_seq
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| records.get(index))
+            .filter(|logged| {
+                let observation = &logged.event;
+                observation.seq < event.seq
+                    && observation.provider == event.provider
+                    && observation.tmux_session == event.tmux_session
+                    && observation.execution_nonce == event.execution_nonce
+                    && logged.codex_ownership.is_none()
+            })
+            .ok_or_else(|| invalid("invalid canonical witness observation"))?;
+        if witness.source != *source
+            || !same_identity(&witness.observed, source)
+            || witness.observed.path == source.path
+            || !(observation.event.old.as_ref() == Some(&witness.observed)
+                || matches!(&observation.event.new,
+                    BindingTarget::Source(observed) if observed == &witness.observed))
+            || seen.contains(witness)
+        {
+            return Err(invalid("canonical witness identity mismatch"));
+        }
+        seen.push(witness.clone());
+    }
+    Ok(())
 }
 
 fn neutral_legacy(
@@ -522,8 +594,9 @@ fn neutral_legacy(
     records: &[Logged],
     source: &SourceId,
     through_seq: u64,
+    mut same_native: impl FnMut(u64, &SourceId) -> bool,
 ) -> bool {
-    let mut same_nonce_seen = false;
+    let mut current_source_seen = false;
     for logged in records
         .iter()
         .take_while(|logged| logged.event.seq <= through_seq)
@@ -543,17 +616,20 @@ fn neutral_legacy(
         if logged.codex_ownership.is_none() {
             let neutral = event.evidence.hook_event.is_none()
                 && matches!(event.cause, BindingCause::Startup | BindingCause::Unknown)
-                && matches!(&event.new, BindingTarget::Source(s) if same_native(s, source))
-                && (!same_nonce_seen
+                && matches!(&event.new, BindingTarget::Source(s) if same_native(event.seq, s))
+                && (!current_source_seen
                     || event
                         .old
                         .as_ref()
-                        .is_none_or(|old| same_native(old, source)));
+                        .is_none_or(|old| same_native(event.seq, old)));
             if !neutral {
                 return false;
             }
         }
-        same_nonce_seen = true;
+        current_source_seen |= matches!(
+            event.new,
+            BindingTarget::Source(_) | BindingTarget::Resolved { .. }
+        );
     }
     true
 }
@@ -585,6 +661,7 @@ pub(crate) fn commit_claim(
                 return Err(invalid("invalid Codex native claim"));
             }
             let pending = fold.pending.iter().find(|p| p.claim.same_candidate(claim));
+            let mut canonical_witnesses = Vec::new();
             let verified = match &decision {
                 Decision::Verified(source) => {
                     if !claim_path(context, &source.path)
@@ -594,15 +671,44 @@ pub(crate) fn commit_claim(
                     {
                         return Err(invalid("stale Codex claim descriptor"));
                     }
-                    if fold.verified.as_ref().is_some_and(|p| {
+                    let same_proof = fold.verified.as_ref().is_some_and(|p| {
                         p.source == *source && p.ownership.claim.same_candidate(claim)
-                    }) {
+                    });
+                    if same_proof && pending.is_none() {
                         return Ok(Planned::Keep(Committed::Unchanged));
                     }
                     claim.eligible(context)
-                        && fold.verified.is_none()
+                        && (fold.verified.is_none() || same_proof)
                         && fold.pending.iter().all(|p| p.claim.same_candidate(claim))
-                        && neutral_legacy(context, &records, source, writer.last_seq)
+                        && neutral_legacy(
+                            context,
+                            &records,
+                            source,
+                            writer.last_seq,
+                            |seq, observed| {
+                                let prior = fold
+                                    .verified
+                                    .as_ref()
+                                    .map(|proof| &proof.ownership.canonical_witnesses[..])
+                                    .unwrap_or_default();
+                                if !recorded_native(seq, observed, source, prior)
+                                    && !same_native(observed, source)
+                                {
+                                    return false;
+                                }
+                                if observed.path != source.path {
+                                    let witness = CanonicalWitness {
+                                        observation_seq: seq,
+                                        observed: observed.clone(),
+                                        source: source.clone(),
+                                    };
+                                    if !canonical_witnesses.contains(&witness) {
+                                        canonical_witnesses.push(witness);
+                                    }
+                                }
+                                true
+                            },
+                        )
                 }
                 _ => false,
             };
@@ -666,6 +772,11 @@ pub(crate) fn commit_claim(
                     context: context.clone(),
                     claim: claim.clone(),
                     pending_seq,
+                    canonical_witnesses: if verified {
+                        canonical_witnesses
+                    } else {
+                        Vec::new()
+                    },
                 }),
             ))
         })();

@@ -206,6 +206,15 @@ fn later_claim_preserves_current_proof_and_two_parents_never_pick_a_winner() {
         let bytes = fixture.bytes();
         fixture.commit(&other_claim, Decision::Pending);
         assert_eq!(fixture.bytes(), bytes);
+        assert_eq!(
+            fixture.commit(&parent_claim, Decision::Verified(parent)),
+            conflict
+        );
+        assert_eq!(
+            fixture.bytes(),
+            bytes,
+            "no matching Pending leaves the proof retry unchanged"
+        );
         let remaining = fixture.commit(&other_claim, Decision::Rejected("subagent".into()));
         assert!(!remaining.conflicted);
         assert_eq!(remaining.verified, first.verified);
@@ -365,24 +374,320 @@ fn same_uuid_path_and_descriptor_replacement_are_not_idempotent_proofs() {
 
 #[test]
 fn symlink_alias_generic_uses_open_identity_and_canonical_path() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let source = fixture.source(PARENT);
     let alias = source.path.with_extension("alias");
     std::os::unix::fs::symlink(&source.path, &alias).unwrap();
     let mut generic = source.clone();
-    generic.path = alias;
+    generic.path = alias.clone();
     fixture.generic(
         &generic,
         &fixture.context.execution_nonce,
         None,
         BindingCause::Unknown,
     );
+    let claim = fixture.claim(&source);
+    let proof = fixture.commit(&claim, Decision::Verified(source.clone()));
+    assert_eq!(
+        proof
+            .verified
+            .as_ref()
+            .unwrap()
+            .ownership
+            .canonical_witnesses
+            .len(),
+        1
+    );
+    let bytes = fixture.bytes();
+    fs::remove_file(alias).unwrap();
+    assert_eq!(codex::read_ownership(&fixture.context).unwrap(), proof);
+    forget_channel_for_tests(584_503);
+    assert_eq!(codex::read_ownership(&fixture.context).unwrap(), proof);
+    assert_eq!(
+        fixture.commit(&claim, Decision::Verified(source.clone())),
+        proof
+    );
+    assert_eq!(fixture.bytes(), bytes);
+    fixture.commit(&claim, Decision::Pending);
+    forget_channel_for_tests(584_503);
+    let resolved = fixture.commit(&claim, Decision::Verified(source));
+    assert!(!resolved.conflicted);
     assert!(
-        fixture
-            .commit(&fixture.claim(&source), Decision::Verified(source))
+        resolved.pending.is_empty(),
+        "prior witness survives same-proof resolution"
+    );
+
+    let old_context = fixture.context.clone();
+    fixture.context.execution_nonce = "b".repeat(32);
+    assert!(
+        codex::read_ownership(&fixture.context)
+            .unwrap()
+            .verified
+            .is_none()
+    );
+    let other = fixture.source(OTHER);
+    let other_proof = fixture.commit(&fixture.claim(&other), Decision::Verified(other));
+    forget_channel_for_tests(584_503);
+    assert_eq!(codex::read_ownership(&old_context).unwrap(), resolved);
+    assert_eq!(
+        codex::read_ownership(&fixture.context).unwrap(),
+        other_proof
+    );
+}
+
+#[test]
+fn pending_order_does_not_consume_the_first_current_source_observation() {
+    for pending_first in [false, true] {
+        for restart in [false, true] {
+            let fixture = Fixture::new();
+            let old = fixture.source(OTHER);
+            let source = fixture.source(PARENT);
+            let claim = fixture.claim(&source);
+            fixture.generic(&old, &"b".repeat(32), None, BindingCause::Unknown);
+            for pending in [pending_first, !pending_first] {
+                if pending {
+                    fixture.commit(&claim, Decision::Pending);
+                } else {
+                    fixture.generic(
+                        &source,
+                        &fixture.context.execution_nonce,
+                        Some(old.clone()),
+                        BindingCause::Unknown,
+                    );
+                }
+                if restart {
+                    forget_channel_for_tests(584_503);
+                    assert!(
+                        codex::read_ownership(&fixture.context)
+                            .unwrap()
+                            .verified
+                            .is_none()
+                    );
+                }
+            }
+            let resolved = fixture.commit(&claim, Decision::Verified(source.clone()));
+            assert_eq!(resolved.verified.as_ref().unwrap().source, source);
+            assert!(resolved.pending.is_empty());
+            assert!(!resolved.conflicted);
+            forget_channel_for_tests(584_503);
+            assert_eq!(codex::read_ownership(&fixture.context).unwrap(), resolved);
+        }
+    }
+}
+
+#[test]
+fn actual_current_source_replacement_still_blocks_a_returning_claim() {
+    for pending_first in [false, true] {
+        let fixture = Fixture::new();
+        let source = fixture.source(PARENT);
+        let other = fixture.source(OTHER);
+        let claim = fixture.claim(&source);
+        if pending_first {
+            fixture.commit(&claim, Decision::Pending);
+        }
+        for (new, old) in [
+            (&source, None),
+            (&other, Some(source.clone())),
+            (&source, Some(other.clone())),
+        ] {
+            fixture.generic(
+                new,
+                &fixture.context.execution_nonce,
+                old,
+                BindingCause::Unknown,
+            );
+            forget_channel_for_tests(584_503);
+        }
+        let held = fixture.commit(&claim, Decision::Verified(source));
+        assert!(held.verified.is_none());
+        assert_eq!(held.pending.len(), 1);
+    }
+}
+
+#[test]
+fn same_verified_retry_resolves_a_later_matching_pending_once() {
+    for restart in [false, true] {
+        let fixture = Fixture::new();
+        let source = fixture.source(PARENT);
+        let claim = fixture.claim(&source);
+        let initial = fixture.commit(&claim, Decision::Verified(source.clone()));
+        assert!(initial.pending.is_empty());
+        if restart {
+            forget_channel_for_tests(584_503);
+        }
+        assert_eq!(codex::read_ownership(&fixture.context).unwrap(), initial);
+        let pending = fixture.commit(&claim, Decision::Pending);
+        assert!(pending.conflicted);
+        assert_eq!(pending.pending.len(), 1);
+        if restart {
+            forget_channel_for_tests(584_503);
+        }
+        assert_eq!(codex::read_ownership(&fixture.context).unwrap(), pending);
+        let mut watch = subscribe_binding_events(584_503).unwrap();
+        watch.borrow_and_update();
+        let resolved = fixture.commit(&claim, Decision::Verified(source.clone()));
+        assert!(watch.has_changed().unwrap());
+        watch.borrow_and_update();
+        assert!(!resolved.conflicted);
+        assert!(resolved.pending.is_empty());
+        let proof = resolved.verified.as_ref().unwrap();
+        assert_eq!(proof.seq, 3);
+        assert_eq!(proof.ownership.pending_seq, Some(2));
+        if restart {
+            forget_channel_for_tests(584_503);
+        }
+        assert_eq!(codex::read_ownership(&fixture.context).unwrap(), resolved);
+        // A restarted writer has a new watch; subscribe to the active writer before the retry.
+        let mut watch = subscribe_binding_events(584_503).unwrap();
+        watch.borrow_and_update();
+        let bytes = fixture.bytes();
+        assert_eq!(fixture.commit(&claim, Decision::Verified(source)), resolved);
+        assert_eq!(fixture.bytes(), bytes);
+        assert!(!watch.has_changed().unwrap());
+        if restart {
+            forget_channel_for_tests(584_503);
+        }
+        assert_eq!(codex::read_ownership(&fixture.context).unwrap(), resolved);
+    }
+}
+
+#[test]
+fn same_claim_retry_cannot_resolve_replaced_descriptors_or_other_parents() {
+    for replace in [false, true] {
+        let fixture = Fixture::new();
+        let source = fixture.source(PARENT);
+        let claim = fixture.claim(&source);
+        fixture.commit(&claim, Decision::Verified(source.clone()));
+        fixture.commit(&claim, Decision::Pending);
+        forget_channel_for_tests(584_503);
+        let candidate = if replace {
+            fs::rename(&source.path, source.path.with_extension("retired")).unwrap();
+            fixture.source(PARENT)
+        } else {
+            let other = fixture.source(OTHER);
+            fixture.commit(&fixture.claim(&other), Decision::Pending);
+            source.clone()
+        };
+        if replace {
+            assert_ne!((candidate.dev, candidate.ino), (source.dev, source.ino));
+        }
+        let bytes = fixture.bytes();
+        let held = fixture.commit(&claim, Decision::Verified(candidate));
+        assert!(held.conflicted);
+        assert_eq!(held.verified.as_ref().unwrap().source, source);
+        assert!(!held.pending.is_empty());
+        assert_eq!(fixture.bytes(), bytes);
+        forget_channel_for_tests(584_503);
+        assert_eq!(codex::read_ownership(&fixture.context).unwrap(), held);
+    }
+}
+
+#[test]
+fn canonical_witness_must_reference_the_exact_observation_and_proof() {
+    let fixture = Fixture::new();
+    let source = fixture.source(PARENT);
+    let alias = source.path.with_extension("alias");
+    std::os::unix::fs::symlink(&source.path, &alias).unwrap();
+    let mut observed = source.clone();
+    observed.path = alias;
+    fixture.generic(
+        &observed,
+        &fixture.context.execution_nonce,
+        None,
+        BindingCause::Unknown,
+    );
+    let claim = fixture.claim(&source);
+    fixture.commit(&claim, Decision::Verified(source.clone()));
+    let original = fixture.bytes();
+    let records: Vec<serde_json::Value> = original
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    for mutation in 0..11 {
+        let mut damaged = records.clone();
+        let witness = &mut damaged[1]["codex_ownership"]["canonical_witnesses"][0];
+        match mutation {
+            0 => witness["observation_seq"] = 99.into(),
+            1 => witness["observation_seq"] = 2.into(),
+            2 => witness["observation_seq"] = 0.into(),
+            3 => witness["observed"]["ino"] = (observed.ino + 1).into(),
+            4 => witness["source"]["path"] = "/other-proof.jsonl".into(),
+            5 => witness["observed"]["session_id"] = OTHER.into(),
+            6 => damaged[0]["execution_nonce"] = "b".repeat(32).into(),
+            7 => damaged[0]["tmux_session"] = "other-tmux".into(),
+            8 => {
+                let duplicate = witness.clone();
+                damaged[1]["codex_ownership"]["canonical_witnesses"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(duplicate);
+            }
+            9 => {
+                // Even mutually consistent witness identities must match the recorded endpoints.
+                witness["observed"]["ino"] = (observed.ino + 1).into();
+                witness["source"]["ino"] = (source.ino + 1).into();
+            }
+            _ => damaged[1]["codex_ownership"]["canonical_witnesses"] = serde_json::json!([]),
+        }
+        let bytes: Vec<u8> = damaged
+            .iter()
+            .flat_map(|record| {
+                let mut bytes = serde_json::to_vec(record).unwrap();
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect();
+        fs::write(fixture.path(), &bytes).unwrap();
+        let mut other = fixture.context.clone();
+        other.execution_nonce = "c".repeat(32);
+        assert!(
+            codex::read_ownership(&other).is_err(),
+            "witness mutation {mutation}"
+        );
+        assert!(
+            codex::commit_claim(
+                &fixture.context,
+                &claim,
+                Decision::Verified(source.clone()),
+                || Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(fixture.bytes(), bytes);
+    }
+    fs::write(fixture.path(), original).unwrap();
+    forget_channel_for_tests(584_503);
+    assert!(
+        codex::read_ownership(&fixture.context)
+            .unwrap()
             .verified
             .is_some()
     );
+}
+
+#[test]
+fn matching_inode_without_canonical_equivalence_cannot_create_a_witness() {
+    let fixture = Fixture::new();
+    let source = fixture.source(PARENT);
+    let mut observed = source.clone();
+    observed.path = source.path.with_extension("hardlink");
+    fs::hard_link(&source.path, &observed.path).unwrap();
+    assert_eq!(
+        file_identity(&fs::metadata(&observed.path).unwrap()),
+        (source.dev, source.ino)
+    );
+    fixture.generic(
+        &observed,
+        &fixture.context.execution_nonce,
+        None,
+        BindingCause::Unknown,
+    );
+    let held = fixture.commit(&fixture.claim(&source), Decision::Verified(source));
+    assert!(held.verified.is_none());
+    assert_eq!(held.pending.len(), 1);
+    forget_channel_for_tests(584_503);
+    assert_eq!(codex::read_ownership(&fixture.context).unwrap(), held);
 }
 
 #[test]
