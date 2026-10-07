@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import datetime as dt
 import errno
 import http.client
@@ -136,6 +137,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "known_gap_rechecks",
     "completion_rechecks",
     "revalidated_after_recheck",
+    "revalidated_after_idle",
     "relay_count",
     "raw_count",
     "message_updates",
@@ -911,6 +913,9 @@ def _update_record_window_snapshot(
     record: dict[str, Any],
     window: assertions.Window,
 ) -> None:
+    window = replace(window,
+        messages=[m for m in window.messages if str(m.get("id")) not in window.deleted_ids],
+        raw_messages=[m for m in window.raw_messages if str(m.get("id")) not in window.deleted_ids])
     record["relay_count"] = len(window.messages)
     record["raw_count"] = len(window.raw_messages)
     record["message_updates"] = len(window.message_updates)
@@ -3656,23 +3661,51 @@ def run_one_cell(
             window.add(message)
 
     def _ingest_snapshot() -> list[dict[str, Any]]:
-        rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-        _ingest_observed(rows)
-        window.reconcile_snapshot(rows, after_id=after_id)
-        return rows
+        rows, cursor = [], after_id
+        for _ in range(100):
+            page = client.fetch_messages(channel_id, after_id=cursor, limit=100)
+            try:
+                ids = [assertions._numeric_id(row) for row in page]
+            except ValueError as exc:
+                raise HarnessEvidenceError("Discord snapshot contains an invalid numeric ID") from exc
+            if any(mid is None or mid <= int(cursor) for mid in ids):
+                raise HarnessEvidenceError("Discord snapshot pagination did not advance")
+            _ingest_observed(page)
+            rows.extend(page)
+            captures = getattr(client, "captures", None)
+            page_size = len(page)
+            if isinstance(captures, list) and captures:
+                page_size = len(captures[-1]["pages"][0]["messages"])
+                if page_size >= 100:
+                    raise HarnessEvidenceError("Discord captured snapshot incomplete: fixed capture cursor cannot paginate")
+            if page_size < 100:
+                window.reconcile_snapshot(rows, after_id=after_id, complete=True)
+                return rows
+            cursor = str(max(ids))
+        raise HarnessEvidenceError("Discord snapshot incomplete after 100 pages")
 
-    def _pending_refetch() -> None:
-        _ingest_snapshot()
+    def _pending_refetch(*, post_idle: bool = False) -> list[dict[str, Any]]:
+        rows = _ingest_snapshot()
         _update_record_window_snapshot(record, window)
+        _record_marker_counts(record, window, marker_targets)
         revalidation = {"assertions": [], "passed": False}
-        record.setdefault("revalidated_after_recheck", []).append(revalidation)
+        trace_key = "revalidated_after_idle" if post_idle else "revalidated_after_recheck"
+        record.setdefault(trace_key, []).append(revalidation)
+        final_view = replace(window,
+            raw_messages=[m for m in window.raw_messages if str(m.get("id")) not in window.deleted_ids],
+            messages=[m for m in window.messages if str(m.get("id")) not in window.deleted_ids]) if post_idle else window
         for previous in record["assertions"]:
             spec = previous["spec"]
+            if post_idle and any(key in spec for key in (
+                "autonomous_background_turn", "deliver_result", "provider_hold_marker_seen",
+            )):
+                continue
             try:
+                # Rechecking a surface must not append another known-gap acceptance.
                 run_assertion(
                     spec,
-                    window=window,
-                    record=record,
+                    window=final_view,
+                    record=copy.deepcopy(record) if post_idle else record,
                     enabled_features=enabled_features,
                     run_id=run_id,
                     observation_context=observation_context,
@@ -3682,6 +3715,7 @@ def run_one_cell(
                 raise
             revalidation["assertions"].append(spec)
         revalidation["passed"] = True
+        return rows
 
     record["id"] = scenario_id
     first_send_done = False
@@ -4258,6 +4292,7 @@ def run_one_cell(
             runtime_root=Path(args.queue_runtime_root),
         )
         record["post_scenario_idle"] = idle_check
+        settled_rows = _pending_refetch(post_idle=True)
         if e36 is not None:
             try:
                 settled = normal_intake_evidence.drained(e36.watcher())
@@ -4269,8 +4304,6 @@ def run_one_cell(
                 # The idle wait is part of the observed run, not a blind acceptance gap.
                 for request in record["discord_prompt_records"]:
                     e36.join(request)
-                settled_rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-                _ingest_observed(settled_rows)
                 normal_intake_evidence.final_assertion(window, record, settled_rows)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise HarnessEvidenceError(f"E36 post-idle evidence unavailable: {error}") from error

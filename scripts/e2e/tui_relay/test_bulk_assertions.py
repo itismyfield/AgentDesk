@@ -56,6 +56,65 @@ class PlaceholderContracts(unittest.TestCase):
 
 
 class CompletionContracts(unittest.TestCase):
+    def test_complete_snapshot_removes_deleted_newest_completion(self):
+        body = message(101, "[E2E:T:ONE]")
+        value = window(body, message(102, "✅ 완료"))
+        a.completion_per_turn(value)
+        value.reconcile_snapshot([body], after_id="100", complete=True)
+        self.assertEqual(value.deleted_ids, {"102"})
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 0"):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_complete_empty_snapshot_removes_only_inline_message(self):
+        value = window(message(101, "[E2E:T:ONE]\n\n-# ✅ 완료"))
+        a.completion_per_turn(value)
+        value.reconcile_snapshot([], after_id="100", complete=True)
+        self.assertEqual(value.deleted_ids, {"101"})
+        self.assertEqual(value.messages, [])
+        self.assertEqual(len(value.raw_messages), 1)
+        with self.assertRaises(a.AssertionError):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_incomplete_full_page_does_not_delete_unobserved_tail(self):
+        page = [message(mid, "earlier reply") for mid in range(101, 201)]
+        value = window(*page, message(201, "[E2E:T:ONE]"), message(202, "✅ 완료"))
+        value.reconcile_snapshot(page, after_id="100", complete=False)
+        self.assertEqual(value.deleted_ids, set())
+        self.assertEqual(len(value.raw_messages), 102)
+
+    def test_partial_snapshots_preserve_deletions_and_edit_history(self):
+        body = message(101, "[E2E:T:ONE]")
+        value = window(body, message(102, "✅ 완료"))
+        value.add(message(102, "✅ 완료 updated"))
+        history = list(value.message_updates)
+        value.reconcile_snapshot([body], after_id="100", complete=True)
+        value.reconcile_snapshot([], after_id="100")
+        value.reconcile_snapshot([body], after_id="100")
+        self.assertEqual(value.deleted_ids, {"102"})
+        self.assertEqual(value.message_updates, history)
+        value.reconcile_snapshot(value.raw_messages, after_id="100")
+        self.assertEqual(value.deleted_ids, set())
+
+    def test_deleted_body_stays_out_of_canonical_messages_until_reobserved(self):
+        body = message(101, "[E2E:T:ONE]\n\n-# ✅ 완료")
+        value = window(body)
+        value.add({**body, "edited_timestamp": "edit"})
+        history = list(value.message_updates)
+        value.reconcile_snapshot([], after_id="100", complete=True)
+        self.assertEqual(value.messages, [])
+        with self.assertRaises(a.AssertionError):
+            a.text_present(value, needle="[E2E:T:ONE]")
+        other = message(102, "other answer")
+        value.add(other)
+        value.reconcile_snapshot([other], after_id="100", complete=True)
+        self.assertEqual([row["id"] for row in value.messages], ["102"])
+        value.add(body)
+        value.reconcile_snapshot([body, other], after_id="100", complete=True)
+        self.assertEqual(value.deleted_ids, set())
+        self.assertEqual([row["id"] for row in value.messages], ["101", "102"])
+        self.assertEqual(value.message_updates[:len(history)], history)
+        a.text_present(value, needle="[E2E:T:ONE]")
+
     def test_one_completion_per_marked_turn(self):
         value = window(message(101, "[E2E:T:ONE]"), message(102, "-# ✅ 완료"),
                        message(103, "[E2E:T:TWO]"), message(104, "📦 응답 완료 · 1s"))
