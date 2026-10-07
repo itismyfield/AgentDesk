@@ -176,7 +176,7 @@ fn herdr_turn(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    if crate::services::turn_host::herdr_turn_switched_on() {
+    if crate::services::turn_host::herdr_turn_switched_on_for(turn.provider) {
         return herdr::execute(turn, plan, sender);
     }
     let refusal = HerdrRefusal::ExecutorNotWired;
@@ -198,15 +198,18 @@ mod herdr {
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
     use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
+    use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn};
     use crate::services::discord::recovery_engine::host_reconcile::{
         HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
         reconcile_hosted_session_pg,
     };
     use crate::services::discord::tui_prompt_relay::herdr_source::{
-        HerdrSourceAttach, attach_launched_herdr_source,
+        HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
     };
     use crate::services::herdr_launch::HerdrLaunchHost;
+    use crate::services::provider::ProviderKind;
     use crate::services::session_host::HerdrTarget;
+    use crate::services::tui_prompt_dedupe::binding_events::SourceId;
     use crate::services::turn_host::HerdrTurnPlan;
 
     pub(super) fn execute(
@@ -221,9 +224,32 @@ mod herdr {
             turn.channel_id,
             Arc::clone(&turn.cancel),
         )?;
+        let ports = BootPorts {
+            pool,
+            channel_id: turn.channel_id,
+        };
+        if *turn.provider == ProviderKind::Codex {
+            let codex = CodexHerdrTurn {
+                pool,
+                owner: owner(turn.provider, turn.channel_id)?,
+                channel_id: turn.channel_id,
+                endpoint: plan.endpoint.clone(),
+                row: plan.row.as_ref().map(|observed| &observed.record),
+                prompt: turn.prompt,
+                working_dir: turn.working_dir,
+                system_prompt: turn.system_prompt,
+                allowed_tools: turn.allowed_tools,
+                model: turn.model,
+                fast_mode: turn.native_fast_mode,
+                goals: turn.codex_goals,
+                compact_token_limit: turn.compact_token_limit,
+                cancel: Some(Arc::clone(&turn.cancel)),
+            };
+            return crate::services::codex::herdr_turn::execute(codex, &ports, sender);
+        }
         let herdr = HerdrTurn {
             pool,
-            owner: owner(turn.channel_id)?,
+            owner: owner(turn.provider, turn.channel_id)?,
             channel_id: turn.channel_id,
             endpoint: plan.endpoint.clone(),
             row: plan.row.as_ref().map(|observed| &observed.record),
@@ -234,16 +260,12 @@ mod herdr {
             hook_endpoint: crate::services::claude_tui::hook_server::current_hook_endpoint(),
             cancel: Some(Arc::clone(&turn.cancel)),
         };
-        let ports = BootPorts {
-            pool,
-            channel_id: turn.channel_id,
-        };
         herdr_turn::execute(herdr, &ports, sender)
     }
 
     /// The channel's canonical row owner, named by the session key the turn runs under.
-    fn owner(channel_id: u64) -> Result<HostedOwner, String> {
-        let context = crate::services::platform::active_provider_context("claude");
+    fn owner(provider: &ProviderKind, channel_id: u64) -> Result<HostedOwner, String> {
+        let context = crate::services::platform::active_provider_context(provider.as_str());
         let key = context.and_then(|context| context.session_key);
         let identity = key
             .as_deref()
@@ -256,7 +278,7 @@ mod herdr {
         let node = crate::config::session_hosts::local_node();
         let root = crate::config::runtime_root().map(|root| root.display().to_string());
         Ok(HostedOwner {
-            provider: "claude".into(),
+            provider: provider.as_str().into(),
             discord_token_hash: token_hash,
             channel_id: channel_id.to_string(),
             logical_key,
@@ -268,6 +290,34 @@ mod herdr {
     pub(super) struct BootPorts<'a> {
         pub(super) pool: &'a PgPool,
         pub(super) channel_id: u64,
+    }
+
+    impl CodexHerdrPorts for BootPorts<'_> {
+        fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
+            herdr_turn::boot_launch_host()
+        }
+
+        fn attach(
+            &self,
+            owner: &HostedOwner,
+            record: &HostedExecution,
+            source: &SourceId,
+            target: &HerdrTarget,
+        ) -> Result<bool, String> {
+            let reader = GateReader::of(record, target)?;
+            let attached = Handle::current().block_on(attach_launched_codex_herdr_source(
+                self.pool,
+                owner,
+                self.channel_id,
+                &record.execution_nonce,
+                source,
+                &reader,
+            ));
+            match attached {
+                HerdrSourceAttach::Published { bound, .. } => Ok(bound),
+                other => Err(format!("herdr turn: codex source not attached: {other:?}")),
+            }
+        }
     }
 
     impl HerdrTurnPorts for BootPorts<'_> {
@@ -385,6 +435,10 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, 
 #[cfg(test)]
 #[path = "provider_dispatch_herdr_tests.rs"]
 mod herdr_tests;
+
+#[cfg(test)]
+#[path = "provider_dispatch_codex_herdr_tests.rs"]
+mod codex_herdr_tests;
 
 #[cfg(test)]
 mod tests {
