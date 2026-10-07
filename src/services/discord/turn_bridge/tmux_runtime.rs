@@ -14,7 +14,6 @@ use std::time::Duration;
 // moved items by their original bare names via these glob/explicit re-imports.
 mod claude_stop_delivery;
 #[cfg(unix)]
-#[allow(dead_code)] // #5340: delivery stays dormant until provider-terminal settlement lands.
 mod codex_stop_delivery;
 mod interrupt_policy;
 mod judged_stop;
