@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "55b5bd0cae68e4a2540d3815d4ed161ba34e41e9",
+  "measured_at_sha": "b3702e95bcebf9b589acba406c40942c5710a0a3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26542,6 +26542,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:79dcf1064b333d94de07569606717f91d4b5490e271c2ab254d330c40c37e5f6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/control/native_herdr_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f1065b1a75fd170c942501b885374b09aa96730e55d4c376a9f7f7fd6459feba"
     },
     {
       "root": "src",
