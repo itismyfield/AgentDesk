@@ -720,6 +720,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     {
         return true;
     }
+    // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
     #[cfg(test)]
     if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
         return false;
