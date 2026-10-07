@@ -1283,7 +1283,7 @@ class ScenarioFilterFailClosed(unittest.TestCase):
                  "--filter", "E-999", "--filter", " E-17, E-17, "],
                 cwd=ROOT, check=False, capture_output=True, text=True,
             )
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
             report = json.loads((output / "matrix.json").read_text(encoding="utf-8"))
         self.assertEqual(report["cells"], ["claude-tui", "codex-tui"])
         self.assertEqual(report["cross_channel_scenarios"], [])
@@ -1293,11 +1293,13 @@ class ScenarioFilterFailClosed(unittest.TestCase):
         self.assertEqual([(row["cell"], row["provider_identity"]["cell"]) for row in cells],
                          [("claude-tui", "claude-tui"), ("codex-tui", "codex-tui")])
         for row in cells:
-            self.assertTrue(row["ok"])
+            self.assertFalse(row["ok"])
+            self.assertTrue(row["execution_ok"])
+            self.assertEqual(row["evidence_status"], "partial")
             self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run"), 0))
         restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
         self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
-                         [("E-17", "pass", True)])
+                         [("E-17", "pass", False)])
 
 
 class TargetHealthContract(unittest.TestCase):
@@ -1928,19 +1930,19 @@ class DeliverHarnessContract(unittest.TestCase):
 
     def test_author_only_from_environment_and_step_result(self):
         client = MagicMock()
-        client.deliver.return_value = {'delivery': 'injected', 'reason': None, 'inject_veto': None}
+        client.deliver.return_value = {'delivery': 'injected', 'reason': None, 'inject_veto': None, 'channel_id': '41'}
         record = {}
-        step = {'deliver_prompt': {'text': 'marker {run_id}', 'origin_id': '{run_id}-input'}}
+        step = {'deliver_prompt': {'text': 'marker {run_id}'}}
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(assertions.AssertionError, 'AGENTDESK_E2E_DELIVER_AUTHOR_ID'):
-                driver.deliver_step(client, step, cell='claude-herdr', run_id='run', record=record)
+                driver.deliver_step(client, step, cell='claude-herdr', run_id='run', channel_id='41', record=record)
         client.deliver.assert_not_called()
         with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}):
-            driver.deliver_step(client, step, cell='claude-herdr', run_id='run', record=record)
-            with self.assertRaisesRegex(assertions.AssertionError, 'author must come only'):
-                driver.deliver_step(client, {'deliver_prompt': {'text': 'hello', 'author': '999'}}, cell='claude-herdr', run_id='run', record=record)
-        client.deliver.assert_called_once_with('adk-claude-tui-e2e', 'marker run', '123', 'adk-e2e-orchestrator', 'run-input')
-        self.assertEqual(record['deliver_results'], [{'delivery': 'injected', 'reason': None, 'inject_veto': None}])
+            driver.deliver_step(client, step, cell='claude-herdr', run_id='run', channel_id='41', record=record)
+            with self.assertRaisesRegex(assertions.AssertionError, 'unsupported deliver options'):
+                driver.deliver_step(client, {'deliver_prompt': {'text': 'hello', 'author': '999'}}, cell='claude-herdr', run_id='run', channel_id='41', record=record)
+        client.deliver.assert_called_once_with('adk-claude-tui-e2e', '[E2E:DELIVER:run-scenario-deliver-0]\nmarker run', '123', 'adk-e2e-orchestrator', 'run-scenario-deliver-0')
+        self.assertEqual(record['deliver_results'][0]['delivery'], 'injected')
         driver.run_assertion({'deliver_result': {'delivery': ['injected'], 'inject_veto': [None]}}, window=assertions.Window('1'), record=record)
         for spec in ({'delivery': ['queued']}, {'inject_veto': ['not_busy']}, {'delivery': []}, {}):
             with self.assertRaises(assertions.AssertionError):
@@ -1981,7 +1983,7 @@ class DeliverHarnessContract(unittest.TestCase):
             client = MagicMock()
             client.send_control.return_value = {'id': '100'}
             client.fetch_messages.return_value = []
-            client.deliver.return_value = {'delivery': 'queued', 'reason': 'turn_active'}
+            client.deliver.return_value = {'delivery': 'queued', 'reason': 'turn_active', 'channel_id': '41'}
             args = Namespace(cell=cell, channel_id='41', dry_run=False, base_url='http://unused.test',
                              reset_before_each=False, hard_reset_session_each=False, allow_destructive=False,
                              queue_runtime_root='unused', final_refetches=1, thread_channel_id=None)
@@ -1993,3 +1995,94 @@ class DeliverHarnessContract(unittest.TestCase):
             self.assertEqual(result['deliver_results'][0]['reason'], 'turn_active')
             client.deliver.assert_called_once()
             self.assertIn(((0.5,), {}), [(c.args, c.kwargs) for c in sleep.call_args_list])
+
+
+class HerdrReviewRepairs(unittest.TestCase):
+    def load(self, **values):
+        import yaml
+        scenario = {'id': 'repair', 'cells': ['claude-herdr'], 'agent_mode': 'real_live',
+                    'coverage_class': 'live', 'steps': [], 'assertions': [], **values}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'scenario.yaml').write_text(yaml.safe_dump(scenario))
+            return driver.load_scenarios(Path(tmp), cell='claude-herdr')
+
+    def test_schema_rejects_scalar_typo_and_unsupported_options_before_send(self):
+        cases = [dict(steps=['send_prompt']),
+                 dict(steps=[{'deliver_prompt': 'hello'}], assertions=[{'deliver_result': {'delivery': ['started']}, 'requires_feature': 'disabled'}]),
+                 dict(steps=[{'restart_dcserver': 'dev'}]),
+                 dict(assertions=[{'no_placeholder_left': False}]),
+                 dict(steps=[{'send_prompt': 'hello', 'post_send_slepp_s': 0}]),
+                 dict(steps=[{'restart_dcserver': {'targte': 'dev'}}]),
+                 dict(assertions=[{'text_present': 'OK', 'no_dupicate_content': True}]),
+                 dict(assertions=[{'completion_per_turn': {'excat': 1}}]),
+                 dict(steps=[{'deliver_prompt': 'hello'}]),
+                 dict(steps=[{'deliver_prompt': {'text': 'hello', 'agent': 'production-agent'}}],
+                      assertions=[{'deliver_result': {'delivery': ['started']}}]),
+                 dict(steps=[{'deliver_prompt': {'text': 'hello', 'origin_id': 'fixed'}}],
+                      assertions=[{'deliver_result': {'delivery': ['started']}}])]
+        with patch.object(driver.discord.DiscordClient, 'deliver') as send:
+            for values in cases:
+                with self.subTest(values=values), self.assertRaises(ValueError):
+                    self.load(**values)
+            send.assert_not_called()
+
+    def test_unconfirmed_deliver_requires_explicit_negative_contract(self):
+        self.load(steps=[{'deliver_prompt': 'hello'}], assertions=[{'deliver_result': {'delivery': ['unconfirmed']}}])
+        for allowed, succeeds in [(['started'], False), (['unconfirmed'], True)]:
+            spec = {'deliver_result': {'delivery': allowed}}
+            kw = {'window': assertions.Window('1'), 'record': {'deliver_results': [{'delivery': 'unconfirmed'}]}}
+            if succeeds:
+                driver.run_assertion(spec, **kw)
+            else:
+                with self.assertRaises(assertions.AssertionError):
+                    driver.run_assertion(spec, **kw)
+
+    def test_deliver_generated_identity_binding_and_channel_fail_closed(self):
+        client = MagicMock()
+        client.deliver.return_value = {'delivery': 'started', 'channel_id': '41'}
+        with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}):
+            for run in ('matrix-a-p1-claude-herdr', 'matrix-a-p2-claude-herdr', 'matrix-b-p1-claude-herdr'):
+                record = {'id': 'G1'}
+                driver.deliver_step(client, {'deliver_prompt': 'hello'}, cell='claude-herdr', run_id=run, channel_id='41', record=record)
+            calls = client.deliver.call_args_list
+            self.assertEqual(len({c.args[1] for c in calls}), 3)
+            self.assertEqual(len({c.args[4] for c in calls}), 3)
+            self.assertTrue(all(c.args[0] == 'adk-claude-tui-e2e' for c in calls))
+            with self.assertRaisesRegex(assertions.AssertionError, 'unsupported.*agent'):
+                driver.deliver_step(client, {'deliver_prompt': {'text': 'hello', 'agent': 'production-agent'}}, cell='claude-herdr', run_id='run', channel_id='41', record={})
+            self.assertEqual(client.deliver.call_count, 3)
+            client.deliver.return_value['channel_id'] = '999'
+            with self.assertRaisesRegex(assertions.AssertionError, 'channel'):
+                driver.deliver_step(client, {'deliver_prompt': 'hello'}, cell='claude-herdr', run_id='run', channel_id='41', record={})
+
+    def test_matrix_partial_evidence_is_not_pass(self):
+        for totals, expected in [({'pass': 1}, 'pass'), ({'not_applicable': 1}, 'partial'),
+                                 ({'known_gap': 1}, 'partial'), ({'unexpected_pass': 1}, 'unexpected_pass'),
+                                 ({'dry_run': 1}, 'dry_run'), ({}, 'partial'), ({'fail': 1}, 'fail')]:
+            with self.subTest(totals=totals):
+                self.assertEqual(matrix.evidence_status(totals), expected)
+
+    def test_restart_target_mismatch_preflight_and_incarnation_carry(self):
+        from tui_relay import herdr
+        scenario = {'steps': [{'restart_dcserver': {}}]}
+        for url, target in [('http://127.0.0.1:8797', 'release'), ('http://127.0.0.1:8791', 'dev')]:
+            with self.assertRaisesRegex(ValueError, 'restart target'):
+                herdr.validate_restart_binding(scenario, Namespace(base_url=url, restart_target_override=target))
+        checks = {r['check'] for r in herdr.omissions(scenario)}
+        self.assertIn('server_incarnation_changed', checks)
+
+    def test_matrix_rejects_cross_provider_actual_channel_alias(self):
+        with self.assertRaisesRegex(ValueError, 'same actual channel'):
+            matrix.validate_channel_bindings({'claude-tui': '41', 'codex-herdr': '41'})
+        matrix.validate_channel_bindings({'claude-tui': '41', 'codex-herdr': '42'})
+
+    def test_e22_excludes_codex_without_shell_capability(self):
+        scenarios = driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='codex-herdr')
+        self.assertNotIn('E-22', [s['id'] for s in scenarios])
+        self.assertIn('E-22', [s['id'] for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr')])
+
+    def test_cli_run_id_is_explicit_and_default_is_unique(self):
+        with patch.object(sys, 'argv', ['driver', '--cell', 'claude-herdr', '--channel-id', '41', '--run-id', 'source-compare-run']):
+            self.assertEqual(driver.parse_args().run_id, 'source-compare-run')
+        with patch.object(sys, 'argv', ['driver', '--cell', 'claude-herdr', '--channel-id', '41']):
+            self.assertNotEqual(driver.parse_args().run_id, driver.parse_args().run_id)

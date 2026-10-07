@@ -8,6 +8,7 @@ import os
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 
 from . import assertions, known_gap
 
@@ -88,8 +89,21 @@ def expected_cancel_refusal(error):
             and "session host is not legacy tmux" in str(error))
 
 
+def validate_restart_binding(scenario, args):
+    port = urllib.parse.urlparse(getattr(args, "base_url", "")).port
+    expected = {8797: "dev", 8791: "release"}.get(port)
+    for step in scenario.get("steps", []):
+        if "restart_dcserver" in step:
+            target = getattr(args, "restart_target_override", None) or (step["restart_dcserver"] or {}).get("target", "release")
+            if target not in ("dev", "release") or (expected and target != expected):
+                raise ValueError(f"restart target {target!r} does not match base URL {args.base_url}")
+
+
 def omissions(scenario):
     items = []
+    if any("restart_dcserver" in step for step in scenario.get("steps", [])):
+        items.append({"check": "server_incarnation_changed", "status": "not_applicable",
+                      "reason": "public health exposes no per-restart incarnation; nonce continuity does not prove dcserver restarted"})
     for step in scenario.get("steps", []):
         for key in TMUX_STEPS.intersection(step):
             items.append({"check": key, "status": "not_applicable", "reason": "tmux-only step; Herdr has no tmux session"})
@@ -138,7 +152,7 @@ def run(driver, scenario, args, client, run_id, result):
     for key in ("not_applicable", "known_gaps", "herdr_observations", "assertions"):
         result[key] = [item for case in (http, stop) for item in case.get(key, [])]
     result["real_provider_contacted"] = http["real_provider_contacted"] or stop["real_provider_contacted"]
-    result["status"] = next((s for s in ("fail", "known_gap", "unexpected_pass", "not_applicable", "dry_run")
+    result["status"] = next((s for s in ("fail", "unexpected_pass", "known_gap", "not_applicable", "dry_run")
                              if s in {http["status"], stop["status"]}), "pass")
     result["reason"] = "; ".join(f"{c['id']}: {c['status']} {c.get('reason') or ''}" for c in (http, stop))
     driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=args.dry_run)
@@ -157,6 +171,11 @@ def _run(driver, scenario, args, client, run_id, result):
         if gate:
             result.update(status="fail", reason=gate)
             return result
+    try:
+        validate_restart_binding(scenario, args)
+    except ValueError as error:
+        result.update(status="fail", reason=str(error))
+        return result
     if args.dry_run:
         print(f"[dry-run] {scenario['id']} ({args.cell}): GET /api/health preflight; setup")
         for step in scenario.get("steps", []):
@@ -191,7 +210,8 @@ def _run(driver, scenario, args, client, run_id, result):
         result.update(status="fail", reason="Herdr E36 requires --no-reset-before-each --phase-deadline-s 3540")
         return result
     window = assertions.Window("")
-    gap_attempted = False
+    gap_token = None
+    gap_trials = []
     gap_failure = False
     prompt_count = 0
     first_response = False
@@ -216,23 +236,35 @@ def _run(driver, scenario, args, client, run_id, result):
             window.reconcile_snapshot(rows, after_id=after_id)
 
         def wait(marker, timeout, *, raw=False):
-            nonlocal first_response, gap_failure
+            nonlocal first_response, gap_failure, gap_token
             found, rows = client.wait_for_message(
                 args.channel_id, predicate=lambda row: marker in ((row.get("content", "") if raw and (row.get("author") or {}).get("bot") else assertions.relay_body(row)) or ""),
                 after_id=after_id, timeout_s=timeout)
             ingest(rows)
             if not found:
-                gap_failure = gap_attempted and scenario["id"] != "E-18"
+                gap_failure = bool(gap_token and gap_token["marker"] == marker and scenario["id"] != "E-18")
                 raise assertions.AssertionError(f"Herdr Discord marker timeout: {marker}")
             first_response = True
+            if gap_token and gap_token["marker"] == marker:
+                gap_token = None
             return found
 
-        for step in scenario.get("steps", []):
+        def open_gap(index, marker=None):
+            nonlocal gap_token
+            remaining = scenario.get("steps", [])[index + 1:]
+            if marker is None:
+                marker = next((str(s["wait_for_discord_text"]).replace("{run_id}", run_id)
+                               for s in remaining if "wait_for_discord_text" in s), None)
+            gap_token = {"request_index": index, "marker": marker}
+            gap_trials.append(dict(gap_token))
+
+        for step_index, step in enumerate(scenario.get("steps", [])):
             if "kill_pane" in step and scenario["id"] == "E-12" and not first_response:
                 raise assertions.AssertionError("force termination requires observed running prompt")
             if TMUX_STEPS.intersection(step):
                 if "kill_pane" in step and scenario["id"] == "E-12":
-                    phase, gap_attempted = "force_cancel", True
+                    phase = "force_cancel"
+                    open_gap(step_index)
                     try:
                         driver.cancel_turn(base_url=args.base_url, channel_id=args.channel_id, force=True)
                     except assertions.AssertionError as error:
@@ -241,8 +273,9 @@ def _run(driver, scenario, args, client, run_id, result):
                 continue
             phase = next(iter(step))
             if "deliver_prompt" in step:
+                gap_token = None
                 window.mark_prompt_sent()
-                driver.deliver_step(client, step, cell=args.cell, run_id=run_id, record=result)
+                driver.deliver_step(client, step, cell=args.cell, run_id=run_id, channel_id=args.channel_id, record=result)
                 result["real_provider_contacted"] = True
                 prompt_count += 1
                 driver.post_send_sleep(step)
@@ -253,8 +286,12 @@ def _run(driver, scenario, args, client, run_id, result):
                     prompt = driver.build_provider_hold_prompt(step["send_provider_hold_prompt"], scenario_id=scenario["id"])
                 else:
                     prompt = str(step.get("send_prompt", step.get("send_discord_prompt"))).replace("{run_id}", run_id)
-                if profile and profile["issue"] == "#5340 P10-2" and prompt_count and first_response:
-                    gap_attempted = True
+                gap_token = None
+                if prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]:
+                    first_response, prompt_count = False, -1
+                elif profile and profile["issue"] == "#5340 P10-2" and prompt_count and first_response:
+                    marker = step.get("hold_marker") if step.get("request_key") == "QA" else step.get("body_marker")
+                    open_gap(step_index, marker.replace("{run_id}", run_id) if marker else None)
                 window.mark_prompt_sent()
                 prompt_count += 1
                 result["real_provider_contacted"] = True
@@ -300,7 +337,7 @@ def _run(driver, scenario, args, client, run_id, result):
                     raise assertions.AssertionError("text stop requires running hold witness")
                 client.send(args.channel_id, "!stop")  # The same normal Discord transport as prompts.
                 driver.post_send_sleep(step)
-                gap_attempted = True
+                open_gap(step_index)
                 ack = "중지하고 있어요..."
                 refused = "이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요."
                 found, rows = client.wait_for_message(args.channel_id,
@@ -316,7 +353,8 @@ def _run(driver, scenario, args, client, run_id, result):
             elif "cancel_turn" in step:
                 if not first_response:
                     raise assertions.AssertionError("cancellation requires observed prompt")
-                phase, gap_attempted = "cancel_turn", True
+                phase = "cancel_turn"
+                open_gap(step_index)
                 try:
                     driver.cancel_turn(base_url=args.base_url, channel_id=args.channel_id,
                                        force=False if scenario["id"] == "E-18" else bool((step["cancel_turn"] or {}).get("force", True)))
@@ -379,7 +417,7 @@ def _run(driver, scenario, args, client, run_id, result):
                     continue
                 driver.run_assertion(spec, window=window, record=result, enabled_features=enabled, run_id=run_id)
             except assertions.AssertionError:
-                gap_failure = gap_attempted and "marker_absent" in spec and scenario["id"] == "E-18-stop"
+                gap_failure = bool(result.get("text_stop_ack")) and "marker_absent" in spec and scenario["id"] == "E-18-stop"
                 raise
             result["assertions"].append({"spec": spec, "passed": True})
         if result.get("text_stop_ack"):
@@ -397,7 +435,7 @@ def _run(driver, scenario, args, client, run_id, result):
         result["herdr_observations"].append(observe(driver, args, clean=True))
         result.update(status="not_applicable" if result["not_applicable"] else "pass",
                       reason="partial coverage: see not_applicable checks" if result["not_applicable"] else None)
-        if profile and gap_attempted:
+        if profile and gap_trials:
             known_gap.apply_herdr_result(result, profile, passed=True)
     except Exception as error:
         result.update(status="fail", reason=f"{type(error).__name__}: {error}")

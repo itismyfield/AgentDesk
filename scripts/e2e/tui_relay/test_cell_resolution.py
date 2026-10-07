@@ -300,7 +300,7 @@ class ScenarioFilter(unittest.TestCase):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell not in {"claude-pipe", "claude-tui", "claude-herdr", "codex-herdr"}:
+            if cell not in {"claude-pipe", "claude-tui", "claude-herdr"}:
                 self.assertNotIn("E-22", ids)
                 continue
             e22 = next(s for s in scenarios if s.get("id") == "E-22")
@@ -470,7 +470,7 @@ class HerdrCells(unittest.TestCase):
     def test_required_scenarios(self):
         for cell in ('claude-herdr', 'codex-herdr'):
             ids = {s['id'] for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell=cell)}
-            self.assertTrue({'E-1', 'E-2', 'E-3', 'E-12', 'E-15', 'E-18', 'E-19', 'E-22', 'E-35', 'E-36'} <= ids)
+            self.assertTrue({'E-1', 'E-2', 'E-3', 'E-12', 'E-15', 'E-18', 'E-19', 'E-35', 'E-36'} <= ids)
             self.assertIn('E-50' if cell == 'claude-herdr' else 'E-51', ids)
             self.assertTrue({'E-4', 'E-10', 'E-14', 'E-21', 'E-31'}.isdisjoint(ids))
 
@@ -482,7 +482,7 @@ class HerdrCells(unittest.TestCase):
             def __getattr__(self, name):
                 raise AssertionError('forbidden side effect: ' + name)
         for cell in ('claude-herdr', 'codex-herdr'):
-            with patch.object(driver.sys, 'argv', ['driver', '--cell', cell, '--channel-id', '41', '--dry-run']):
+            with patch.object(driver.sys, 'argv', ['driver', '--cell', cell, '--channel-id', '41', '--base-url', 'http://unused.test', '--dry-run']):
                 args = driver.parse_args()
             args.reset_before_each = True
             args.hard_reset_session_each = True

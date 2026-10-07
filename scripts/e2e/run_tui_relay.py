@@ -32,6 +32,7 @@ import datetime as dt
 import errno
 import http.client
 import json
+import uuid
 import math
 import os
 import signal
@@ -229,6 +230,7 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--run-id", default=uuid.uuid4().hex, help="Explicit run identity shared with source comparison")
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
     parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
     parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
@@ -970,6 +972,96 @@ def validate_scenario_filter(raw: str | None, scenarios_dir: Path) -> set[str]:
     return wanted
 
 
+STEP_OPTIONS = {
+    "send_prompt": None, "send_discord_prompt": None, "send_keys": None, "send_keys_no_enter": None,
+    "wait_for_discord_text": None, "wait_for_raw_discord_text": None, "wait_idle_s": None,
+    "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target"},
+    "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
+    "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
+    "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"},
+    "replay_fixture": {"kind", "provider", "frames"},
+    "local_control_then_prompt": {"control", "notice", "prompt", "notice_timeout_s", "admission_timeout_s", "quiet_s", "poll_interval_s"},
+    "send_timed_response_prompt": {"before_marker", "after_marker", "hold_seconds"},
+    "send_provider_hold_prompt": {"ok_marker", "marker", "late_marker", "hold_seconds"},
+    "wait_for_provider_hold_state": {"ok_marker", "marker", "late_marker", "timeout_s", "poll_interval_s"},
+    "cancel_turn": {"force", "timeout_s"}, "delete_status_panel": {"panel_regex"},
+    "inject_discord_failure": {"operation", "count"}, "clear_discord_failure": {"operation"},
+    "send_keys_sequence": {"keys", "key_interval_s", "interval_s", "mark_prompt_sent", "diagnostic_prompt", "sleep_s"},
+    "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons"},
+}
+ASSERTION_OPTIONS = {
+    **{k: None for k in ("text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
+                         "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
+                         "no_control_chars", "body_not_overwritten", "fixture_followup_ready",
+                         "fixture_no_health_degradation", "no_placeholder_left")},
+    "message_count_between_markers": {"min", "max"},
+    "raw_message_count_between_markers": {"min", "max", "include_our_send"},
+    "relay_latency_within": {"max_seconds"}, "body_complete": {"head", "tail"},
+    "chrome_count": {"text", "regex", "min", "max", "exact", "include_our_send"},
+    "raw_text_absent": {"needle", "text", "include_our_send"},
+    "marker_absent": {"marker", "surface", "include_our_send"},
+    "provider_hold_marker_seen": {"marker", "ok_marker"},
+    "status_panel_after_body": {"body_marker", "panel_regex"}, "single_status_panel": {"panel_regex"},
+    "completion_chrome_after_body": {"body_marker", "required"},
+    "relay_bodies_after_local_control": {"containing", "exact"},
+    "fixture_task_notification": {"source", "kind", "status"},
+    "fixture_finalized": {"finalized", "result_text_source", "active_turn"},
+    "fixture_task_complete_finalized": {"result_text_source", "turn_id"},
+    "fixture_state": {"followup_probe_accepted"},
+    "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
+    "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
+}
+
+
+def validate_scenario_schema(scenario):
+    """Reject unexecuted actions/options before the driver can contact a server."""
+    for kind, schema in (("steps", STEP_OPTIONS), ("assertions", ASSERTION_OPTIONS)):
+        entries = scenario.get(kind, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"{kind} must be a list")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"{kind} entry must be a mapping: {entry!r}")
+            actions = set(entry) & schema.keys()
+            if len(actions) != 1:
+                raise ValueError(f"{kind} needs exactly one supported action: {entry!r}")
+            action = next(iter(actions))
+            metadata = {"requires_feature"} if kind == "assertions" else set()
+            if action in {"wait_for_discord_text", "wait_for_raw_discord_text"}:
+                metadata.add("timeout_s")
+            if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
+                metadata.add("post_send_sleep_s")
+            if action == "send_discord_prompt" and scenario.get("e36_normal_intake"):
+                metadata.update({"request_key", "body_marker", "hold_marker"})
+            if set(entry) - {action} - metadata:
+                raise ValueError(f"unsupported {kind} sibling options: {entry!r}")
+            value, allowed = entry[action], schema[action]
+            if isinstance(value, dict) and (allowed is None or set(value) - allowed):
+                raise ValueError(f"unsupported {action} options: {value!r}")
+            scalar_or_mapping = {"deliver_prompt", "assert_session_preserved", "provider_hold_marker_seen", "raw_text_absent", "marker_absent", "relay_latency_within", "completion_chrome_after_body", "single_status_panel"}
+            if allowed is not None and action not in scalar_or_mapping and not isinstance(value, dict):
+                raise ValueError(f"{action} requires mapping options")
+            if action in {"send_prompt", "send_discord_prompt", "send_keys", "send_keys_no_enter", "wait_for_discord_text", "wait_for_raw_discord_text"} and not isinstance(value, str):
+                raise ValueError(f"{action} requires text")
+            if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome"} and value is not True:
+                raise ValueError(f"{action} must be true")
+            if "post_send_sleep_s" in entry:
+                delay = entry["post_send_sleep_s"]
+                if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+                    raise ValueError("post_send_sleep_s must be a finite nonnegative number")
+            if action == "deliver_prompt":
+                text = value.get("text") if isinstance(value, dict) else value
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("deliver_prompt requires nonempty text")
+            if action == "deliver_result":
+                if "requires_feature" in entry:
+                    raise ValueError("deliver_result cannot be feature-gated")
+                if not isinstance(value, dict) or not value.get("delivery") or any(not isinstance(v, list) or not v for v in value.values()):
+                    raise ValueError("deliver_result requires nonempty delivery allowed values")
+    if any("deliver_prompt" in step for step in scenario.get("steps", [])) and not any("deliver_result" in spec for spec in scenario.get("assertions", [])):
+        raise ValueError("deliver_prompt requires deliver_result before any POST")
+
+
 def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
     scenarios: list[dict[str, Any]] = []
     for yaml_path in sorted(scenarios_dir.glob("*.yaml")):
@@ -977,6 +1069,7 @@ def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
             data = yaml.safe_load(fp)
         if not isinstance(data, dict):
             raise ValueError(f"{yaml_path} did not parse to a mapping")
+        validate_scenario_schema(data)
         cells = data.get("cells") or []
         if not isinstance(cells, list):
             raise ValueError(f"{yaml_path} has non-list cells field")
@@ -3412,7 +3505,7 @@ def post_send_sleep(step):
     time.sleep(delay)
 
 
-def deliver_step(client, step, *, cell, run_id, record):
+def deliver_step(client, step, *, cell, run_id, channel_id, record):
     author = os.environ.get("AGENTDESK_E2E_DELIVER_AUTHOR_ID", "").strip()
     if not author:
         raise assertions.AssertionError("deliver_prompt requires AGENTDESK_E2E_DELIVER_AUTHOR_ID")
@@ -3421,14 +3514,20 @@ def deliver_step(client, step, *, cell, run_id, record):
         params = {"text": params}
     if not isinstance(params, dict) or not isinstance(params.get("text"), str) or not params["text"].strip():
         raise assertions.AssertionError("deliver_prompt requires nonempty text")
-    if "author" in params or "author_discord_user_id" in params:
-        raise assertions.AssertionError("deliver author must come only from AGENTDESK_E2E_DELIVER_AUTHOR_ID")
+    if set(params) - {"text", "source"}:
+        raise assertions.AssertionError(f"unsupported deliver options: {sorted(set(params) - {'text', 'source'})}")
     index = len(record.get("deliver_results", []))
-    response = client.deliver(params.get("agent", cell_default_agent(cell)),
-                              params["text"].replace("{run_id}", run_id), author,
-                              params.get("source", "adk-e2e-orchestrator"),
-                              str(params.get("origin_id", f"{run_id}-deliver-{index}")).replace("{run_id}", run_id))
-    record.setdefault("deliver_results", []).append({k: response.get(k) for k in ("delivery", "reason", "inject_veto")})
+    origin_id = f"{run_id}-{record.get('id', 'scenario')}-deliver-{index}"
+    marker = f"[E2E:DELIVER:{origin_id}]"
+    text = marker + "\n" + params["text"].replace("{run_id}", run_id)
+    response = client.deliver(cell_default_agent(cell), text, author,
+                              params.get("source", "adk-e2e-orchestrator"), origin_id)
+    observed = {k: response.get(k) for k in ("delivery", "reason", "inject_veto", "channel_id")}
+    observed.update(origin_id=origin_id, run_marker=marker)
+    record["real_provider_contacted"] = True
+    record.setdefault("deliver_results", []).append(observed)
+    if str(response.get("channel_id")) != str(channel_id):
+        raise assertions.AssertionError(f"deliver response channel mismatch: expected {channel_id}, observed {response.get('channel_id')}")
     return response
 
 
@@ -3564,6 +3663,7 @@ def run_one_cell(
             revalidation["assertions"].append(spec)
         revalidation["passed"] = True
 
+    record["id"] = scenario_id
     first_send_done = False
 
     def _advance_window_past_setup_echo() -> None:
@@ -3605,7 +3705,7 @@ def run_one_cell(
         if "deliver_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
-            deliver_step(client, step, cell=cell, run_id=run_id, record=record)
+            deliver_step(client, step, cell=cell, run_id=run_id, channel_id=channel_id, record=record)
             _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
             post_send_sleep(step)
         elif "send_discord_prompt" in step:
@@ -4871,7 +4971,7 @@ def main() -> int:
         return 2
     handoff_to = args.handoff_to_agent or cell_default_agent(cell)
     output_dir = resolve_output_dir(args.output, cell)
-    run_id = output_dir.name
+    run_id = getattr(args, "run_id", output_dir.name)
     print(f"[e2e] cell={cell} run_id={run_id} output={output_dir}")
 
     scenarios = load_scenarios(scenarios_dir, cell=cell)

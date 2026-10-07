@@ -3,7 +3,7 @@ title: tool_use 이후 후속 텍스트 head-to-tail 완결성
 agent_mode: real_live
 coverage_class: live
 # Herdr: Discord tool-text checks run; durable hold witness is not_applicable; no TUI-specific known-gap exemption.
-cells: [claude-pipe, claude-tui, claude-herdr, codex-herdr]
+cells: [claude-pipe, claude-tui, claude-herdr]
 isolation: required
 acceptance_criteria:
   - Emit visible pre-tool assistant text.

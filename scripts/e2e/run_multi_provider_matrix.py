@@ -11,6 +11,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import json
+import uuid
 import os
 import subprocess
 import sys
@@ -205,6 +206,25 @@ def resolve_output_dir(arg: str | None) -> Path:
     return out
 
 
+def evidence_status(totals):
+    totals = totals or {}
+    for status in ("fail", "unexpected_pass"):
+        if totals.get(status, 0):
+            return status
+    if any(totals.get(s, 0) for s in ("known_gap", "not_applicable", "skipped")):
+        return "partial"
+    if totals.get("dry_run", 0):
+        return "dry_run"
+    return "pass" if totals.get("pass", 0) else "partial"
+
+
+def validate_channel_bindings(channel_ids):
+    for cell, channel in channel_ids.items():
+        if cell.endswith("-herdr") and any(not other.endswith("-herdr") and str(value) == str(channel)
+                                         for other, value in channel_ids.items()):
+            raise ValueError("Herdr and non-Herdr cells resolve to the same actual channel ID")
+
+
 def run_cell(
     *,
     cell: str,
@@ -213,10 +233,15 @@ def run_cell(
     output_dir: Path,
     pass_index: int,
 ) -> dict[str, Any]:
+    if not getattr(args, "matrix_run_id", None):
+        args.matrix_run_id = uuid.uuid4().hex
+    run_id = f"{args.matrix_run_id}-p{pass_index}-{cell}"
     cell_output = output_dir / f"pass-{pass_index}" / cell
     cmd = [
         sys.executable,
         "scripts/e2e/run_tui_relay.py",
+        "--run-id",
+        run_id,
         "--base-url",
         args.base_url,
         "--cell",
@@ -262,7 +287,14 @@ def run_cell(
     report: dict[str, Any] | None = None
     if report_path.exists():
         report = json.loads(report_path.read_text(encoding="utf-8"))
+    execution_ok = proc.returncode == 0 and bool(report)
+    status = evidence_status(report.get("totals")) if report else "fail"
+    if not execution_ok and status not in ("fail", "unexpected_pass"):
+        status = "fail"
     return {
+        "run_id": run_id,
+        "execution_ok": execution_ok,
+        "evidence_status": status,
         "kind": "cell",
         "pass_index": pass_index,
         "cell": cell,
@@ -277,7 +309,7 @@ def run_cell(
         "coverage_class_totals": (report or {}).get("coverage_class_totals"),
         "coverage_class_violations": (report or {}).get("coverage_class_violations"),
         "real_provider_contacted": bool((report or {}).get("real_provider_contacted")),
-        "ok": proc.returncode == 0 and bool(report),
+        "ok": execution_ok and status == "pass",
     }
 
 
@@ -1612,6 +1644,9 @@ def main() -> int:
     if any(c.endswith("-herdr") and c.replace("-herdr", "-tui") in cells for c in cells):
         raise ValueError("Herdr and tmux cells must not share one channel in a matrix run")
     channel_ids = load_channel_ids(Path(args.config).expanduser(), cells)
+    validate_channel_bindings(channel_ids)
+    for selected_cell in cells:
+        cell_driver.load_scenarios(scenarios_dir, cell=selected_cell)
     cross_scenarios = load_cross_channel_scenarios(scenarios_dir)
     restart_guard_scenarios = load_restart_guard_scenarios(scenarios_dir)
     if wanted:
@@ -1624,6 +1659,7 @@ def main() -> int:
             if str(scenario.get("id")) in wanted
         ]
     output_dir = resolve_output_dir(args.output)
+    args.matrix_run_id = uuid.uuid4().hex
     pass_count = 2 if args.twice else 1
 
     results: list[dict[str, Any]] = []
@@ -1649,7 +1685,7 @@ def main() -> int:
             result = run_cross_channel_scenario(
                 scenario,
                 args=args,
-                run_id=output_dir.name,
+                run_id=args.matrix_run_id,
                 channel_ids=channel_ids,
                 selected_cells=cells,
                 pass_index=pass_index,
@@ -1668,7 +1704,7 @@ def main() -> int:
             result = run_foreign_active_restart_guard_scenario(
                 scenario,
                 args=args,
-                run_id=output_dir.name,
+                run_id=args.matrix_run_id,
                 channel_ids=channel_ids,
                 selected_cells=cells,
                 pass_index=pass_index,
@@ -1681,7 +1717,17 @@ def main() -> int:
                 f"reason={result.get('reason') or ''}"
             )
 
+    for row in results:
+        if row.get("kind") != "cell":
+            row["execution_ok"] = bool(row.get("ok"))
+            row["evidence_status"] = "fail" if not row["execution_ok"] else ("dry_run" if args.dry_run else ("pass" if row.get("status") == "pass" else "partial"))
+            row["ok"] = row["execution_ok"] and row["evidence_status"] == "pass"
+    statuses = [r["evidence_status"] for r in results]
+    execution_ok = all(r.get("execution_ok", r.get("ok", False)) for r in results)
+    aggregate = next((s for s in ("fail", "unexpected_pass", "partial", "dry_run") if s in statuses), "pass" if statuses else "partial")
     summary = {
+        "execution_ok": execution_ok,
+        "evidence_status": aggregate,
         "output": str(output_dir),
         "cells": cells,
         "passes": pass_count,
@@ -1696,7 +1742,7 @@ def main() -> int:
             result.get("real_provider_contacted") is True for result in results
         ),
         "results": results,
-        "ok": all(result["ok"] for result in results),
+        "ok": execution_ok and aggregate == "pass",
     }
     summary_path = output_dir / "matrix.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

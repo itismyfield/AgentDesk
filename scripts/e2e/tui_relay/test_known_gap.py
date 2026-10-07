@@ -439,7 +439,7 @@ class HerdrExpectedFailure(unittest.TestCase):
             marker = 'OK' if not rows else 'NEXT'
             row = {'id': str(102 + len(rows)), 'content': marker, 'author': {'id': '42', 'bot': True}}
             rows.append(row)
-            return (None if marker == missing else row), list(rows)
+            return (row if marker != missing and kwargs['predicate'](row) else None), list(rows)
         client.wait_for_message.side_effect = wait
         client.fetch_messages.side_effect = lambda *a, **kw: list(rows)
         args = Namespace(cell=cell, channel_id='41', base_url='http://unused.test', dry_run=False,
@@ -576,3 +576,52 @@ class HerdrExpectedFailure(unittest.TestCase):
             self.assertEqual(sum('E18S:OK' in x for x in sends), 1)
             if not refused:
                 self.assertEqual(len(sends), 4)  # HTTP hold, command hold, !stop, one next prompt; no resend.
+
+
+class HerdrScopedGapRepairs(unittest.TestCase):
+    execute = HerdrExpectedFailure.execute
+    def test_after_clear_timeout_does_not_inherit_successful_followup_gap(self):
+        scenario = {'id': 'E-51', 'steps': [{'send_prompt': 'OK'}, {'wait_for_discord_text': 'OK'},
+                    {'send_prompt': 'NEXT'}, {'wait_for_discord_text': 'NEXT'}, {'send_prompt': '!clear [run-marker]'},
+                    {'send_prompt': 'AFTER_CLEAR'}, {'wait_for_discord_text': 'AFTER_CLEAR'}]}
+        result, _, client = self.execute(scenario, cell='codex-herdr')
+        # The helper only produces OK/NEXT: AFTER_CLEAR is absent, even though T2 succeeded.
+        self.assertEqual(result['status'], 'fail', result)
+        self.assertEqual(client.send.call_count, 4)
+
+    def test_unexpected_pass_dominates_other_subcase_known_gap(self):
+        from tui_relay import herdr
+        from argparse import Namespace
+        from unittest.mock import patch
+        cases = [{'id': 'E-18', 'status': 'unexpected_pass', 'real_provider_contacted': True},
+                 {'id': 'E-18-stop', 'status': 'known_gap', 'real_provider_contacted': True}]
+        result = {'agent_mode': 'real_live', 'coverage_class': 'live'}
+        with patch.object(herdr, '_run', side_effect=cases):
+            actual = herdr.run(driver, {'herdr_text_stop': True}, Namespace(dry_run=False), None, 'run', result)
+        self.assertEqual(actual['status'], 'unexpected_pass')
+
+    def test_actual_e51_clear_ack_then_after_clear_timeout_is_regression(self):
+        from argparse import Namespace
+        from unittest.mock import Mock, patch
+        from tui_relay import herdr
+        scenario = yaml.safe_load((Path(__file__).resolve().parents[3] / 'tests/e2e/tui_relay/scenarios/E-51-codex-clear-and-turns.yaml').read_text())
+        args = Namespace(cell='codex-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=False, final_refetches=1)
+        client = Mock(); client.send_control.return_value = {'id': '100'}
+        rows = []
+        def send(channel, text):
+            if text.startswith('!clear'):
+                rows.append({'id': '104', 'content': '세션을 초기화했어요.', 'author': {'bot': True}})
+        def wait(channel, **kwargs):
+            for marker in ('[E2E:E51:run:T1]', '[E2E:E51:run:T2]'):
+                row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker, 'author': {'bot': True}}
+                if kwargs['predicate'](row):
+                    rows.append(row); return row, rows
+            return None, rows
+        client.send.side_effect = send; client.wait_for_message.side_effect = wait
+        client.fetch_messages.side_effect = lambda *a, **k: rows
+        with patch.object(herdr, 'observe', return_value={'herdr': {}}), patch.object(herdr.time, 'sleep'):
+            result = driver.run_scenario(scenario, args=args, client=client, run_id='run')
+        self.assertEqual(result['status'], 'fail', result)
+        self.assertIn('AFTER_CLEAR', result['reason'])
+        self.assertNotIn('known_gaps', result)

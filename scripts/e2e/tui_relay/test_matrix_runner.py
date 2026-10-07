@@ -995,3 +995,32 @@ class HerdrMatrix(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'share one channel'):
                 matrix.main()
         config.assert_not_called()
+
+
+class MatrixEvidenceRepairs(unittest.TestCase):
+    def test_twice_passes_distinct_run_ids_and_partial_is_not_ok(self):
+        import json
+        args = Namespace(base_url='http://unused.test', scenarios='tests/e2e/tui_relay/scenarios',
+                         queue_runtime_root='unused', turn_start_timeout_s=5, filter=None, dry_run=False,
+                         required_agent_mode=None, required_coverage_class=None, allow_destructive=False,
+                         reset_before_each=False, hard_reset_session_each=False, matrix_run_id='matrix-a')
+        calls = []
+        def run(cmd, **kw):
+            calls.append(cmd)
+            directory = Path(cmd[cmd.index('--output') + 1]); directory.mkdir(parents=True, exist_ok=True)
+            (directory / 'report.claude-herdr.json').write_text(json.dumps({'totals': {'not_applicable': 1}}))
+            return Namespace(returncode=0)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(matrix.subprocess, 'run', side_effect=run):
+            rows = [matrix.run_cell(cell='claude-herdr', channel_id='41', args=args, output_dir=Path(tmp), pass_index=i) for i in (1, 2)]
+        self.assertEqual([c[c.index('--run-id') + 1] for c in calls], ['matrix-a-p1-claude-herdr', 'matrix-a-p2-claude-herdr'])
+        self.assertTrue(all(r['execution_ok'] and not r['ok'] and r['evidence_status'] == 'partial' for r in rows))
+
+    def test_actual_channel_alias_is_rejected_before_cell_launch(self):
+        args = Namespace(scenarios=str(ROOT / 'tests/e2e/tui_relay/scenarios'), filter=None,
+                         cells='claude-tui,codex-herdr', config='unused')
+        with patch.object(matrix, 'parse_args', return_value=args), \
+             patch.object(matrix, 'load_channel_ids', return_value={'claude-tui': '41', 'codex-herdr': '41'}), \
+             patch.object(matrix, 'run_cell') as launch:
+            with self.assertRaisesRegex(ValueError, 'same actual channel'):
+                matrix.main()
+        launch.assert_not_called()
