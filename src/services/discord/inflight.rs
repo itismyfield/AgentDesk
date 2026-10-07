@@ -626,6 +626,11 @@ pub(super) fn load_inflight_states_excluding(
     load_inflight_states_from_root_excluding(&root, provider, exclude_channel)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(in crate::services::discord) static AFTER_EXCLUDING_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {
     let providers = [
         ProviderKind::Claude,

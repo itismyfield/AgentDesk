@@ -2,6 +2,58 @@ use super::*;
 use crate::services::discord::input_runtime::{self, fence::Gate};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
 
+#[cfg(unix)]
+#[tokio::test]
+async fn c2_sigterm_handler_dispatch_persists_before_consuming_shutdown_slot() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel = ChannelId::new(6_325_607);
+    shared.last_message_ids.insert(channel, 99);
+    // One remaining slot keeps this real handler path away from process::exit.
+    shared
+        .restart
+        .shutdown_remaining
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    SIGTERM_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(receive));
+    let handler = run_bot_spawn_sigterm_handler(&shared, provider.clone());
+    send.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler completes")
+        .expect("handler join");
+    let checkpoint = runtime_store::last_message_root()
+        .unwrap()
+        .join("codex")
+        .join(format!("{}.txt", channel.get()));
+    assert_eq!(
+        std::fs::read_to_string(&checkpoint)
+            .ok()
+            .map(|value| value.trim().to_owned()),
+        Some("99".into()),
+        "actual handler omitted persistence"
+    );
+    assert!(
+        shared
+            .restart
+            .shutdown_counted
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        shared
+            .restart
+            .shutdown_remaining
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
 fn item(id: u64) -> Intervention {
     Intervention {
         author_id: UserId::new(7),

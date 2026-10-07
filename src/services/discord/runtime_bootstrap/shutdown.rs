@@ -7,13 +7,24 @@ use super::*;
 pub(super) fn run_bot_spawn_sigterm_handler(
     shared: &Arc<SharedData>,
     provider_for_shutdown: ProviderKind,
-) {
+) -> tokio::task::JoinHandle<()> {
     let shared_for_signal = shared.clone();
+    #[cfg(test)]
+    let test_signal = SIGTERM_FOR_TEST.with(|slot| slot.borrow_mut().take());
     tokio::spawn(async move {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
             if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                #[cfg(test)]
+                if let Some(test_signal) = test_signal {
+                    if test_signal.await.is_err() {
+                        return;
+                    }
+                } else {
+                    sigterm.recv().await;
+                }
+                #[cfg(not(test))]
                 sigterm.recv().await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
@@ -49,7 +60,12 @@ pub(super) fn run_bot_spawn_sigterm_handler(
                 }
             }
         }
-    });
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static SIGTERM_FOR_TEST: std::cell::RefCell<Option<tokio::sync::oneshot::Receiver<()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Persist both restart snapshots around inflight marking without exiting the process.

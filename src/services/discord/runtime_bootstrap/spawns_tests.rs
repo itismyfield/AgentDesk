@@ -6,6 +6,61 @@
 
 use super::*;
 
+#[test]
+fn c2_deferred_prescan_skips_old_format_held_rows_before_backfill() {
+    use crate::services::discord::input_runtime::{self, fence};
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let root = inflight::inflight_runtime_root().unwrap();
+    let (held, legacy) = (6_325_605, 6_325_606);
+    for channel in [held, legacy] {
+        let state = InflightTurnState::new(
+            provider.clone(),
+            channel,
+            None,
+            7,
+            channel + 1,
+            channel + 2,
+            "prescan".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        inflight::save_inflight_state_create_new(&state).unwrap();
+    }
+    let path = inflight::inflight_state_path(&root, &provider, held);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("finalizer_turn_id");
+    std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let gate = fence::Gate::protect(provider.clone(), held).unwrap();
+    let _health = fence::test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
+    let states = deferred_restart_inflight_snapshot(&provider);
+    assert_eq!(
+        states
+            .iter()
+            .map(|state| state.channel_id)
+            .collect::<Vec<_>>(),
+        vec![legacy]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(
+        !input_runtime::health_reasons()
+            .iter()
+            .any(|reason| reason.contains(&format!("channel={held}"))),
+        "deferred pre-scan must not attempt a compatibility writer"
+    );
+}
+
 #[tokio::test]
 async fn standby_marker_fences_intake_exposes_ack_and_counts_shutdown_once() {
     let registry = health::HealthRegistry::new();

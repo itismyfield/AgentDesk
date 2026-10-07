@@ -1624,6 +1624,17 @@ mod rebind_error_status_tests {
     }
 
     #[test]
+    fn c2_input_fenced_maps_to_conflict() {
+        let err = RebindError::InputFenced("Busy".into());
+        let (status, message) = rebind_error_status_and_message(&err);
+        assert_eq!(
+            status, "409 Conflict",
+            "input fence is a retryable conflict"
+        );
+        assert_eq!(message, err.to_string());
+    }
+
+    #[test]
     fn zero_channel_id_maps_to_bad_request() {
         let (status, message) = rebind_error_status_and_message(&RebindError::ChannelIdZero);
 
