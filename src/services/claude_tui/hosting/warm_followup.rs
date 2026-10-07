@@ -114,6 +114,20 @@ fn recover_claude_tui_stranded_prompt_draft(
             tmux_session_name,
             || clear_draft(host, tmux_session_name, clear, cancel_token.as_deref()),
         );
+        // A pane held for draft recovery keeps its draft; the submit below holds or requeues.
+        let Some(cleared) = cleared else {
+            return ClaudeTuiDraftRecoveryOutcome::Proceed {
+                state: ClaudeTuiRecreateState {
+                    resolved_session_id,
+                    transcript_path,
+                    transcript_path_string,
+                    resume,
+                },
+                busy_waited,
+                recreate_before_submit,
+                prompt_draft_cleared_before_submit,
+            };
+        };
         let outcome = draft_outcome(draft_state, &snapshot, &cleared);
         tracing::warn!(
             tmux_session_name,

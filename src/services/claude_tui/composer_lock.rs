@@ -5,8 +5,10 @@
 //! Keeping them distinct lets an auto `/compact` steer a busy pane without
 //! waiting behind a normal turn's readiness phase.
 
+use std::collections::HashMap;
 #[cfg(unix)]
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 #[cfg(unix)]
 static SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, Arc<Mutex<()>>>> =
@@ -67,6 +69,99 @@ pub(crate) fn try_with_composer_mutation_lock<R>(
     _operation: impl FnOnce() -> R,
 ) -> Option<R> {
     None
+}
+
+/// Why a pane's composer is protected; in memory only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftGuard {
+    /// Where the person's draft went is not known.
+    RecoveryRequired,
+    /// The person's draft is back in the composer, theirs to send or clear.
+    DraftRestored,
+}
+
+/// What a capture of a protected pane shows: no stash with an empty composer, no stash with the
+/// person's text, or anything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftSighting {
+    Settled,
+    PersonDraft,
+    Unsettled,
+}
+
+/// What automatic writers may do to a pane now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposerAdmission {
+    Any,
+    /// Only a verified stash transaction, which hands the person's draft back.
+    StashOnly,
+    Held,
+}
+
+static DRAFT_GUARDS: LazyLock<Mutex<HashMap<String, DraftGuard>>> = LazyLock::new(Default::default);
+
+/// An automatic composer write refused because the pane protects a person's draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DraftRecoveryHold;
+
+fn draft_guards() -> MutexGuard<'static, HashMap<String, DraftGuard>> {
+    DRAFT_GUARDS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Protects this pane's composer until a capture shows no stash and an empty composer.
+pub(crate) fn guard_draft(tmux_session_name: &str, guard: DraftGuard) {
+    draft_guards().insert(tmux_session_name.to_string(), guard);
+}
+
+/// Decides one automatic write under the composer lock, before any key. Only a protected pane is
+/// captured: an empty composer without a stash releases it, the person's text allows a stash.
+pub(crate) fn composer_admission(
+    tmux_session_name: &str,
+    capture: impl FnOnce() -> Option<String>,
+) -> ComposerAdmission {
+    if !draft_guards().contains_key(tmux_session_name) {
+        return ComposerAdmission::Any;
+    }
+    let sighting = capture().map_or(DraftSighting::Unsettled, |capture| {
+        super::busy_inject::draft_sighting(&capture)
+    });
+    match sighting {
+        DraftSighting::Settled => {
+            draft_guards().remove(tmux_session_name);
+            ComposerAdmission::Any
+        }
+        DraftSighting::PersonDraft => {
+            guard_draft(tmux_session_name, DraftGuard::DraftRestored);
+            ComposerAdmission::StashOnly
+        }
+        DraftSighting::Unsettled => ComposerAdmission::Held,
+    }
+}
+
+/// Whether this pane protects a person's draft now; reads no pane.
+pub(crate) fn draft_guarded(tmux_session_name: &str) -> bool {
+    draft_guards().contains_key(tmux_session_name)
+}
+
+/// One look, between composer mutations, for whether automatic writes may run again; a pane
+/// another writer holds right now counts as still protected.
+pub(crate) fn draft_released(tmux_session_name: &str) -> bool {
+    let capture = || super::host_input::observe_draft(tmux_session_name);
+    let admit = || composer_admission(tmux_session_name, capture) == ComposerAdmission::Any;
+    try_with_composer_mutation_lock(tmux_session_name, admit).unwrap_or(false)
+}
+
+/// Admits a write that is not a stash transaction: submits, cleanups, clears and plain keys.
+pub(crate) fn admit_composer_write(
+    tmux_session_name: &str,
+    capture: impl FnOnce() -> Option<String>,
+) -> Result<(), DraftRecoveryHold> {
+    match composer_admission(tmux_session_name, capture) {
+        ComposerAdmission::Any => Ok(()),
+        ComposerAdmission::StashOnly | ComposerAdmission::Held => Err(DraftRecoveryHold),
+    }
 }
 
 /// Run a blocking hosted-turn operation under the pane's full turn lock.
