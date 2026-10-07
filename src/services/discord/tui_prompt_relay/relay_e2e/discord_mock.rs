@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, Query, State, WebSocketUpgrade};
+use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::{Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -65,6 +65,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
+    extra_channels: Arc<Mutex<std::collections::HashSet<u64>>>,
     next_response_id: Arc<AtomicU64>,
 }
 
@@ -85,8 +86,25 @@ impl DiscordMockState {
             history_queries: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
+            extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
+    }
+
+    pub(in crate::services::discord) fn allow_channel(&self, channel_id: u64) {
+        self.extra_channels
+            .lock()
+            .expect("allowed channels")
+            .insert(channel_id);
+    }
+
+    fn accepts_channel(&self, channel_id: u64) -> bool {
+        channel_id == CHANNEL_ID
+            || self
+                .extra_channels
+                .lock()
+                .expect("allowed channels")
+                .contains(&channel_id)
     }
 }
 
@@ -268,12 +286,6 @@ fn history_page_returns_the_ids_nearest_the_cursor_newest_first() {
     }
 }
 
-async fn get_channel(Path(channel_id): Path<u64>) -> Json<Value> {
-    let mut channel = private_channel_json();
-    channel["id"] = json!(channel_id.to_string());
-    Json(channel)
-}
-
 fn mint_message(
     state: &DiscordMockState,
     payload: &Value,
@@ -298,14 +310,25 @@ fn mint_message(
 async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Body>) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    if method == Method::GET && path == format!("/api/v10/channels/{CHANNEL_ID}") {
-        return Json(private_channel_json()).into_response();
+    let route_channel = path
+        .strip_prefix("/api/v10/channels/")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|id| id.parse::<u64>().ok());
+    let channel_allowed = route_channel.is_some_and(|id| state.accepts_channel(id));
+    if method == Method::GET
+        && channel_allowed
+        && route_channel.is_some_and(|id| path == format!("/api/v10/channels/{id}"))
+    {
+        let mut channel = private_channel_json();
+        channel["id"] = json!(route_channel.unwrap().to_string());
+        return Json(channel).into_response();
     }
     let message_channel = path
         .strip_prefix("/api/v10/channels/")
         .and_then(|rest| rest.strip_suffix("/messages"))
         .and_then(|id| id.parse::<u64>().ok());
     if method == Method::POST
+        && channel_allowed
         && let Some(channel_id) = message_channel
     {
         let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
@@ -375,10 +398,7 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             }
         }
     }
-    if method == Method::PATCH
-        && path.starts_with("/api/v10/channels/")
-        && path.contains("/messages/")
-    {
+    if method == Method::PATCH && channel_allowed && path.contains("/messages/") {
         let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
             .await
             .unwrap_or_default();
@@ -404,16 +424,13 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     }
 
     if (method == Method::PUT || method == Method::DELETE)
-        && path.starts_with("/api/v10/channels/")
+        && channel_allowed
         && path.contains("/messages/")
         && path.contains("/reactions/")
     {
         return StatusCode::NO_CONTENT.into_response();
     }
-    if method == Method::DELETE
-        && path.starts_with("/api/v10/channels/")
-        && path.contains("/messages/")
-    {
+    if method == Method::DELETE && channel_allowed && path.contains("/messages/") {
         return StatusCode::NO_CONTENT.into_response();
     }
     // `catch_up` resolves the bot identity here and skips every candidate whose
@@ -437,6 +454,39 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         .into_response()
 }
 
+#[tokio::test]
+async fn unregistered_channels_are_unhandled_until_explicitly_allowed() {
+    let state = DiscordMockState::new();
+    state.park_first_placeholder.store(false, Ordering::SeqCst);
+    let other = CHANNEL_ID + 1;
+    for (method, suffix) in [
+        (Method::GET, ""),
+        (Method::POST, "/messages"),
+        (Method::PATCH, "/messages/1"),
+        (Method::DELETE, "/messages/1"),
+        (Method::PUT, "/messages/1/reactions/check/@me"),
+    ] {
+        let request = || {
+            Request::builder()
+                .method(method.clone())
+                .uri(format!("/api/v10/channels/{other}{suffix}"))
+                .body(Body::from(r#"{"content":"probe"}"#))
+                .unwrap()
+        };
+        let response = discord_rest(State(state.clone()), request()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            state.unhandled.lock().unwrap().pop(),
+            Some(format!("{method} /api/v10/channels/{other}{suffix}"))
+        );
+        state.allow_channel(other);
+        let response = discord_rest(State(state.clone()), request()).await;
+        assert!(response.status().is_success());
+        assert!(state.unhandled.lock().unwrap().is_empty());
+        state.extra_channels.lock().unwrap().remove(&other);
+    }
+}
+
 async fn gateway_socket(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
 }
@@ -446,7 +496,6 @@ pub(in crate::services::discord) async fn start(
 ) -> (String, String, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/gateway", get(gateway_socket))
-        .route("/api/v10/channels/{channel_id}", get(get_channel))
         .fallback(discord_rest)
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

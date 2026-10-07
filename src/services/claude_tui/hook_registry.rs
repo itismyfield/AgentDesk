@@ -1092,6 +1092,24 @@ mod tests {
     }
 
     #[test]
+    fn hidden_fanout_origin_counts_toward_buffered_bytes() {
+        let native = event("claude", "alias", HookEventKind::Notification, json!({}));
+        let reg = registry();
+        let k = key("claude", "alias");
+        reg.deliver(k.clone(), native.clone());
+        let native_bytes = reg.buffered_bytes(&k);
+        reg.claim_once(k.clone());
+        let mut alias = native;
+        alias.fanout = Some(crate::services::claude_tui::hook_server::HookFanout {
+            origin_session_id: "o".repeat(40),
+            primary_discarded: false,
+        });
+        reg.deliver(k.clone(), alias);
+        assert_eq!(reg.buffered_len(&k), 1);
+        assert_eq!(reg.buffered_bytes(&k), native_bytes + 40);
+    }
+
+    #[test]
     fn oversized_payload_is_not_retained_in_replay_buffer() {
         let reg = registry();
         let k = key("claude", "sid");

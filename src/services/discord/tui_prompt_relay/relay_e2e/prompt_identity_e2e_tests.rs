@@ -354,6 +354,7 @@ async fn an_http_alias_keeps_its_distinct_pane_channel() {
     let hooks = HookServerState::new();
     let (harness, relayed) = start(first, &[command], hooks.subscribe(), READY).await;
     let channel = poise::serenity_prelude::ChannelId::new(super::CHANNEL_ID + 10);
+    harness.mock.allow_channel(channel.get());
     crate::services::discord::rebind_channel_session(
         &harness.shared,
         &crate::services::provider::ProviderKind::Claude,
