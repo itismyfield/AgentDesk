@@ -5739,6 +5739,7 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_identity_separates_original_and_execution_provider
+services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_refusal_preserves_existing_thread_role_override
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_redirect_refuses_closed_thread_before_bootstrap_or_mapping
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
@@ -5749,6 +5750,7 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn
+services::discord::router::message_handler::intake_turn::input_effect_tests::c1b_off_role_override_keeps_runtime_transition_on_original_provider
 services::discord::router::message_handler::intake_turn::input_effect_tests::c1b_worker_core_refuses_closing_before_settings_or_voice_consumption
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_adopts_worker_intake_outbox_identity

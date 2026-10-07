@@ -660,7 +660,7 @@ mod tests {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = shared.provider.clone();
-        let channel = ChannelId::new(6_325_532);
+        let channel = ChannelId::new(6_325_538);
         let state = InflightTurnState::new(
             provider.clone(),
             channel.get(),
