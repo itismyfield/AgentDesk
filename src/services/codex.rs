@@ -1714,11 +1714,11 @@ fn execute_streaming_local_tui_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    if let Some(result) = verified_hold::preflight(tmux_session_name, cancel_token.as_ref()) {
-        return result;
-    }
     let warm_followup_enabled =
-        crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled();
+        match verified_hold::preflight(tmux_session_name, cancel_token.as_ref()) {
+            Some(result) => return result,
+            None => crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),
+        };
     let turn_lock = warm_followup_enabled.then(|| codex_tui_session_turn_lock(tmux_session_name));
     let _turn_guard = turn_lock
         .as_ref()
