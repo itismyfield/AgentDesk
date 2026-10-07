@@ -983,6 +983,19 @@ pub(super) mod save_fault {
         let index = armed.iter().position(|armed| *armed == channel_id);
         index.map(|index| armed.swap_remove(index)).is_some()
     }
+
+    /// Faults still armed for the channel; disarms them when `clear`.
+    pub(in crate::services::turn_orchestrator) fn armed(
+        channel_id: ChannelId,
+        clear: bool,
+    ) -> usize {
+        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+        let count = armed.iter().filter(|armed| **armed == channel_id).count();
+        if clear {
+            armed.retain(|armed| *armed != channel_id);
+        }
+        count
+    }
 }
 
 #[cfg(test)]

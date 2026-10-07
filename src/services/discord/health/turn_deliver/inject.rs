@@ -1,23 +1,33 @@
 //! Busy-turn injection for human input: the kill switch, the vetoes read before any pane call,
-//! and the hand-off of one deliver to `claude_tui::busy_inject`.
+//! the mailbox order reservation, and the hand-off of one input to `claude_tui::busy_inject`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use poise::serenity_prelude::ChannelId;
 
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Outcome, Unconfirmed, Veto};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
+use crate::services::discord::input_runtime::fence;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
+use crate::services::turn_orchestrator::{
+    ActiveTurnKind, ChannelMailboxSnapshot, ExpectedClaim, HANDBACK_NOT_WRITTEN,
+    InjectionSettlement, Intervention, ReserveOutcome,
+};
 use tokio::sync::OwnedMutexGuard;
 
-/// `ADK_BUSY_INJECT` turns on busy-turn injection for turn/deliver, read once per process: `external`
-/// for TUI-direct turns, `all` for Discord turns too; unset or any other value keeps it off.
+/// `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read
+/// once per process: `external` or `all` opens it for any turn holder; anything else keeps it off.
 pub(crate) const INJECT_ENV: &str = "ADK_BUSY_INJECT";
 
-pub(super) const HOLDER_UNSUPPORTED: &str = "holder_unsupported";
+pub(super) const HOLDER_CHANGED: &str = "holder_changed";
+pub(super) const INPUT_IN_FLIGHT: &str = "input_in_flight";
+const INPUT_RUNTIME_OWNED: &str = "input_runtime_owned";
+const MAILBOX_UNAVAILABLE: &str = "mailbox_unavailable";
+const NOT_BUSY: &str = "not_busy";
 pub(super) const QUEUE_NONEMPTY: &str = "queue_nonempty";
 const SESSION_UNRESOLVED: &str = "session_unresolved";
 pub(super) const TRANSITION_BUSY: &str = "transition_busy";
@@ -41,6 +51,7 @@ impl InjectMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum InjectAttempt {
+    /// Nothing was reserved or sent; the caller's own start or queue follows.
     NotSent(&'static str),
     Injected {
         turn_id: Option<String>,
@@ -49,6 +60,13 @@ pub(super) enum InjectAttempt {
         turn_id: Option<String>,
         detail: &'static str,
     },
+    /// The pane vetoed after the reservation; the input took the queue front as `turn_id`.
+    HandedBack {
+        turn_id: String,
+        veto: &'static str,
+    },
+    /// The pane vetoed and the queue front was not written, or its result is unknown.
+    HandbackFailed(&'static str),
 }
 
 /// Tests never read the process env; a channel injects only when a test forces it.
@@ -63,30 +81,52 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
     }
 }
 
-/// Holder vetoes on one mailbox snapshot and the channel's durable row; `Ok` names the busy turn.
+/// Who holds the channel at one read: the mailbox claim and the durable row.
+pub(super) struct Holder {
+    claim: ExpectedClaim,
+    row: Option<RowKey>,
+    pub(super) turn_id: Option<String>,
+}
+
+type RowKey = (TurnSource, u64, String, Option<u64>);
+
+fn row_key(row: &InflightTurnState) -> RowKey {
+    let started = row.started_at.clone();
+    (
+        row.turn_source,
+        row.user_msg_id,
+        started,
+        row.turn_start_offset,
+    )
+}
+
+/// Any holder takes input, except a claimed input whose own row is not on disk: that input has not
+/// reached the pane, so later input waits behind it. `turn_id` names a row's Discord message.
 pub(super) fn holder(
-    mode: InjectMode,
     snapshot: &ChannelMailboxSnapshot,
     row: Option<&InflightTurnState>,
     channel_id: u64,
-) -> Result<Option<String>, &'static str> {
-    let row = row.ok_or(HOLDER_UNSUPPORTED)?;
-    match (&snapshot.cancel_token, row.turn_source) {
-        // A TUI-direct turn holds the channel through its row alone.
-        (None, TurnSource::ExternalInput) => Ok(None),
-        // A Discord turn whose own row is on disk.
-        (Some(_), TurnSource::Managed)
-            if mode == InjectMode::All
-                && !snapshot.active_turn_kind.is_background()
-                && snapshot
-                    .active_user_message_id
-                    .is_some_and(|id| id.get() == row.user_msg_id) =>
-        {
-            Ok(Some(format!("discord:{channel_id}:{}", row.user_msg_id)))
-        }
-        // Background, monitor and adopted holders, and a claim taken over a foreign row.
-        _ => Err(HOLDER_UNSUPPORTED),
+) -> Result<Holder, &'static str> {
+    let message = snapshot.active_user_message_id;
+    let claim = snapshot
+        .cancel_token
+        .clone()
+        .map(|token| (token, snapshot.active_turn_kind, message));
+    let own_row = row
+        .zip(message)
+        .is_some_and(|(row, message)| row.user_msg_id == message.get());
+    if claim.is_some() && snapshot.active_turn_kind == ActiveTurnKind::UserOrAgent && !own_row {
+        return Err(INPUT_IN_FLIGHT);
     }
+    let turn_id = row
+        .filter(|row| row.turn_source != TurnSource::ExternalInput && row.user_msg_id != 0)
+        .map(|row| format!("discord:{channel_id}:{}", row.user_msg_id));
+    let row = row.map(row_key);
+    Ok(Holder {
+        claim,
+        row,
+        turn_id,
+    })
 }
 
 /// Queued input, or a head dequeued but not yet claimed, must run before this one.
@@ -102,8 +142,12 @@ struct Target {
     session: String,
     transcript: PathBuf,
     turn_id: Option<String>,
-    /// Held from the first mailbox read until the pane effect ends.
+    /// The mailbox claim the holder check judged; the reservation requires it unchanged.
+    claim: ExpectedClaim,
+    /// Held from the first mailbox read until the owner settles.
     transition: OwnedMutexGuard<()>,
+    /// Keeps an input-runtime gate from closing on the channel until the owner settles.
+    input: Option<fence::Permit>,
 }
 
 async fn observe(
@@ -118,16 +162,73 @@ async fn observe(
     (snapshot, row)
 }
 
+/// The channel's name, read under the core lock.
+async fn channel_name(shared: &SharedData, channel: ChannelId) -> Option<String> {
+    let data = shared.core.lock().await;
+    let session = data.sessions.get(&channel);
+    session.and_then(|session| session.channel_name.clone())
+}
+
+/// The channel's Claude TUI pane and transcript. A row stamped with another runtime, or a first
+/// bound candidate (watcher, row, channel name) of another runtime, means the session is not TUI.
+pub(super) fn tui_session(
+    provider: &ProviderKind,
+    row: Option<&InflightTurnState>,
+    watcher: Option<String>,
+    named: Option<String>,
+) -> Option<(String, PathBuf)> {
+    let kind = row.and_then(|row| row.runtime_kind);
+    if kind.is_some_and(|kind| kind != RuntimeHandoffKind::ClaudeTui) {
+        return None;
+    }
+    let candidates = [
+        watcher,
+        row.and_then(|row| row.tmux_session_name.clone()),
+        named.map(|name| provider.build_tmux_session_name(&name)),
+    ];
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
+    let (session, binding) = candidates
+        .into_iter()
+        .flatten()
+        .find_map(|session| binding(&session).map(|binding| (session, binding)))?;
+    (binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
+        .then(|| (session, PathBuf::from(binding.relay_output_path())))
+}
+
+fn live_tui_session(
+    shared: &SharedData,
+    request: &HumanInputRequest,
+    row: Option<&InflightTurnState>,
+    named: Option<String>,
+) -> Option<(String, PathBuf)> {
+    let watcher = shared.tmux_watchers.channel_binding(&request.channel_id);
+    let watcher = watcher.map(|binding| binding.tmux_session_name);
+    tui_session(&request.provider, row, watcher, named)
+}
+
 /// Every veto that needs no pane call, in the documented order.
 async fn resolve(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
-    mode: InjectMode,
 ) -> Result<Target, &'static str> {
     let channel = request.channel_id.get();
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
+    // A session that resolves to no Claude TUI pane stops here, before acquiring the
+    // session-transition guard or issuing pane I/O.
+    let read = crate::services::discord::inflight::load_inflight_state_read_only;
+    let row = read(&request.provider, channel);
+    let named = channel_name(shared, request.channel_id).await;
+    let pane = live_tui_session(shared, request, row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
+    // An idle transcript keeps the caller's own start; a reservation is only for a live turn.
+    if !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&pane.1).is_busy() {
+        return Err(NOT_BUSY);
+    }
+    let input = match fence::lookup(&request.provider, channel) {
+        Some(gate) => Some(gate.admit().map_err(|_| INPUT_RUNTIME_OWNED)?),
+        None => None,
+    };
     // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
     // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
     let transition = shared
@@ -135,50 +236,44 @@ async fn resolve(
         .try_lock_owned()
         .map_err(|_| TRANSITION_BUSY)?;
     let (snapshot, row) = observe(shared, request).await;
-    let turn_id = holder(mode, &snapshot, row.as_ref(), channel)?;
-    if crate::services::tui_o::turn_mode::transcript_turns(channel) {
-        return Err("turn_mode_unsupported");
-    }
+    let first = holder(&snapshot, row.as_ref(), channel)?;
     backlog(&snapshot)?;
-    let session = row
-        .and_then(|row| row.tmux_session_name)
-        .filter(|name| !name.trim().is_empty())
-        .ok_or(SESSION_UNRESOLVED)?;
-    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
-        .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
-        .ok_or(SESSION_UNRESOLVED)?;
     let deferred = crate::services::discord::host_defer_gate::channel_session_deferred;
-    if deferred(shared, &request.provider, channel, &session).await {
+    if deferred(shared, &request.provider, channel, &pane.0).await {
         return Err(SESSION_UNRESOLVED);
     }
-    // Paths that skip the transition may have queued or claimed while the lookup awaited.
-    let (snapshot, row) = observe(shared, request).await;
-    if holder(mode, &snapshot, row.as_ref(), channel)? != turn_id {
-        return Err(HOLDER_UNSUPPORTED);
-    }
-    backlog(&snapshot)?;
-    if row.and_then(|row| row.tmux_session_name).as_deref() != Some(session.as_str()) {
+    // Paths that skip the transition may queue or claim while these lookups wait; the owner's
+    // reservation checks the claim and the queue after them, and the row is read last here.
+    #[cfg(test)]
+    test_hook::final_name_lookup(channel);
+    let named = channel_name(shared, request.channel_id).await;
+    let row = read(&request.provider, channel);
+    if live_tui_session(shared, request, row.as_ref(), named).as_ref() != Some(&pane) {
         return Err(SESSION_UNRESOLVED);
     }
+    if row.as_ref().map(row_key) != first.row {
+        return Err(HOLDER_CHANGED);
+    }
+    let (session, transcript) = pane;
     Ok(Target {
-        transcript: PathBuf::from(binding.relay_output_path()),
         session,
-        turn_id,
+        transcript,
+        turn_id: first.turn_id,
+        claim: first.claim,
         transition,
+        input,
     })
 }
 
 pub(super) async fn attempt(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
-    mode: InjectMode,
 ) -> InjectAttempt {
-    let target = match resolve(shared, request, mode).await {
+    let target = match resolve(shared, request).await {
         Ok(target) => target,
         Err(veto) => return InjectAttempt::NotSent(veto),
     };
     let channel = request.channel_id.get();
-    let pane = pane(channel, &target.session);
     let input = Arc::new(Input {
         channel,
         provider: request.provider.as_str().to_string(),
@@ -188,15 +283,105 @@ pub(super) async fn attempt(
         nonce: busy_inject::fresh_nonce(),
     });
     let (session, turn_id) = (target.session.clone(), target.turn_id.clone());
-    // The effect outlives a cancelled request, so it keeps the transition and records its own alert.
-    let effect = tokio::task::spawn_blocking({
-        let input = input.clone();
-        move || run(&pane, target, &input)
-    });
-    match effect.await {
+    let owner = Owner {
+        shared: shared.clone(),
+        provider: request.provider.clone(),
+        channel_id: request.channel_id,
+        handback: request.queue_entry(),
+    };
+    // The owner outlives a cancelled request: it settles the reservation and any handback itself.
+    match tokio::spawn(owner.run(target, input.clone())).await {
         Ok(attempt) => attempt,
-        // The effect panicked outside its catch_unwind or never started, so it recorded nothing.
+        // The owner panicked; its reservation is an orphan and its paste is unknown.
         Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
+    }
+}
+
+struct Owner {
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    /// The queue entry a vetoed paste becomes, and the turn id that names it.
+    handback: (Intervention, String),
+}
+
+impl Owner {
+    async fn run(self, target: Target, input: Arc<Input>) -> InjectAttempt {
+        let Owner {
+            shared,
+            provider,
+            channel_id,
+            handback: (handback, queued_turn),
+        } = self;
+        let Target {
+            session,
+            transcript,
+            turn_id,
+            claim,
+            transition,
+            input: permit,
+        } = target;
+        let mailbox = shared.mailbox(channel_id);
+        #[cfg(test)]
+        test_hook::before_reserve(input.channel).await;
+        let ticket = match mailbox.reserve_injection(None, claim, permit.clone()).await {
+            ReserveOutcome::Reserved(ticket) => ticket,
+            ReserveOutcome::HolderChanged => return InjectAttempt::NotSent(HOLDER_CHANGED),
+            ReserveOutcome::Backlog => return InjectAttempt::NotSent(QUEUE_NONEMPTY),
+            ReserveOutcome::Unavailable => return InjectAttempt::NotSent(MAILBOX_UNAVAILABLE),
+        };
+        let pane = pane(input.channel, &session);
+        let effect = tokio::task::spawn_blocking({
+            let (input, session, turn_id) = (input.clone(), session.clone(), turn_id.clone());
+            move || run(&pane, &session, &transcript, turn_id, &input)
+        });
+        let attempt = match effect.await {
+            Ok(attempt) => attempt,
+            // The effect panicked outside its catch_unwind or never started, so it recorded nothing.
+            Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
+        };
+        let discord = crate::services::discord::queue_persistence_context;
+        let persistence = discord(&shared, &provider, channel_id);
+        let attempt = match attempt {
+            InjectAttempt::NotSent(veto) => {
+                let source = [handback.message_id.get()];
+                let handed =
+                    mailbox.hand_back_injected_input(ticket, handback, persistence, permit.clone());
+                match handed.await {
+                    Ok(events) => {
+                        let apply = crate::services::discord::apply_queue_exit_feedback;
+                        let feedback = apply(&shared, channel_id, &events);
+                        fence::effect::scope(permit.clone(), feedback).await;
+                        InjectAttempt::HandedBack {
+                            turn_id: queued_turn,
+                            veto,
+                        }
+                    }
+                    Err(reason) => {
+                        if reason == HANDBACK_NOT_WRITTEN {
+                            let failure = fence::Failure::Persistence;
+                            fence::record_failure(&provider, input.channel, &source, failure);
+                            let notice = crate::services::discord::queue_io::input_refusal_notice;
+                            notice(&shared, channel_id, &source, failure).await;
+                        }
+                        InjectAttempt::HandbackFailed(reason)
+                    }
+                }
+            }
+            delivered => {
+                let settle = InjectionSettlement::Delivered;
+                let permit = permit.clone();
+                let _ = mailbox
+                    .settle_injected_input(ticket, settle, persistence, permit)
+                    .await;
+                delivered
+            }
+        };
+        drop((transition, permit));
+        // Ending the reservation may release a drain it withheld.
+        let kick = crate::services::discord::queue_io::schedule_post_enqueue_idle_queue_kick;
+        kick(shared, provider, channel_id);
+        attempt
     }
 }
 
@@ -209,19 +394,19 @@ struct Input {
     nonce: String,
 }
 
-fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt {
+fn run(
+    pane: &busy_inject::Pane,
+    session: &str,
+    transcript: &std::path::Path,
+    turn_id: Option<String>,
+    input: &Input,
+) -> InjectAttempt {
     #[cfg(test)]
     test_hook::crash(input.channel);
-    let Target {
-        session,
-        transcript,
-        turn_id,
-        transition,
-    } = target;
     let nonce = &input.nonce;
     let request = busy_inject::Request {
-        session: &session,
-        transcript: &transcript,
+        session,
+        transcript,
         source: &input.source,
         author: &input.author,
         nonce,
@@ -230,7 +415,7 @@ fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt
     let inject = || busy_inject::inject(pane, &request, &busy_inject::TIMING);
     // A panic may come after the paste, so it is reported like any later failure.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
-    let alert = |detail| unconfirmed(input, &session, turn_id.clone(), detail);
+    let alert = |detail| unconfirmed(input, session, turn_id.clone(), detail);
     let result = match outcome {
         Ok(Outcome::NotSent(veto)) => InjectAttempt::NotSent(veto_name(veto)),
         Ok(Outcome::Injected) => {
@@ -247,7 +432,6 @@ fn run(pane: &busy_inject::Pane, target: Target, input: &Input) -> InjectAttempt
         Ok(Outcome::Unconfirmed(detail)) => alert(unconfirmed_name(detail)),
         Err(_) => alert("executor_failed"),
     };
-    drop(transition);
     result
 }
 
@@ -322,12 +506,49 @@ fn unconfirmed_name(detail: Unconfirmed) -> &'static str {
 pub(crate) mod test_hook {
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Notify;
 
     use super::InjectMode;
 
     static FORCED: Mutex<Option<HashMap<u64, (InjectMode, PathBuf)>>> = Mutex::new(None);
     static CRASHING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    static FINAL_LOOKUP: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
+    type Park = (Arc<Notify>, Arc<Notify>);
+    static BEFORE_RESERVE: Mutex<Option<HashMap<u64, Park>>> = Mutex::new(None);
+
+    /// Parks the channel's next owner before its reservation: `(reached, resume)`.
+    pub(crate) fn park_before_reserve(channel_id: u64) -> Park {
+        let park: Park = Default::default();
+        let mut parks = BEFORE_RESERVE.lock().unwrap_or_else(|e| e.into_inner());
+        parks
+            .get_or_insert_with(HashMap::new)
+            .insert(channel_id, park.clone());
+        park
+    }
+
+    pub(super) async fn before_reserve(channel_id: u64) {
+        let park = {
+            let mut parks = BEFORE_RESERVE.lock().unwrap_or_else(|e| e.into_inner());
+            parks.as_mut().and_then(|parks| parks.remove(&channel_id))
+        };
+        if let Some((reached, resume)) = park {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+
+    /// Fires when the channel's resolve is about to take the core lock for its final name lookup.
+    pub(crate) fn final_lookup_signal(channel_id: u64) -> Arc<Notify> {
+        let mut signals = FINAL_LOOKUP.lock().unwrap_or_else(|e| e.into_inner());
+        let signals = signals.get_or_insert_with(HashMap::new);
+        signals.entry(channel_id).or_default().clone()
+    }
+
+    pub(super) fn final_name_lookup(channel_id: u64) {
+        final_lookup_signal(channel_id).notify_one();
+    }
 
     pub(crate) fn forced(channel_id: u64) -> Option<(InjectMode, PathBuf)> {
         let forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
