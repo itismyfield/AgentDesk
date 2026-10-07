@@ -17,6 +17,7 @@ use crate::services::discord::tmux::execution_identity::herdr_observation::Herdr
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_restarted_herdr_source,
 };
+use crate::services::provider::ProviderKind;
 use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, herdr_endpoints};
 use crate::services::tui_prompt_dedupe::herdr_execution_listed;
 
@@ -102,7 +103,8 @@ impl Reconnect {
     }
 }
 
-type Results = BTreeMap<i64, (String, Reconnect)>;
+/// Per sessions row: whether a Codex pass read it, the execution it read and its result.
+type Results = BTreeMap<i64, (bool, String, Reconnect)>;
 
 /// The latest pass: its result per sessions row with the execution it read, and the input holds
 /// it counted.
@@ -145,9 +147,22 @@ fn with_pass<R>(use_it: impl FnOnce(&mut Pass) -> R) -> R {
     RECONNECTS.with_borrow_mut(use_it)
 }
 
-/// Reconnects this node's Bound Herdr executions after a restart, each through its own reader;
-/// a settled one is not read again. Without a local endpoint it reads nothing.
-pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(pool: Option<&PgPool>) {
+/// Whether a Codex pass reads `row`; every other row, an unreadable one included, is the
+/// Claude pass's.
+fn codex_row(row: &HostedRecord) -> bool {
+    matches!(row, HostedRecord::Known(record) if record.owner.provider == "codex")
+}
+
+/// After a restart, reconnects this node's Bound Herdr rows of `provider`'s pass; a settled one is
+/// not read again. Without a local endpoint, or in the Codex pass off Herdr, it reads nothing.
+pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+) {
+    let codex = *provider == ProviderKind::Codex;
+    if codex && !crate::services::turn_host::herdr_turn_switched_on_for(provider) {
+        return;
+    }
     if herdr_endpoints().is_empty() {
         return;
     }
@@ -172,19 +187,19 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(pool: Option
     };
     let before = with_pass(|pass| pass.results.clone());
     let mut after = BTreeMap::new();
-    for row in rows {
+    for row in rows.iter().filter(|row| codex_row(&row.record) == codex) {
         let record = match &row.record {
             HostedRecord::Known(record) => record,
             _ => {
-                after.insert(row.session_id(), (String::new(), Reconnect::Unknown));
+                after.insert(row.session_id(), (codex, String::new(), Reconnect::Unknown));
                 continue;
             }
         };
         let nonce = record.execution_nonce.clone();
         let seen = before
             .get(&row.session_id())
-            .filter(|(seen, _)| *seen == nonce);
-        let result = match seen.map(|(_, result)| *result) {
+            .filter(|(_, seen, _)| *seen == nonce);
+        let result = match seen.map(|(_, _, result)| *result) {
             Some(result) if result.settled() => result,
             // Only this pass's own refusal listed the pane; any other listing is this process's.
             Some(result) if result != Reconnect::Pending => {
@@ -193,9 +208,15 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(pool: Option
             _ if herdr_execution_listed(&record.owner.logical_key) => continue,
             _ => reconnect_unless_pending(&runtime, pool, record),
         };
-        after.insert(row.session_id(), (nonce, result));
+        after.insert(row.session_id(), (codex, nonce, result));
     }
-    with_pass(|pass| pass.results = after);
+    with_pass(|pass| {
+        // The other pass's rows keep their results; a row gone from the listing is dropped.
+        let listed = |id: &i64| rows.iter().any(|row| row.session_id() == *id);
+        pass.results
+            .retain(|id, (read_by_codex, ..)| *read_by_codex != codex && listed(id));
+        pass.results.extend(after);
+    });
 }
 
 /// A Pending execution is left to its next turn: nothing is launched or attached for it here.
@@ -245,7 +266,7 @@ pub(crate) fn local_reconnect_health() -> Option<(ReconnectCounts, HeldInputs)> 
 }
 
 pub(crate) fn reconnect_counts() -> ReconnectCounts {
-    let results: Vec<Reconnect> = with_pass(|pass| pass.results.values().map(|r| r.1).collect());
+    let results: Vec<Reconnect> = with_pass(|pass| pass.results.values().map(|r| r.2).collect());
     let mut counts = ReconnectCounts {
         channels: results.len(),
         ..ReconnectCounts::default()

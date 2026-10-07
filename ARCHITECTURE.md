@@ -727,6 +727,7 @@ src/
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── startup_update_tests.rs
+│   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
 │   │   │   └── inline_banner.rs
@@ -1257,6 +1258,7 @@ src/
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -1547,6 +1549,7 @@ src/
 │   │   │   │   ├── claim_entry_tests.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs

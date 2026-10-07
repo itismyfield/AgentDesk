@@ -154,6 +154,19 @@ pub(crate) fn register_claude_pane_under_source_authority(
     registered
 }
 
+/// A restart's restore of a Codex pane's logged `source`, for a caller holding its source
+/// authority: published only while the path still names that file, and nothing new is logged.
+pub(crate) fn register_restored_codex_pane_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+    source: binding_events::SourceId,
+) -> Option<Persisted> {
+    let record = Record::Exact(source);
+    let cause = CauseSource::Observed;
+    register_rehydrated_under_source_authority(authority, "codex", channel, binding, record, cause)
+}
+
 fn begin_pane_registration(key: &Pane, binding: &TuiRuntimeBinding) {
     if let Some(launch) = binding
         .session_id

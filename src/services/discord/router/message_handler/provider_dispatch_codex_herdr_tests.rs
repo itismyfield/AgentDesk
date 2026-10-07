@@ -33,7 +33,12 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 const CHANNEL: u64 = O_CHANNEL;
 const TOKEN: &str = "discord_0123456789abcdef";
 const LIMIT: Duration = Duration::from_secs(30);
-const READY: &str = "earlier output\n\
+/// The status row Codex draws at the bottom of the screen.
+const STATUS: &str = "  gpt-5.5 xhigh · /fixture/workspace";
+/// An empty compact composer as Codex 0.160 draws it: a bare `›` with the status row below.
+const READY: &str = "earlier output\n\n›\n\n  gpt-5.5 xhigh · /fixture/workspace";
+/// The boxed composer the Herdr tests showed before; the Herdr reader reads no boxed form.
+const BOXED_READY: &str = "earlier output\n\
 ╭──────────────────────────────────────────────────────────────╮\n\
 │ ▌                                                            │\n\
 ╰──────────────────────────────────────────────────────────────╯\n\
@@ -110,6 +115,15 @@ impl CodexHerdrPorts for Ports<'_> {
             self.posted_before_attach.lock().unwrap().push(posts);
         }
         CodexHerdrPorts::attach(&self.boot, owner, record, source, target)
+    }
+
+    fn confirm_bound(
+        &self,
+        owner: &HostedOwner,
+        record: &HostedExecution,
+        target: &HerdrTarget,
+    ) -> Result<(), String> {
+        CodexHerdrPorts::confirm_bound(&self.boot, owner, record, target)
     }
 }
 
@@ -429,14 +443,46 @@ fn append(path: &Path, lines: &[Value]) {
 }
 
 fn answer_lines() -> Vec<Value> {
+    turn_lines("t1", "답")
+}
+
+/// Turn `turn` of the rollout: its start, one assistant message `text` and its completion.
+fn turn_lines(turn: &str, text: &str) -> Vec<Value> {
+    let mut lines = started_lines(turn, text);
+    lines.push(
+        json!({"type": "event_msg", "payload": {"type": "task_complete",
+        "turn_id": turn, "last_agent_message": text}}),
+    );
+    lines
+}
+
+/// Turn `turn` started with one assistant message `text`, not complete yet.
+fn started_lines(turn: &str, text: &str) -> Vec<Value> {
     vec![
-        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}}),
+        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}),
         json!({"type": "response_item", "timestamp": "2026-10-07T07:00:01.000Z", "payload": {
-            "type": "message", "role": "assistant", "id": "msg_1",
-            "content": [{"type": "output_text", "text": "답"}]}}),
-        json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1",
-            "last_agent_message": "답"}}),
+            "type": "message", "role": "assistant", "id": format!("msg_{turn}_{text}"),
+            "content": [{"type": "output_text", "text": text}]}}),
     ]
+}
+
+/// The pane's provider answers turn `turn` with `text` once `sends` pane writes arrived.
+fn reply(fx: &Fixture, path: &Path, sends: usize, turn: &str, text: &str) {
+    if wait_for(&fx.finished, "the follow-up", || {
+        fx.rig.sends().len() == sends
+    }) {
+        append(path, &turn_lines(turn, text));
+    }
+}
+
+fn texts(messages: &[StreamMessage]) -> Vec<&str> {
+    fn text(m: &StreamMessage) -> Option<&str> {
+        match m {
+            StreamMessage::Text { content } => Some(content.trim()),
+            _ => None,
+        }
+    }
+    messages.iter().filter_map(text).collect()
 }
 
 fn screen(text: &str) -> Value {
@@ -458,6 +504,13 @@ fn context_of(nonce: &str) -> PathBuf {
     root.join(format!("runtime/binding_contexts/codex/{nonce}.json"))
 }
 
+/// Where a launch keeps the fingerprint of its launch options.
+fn options_of(fx: &Fixture) -> PathBuf {
+    let files =
+        crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(fx.logical());
+    files.launch_options_fingerprint_path
+}
+
 fn hold_of(nonce: &str) -> PathBuf {
     let root = crate::config::runtime_root().unwrap();
     root.join("runtime/herdr_input_holds").join(nonce)
@@ -469,8 +522,8 @@ fn pane_events(fx: &Fixture) -> usize {
     events.iter().filter(|e| e.tmux_session == logical).count()
 }
 
-// T1-4/T1-6/T1-9/T1-14: a prompt-less launch takes one prompt, logs nothing until its own start,
-// then attaches, binds, ends its hold and reads the new rollout; the next turn is not input-held.
+// T1-4/T1-6/T1-9/T1-14/T2-1: a prompt-less launch takes one prompt and logs nothing until its own
+// start, then binds and ends its hold; the next turn writes once and reads only its own reply.
 #[test]
 fn cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg() {
     let fx = Fixture::admitted("cold");
@@ -545,12 +598,22 @@ fn cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold
     );
     assert!(!ran.contains("HERDR_ENV="), "{ran}");
 
-    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
-    let second = second.unwrap_err();
-    assert!(!second.contains("input held"), "{second}");
-    assert!(second.contains("no follow-up yet"), "{second}");
-    assert_eq!(fx.rig.sends(), prompt_sends());
+    let (second, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        reply(&fx, &path, 4, "t2", "둘째")
+    });
+    assert_eq!(second, Ok(()));
+    assert_eq!(fx.rig.sends(), [prompt_sends(), prompt_sends()].concat());
+    assert_eq!(
+        texts(&messages),
+        ["둘째"],
+        "only the reply after the prompt"
+    );
+    assert!(
+        !hold_of(&nonce).exists(),
+        "a submitted follow-up ends its hold"
+    );
     assert_eq!(fx.row(), Some(HostedState::Bound));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
 }
 
 // T1-15: a cancel before any write leaves the Pending pane with no hold; the next turn creates
@@ -569,6 +632,14 @@ fn a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_p
     assert_eq!(fx.row(), Some(HostedState::Pending));
     let nonce = launcher.nonces.lock().unwrap()[0].clone();
     assert!(!hold_of(&nonce).exists());
+    // Other launch options than the pane's refuse its first prompt before any read or write.
+    let kept = options_of(&fx);
+    let launched_with = std::fs::read_to_string(&kept).unwrap();
+    std::fs::write(&kept, "other options").unwrap();
+    let (changed, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    assert!(changed.unwrap_err().contains("LaunchOptionsChanged"));
+    assert!(fx.rig.sends().is_empty());
+    std::fs::write(&kept, launched_with).unwrap();
     let ports = fx.ports(&launcher);
     let (second, _) = fx.turn(&fx.record(), &ports, || {
         fx.rig.answer("pane.read", screen(READY));
@@ -745,12 +816,13 @@ fn a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg() {
 }
 
 /// A bound cold start whose hold release meets a holds directory of `mode`; the turn's result,
-/// its nonce and what a release under that mode returns.
-fn bound_with_holds_dir(tag: &str, mode: u32) -> (Fixture, Result<(), String>, String) {
+/// its nonce and its rollout.
+fn bound_with_holds_dir(tag: &str, mode: u32) -> (Fixture, Result<(), String>, String, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::admitted(tag);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
+    let path = Mutex::new(None);
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         let Some(nonce) = fx.start_provider(&launcher, true) else {
             return;
@@ -759,10 +831,11 @@ fn bound_with_holds_dir(tag: &str, mode: u32) -> (Fixture, Result<(), String>, S
             let dir = hold_of(&nonce).parent().unwrap().to_owned();
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        fx.answer(&nonce);
+        *path.lock().unwrap() = fx.answer(&nonce).map(|(_, path)| path);
     });
     let nonce = launcher.nonces.lock().unwrap()[0].clone();
-    (fx, result, nonce)
+    let path = path.into_inner().unwrap().unwrap();
+    (fx, result, nonce, path)
 }
 
 // N2: a removal whose directory sync fails is NotDurable with the hold gone; a removal that fails
@@ -774,7 +847,7 @@ fn a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg() 
         let dir = hold_of(nonce).parent().unwrap().to_owned();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     };
-    let (fx, result, nonce) = bound_with_holds_dir("unsynced", 0o300);
+    let (fx, result, nonce, path) = bound_with_holds_dir("unsynced", 0o300);
     assert_eq!(result, Ok(()));
     assert!(!hold_of(&nonce).exists(), "NotDurable: the hold is gone");
     std::fs::write(hold_of("unsynced-probe"), "").unwrap();
@@ -784,11 +857,13 @@ fn a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg() 
     ));
     assert!(!hold_of("unsynced-probe").exists());
     restore(&nonce);
-    let (second, _) = fx.turn(&fx.record(), &fx.ports(&Arc::default()), || {});
-    assert!(second.unwrap_err().contains("no follow-up yet"));
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&Arc::default()), || {
+        reply(&fx, &path, 4, "t2", "둘째")
+    });
+    assert_eq!(second, Ok(()), "the removed hold holds nothing");
     drop(fx);
 
-    let (fx, result, nonce) = bound_with_holds_dir("unlinked", 0o500);
+    let (fx, result, nonce, _) = bound_with_holds_dir("unlinked", 0o500);
     assert_eq!(result, Ok(()));
     assert!(hold_of(&nonce).exists(), "Kept: the hold stays");
     assert!(matches!(
@@ -1056,3 +1131,6 @@ fn a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg() {
     assert!(!state.user_stop.load(Ordering::SeqCst));
     assert_eq!(token.tmux_session_name().as_deref(), Some(fx.logical()));
 }
+
+#[path = "provider_dispatch_codex_herdr_followup_tests.rs"]
+mod followup;

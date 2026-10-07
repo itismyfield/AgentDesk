@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, UNIX_EPOCH};
@@ -71,6 +71,8 @@ pub(crate) struct HerdrRig {
     /// Server pids the next dials reach, the last one repeating.
     servers: Arc<Mutex<VecDeque<u32>>>,
     unanswered_sends: Arc<AtomicBool>,
+    /// Pane writes still answered before the rest go unanswered; `usize::MAX` answers them all.
+    answered_sends: Arc<AtomicUsize>,
     os: Arc<LateOs>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -119,7 +121,9 @@ impl HerdrRig {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        let answered_sends = Arc::new(AtomicUsize::new(usize::MAX));
         let (log, unanswered, stopped) = (requests.clone(), unanswered_sends.clone(), stop.clone());
+        let answered = answered_sends.clone();
         let answers = Answers::default();
         let scripted = answers.clone();
         let thread = thread::spawn(move || {
@@ -151,7 +155,12 @@ impl HerdrRig {
                         }
                     }
                 }
-                if !(send && unanswered.load(Ordering::SeqCst)) {
+                let silent = send
+                    && (unanswered.load(Ordering::SeqCst)
+                        || answered.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                            (left != usize::MAX && left > 0).then(|| left - 1)
+                        }) == Err(0));
+                if !silent {
                     let _ =
                         writer.write_all(format!("{}\n", reply(&request, &scripted)).as_bytes());
                 }
@@ -165,6 +174,7 @@ impl HerdrRig {
             answers,
             servers: Arc::new(Mutex::new(VecDeque::from([7]))),
             unanswered_sends,
+            answered_sends,
             os: Arc::default(),
             stop,
             thread: Some(thread),
@@ -286,6 +296,12 @@ impl HerdrRig {
     /// they landed.
     pub(crate) fn leave_sends_unanswered(&self, unanswered: bool) {
         self.unanswered_sends.store(unanswered, Ordering::SeqCst);
+        self.answered_sends.store(usize::MAX, Ordering::SeqCst);
+    }
+
+    /// The next `answered` pane writes are answered and every later one is left unanswered.
+    pub(crate) fn answer_sends_then_leave_unanswered(&self, answered: usize) {
+        self.answered_sends.store(answered, Ordering::SeqCst);
     }
 
     pub(crate) fn requests(&self) -> Vec<Value> {
