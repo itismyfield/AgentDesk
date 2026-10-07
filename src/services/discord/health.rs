@@ -63,6 +63,10 @@ pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_sessio
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
 // API surface, same convention as the recovery/snapshot blocks below.
+#[cfg(all(test, unix))]
+pub(crate) use super::turn_presence::activity::tests::{
+    BindingRoot, bind_turn_mode_transcript, settled_reason,
+};
 pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutboundDeliveryId;
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
@@ -88,8 +92,8 @@ pub(crate) use turn_deliver::inject_tests::{
     InjectPane, end_turn, queue_texts, register_inject_runtime, start_without_gateway,
 };
 pub use turn_deliver::{
-    EXTERNAL_TURN_ACTIVE, HumanInputDelivery, HumanInputError, HumanInputRequest,
-    deliver_human_input, external_turn_holds_channel,
+    ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
+    external_turn_hold_for_start,
 };
 #[cfg(test)]
 pub(crate) use turn_deliver::{register_bot_auth_for_tests, seed_external_turn_row_for_tests};

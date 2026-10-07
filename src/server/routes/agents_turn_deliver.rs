@@ -503,6 +503,77 @@ mod pg_tests {
         );
     }
 
+    /// A turn-mode direct turn holds no row: its transcript alone must queue a deliver and refuse a
+    /// start, naming whether it read busy or unknown.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_turn_mode_direct_turn_queues_deliver_and_refuses_start_pg() {
+        use crate::services::discord::health::{
+            BindingRoot, bind_turn_mode_transcript, queue_texts, register_inject_runtime,
+            settled_reason, start_without_gateway,
+        };
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let bindings = tempfile::tempdir().unwrap();
+        let _binding = BindingRoot::enter(bindings.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user = r#"{"type":"user","uuid":"a","message":{"content":"direct"}}"#;
+        let agents = [
+            ("tm-busy", 6_845_301_u64, format!("{user}\n"), "open"),
+            (
+                "tm-unknown",
+                6_845_302,
+                format!("{user}\n{{\"type\":\"user\"\n"),
+                "facts_halted",
+            ),
+        ];
+        for (agent, channel, _, _) in &agents {
+            let seed = crate::db::agents::insert_agent_channels_for_tests;
+            seed(&pool, agent, Some(&channel.to_string()), None).await;
+        }
+        let registry = Arc::new(HealthRegistry::new());
+        let channels = agents.each_ref().map(|(_, channel, _, _)| *channel);
+        let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
+        let (mut starts, mut confirmed) = (Vec::new(), Vec::new());
+        for (_, channel, transcript, reason) in &agents {
+            starts.push(start_without_gateway(*channel));
+            let path = bindings.path().join(format!("{channel}.jsonl"));
+            std::fs::write(&path, transcript).unwrap();
+            let session = format!("route-{channel}");
+            let provider = ProviderKind::Claude;
+            confirmed.push(bind_turn_mode_transcript(
+                &shared, &provider, *channel, &session, &path,
+            ));
+            assert_eq!(settled_reason(&shared, &provider, *channel).await, *reason);
+        }
+        let app = router(Some(pool), Some(registry));
+        let input = json!({"text": "status?", "author_discord_user_id": "200"}).to_string();
+        let start = json!({"prompt": "status?"}).to_string();
+        let mut observed = Vec::new();
+        for (agent, channel, _, _) in &agents {
+            let (status, body) = deliver(&app, agent, &input).await;
+            let field = |body: &Value, name: &str| body[name].as_str().unwrap_or("-").to_string();
+            let queued = queue_texts(&shared, *channel).await.len();
+            let (start_status, started) =
+                post(&app, &format!("/agents/{agent}/turn/start"), &start).await;
+            observed.push(format!(
+                "{agent}: deliver {} {} {} queued={queued} start {} {}",
+                status.as_u16(),
+                field(&body, "delivery"),
+                field(&body, "reason"),
+                start_status.as_u16(),
+                field(&started, "reason"),
+            ));
+        }
+        assert_eq!(
+            observed,
+            [
+                "tm-busy: deliver 200 queued external_turn_active queued=1 start 409 external_turn_active",
+                "tm-unknown: deliver 200 queued turn_activity_unknown queued=1 start 409 turn_activity_unknown",
+            ]
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn target_and_author_gates_run_at_the_route_boundary_pg() {
         let pg_db = TestPostgresDb::create().await;

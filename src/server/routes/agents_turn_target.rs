@@ -136,17 +136,22 @@ fn resolve_bound_target(
 }
 
 /// 409 when a turn that never claimed the mailbox (TUI-direct, adopted or monitor) still
-/// holds the channel: a start there would report `started` and then lose the prompt.
-pub(super) fn external_turn_conflict(
+/// holds the channel, or a turn-mode transcript reads busy or unknown: a start there would
+/// report `started` and then lose the prompt.
+pub(super) async fn external_turn_conflict(
+    registry: Option<&crate::services::discord::health::HealthRegistry>,
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {
-    use crate::services::discord::health::{EXTERNAL_TURN_ACTIVE, external_turn_holds_channel};
-    external_turn_holds_channel(provider, channel_id).then(|| {
-        let error = format!("an external TUI turn holds channel {channel_id}");
-        let body = json!({"ok": false, "status": "conflict", "reason": EXTERNAL_TURN_ACTIVE, "error": error});
-        (StatusCode::CONFLICT, Json(body))
-    })
+    use crate::services::discord::health::{ExternalHold, external_turn_hold_for_start};
+    let hold = external_turn_hold_for_start(registry, provider, channel_id).await?;
+    let error = match hold {
+        ExternalHold::Unknown => format!("channel {channel_id}'s TUI turn state is unknown"),
+        _ => format!("an external TUI turn holds channel {channel_id}"),
+    };
+    let reason = hold.reason();
+    let body = json!({"ok": false, "status": "conflict", "reason": reason, "error": error});
+    Some((StatusCode::CONFLICT, Json(body)))
 }
 
 /// Starts a headless turn on a resolved agent target; returns its turn id and start status.
