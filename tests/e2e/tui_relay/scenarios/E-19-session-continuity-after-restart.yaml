@@ -2,7 +2,8 @@ id: E-19
 title: dcserver restart preserves live tmux session identity
 agent_mode: real_live
 coverage_class: live
-cells: [claude-tui, codex-tui]
+# Herdr: tmux identity checks are not_applicable; verify same status nonce and published reconnect row.
+cells: [claude-tui, codex-tui, claude-herdr, codex-herdr]
 isolation: required
 destructive: true
 acceptance_criteria:
@@ -26,7 +27,28 @@ steps:
     timeout_s: 240
   - capture_session_identity:
       label: before_restart
-  - restart_dcserver: {}
+  - restart_dcserver:
+      # Same bulk inventory baseline as E-54; any other degraded reason still fails.
+      require_status: &bulk_status [healthy, degraded]
+      allowed_degraded_reasons: &bulk_baseline_reasons
+        - "tui_o:released:1474933804887179286"
+        - "tui_o:released:1475086789696946196"
+        - "tui_o:released:1478248459445469264"
+        - "tui_o:released:1478652416533463101"
+        - "tui_o:released:1478652616295583805"
+        - "tui_o:released:1478652735300829185"
+        - "tui_o:released:1478653028000338114"
+        - "tui_o:released:1478653071214252103"
+        - "tui_o:released:1480531508820185241"
+        - "tui_o:released:1481478222439907560"
+        - "tui_o:released:1490141479707086938"
+        - "tui_o:released:1500628371829428350"
+        - "tui_o:released:1509350778043895902"
+        - "tui_o:released:1527859708180828350"
+        - "tui_o:released:1536866287983132752"
+        - "tui_o:released:1536887557290197062"
+        - "tui_o:too_many_readers:1509350490461180105"
+        - "relay_verdict_unknown_codex_1509350778043895902"
   - assert_session_preserved:
       label: before_restart
   - send_prompt: |
@@ -38,6 +60,8 @@ steps:
     timeout_s: 240
   - wait_idle_s: 5
   - assert_health:
+      require_status: *bulk_status
+      allowed_degraded_reasons: *bulk_baseline_reasons
       timeout_s: 60
       poll_interval_s: 2
       forbid_degraded_reasons:

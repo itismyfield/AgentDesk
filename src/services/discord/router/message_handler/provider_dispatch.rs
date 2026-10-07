@@ -52,6 +52,16 @@ pub(super) struct InputEffectProbe {
 pub(super) static INPUT_EFFECT_PROBE: std::sync::Mutex<Option<InputEffectProbe>> =
     std::sync::Mutex::new(None);
 #[cfg(test)]
+pub(super) struct SubmittedPrompt {
+    pub prompt: String,
+    pub system_prompt: Option<String>,
+    pub session_id: Option<String>,
+}
+#[cfg(test)]
+pub(super) static INPUT_PROMPT_PROBE: std::sync::Mutex<
+    Option<(u64, tokio::sync::oneshot::Sender<SubmittedPrompt>)>,
+> = std::sync::Mutex::new(None);
+#[cfg(test)]
 fn input_effect_probe(
     turn: &StreamingTurn<'_>,
     sender: &Sender<StreamMessage>,
@@ -121,6 +131,21 @@ pub(super) fn execute(
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
         // A Herdr turn never falls back to another driver.
         TurnHost::Herdr(plan) => return herdr_turn(&turn, plan, sender),
+    }
+    #[cfg(test)]
+    {
+        let mut probe = INPUT_PROMPT_PROBE.lock().unwrap();
+        if probe
+            .as_ref()
+            .is_some_and(|(channel, _)| *channel == turn.channel_id)
+        {
+            let (_, capture) = probe.take().unwrap();
+            let _ = capture.send(SubmittedPrompt {
+                prompt: turn.prompt.to_owned(),
+                system_prompt: turn.system_prompt.map(str::to_owned),
+                session_id: turn.session_id.map(str::to_owned),
+            });
+        }
     }
     #[cfg(test)]
     if let Some(result) = input_effect_probe(&turn, &sender) {

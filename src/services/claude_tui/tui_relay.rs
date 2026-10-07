@@ -90,6 +90,11 @@ pub(crate) trait SendBackend: Send + Sync {
         delete: bool,
     ) -> Result<(), String>;
     fn send_enter(&self, session_name: &str) -> Result<(), String>;
+    /// The pane with its attributes (`capture-pane -e`) for the draft-protection check; a backend
+    /// that cannot read it so keeps a protected pane held.
+    fn capture(&self, _session_name: &str) -> Option<String> {
+        None
+    }
 }
 
 struct TmuxSendBackend;
@@ -120,6 +125,10 @@ impl SendBackend for TmuxSendBackend {
             transport.send_keys(session_name, &[HostKey::Enter])
         })
         .map(|_| ())
+    }
+
+    fn capture(&self, session_name: &str) -> Option<String> {
+        host_input::observe_draft(session_name)
     }
 }
 
@@ -270,6 +279,13 @@ fn handle_send_with_backend(
     let mutation = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &session_name,
         || -> Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)> {
+            let protected = crate::services::claude_tui::composer_lock::admit_composer_write(
+                &session_name,
+                || backend.capture(&session_name),
+            );
+            if protected.is_err() {
+                return Err(draft_recovery_hold_json());
+            }
             if !req.text.is_empty() {
                 let buffer_name = allocate_buffer_name();
                 backend
@@ -591,6 +607,14 @@ fn bad_request_json(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(error_json(message)))
 }
 
+/// Nothing was sent: the pane protects a person's draft, so the caller keeps the input.
+fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(error_json("draft_recovery_hold")),
+    )
+}
+
 /// Test-only `SendBackend` exposed to the crate so the server-layer
 /// auth-boundary integration tests (which own the middleware wiring) can mount
 /// `/tui/send` without touching tmux. Kept next to the trait it implements; the
@@ -629,6 +653,19 @@ mod tests {
     use axum::http::StatusCode;
     use chrono::Utc;
     use serde_json::json;
+
+    /// The production backend reads a protected pane with its attributes, so a faint placeholder
+    /// stays apart from typed text.
+    #[cfg(unix)]
+    #[test]
+    fn the_tmux_backend_reads_the_pane_with_its_attributes() {
+        let session = format!("relay-draft-{}", uuid::Uuid::new_v4().simple());
+        let pane = host_input::FakeDraftPane::new(&session);
+        let row = "\x1b[39m\u{276f}\u{a0}\x1b[2mTry \"refactor <filepath>\"\x1b[0m\n";
+        pane.show(row);
+        assert_eq!(TmuxSendBackend.capture(&session).as_deref(), Some(row));
+        assert_eq!(pane.draft_reads(), 1);
+    }
 
     fn send_request(text: &str, submit: bool) -> SendRequest {
         SendRequest {

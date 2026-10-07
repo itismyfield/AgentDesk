@@ -490,7 +490,17 @@ mod tests {
         // captured synthetic mailbox actor.
         assert_eq!(tui_direct.matches(&pinned).count(), 1);
         assert!(intake.contains("cancel_token.clone(),\n            request_owner"));
-        assert!(headless.contains("cancel_token.clone(),\n            request_owner"));
+        // The headless start bridges the token its shared claim helper registered with the mailbox.
+        let headless_claim = include_str!("../../router/turn_start.rs");
+        assert!(headless.contains(
+            "let (session_transition_guard, cancel_token) =\n        claim(shared, channel_id, request_owner, &reservation, identity).await?;"
+        ));
+        assert!(
+            headless_claim.contains(
+                "let (token, message) = (cancel_token.clone(), reservation.user_msg_id);"
+            )
+        );
+        assert!(headless_claim.contains("Ok((transition, cancel_token))"));
         assert!(recovery.contains("mailbox_recovery_kickoff(\n            shared,\n            channel_id,\n            cancel_token.clone(),"));
         assert_eq!(
             tui_direct

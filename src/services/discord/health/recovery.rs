@@ -1726,12 +1726,22 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
         )
         .await;
+        #[cfg(test)]
+        retirement_await_tests::hold_reattach_return(channel_id.get()).await;
         if reattach_lane.handled_tick() {
             // A reused live incumbent owns the tick without repairing anything,
             // so it stops the remaining branches but adds nothing to `cleaned`.
             if reattach_lane.counts_as_cleaned() {
                 cleaned += 1;
             }
+            continue;
+        }
+        // The reattach await can outlive Legacy supervision for this channel.
+        if super::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id.get(),
+            "stall_watchdog_after_reattach",
+        ) {
             continue;
         }
         // #3668 F2: if JSONL still holds an unrelayed final answer after
@@ -6970,3 +6980,6 @@ mod retired_channel_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod retirement_await_tests;

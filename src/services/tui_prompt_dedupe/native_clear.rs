@@ -340,9 +340,9 @@ pub(crate) trait NativeClearHost: Send + 'static {
     fn submit(&mut self, deadline: Instant) -> NativeClearSubmission;
     fn decide(&mut self, allow_fallback: bool) -> ClearDecision;
     fn composer_empty(&mut self, deadline: Instant) -> bool;
-    // Finish the durable boundary resolve inside these callbacks, while the worker owns the guard.
-    // A failed resolve must return false, preserving Hold instead of publishing success.
+    // Save the checked selector before confirming the composer; resolve only in finish.
     fn save(&mut self, commit: ClearCommit, deadline: Instant) -> Step<'_, bool>;
+    fn finish(&mut self, commit: ClearCommit, deadline: Instant) -> Step<'_, bool>;
     fn fallback(&mut self, deadline: Instant) -> Step<'_, bool>;
 }
 
@@ -405,7 +405,12 @@ async fn run_until<H: NativeClearHost>(
             let saved = tokio::time::timeout_at(end, host.save(commit.clone(), end))
                 .await
                 .unwrap_or(false);
-            if saved && host.composer_empty(end) {
+            if saved
+                && host.composer_empty(end)
+                && tokio::time::timeout_at(end, host.finish(commit.clone(), end))
+                    .await
+                    .unwrap_or(false)
+            {
                 ClearOutcome::Native(commit)
             } else {
                 ClearOutcome::Hold(Some(commit))
@@ -495,6 +500,9 @@ mod tests {
                 saved.fetch_add(1, Ordering::SeqCst);
                 true
             })
+        }
+        fn finish(&mut self, _: ClearCommit, _: Instant) -> Step<'_, bool> {
+            Box::pin(async { true })
         }
         fn fallback(&mut self, _: Instant) -> Step<'_, bool> {
             self.kills.fetch_add(1, Ordering::SeqCst);

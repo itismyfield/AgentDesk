@@ -1503,8 +1503,12 @@ const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 // items but never construct one; everything else may not name them.
 #[test]
 fn herdr_items_have_no_production_caller() {
+    const ESCAPE_DELIVERY: &str =
+        "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs";
     const OWNERS: &[(&str, usize)] = &[
         ("src/services/session_host.rs", 0),
+        // Dormant Escape uses the registered target; no host is constructed or stop path wired.
+        (ESCAPE_DELIVERY, 1),
         ("src/services/session_host/herdr_host.rs", 5),
         ("src/services/session_host/herdr/model.rs", 1),
         ("src/services/session_host/herdr/contract.rs", 0),
@@ -1611,6 +1615,7 @@ fn herdr_items_have_no_production_caller() {
                 RECONCILE,
                 WATCH_HOST,
                 INPUT_GATE,
+                ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
             ],
         ),
         (
@@ -1625,6 +1630,7 @@ fn herdr_items_have_no_production_caller() {
                 RECONCILE,
                 WATCH_HOST,
                 INPUT_GATE,
+                ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
             ],
         ),
         (
@@ -1639,6 +1645,7 @@ fn herdr_items_have_no_production_caller() {
                 RECONCILE,
                 WATCH_HOST,
                 INPUT_GATE,
+                ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),

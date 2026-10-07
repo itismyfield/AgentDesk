@@ -156,35 +156,13 @@ async fn start_reserved_headless_turn_admitted(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
-    let session_transition_guard = shared
-        .acquire_session_transition(channel_id)
-        .await
-        .map_err(|_| {
-            HeadlessTurnStartError::Conflict(format!(
-                "session transition stayed busy for {} seconds on channel {}",
-                super::super::super::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs(),
-                channel_id.get()
-            ))
-        })?;
-    let cancel_token = Arc::new(CancelToken::new());
-    let started = crate::services::agent_recovery::admission::with_turn_identity(
+    let identity = (
         provider.clone(),
-        role_binding.as_ref().map(|binding| binding.role_id.clone()),
-        super::super::super::mailbox_try_start_turn(
-            shared,
-            channel_id,
-            cancel_token.clone(),
-            request_owner,
-            user_msg_id,
-        ),
-    )
-    .await;
-    if !started {
-        return Err(HeadlessTurnStartError::Conflict(format!(
-            "agent mailbox is busy for channel {}",
-            channel_id.get()
-        )));
-    }
+        role_binding.as_ref().map(|b| b.role_id.clone()),
+    );
+    let claim = super::super::turn_start::claim_reserved_headless_turn;
+    let (session_transition_guard, cancel_token) =
+        claim(shared, channel_id, request_owner, &reservation, identity).await?;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
     // Compute the routine continuity policy once at the turn-start boundary.
     // The shared `/goal fresh` machinery below clears every provider restore path

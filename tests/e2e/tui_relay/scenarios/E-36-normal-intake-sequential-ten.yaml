@@ -2,7 +2,8 @@ id: E-36
 title: Ten reset-free normal Discord turns and a separate queued follow-up
 agent_mode: real_live
 coverage_class: live
-cells: [claude-tui]
+# Herdr: isolated reset-free phase; Discord markers only, native/intake queue joins not_applicable.
+cells: [claude-tui, claude-herdr, codex-herdr]
 isolation: required
 e36_normal_intake:
   sequential_count: 10

@@ -9,6 +9,7 @@ import io
 import json
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1496,31 +1497,28 @@ class ScenarioHealthProbe(unittest.TestCase):
         self.assertIn("agent_turn_status=residual", message)
 
     def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
-        payloads = {
-            "/api/health": [
-                (
-                    200,
-                    {
-                        "status": "degraded",
-                        "ok": False,
-                        "fully_recovered": False,
-                        "degraded": True,
-                        "degraded_reasons": ["provider:claude:reconcile_in_progress"],
-                    },
-                )
-            ],
+        health = {
+            "status": "degraded",
+            "ok": False,
+            "fully_recovered": True,
+            "degraded": True,
+            "degraded_reasons": ["provider:claude:reconcile_in_progress"],
+        }
+        options = {
+            "require_status": ["healthy", "degraded"],
+            "forbid_degraded_reasons": ["global_active_counter_out_of_bounds"],
         }
 
-        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
-            result = driver.assert_health(
-                "http://agentdesk.test",
-                {
-                    "require_status": ["healthy", "degraded"],
-                    "forbid_degraded_reasons": ["global_active_counter_out_of_bounds"],
-                },
-            )
-
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for({"/api/health": [(200, health)]})):
+            result = driver.assert_health("http://agentdesk.test", options)
         self.assertEqual(result["status"], "degraded")
+
+        # Allowing unrelated reasons never waives unfinished startup recovery.
+        unrecovered = {"/api/health": [(200, {**health, "fully_recovered": False})]}
+        with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(unrecovered)):
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                driver.assert_health("http://agentdesk.test", options)
+        self.assertIn("fully_recovered=false", str(ctx.exception))
 
     def test_assert_health_forbid_non_strict_still_raises_on_forbidden(self):
         payloads = {
@@ -3267,6 +3265,7 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
             def __init__(self):
                 self.next_id = 5000
                 self.prompts: list[str] = []
+                self.rows: list[dict] = []
 
             def _id(self) -> str:
                 self.next_id += 1
@@ -3280,7 +3279,8 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
                 return {"id": self._id()}
 
             def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
-                return []
+                return [row for row in self.rows
+                        if after_id is None or int(row["id"]) > int(after_id)][:limit]
 
         client = FakeClient()
         idle_calls: list[dict] = []
@@ -3294,6 +3294,7 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
                 "type": 0,
                 "timestamp": "2026-05-31T00:00:00Z",
             }
+            client.rows.append(message)
             return message, [message]
 
         def fake_idle(**kwargs):
@@ -3431,7 +3432,7 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
                 if stage == "dispatch":
                     self.client.send_prompt.side_effect = [RuntimeError("dispatch failed"), {"id": "111"}]
                 else:
-                    self.client.fetch_messages.side_effect = [[], RuntimeError("history failed"), [], []]
+                    self.client.fetch_messages.side_effect = [[], RuntimeError("history failed"), [], [], []]
                 rc, report, output = self.main_result(self.scenario("E-GENERIC"), self.scenario("E-NEXT"))
                 self.assertEqual((rc, [(r["id"], r["status"]) for r in report["scenarios"]]), (1, [("E-GENERIC", "fail"), ("E-NEXT", "pass")]))
                 self.assertEqual(report["scenarios"][0]["failure_attribution"]["source"], "exception")
@@ -3531,6 +3532,82 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
                     self.assertEqual(len(report["scenarios"]), 2)
                     self.assertIn("live mailbox state outside cell", report["scenarios"][0]["reason"])
                     self.assertTrue(any("TEARDOWN" in call.args[1] for call in self.client.send_control.call_args_list))
+
+    HEALTHY = {"cluster_standby": False, "status": "healthy", "ok": True, "fully_recovered": True}
+
+    def degraded(self, reasons, *, recovered=True):
+        return {**self.HEALTHY, "status": "degraded", "ok": False, "degraded": True,
+                "degraded_reasons": reasons, "fully_recovered": recovered}
+
+    def health_steps_result(self, name, steps, after, *, kickstart_rc=0):
+        # /api/health stays healthy until launchctl ran, then serves `after` in order; the clock advances on sleep.
+        kicked, reads, clock = [], [], [0.0]
+        has_restart = any("restart_dcserver" in step for step in steps)
+
+        def health(base, path, **k):
+            if path != "/api/health":
+                return 200, {"sessions": []}
+            if has_restart and not kicked:
+                return 200, self.HEALTHY
+            reads.append(path)
+            return 200, after[min(len(reads), len(after)) - 1]
+
+        def kickstart(cmd, **k):
+            kicked.append(cmd[:3])
+            return subprocess.CompletedProcess(cmd, kickstart_rc, "", "kickstart refused" if kickstart_rc else "")
+
+        self.api.side_effect = health
+        driver.time.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        with patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(driver.subprocess, "run", side_effect=kickstart):
+            _, report, _ = self.main_result(self.scenario(name, steps + [{"send_prompt": "after health"}]))
+        self.assertEqual(kicked, [["launchctl", "kickstart", "-k"]] if has_restart else [])
+        return report["scenarios"][0]
+
+    def test_restart_health_wait_takes_assert_health_allowlist(self):
+        # A fully recovered restart can keep only the bulk baseline degraded reasons.
+        baseline = ["tui_o:released:1474933804887179286", "tui_o:too_many_readers:99"]
+        allow = {"require_status": ["healthy", "degraded"], "allowed_degraded_reasons": baseline}
+        for options, after, missing in ((allow, self.degraded(baseline), None),
+                                        (allow, self.degraded(baseline + ["tui_o:unexpected:7"]), "tui_o:unexpected:7"),
+                                        (allow, self.degraded(baseline, recovered=False), "fully_recovered=false"),
+                                        ({}, self.degraded(baseline), "status=degraded"), ({}, self.HEALTHY, None)):
+            with self.subTest(options=options, after=after):
+                row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release", **options}}], [after])
+                self.assertEqual(row["status"], "fail" if missing else "pass", row.get("reason"))
+                if missing:
+                    self.assertIn("did not become healthy", row["reason"])
+                    self.assertIn(missing, row["reason"])
+
+    def test_restart_fails_when_launchctl_kickstart_fails(self):
+        # A refused kickstart must not pass against the old server that still answers healthy.
+        row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY],
+                                       kickstart_rc=113)
+        self.assertEqual(row["status"], "fail")
+        self.assertIn("launchctl kickstart failed", row["reason"])
+        self.assertIn("kickstart refused", row["reason"])
+
+    def test_bulk_baseline_scenarios_hold_through_final_health(self):
+        # Real scenario health options: the steady bulk baseline passes to the end; a new reason or
+        # an unfinished startup recovery in the last health read still fails.
+        load = lambda name: driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios" / f"{name}.yaml").read_text())
+        baseline = next(step["assert_health"] for step in load("E-54-discord-stop-active-and-idle")["steps"]
+                        if "assert_health" in step)["allowed_degraded_reasons"]
+        for name in ("E-9-restart-mid-stream", "E-19-session-continuity-after-restart",
+                     "E-53-claude-autonomous-background-turn", "E-54-discord-stop-active-and-idle"):
+            data = load(name)
+            driver.validate_scenario_schema(data)
+            steps = [step for step in data["steps"] if {"restart_dcserver", "assert_health"} & step.keys()]
+            steady = {**self.degraded(baseline), "global_active": 0, "global_finalizing": 0}
+            lead = [steady] * (len(steps) - 1)
+            for last, missing in ((steady, None), ({**steady, "degraded_reasons": baseline + ["tui_o:unexpected:7"]},
+                                                   "tui_o:unexpected:7"),
+                                  ({**steady, "fully_recovered": False}, "fully_recovered=false")):
+                with self.subTest(name=name, missing=missing):
+                    row = self.health_steps_result(data["id"], steps, lead + [last])
+                    self.assertEqual(row["status"], "fail" if missing else "pass", row.get("reason"))
+                    if missing:
+                        self.assertIn(missing, row["reason"])
 
     def test_safety_recheck_precedes_mode_gates_without_teardown(self):
         for source in ("harness", "safety"):

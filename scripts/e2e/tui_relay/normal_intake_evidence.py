@@ -14,7 +14,7 @@ PHASE_SECONDS = 3540
 # Named for the reviewer, not tuned here: changing any value changes the acceptance profile.
 REQUEST_DEADLINE_S = 240  # per-request response budget the phase reserve arithmetic is sized against.
 QUEUE_COMMIT_OBSERVATION_S = 20  # QA holds a 20s tool, so QB's commit row must appear inside it.
-LOG_SAMPLE_BYTES = 65536  # trailing log slice read once to prove the adk-tracing-text-v1 field shape.
+LOG_SAMPLE_BYTES = 65536  # trailing pre-run slice; a busy log may hold no intake row here, so the run's own segment also counts.
 BOUNDED_READ_BYTES = 1_048_576  # per-observation read ceiling; a larger tail means the source outran us.
 LOG_TARGET = "agentdesk::services::discord::router::intake_queue_transaction"
 LOG_MESSAGE = "discord intake queue transaction committed"
@@ -183,15 +183,7 @@ def hold_publication_ids(window, observed, rows, marker):
 
 def edited_completion_candidates(window, observed, after_id):
     """Chrome we already observed cannot be retired by a later edit of the same message."""
-    ids = set()
-    for update in window.message_updates:
-        mid = str(update["id"])
-        if (row := observed.get(mid)) is None or assertions.is_our_send(row) or int(mid) <= after_id:
-            continue
-        if any(p.search(update.get(field) or "") for field in ("before", "after")
-               for p in assertions._COMPLETION_CHROME_PATTERNS):
-            ids.add(mid)
-    return ids
+    return assertions.edited_completion_candidates(window, observed, after_id)
 
 
 def drained(state):
@@ -223,8 +215,9 @@ class Evidence:
         self.generation = cursor(self.path)
         self.log_cursor = cursor(self.log)
         sample_start = {**self.log_cursor, "offset": max(0, self.log_cursor["offset"] - LOG_SAMPLE_BYTES)}
-        if not any(log_rows(tail(self.log, sample_start))):
-            raise ValueError(f"E36 intake log {self.log}: INFO/format evidence unavailable")
+        # Without a pre-run row the format must be proven by a row written after this cursor.
+        self.log_format_evidence = "pre_run_tail" if any(log_rows(tail(self.log, sample_start))) else None
+        record["e36_acceptance"]["intake_log_format_evidence"] = self.log_format_evidence
         record["e36_acceptance"].update(phase_seconds=PHASE_SECONDS, lease_ttl_s=3600,
                                       core_allowance_s=3503, pessimistic_subtotal_s=6054)
         self.idle()
@@ -283,6 +276,8 @@ class Evidence:
         deadline = min(prior["deadline"], self.d.time.monotonic() + QUEUE_COMMIT_OBSERVATION_S)
         while self.d.time.monotonic() < deadline and not matches:
             rows = list(log_rows(tail(self.log, request["log_before"])))
+            if rows and self.log_format_evidence is None:
+                self.log_format_evidence = self.record["e36_acceptance"]["intake_log_format_evidence"] = "run_segment"
             matches = [r for r in rows if r["channel_id"] == self.channel and r["message_id"] == request["inbound_message_id"]]
             if matches:
                 request["queue"] = matches[-1]  # Preserve exact commit before sampling transient ownership.
@@ -299,6 +294,8 @@ class Evidence:
                     raise ValueError("E36 QA activity ended before any QB commit became observable")
                 self.d.time.sleep(0.1)
         if not matches:
+            if self.log_format_evidence is None:
+                raise ValueError(f"E36 intake log {self.log}: INFO/format evidence unavailable")
             raise ValueError(f"E36 intake log {self.log}: exact QB commit unavailable")
         # source=busy_active_turn on QB's own commit is the ownership evidence; a mailbox
         # sample that missed the handover does not retract it.

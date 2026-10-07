@@ -1,0 +1,279 @@
+"""Offline final-snapshot and per-turn completion contracts for bulk activation."""
+
+import datetime as dt
+from pathlib import Path
+import sys
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tui_relay import assertions as a
+
+
+def message(mid, content, *, author="relay", bot=True, second=None):
+    row = {"id": str(mid), "content": content, "author": {"id": author, "bot": bot}, "type": 0}
+    if second is not None:
+        row["timestamp"] = f"2026-10-07T00:00:{second:02d}Z"
+    return row
+
+
+def window(*rows):
+    result = a.Window("100")
+    for row in rows:
+        result.add(row)
+    return result
+
+
+def timed(*rows):
+    result = window(*rows)
+    for second in (0, 10):
+        result.mark_prompt_sent(dt.datetime(2026, 10, 7, 0, 0, second, tzinfo=dt.timezone.utc))
+    return result
+
+
+class PlaceholderContracts(unittest.TestCase):
+    def test_final_body_passes_with_deleted_edited_and_nonrelay_placeholders(self):
+        value = window(message(101, "..."), message(102, "…"),
+                       message(103, "...", author=a.OUR_BOT_ID),
+                       message(104, "...", bot=False), message(105, "There is ... more."),
+                       message(106, "There is … more"), message(107, "…\u200bmore"),
+                       message(108, "more\ufeff..."))
+        value.deleted_ids.add("101")
+        value.add(message(102, "real answer"))
+        a.no_placeholder_left(value)
+
+    def test_single_surviving_placeholder_fails(self):
+        for content in ("...", " \n… \n", "🆕 새 세션 시작\n\n...",
+                        "…\n\n-# ✅ 완료", "\u200b...\ufeff", "\u2060…\u200b",
+                        " \u200b\ufeff\u2060…\u2060\ufeff\u200b\n"):
+            with self.subTest(content=content), self.assertRaisesRegex(a.AssertionError, "placeholders remain"):
+                a.no_placeholder_left(window(message(101, content)))
+
+    def test_final_placeholder_edit_is_not_hidden_by_prior_body(self):
+        value = window(message(101, "answer"))
+        value.add(message(101, "..."))
+        with self.assertRaises(a.AssertionError):
+            a.no_placeholder_left(value)
+
+
+class CompletionContracts(unittest.TestCase):
+    def test_complete_snapshot_removes_deleted_newest_completion(self):
+        body = message(101, "[E2E:T:ONE]")
+        value = window(body, message(102, "✅ 완료"))
+        a.completion_per_turn(value)
+        value.reconcile_snapshot([body], after_id="100", complete=True)
+        self.assertEqual(value.deleted_ids, {"102"})
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 0"):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_complete_empty_snapshot_removes_only_inline_message(self):
+        value = window(message(101, "[E2E:T:ONE]\n\n-# ✅ 완료"))
+        a.completion_per_turn(value)
+        value.reconcile_snapshot([], after_id="100", complete=True)
+        self.assertEqual(value.deleted_ids, {"101"})
+        self.assertEqual(value.messages, [])
+        self.assertEqual(len(value.raw_messages), 1)
+        with self.assertRaises(a.AssertionError):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_incomplete_full_page_does_not_delete_unobserved_tail(self):
+        page = [message(mid, "earlier reply") for mid in range(101, 201)]
+        value = window(*page, message(201, "[E2E:T:ONE]"), message(202, "✅ 완료"))
+        value.reconcile_snapshot(page, after_id="100", complete=False)
+        self.assertEqual(value.deleted_ids, set())
+        self.assertEqual(len(value.raw_messages), 102)
+
+    def test_partial_snapshots_preserve_deletions_and_edit_history(self):
+        body = message(101, "[E2E:T:ONE]")
+        value = window(body, message(102, "✅ 완료"))
+        value.add(message(102, "✅ 완료 updated"))
+        history = list(value.message_updates)
+        value.reconcile_snapshot([body], after_id="100", complete=True)
+        value.reconcile_snapshot([], after_id="100")
+        value.reconcile_snapshot([body], after_id="100")
+        self.assertEqual(value.deleted_ids, {"102"})
+        self.assertEqual(value.message_updates, history)
+        value.reconcile_snapshot(value.raw_messages, after_id="100")
+        self.assertEqual(value.deleted_ids, set())
+
+    def test_deleted_body_stays_out_of_canonical_messages_until_reobserved(self):
+        body = message(101, "[E2E:T:ONE]\n\n-# ✅ 완료")
+        value = window(body)
+        value.add({**body, "edited_timestamp": "edit"})
+        history = list(value.message_updates)
+        value.reconcile_snapshot([], after_id="100", complete=True)
+        self.assertEqual(value.messages, [])
+        with self.assertRaises(a.AssertionError):
+            a.text_present(value, needle="[E2E:T:ONE]")
+        other = message(102, "other answer")
+        value.add(other)
+        value.reconcile_snapshot([other], after_id="100", complete=True)
+        self.assertEqual([row["id"] for row in value.messages], ["102"])
+        value.add(body)
+        value.reconcile_snapshot([body, other], after_id="100", complete=True)
+        self.assertEqual(value.deleted_ids, set())
+        self.assertEqual([row["id"] for row in value.messages], ["101", "102"])
+        self.assertEqual(value.message_updates[:len(history)], history)
+        a.text_present(value, needle="[E2E:T:ONE]")
+
+    def test_one_completion_per_marked_turn(self):
+        value = window(message(101, "[E2E:T:ONE]"), message(102, "-# ✅ 완료"),
+                       message(103, "[E2E:T:TWO]"), message(104, "📦 응답 완료 · 1s"))
+        a.completion_per_turn(value)
+        a.completion_per_turn(value, marker="[E2E:T:TWO]")
+        a.completion_per_turn(value, marker="TWO")
+
+    def test_duplicate_first_and_missing_second_do_not_cancel(self):
+        value = window(message(101, "[E2E:T:ONE]"), message(102, "✅ 완료"),
+                       message(103, "✅ 완료"), message(104, "[E2E:T:TWO]"))
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
+            a.completion_per_turn(value)
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 0"):
+            a.completion_per_turn(value, marker="[E2E:T:TWO]")
+
+    def test_prompt_windows_support_multiple_body_markers_and_unmarked_bodies(self):
+        value = timed(message(101, "[E2E:T:PRE] [E2E:T:POST]", second=1),
+                      message(102, "✅ 완료", second=2), message(103, "plain answer", second=11),
+                      message(104, "✅ 완료", second=12))
+        a.completion_per_turn(value)
+        a.completion_per_turn(value, marker="[E2E:T:POST]")
+
+    def test_prompt_window_without_body_or_completion_fails(self):
+        value = timed(message(101, "answer", second=1), message(102, "✅ 완료", second=2))
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 0"):
+            a.completion_per_turn(value)
+
+    def test_completion_before_body_fails(self):
+        value = window(message(101, "✅ 완료"), message(102, "[E2E:T:ONE]"))
+        for marker in (None, "[E2E:T:ONE]"):
+            with self.subTest(marker=marker), self.assertRaises(a.CompletionOrderError):
+                a.completion_per_turn(value, marker=marker)
+
+    def test_deleted_card_and_nonbot_or_driver_cards_are_excluded(self):
+        value = window(message(101, "[E2E:T:ONE]"), message(102, "✅ 완료"),
+                       message(103, "✅ 완료"), message(104, "✅ 완료", bot=False),
+                       message(105, "✅ 완료", author=a.OUR_BOT_ID))
+        value.deleted_ids.add("102")
+        a.completion_per_turn(value, marker="[E2E:T:ONE]")
+        value.deleted_ids.add("103")
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 0"):
+            a.completion_per_turn(value)
+
+    def test_exact_zero_and_two(self):
+        value = window(message(101, "[E2E:T:ONE]"))
+        a.completion_per_turn(value, exact=0, marker="[E2E:T:ONE]")
+        for mid in (102, 103):
+            value.add(message(mid, "✅ 완료"))
+        a.completion_per_turn(value, exact=2, marker="[E2E:T:ONE]")
+        with self.assertRaisesRegex(a.AssertionError, "expected 0, got 2"):
+            a.completion_per_turn(value, exact=0)
+
+    def test_missing_repeated_or_deleted_marker_is_not_attributable(self):
+        for content in ("answer", "[E2E:T:ONE] [E2E:T:ONE]"):
+            with self.subTest(content=content), self.assertRaisesRegex(a.AssertionError, "must occur once"):
+                a.completion_per_turn(timed(message(101, content, second=1)), marker="[E2E:T:ONE]")
+        value = window(message(101, "[E2E:T:ONE]"), message(102, "✅ 완료"))
+        value.deleted_ids.add("101")
+        with self.assertRaises(a.AssertionError):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_card_edits_are_one_id_and_marker_in_card_does_not_count_as_body(self):
+        value = window(message(101, "[E2E:T:ONE]"), message(102, "✅ 완료"))
+        value.add(message(102, "✅ 완료 updated"))
+        a.completion_per_turn(value)
+        with self.assertRaises(a.AssertionError):
+            a.completion_per_turn(window(message(102, "✅ 완료 [E2E:T:ONE]")), marker="[E2E:T:ONE]")
+
+    def test_completion_edited_to_body_does_not_hide_duplicate(self):
+        for completion in ("✅ 완료", "ordinary text\n\n-# ✅ 완료"):
+            value = window(message(101, "[E2E:T:ONE]"), message(102, completion))
+            value.add(message(102, "ordinary text"))
+            value.add(message(103, "✅ 완료"))
+            for marker in (None, "[E2E:T:ONE]"):
+                with self.subTest(marker=marker, completion=completion), self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
+                    a.completion_per_turn(value, marker=marker)
+
+    def test_edited_completion_candidates_are_scoped_to_each_turn(self):
+        value = timed(message(101, "[E2E:T:ONE]", second=1),
+                      message(102, "✅ 완료", second=2),
+                      message(103, "[E2E:T:TWO]", second=11),
+                      message(104, "✅ 완료", second=12))
+        value.add(message(102, "ordinary text", second=2))
+        value.add(message(105, "✅ 완료", second=3))
+        a.completion_per_turn(value, marker="[E2E:T:TWO]")
+        with self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
+            a.completion_per_turn(value, marker="[E2E:T:ONE]")
+
+    def test_shared_history_helper_preserves_e36_scope_and_semantics(self):
+        from tui_relay import normal_intake_evidence as e36
+        value = window(message(101, "✅ 완료"), message(102, "✅ 완료"),
+                       message(103, "✅ 완료", author=a.OUR_BOT_ID))
+        for mid in (101, 102, 103):
+            value.add(message(mid, "ordinary text", author=a.OUR_BOT_ID if mid == 103 else "relay"))
+        observed = {row["id"]: row for row in value.raw_messages}
+        self.assertEqual(e36.edited_completion_candidates(value, observed, 101), {"102"})
+        self.assertEqual(e36.edited_completion_candidates(value, {"101": observed["101"]}, 100), {"101"})
+
+    def test_ambiguous_fallback_and_missing_timestamp_fail_closed(self):
+        for value in (window(message(101, "[E2E:T:PRE] [E2E:T:POST]")),
+                      timed(message(101, "[E2E:T:ONE]")), window()):
+            with self.subTest(value=value), self.assertRaises(a.AssertionError):
+                a.completion_per_turn(value)
+
+    def test_single_message_terminal_footer_is_one_completion(self):
+        for footer in ("-# ✅ 완료", "-# ⠸ 완료", "-# ✅ 백그라운드 완료"):
+            value = window(message(101, "[E2E:T:ONE]\n\n" + footer))
+            with self.subTest(footer=footer):
+                a.completion_per_turn(value)
+                a.completion_per_turn(value, marker="[E2E:T:ONE]")
+                value.add(message(102, "✅ 완료"))
+                with self.assertRaisesRegex(a.AssertionError, "expected 1, got 2"):
+                    a.completion_per_turn(value)
+
+    def test_only_inline_completion_must_survive_in_final_snapshot(self):
+        marker = "[E2E:T:ONE]"
+        for final in (marker, marker + "\n\n-# ⠸ 진행 중"):
+            value = window(message(101, marker + "\n\n-# ✅ 완료"))
+            value.add(message(101, final))
+            for selected in (None, marker):
+                with self.subTest(final=final, marker=selected), self.assertRaisesRegex(
+                        a.AssertionError, "expected 1, got 0 final IDs" if final == marker else "completion_per_turn"):
+                    a.completion_per_turn(value, marker=selected)
+
+    def test_inline_completion_retained_after_edit_is_final_evidence(self):
+        marker = "[E2E:T:ONE]"
+        value = window(message(101, marker + "\n\n-# ✅ 완료"))
+        value.add(message(101, marker + " updated\n\n-# ✅ 완료"))
+        a.completion_per_turn(value)
+        a.completion_per_turn(value, marker=marker)
+
+    def test_inline_completion_history_still_rejects_duplicate_after_edit(self):
+        marker = "[E2E:T:ONE]"
+        value = window(message(101, marker + "\n\n-# ✅ 완료"))
+        value.add(message(101, marker))
+        value.add(message(102, "✅ 완료"))
+        for selected in (None, marker):
+            with self.subTest(marker=selected), self.assertRaisesRegex(
+                    a.AssertionError, "expected 1, got 2 observed IDs"):
+                a.completion_per_turn(value, marker=selected)
+
+    def test_footer_like_prose_and_active_footer_are_not_completions(self):
+        for suffix in ("\n\n-# ✅ 완료\nordinary prose", "\n\n-# ⠸ 진행 중", "\n-# ✅ 완료"):
+            with self.subTest(suffix=suffix), self.assertRaises(a.AssertionError):
+                a.completion_per_turn(window(message(101, "[E2E:T:ONE]" + suffix)))
+
+    def test_inline_completion_includes_earlier_card_in_order_check(self):
+        value = window(message(101, "✅ 완료"), message(102, "[E2E:T:ONE]\n\n-# ✅ 완료"))
+        with self.assertRaises(a.CompletionOrderError):
+            a.completion_per_turn(value, exact=2)
+
+    def test_invalid_count_and_marker_are_rejected(self):
+        for exact in (-1, 1.5, True, "1"):
+            with self.subTest(exact=exact), self.assertRaises(a.AssertionError):
+                a.completion_per_turn(window(), exact=exact)
+        for marker in ("", [], 7):
+            with self.subTest(marker=marker), self.assertRaises(a.AssertionError):
+                a.completion_per_turn(window(), marker=marker)
+
+
+if __name__ == "__main__":
+    unittest.main()

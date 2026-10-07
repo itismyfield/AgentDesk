@@ -2,7 +2,105 @@
 
 use super::cancel_token_cleanup::authority::{self, KillAuthorization, SessionKillGuard};
 use super::{CancelToken, ProviderKind};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Observations of this token's Herdr input, not a source or settlement authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HerdrSubmission {
+    Unsubmitted,
+    Submitted,
+    Unknown,
+}
+
+pub(crate) struct HerdrInterruptState {
+    pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    pub(crate) submission: Mutex<HerdrSubmission>,
+    pub(crate) user_stop: AtomicBool,
+}
+
+impl CancelToken {
+    /// Install observation before input; only Herdr executors use this slot.
+    pub(crate) fn prepare_herdr_interrupt(
+        &self,
+        provider: ProviderKind,
+        owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    ) -> Arc<HerdrInterruptState> {
+        let mut slot = self
+            .herdr_interrupt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = slot.as_ref() {
+            #[cfg(test)]
+            if herdr_interrupt_mutant("prepare_reset") {
+                self.claude_interrupt_claim.store(0, Ordering::Release);
+            }
+            return state.clone();
+        }
+        let state = Arc::new(HerdrInterruptState {
+            owner: owner.clone(),
+            submission: Mutex::new(HerdrSubmission::Unsubmitted),
+            user_stop: AtomicBool::new(false),
+        });
+        self.bind_interrupt_session(provider, &owner.logical_key);
+        *slot = Some(state.clone());
+        state
+    }
+
+    pub(crate) fn herdr_interrupt_state(&self) -> Option<Arc<HerdrInterruptState>> {
+        self.herdr_interrupt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// Provider-terminal settlement is not yet wired; tests exercise only delivery machinery.
+pub(crate) fn herdr_stop_settlement_available() -> bool {
+    #[cfg(all(test, unix))]
+    {
+        HERDR_SETTLEMENT_OVERRIDE.with(|value| value.get())
+    }
+    #[cfg(not(all(test, unix)))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn herdr_interrupt_mutant(name: &str) -> bool {
+    std::env::var("ADK_P10_3_MUTANT").ok().as_deref() == Some(name)
+}
+
+/// A requested switch cannot enable Escape before provider-terminal settlement exists.
+pub(crate) fn herdr_cancel_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = HERDR_CANCEL_OVERRIDE.with(|value| value.get()) {
+        return enabled && herdr_stop_settlement_available();
+    }
+    let enabled = cfg!(unix)
+        && crate::config_live_reload::current()
+            .and_then(|config| config.runtime.herdr_cancel_enabled)
+            .unwrap_or(false);
+    if enabled && !herdr_stop_settlement_available() {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                event = "herdr_stop_settlement_unavailable",
+                "herdr stop settlement not available; Escape disabled"
+            );
+        }
+        return false;
+    }
+    enabled
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static HERDR_CANCEL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    #[cfg(unix)]
+    pub(crate) static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
 
 pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
     token: &'a CancelToken,
@@ -62,12 +160,17 @@ impl CancelToken {
     /// The registry is monotonic per session: delayed recovery/rebind callers may
     /// refresh their token-local tmux name, but cannot replace a newer turn.
     pub(crate) fn bind_claude_tmux_session(&self, tmux_session_name: &str) {
+        self.bind_interrupt_session(ProviderKind::Claude, tmux_session_name);
+    }
+
+    /// Publish the provider's generation before its pane receives input.
+    pub(crate) fn bind_interrupt_session(&self, provider: ProviderKind, tmux_session_name: &str) {
         let tmux_session_name = tmux_session_name.trim();
         if tmux_session_name.is_empty() {
             return;
         }
         let Some(binding) = authority::publish(
-            ProviderKind::Claude,
+            provider,
             tmux_session_name,
             self.claude_interrupt_generation,
         ) else {
@@ -88,14 +191,26 @@ impl CancelToken {
         &self,
         tmux_session_name: &str,
     ) -> Option<ClaudeInterruptDeliveryGuard<'_>> {
+        self.lock_current_interrupt_session(ProviderKind::Claude, tmux_session_name)
+    }
+
+    /// Keep the provider-specific current generation held through write and claim commit.
+    pub(crate) fn lock_current_interrupt_session(
+        &self,
+        provider: ProviderKind,
+        tmux_session_name: &str,
+    ) -> Option<ClaudeInterruptDeliveryGuard<'_>> {
         let binding = self
             .tmux_binding
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let matches_requested_name = binding
-            .as_ref()
-            .is_some_and(|binding| binding.name() == tmux_session_name.trim());
+        let matches_requested_name = match binding.as_ref() {
+            Some(authority::TmuxBinding::Published { key, .. }) => {
+                *key == authority::SessionKey::new(provider, tmux_session_name.trim())
+            }
+            _ => false,
+        };
         if !matches_requested_name {
             return None;
         }

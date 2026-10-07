@@ -712,6 +712,9 @@ pub struct CancelToken {
     /// Wrapper prompt handoff completed before its JSONL user envelope appeared.
     /// The stop path must treat this window as submitted, not as prior-turn idle.
     claude_interrupt_submit_pending: AtomicBool,
+    /// Herdr-only input observation and user-stop intent; absent on all existing paths.
+    herdr_interrupt:
+        Mutex<Option<std::sync::Arc<cancel_token_claude_interrupt::HerdrInterruptState>>>,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
@@ -747,6 +750,7 @@ impl CancelToken {
                 .fetch_add(1, Ordering::Relaxed),
             turn_nonce,
             claude_interrupt_submit_pending: AtomicBool::new(false),
+            herdr_interrupt: Mutex::new(None),
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),

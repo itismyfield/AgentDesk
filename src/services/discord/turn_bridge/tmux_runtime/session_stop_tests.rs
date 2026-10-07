@@ -236,6 +236,17 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         command(&ctx, &data, channel).await;
         assert!(fx.take_calls().is_empty(), "idle must not even probe tmux");
         open(&path, "second");
+        // Herdr without an executor-owned token remains refused even with Escape enabled.
+        use crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE;
+        HERDR_CANCEL_OVERRIDE.set(Some(true));
+        mark(session, Mark::Herdr);
+        assert!(matches!(
+            super::super::judged_stop::begin_command_stop(&shared, &data.provider, channel, true)
+                .await,
+            CommandStop::HostRefused
+        ));
+        assert!(fx.take_calls().is_empty());
+        HERDR_CANCEL_OVERRIDE.set(None);
         for marker in [Mark::Herdr, Mark::Process, Mark::Zellij, Mark::Unreadable] {
             mark(session, marker);
             command(&ctx, &data, channel).await;

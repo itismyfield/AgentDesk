@@ -203,6 +203,7 @@ src/
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs
 │   ├── session_agent_resolution.rs
+│   ├── session_evidence.rs
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
@@ -332,7 +333,8 @@ src/
 │   │   │   │       ├── part_08.rs
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
-│   │   │   │       └── part_11.rs
+│   │   │   │       ├── part_11.rs
+│   │   │   │       └── session_evidence.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs
@@ -431,6 +433,8 @@ src/
 │   │   ├── runtime_profile_tests.rs
 │   │   ├── scheduled_messages.rs
 │   │   ├── session_activity.rs
+│   │   ├── session_evidence.rs
+│   │   ├── session_evidence_tests.rs
 │   │   ├── settings.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
@@ -569,6 +573,12 @@ src/
 │   │   ├── process.rs
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
+│   │   ├── busy_inject/
+│   │   │   ├── stash_tests/
+│   │   │   │   └── hold_tests.rs
+│   │   │   ├── screen.rs
+│   │   │   ├── stash.rs
+│   │   │   └── stash_tests.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
@@ -592,6 +602,8 @@ src/
 │   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
+│   │   ├── input/
+│   │   │   └── draft_hold.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -750,7 +762,7 @@ src/
 │   │   │   ├── retry_state.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
-│   │   │   └── too_old_notice.rs
+│   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── home_fence.rs
@@ -760,6 +772,7 @@ src/
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
+│   │   │   │   ├── native_policy_tests.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
@@ -851,6 +864,7 @@ src/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── live_agent_recovery.rs
+│   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
@@ -1079,6 +1093,7 @@ src/
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
+│   │   │   ├── retirement_tests.rs
 │   │   │   ├── tick.rs
 │   │   │   └── tick_cleanup_tests.rs
 │   │   ├── prompt_builder/
@@ -1168,6 +1183,7 @@ src/
 │   │   │   │   ├── incarnation_follow_up.rs
 │   │   │   │   ├── input_fence.rs
 │   │   │   │   ├── orphan_token_finish.rs
+│   │   │   │   ├── retirement.rs
 │   │   │   │   └── unread_tail_seed.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── decision.rs
@@ -1215,6 +1231,8 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
+│   │   │   │   │   ├── runtime_transition/
+│   │   │   │   │   │   └── native_hold_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1223,6 +1241,7 @@ src/
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
+│   │   │   │   │   ├── native_fresh_prompt_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── runtime_transition.rs
@@ -1385,8 +1404,10 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_reaper/
+│   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
-│   │   │   └── host_guard_tests.rs
+│   │   │   ├── host_guard_tests.rs
+│   │   │   └── retirement_await_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1489,6 +1510,7 @@ src/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── drain.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── retirement_census_tests.rs
 │   │   │   ├── store.rs
 │   │   │   ├── sweep.rs
 │   │   │   ├── tombstone.rs
@@ -1498,7 +1520,9 @@ src/
 │   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
+│   │   │   ├── retirement_recheck_tests.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
 │   │   │   ├── turn_retirement.rs
@@ -1642,6 +1666,8 @@ src/
 │   │   │   │   └── rowless_receipt.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
 │   │   │   │   ├── judged_stop_tests.rs
@@ -1904,6 +1930,7 @@ src/
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_restart_handoff_mailbox_tests.rs
+│   │   ├── tmux_restart_handoff_retirement_await_tests.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
 │   │   ├── tmux_watcher_registry.rs
@@ -2342,6 +2369,8 @@ src/
 │   │   ├── front_requeue.rs
 │   │   ├── inbound_order.rs
 │   │   ├── incarnation.rs
+│   │   ├── injected_inputs.rs
+│   │   ├── injected_inputs_tests.rs
 │   │   ├── input_fence.rs
 │   │   ├── input_fence_tests.rs
 │   │   ├── input_handback.rs

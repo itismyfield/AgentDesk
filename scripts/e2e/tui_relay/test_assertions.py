@@ -10,6 +10,7 @@ import contextlib
 import copy
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -139,6 +140,7 @@ class E36EvidenceContract(unittest.TestCase):
             path = Path(root) / "intake"
             reader = object.__new__(e36.Evidence)
             reader.log, reader.channel = path, "42"
+            reader.record, reader.log_format_evidence = {"e36_acceptance": {}}, "pre_run_tail"
             reader.watcher = lambda: {"mailbox_active_user_msg_id": 100}
             for name, fields, error in (
                 ("accepted", 'message_id=200 source="busy_active_turn" outcome="enqueued" persistence_error="none"', None),
@@ -163,6 +165,52 @@ class E36EvidenceContract(unittest.TestCase):
                         self.assertEqual(request["queue"]["active_prior_message_id"], "100")
                     if name in ("wrong_id", "unavailable"):
                         self.assertNotIn("queue", request)
+
+    def test_busy_log_format_is_proven_by_the_run_segment_not_only_the_pre_run_tail(self):
+        from types import SimpleNamespace
+        row = ('\x1b[2m2026-10-07T11:08:58Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2m%s\x1b[0m: %s '
+               'channel_id=%s message_id=%s source="busy_active_turn" author_class="allowed_bot" '
+               'outcome="enqueued" persistence_error="none"\n')
+        noise = "INFO agentdesk::other: unrelated %s\n" % ("x" * 200)
+        with tempfile.TemporaryDirectory() as root:
+            log, native = Path(root) / "dcserver.log", Path(root) / "native.jsonl"
+            native.write_text("")
+            state = {"bound_output_path": str(native), "bound_session_id": "s", "tmux_session": "t",
+                     "unread_bytes": 0, "has_pending_queue": False, "mailbox_active_user_msg_id": 100}
+            clock = [0.0]
+            d = SimpleNamespace(_read_api_json=lambda base, path: (200, state),
+                                assert_cell_idle=lambda **kwargs: {"status": "idle"},
+                                time=SimpleNamespace(monotonic=lambda: clock[0],
+                                                     sleep=lambda t: clock.__setitem__(0, clock[0] + t)))
+            args = Namespace(queue_runtime_root=root, e36_intake_log=str(log), base_url="http://offline.invalid",
+                             cell="claude-tui")
+            for name, prior_rows, run_rows, outcome in (
+                    ("busy_log", [row % (e36.LOG_TARGET, e36.LOG_MESSAGE, 7, 1)], [("42", 200)], "run_segment"),
+                    ("quiet_log", [row % (e36.LOG_TARGET, e36.LOG_MESSAGE, 7, 1)], [], "unavailable"),
+                    ("foreign_row_only", [], [("7", 300)], "commit_missing"),
+                    ("never_seen", [], [], "unavailable")):
+                with self.subTest(case=name):
+                    clock[0] = 0.0
+                    log.write_text("".join(prior_rows) + noise * (e36.LOG_SAMPLE_BYTES // len(noise) + 1)
+                                   if name != "quiet_log" else "".join(prior_rows))
+                    record = {"e36_acceptance": {}}
+                    evidence = e36.Evidence(d, args, "42", record)
+                    pre_run = record["e36_acceptance"]["intake_log_format_evidence"]
+                    self.assertEqual(pre_run, "pre_run_tail" if name == "quiet_log" else None)
+                    request = {"inbound_message_id": "200", "log_before": e36.cursor(log)}
+                    with log.open("a") as stream:
+                        stream.writelines(row % (e36.LOG_TARGET, e36.LOG_MESSAGE, c, m) for c, m in run_rows)
+                    prior = {"inbound_message_id": "100", "deadline": 20}
+                    if outcome == "run_segment":
+                        evidence.queue(request, prior)
+                        self.assertEqual(request["queue"]["source"], "busy_active_turn")
+                        self.assertEqual(record["e36_acceptance"]["intake_log_format_evidence"], "run_segment")
+                        continue
+                    message = "INFO/format evidence unavailable" if outcome == "unavailable" and pre_run is None \
+                        else "exact QB commit unavailable"
+                    with self.assertRaisesRegex(ValueError, message):
+                        evidence.queue(request, prior)
+                    self.assertNotIn("queue", request)
 
     def test_request_window_filters_prior_and_shared_chrome_and_detects_deleted_body(self):
         global_window = _window(_relay_msg(11, "old"), _raw_bot_msg(12, "✅ 응답 완료"),
@@ -232,6 +280,7 @@ class E36EvidenceContract(unittest.TestCase):
             path = Path(root) / "intake"
             reader = object.__new__(e36.Evidence)
             reader.log, reader.channel = path, "42"
+            reader.record, reader.log_format_evidence = {"e36_acceptance": {}}, "pre_run_tail"
             reader.d = SimpleNamespace(time=SimpleNamespace(monotonic=lambda: 0, sleep=MagicMock()))
             for active in (200, None):
                 with self.subTest(active=active):
@@ -402,6 +451,94 @@ class OrderedTextPresent(unittest.TestCase):
         window = _window(_relay_msg(1, "alpha"))
         with self.assertRaises(assertions.AssertionError):
             assertions.ordered_text_present(window, needles=["alpha", "beta"])
+
+
+    def test_dispatcher_expands_run_id_like_text_present(self):
+        window = _window(_relay_msg(1, "[E2E:X:run-1:A]"), _relay_msg(2, "[E2E:X:run-1:B]"))
+        spec = {"ordered_text_present": ["[E2E:X:{run_id}:A]", "[E2E:X:{run_id}:B]"]}
+        driver.run_assertion(spec, window=window, run_id="run-1")
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion(spec, window=window, run_id="run-2")
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({"ordered_text_present": spec["ordered_text_present"][::-1]},
+                                 window=window, run_id="run-1")
+
+
+class E4ProviderBodyWait(unittest.TestCase):
+    NOTICE_BOT = "1481522187197218816"
+
+    def run_e4(self, cell, bodies, *, delete_bodies_after_first_fetch=False):
+        scenario = driver.yaml.safe_load(
+            (ROOT / "tests/e2e/tui_relay/scenarios/E-4-direct-input-relay.yaml").read_text())
+        driver.validate_scenario_schema(scenario)
+        bot = assertions.provider_bot_id(driver.cell_provider(cell))
+        warmup = [{"id": "11", "content": "[E2E:E4:WARMUP]", "author": {"id": bot, "bot": True}, "type": 0}]
+        direct = [{"id": "12", "content": "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n"
+                   "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK\n```",
+                   "author": {"id": self.NOTICE_BOT, "bot": True}, "type": 0}]
+        direct += [{"id": str(20 + i), "content": "DIRECT_E4_OK", "author": {"id": author, "bot": True}, "type": 0}
+                   for i, author in enumerate(bodies)]
+        rows = []
+        client = MagicMock(base_url="http://offline.invalid")
+        client.send_control.side_effect = lambda channel, content: {"id": "10" if "SETUP" in content else "99"}
+        client.send_prompt.side_effect = lambda *a, **kw: rows.extend(warmup) or {"id": "10"}
+        def fetch(channel, after_id=None, limit=100):
+            page = [r for r in rows if int(r["id"]) > int(after_id or 0)]
+            if delete_bodies_after_first_fetch:
+                rows[:] = [r for r in rows if r not in page or int(r["id"]) < 20]
+            return page
+        client.fetch_messages.side_effect = fetch
+        client.wait_for_message.side_effect = lambda channel, predicate, after_id=None, **kw: (
+            next((r for r in rows if int(r["id"]) > int(after_id or 0) and predicate(r)), None), list(rows))
+        args = Namespace(cell=cell, channel_id="41", dry_run=False, base_url="http://offline.invalid",
+                         reset_before_each=False, hard_reset_session_each=False, allow_destructive=False,
+                         queue_runtime_root="unused", final_refetches=1, thread_channel_id=None)
+        clock = [0.0]
+        with patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(driver.time, "sleep", side_effect=lambda t: clock.__setitem__(0, clock[0] + t)), \
+             patch.object(driver.tmux, "send_keys", side_effect=lambda session, keys: (
+                 keys != "C-m" or rows.extend(direct) or True)) as keys, \
+             patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
+             patch.object(driver, "_raise_if_tui_prompt_stuck_while_idle"), \
+             patch.object(driver, "_collect_wait_timeout_diagnostics", return_value={}):
+            result = driver.run_scenario(scenario, args=args, client=client, run_id="run")
+        keys.assert_called()
+        return result
+
+    def test_notice_quoting_the_expected_text_does_not_satisfy_the_body_wait(self):
+        for cell, notice_bot in (("claude-tui", None), ("codex-tui", None),
+                                 ("claude-tui", assertions.provider_bot_id("claude"))):
+            with self.subTest(cell=cell, notice_bot=notice_bot):
+                if notice_bot:
+                    self.NOTICE_BOT = notice_bot
+                result = self.run_e4(cell, [])
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn("timeout waiting for Discord text 'DIRECT_E4_OK'", result["reason"])
+
+    def test_response_bot_body_satisfies_the_wait_and_other_bots_do_not(self):
+        claude, codex = (assertions.provider_bot_id(p) for p in ("claude", "codex"))
+        for cell, author, status in (("claude-tui", claude, "pass"), ("codex-tui", codex, "pass"),
+                                     ("codex-tui", claude, "fail"), ("claude-tui", "999", "fail")):
+            with self.subTest(cell=cell, author=author):
+                self.assertEqual(self.run_e4(cell, [author])["status"], status)
+
+    def test_final_assertion_needs_the_provider_body_after_post_idle_refetch(self):
+        claude = assertions.provider_bot_id("claude")
+        result = self.run_e4("claude-tui", [claude], delete_bodies_after_first_fetch=True)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("provider bot", result["reason"])
+        window = _window({"id": "12", "content": "터미널에 직접 주입된 입력 (tmux : `s`):\nDIRECT_E4_OK",
+                          "author": {"id": claude, "bot": True}, "type": 0})
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({"provider_text_present": "DIRECT_E4_OK"}, window=window, provider="claude")
+        with self.assertRaisesRegex(assertions.AssertionError, "cell provider"):
+            driver.run_assertion({"provider_text_present": "DIRECT_E4_OK"},
+                                 window=_window(_relay_msg(1, "DIRECT_E4_OK")))
+
+    def test_relay_author_accepts_only_provider(self):
+        scenario = {"steps": [{"wait_for_discord_text": "X", "relay_author": "notify"}], "assertions": []}
+        with self.assertRaisesRegex(ValueError, "relay_author"):
+            driver.validate_scenario_schema(scenario)
 
 
 class NoDuplicateMarker(unittest.TestCase):
@@ -1282,7 +1419,7 @@ class ScenarioFilterFailClosed(unittest.TestCase):
                  "--filter", "E-999", "--filter", " E-17, E-17, "],
                 cwd=ROOT, check=False, capture_output=True, text=True,
             )
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
             report = json.loads((output / "matrix.json").read_text(encoding="utf-8"))
         self.assertEqual(report["cells"], ["claude-tui", "codex-tui"])
         self.assertEqual(report["cross_channel_scenarios"], [])
@@ -1292,11 +1429,13 @@ class ScenarioFilterFailClosed(unittest.TestCase):
         self.assertEqual([(row["cell"], row["provider_identity"]["cell"]) for row in cells],
                          [("claude-tui", "claude-tui"), ("codex-tui", "codex-tui")])
         for row in cells:
-            self.assertTrue(row["ok"])
-            self.assertEqual(row["totals"], {"pass": 0, "fail": 0, "skipped": 0})
+            self.assertFalse(row["ok"])
+            self.assertTrue(row["execution_ok"])
+            self.assertEqual(row["evidence_status"], "partial")
+            self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run"), 0))
         restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
         self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
-                         [("E-17", "pass", True)])
+                         [("E-17", "pass", False)])
 
 
 class TargetHealthContract(unittest.TestCase):
@@ -1396,7 +1535,7 @@ class TargetHealthContract(unittest.TestCase):
                     consumers.append((scenario["id"], step))
         self.assertTrue(consumers)
         for sid, step in consumers:
-            for cell in driver.SUPPORTED_CELLS:
+            for cell in (c for c in driver.SUPPORTED_CELLS if not c.endswith("-herdr")):
                 with self.subTest(scenario=sid, cell=cell):
                     provider = driver.cell_provider(cell)
                     foreign = "claude" if provider == "codex" else "codex"
@@ -1502,23 +1641,30 @@ class E35CurrentRunContract(unittest.TestCase):
                     client.send_control.return_value = {"id": "1"}
                     client.send.return_value = {"id": "2"}
                     # The real wait first sees the current marker; final edits must still pass assertions.
-                    client.fetch_messages.side_effect = [[], [body], messages]
+                    client.wait_for_message.return_value = (body, [body])
+                    client.fetch_messages.side_effect = [messages] if cell.endswith("-herdr") else [[], [body], messages, messages]
                     args = Namespace(base_url=client.base_url, cell=cell, channel_id="42", thread_channel_id=None,
-                                     dry_run=False, reset_before_each=True, hard_reset_session_each=True,
+                                     dry_run=False, reset_before_each=True, hard_reset_session_each=not cell.endswith("-herdr"),
                                      allow_destructive=False, queue_runtime_root="unused", final_refetches=1)
-                    with patch.object(driver, "durable_probe_safety_gate", return_value={"status": "idle"}) as safety, \
+                    with patch.object(driver.herdr, "observe", return_value={"herdr": {}}), \
+                         patch.object(driver, "durable_probe_safety_gate", return_value={"status": "idle"}) as safety, \
                          patch.object(driver.durable_delivery, "poll_records", return_value={"status": "evaluated"}) as receipt, \
                          patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
                          patch.object(driver, "reset_channel_state") as reset, \
                          patch.object(driver, "hard_reset_provider_session") as hard_reset, patch.object(driver.time, "sleep"):
                         result = driver.run_scenario(scenario, args=args, run_id="current-run", client=client)
-                    self.assertEqual(result["status"], expected, result)
+                    expected_status = "not_applicable" if cell.endswith("-herdr") and expected == "pass" else expected
+                    self.assertEqual(result["status"], expected_status, result)
                     if expected == "fail":
-                        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+                        self.assertIn(result["failure_attribution"]["source"], ("assertion", "assertions"))
                     client.send.assert_called_once_with("42", original["steps"][0]["send_discord_prompt"].replace("{run_id}", "current-run"))
                     client.send_prompt.assert_not_called()
-                    receipt.assert_called_once_with(Path("unused"), provider="claude", channel_id="42", message_id="3")
-                    self.assertEqual(safety.call_count, 2)
+                    if cell.endswith("-herdr"):
+                        receipt.assert_not_called()
+                        safety.assert_not_called()
+                    else:
+                        receipt.assert_called_once_with(Path("unused"), provider="claude", channel_id="42", message_id="3")
+                        self.assertEqual(safety.call_count, 2)
                     reset.assert_not_called()
                     hard_reset.assert_not_called()
         self.assertEqual(scenario, original)
@@ -1657,7 +1803,7 @@ class RequiredCompletionWait(unittest.TestCase):
     def test_observed_4649ms_lag_passes_without_resetting_body_anchor(self):
         record, error, requests, _ = self._run()
         self.assertIsNone(error, str(error))
-        self.assertEqual(len(requests), 6)
+        self.assertEqual(len(requests), 7)
         trace = record["completion_rechecks"][0]
         self.assertEqual(trace, {"refetches": 2, "deadline_at": 110, "elapsed_s": 5, "outcome": "PASS"})
         self.assertEqual(record["_body_observations"][self.MARKER], 100)
@@ -1683,7 +1829,7 @@ class RequiredCompletionWait(unittest.TestCase):
             with self.subTest(return_delay=delay):
                 record, error, requests, _ = self._run(return_delay=delay)
                 self.assertEqual(error is None, passed)
-                self.assertEqual(len(requests), 5)
+                self.assertEqual(len(requests), 6 if passed else 5)
                 self.assertEqual(record["completion_rechecks"][0]["refetches"], 1)
                 self.assertEqual(record["completion_rechecks"][0]["outcome"], "PASS" if passed else "EXHAUSTED")
         record, error, requests, _ = self._run(retry_after=8)
@@ -1702,7 +1848,7 @@ class RequiredCompletionWait(unittest.TestCase):
     def test_panel_deleted_after_completing_above_body_is_judged_on_final_state(self):
         record, error, requests, _ = self._run(move_at=0)
         self.assertIsNone(error, str(error))
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(requests), 5)
         self.assertNotIn("completion_rechecks", record)
 
     def test_panel_move_within_follow_window_passes_and_later_move_fails(self):
@@ -1749,7 +1895,7 @@ class RequiredCompletionWait(unittest.TestCase):
             with self.subTest(options=options):
                 record, error, requests, _ = self._run(**options)
                 self.assertEqual(error is not None, bool(options.get("other_failure")))
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(len(requests), 4 if options.get("other_failure") else 5)
                 self.assertNotIn("completion_rechecks", record)
                 self.assertNotIn("revalidated_after_recheck", record)
         callback = MagicMock()
@@ -1770,7 +1916,7 @@ class RequiredCompletionWait(unittest.TestCase):
                 if missing:
                     self.assertIsInstance(error, driver.ScenarioStepAssertionError)
                     self.assertIn("completion chrome not found", str(error))
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(len(requests), 4 if missing else 5)
                 self.assertEqual(sleeps, [1.0])
                 self.assertNotIn("completion_rechecks", record)
                 self.assertNotIn("revalidated_after_recheck", record)
@@ -1812,8 +1958,8 @@ class RequiredCompletionWait(unittest.TestCase):
             ) as primitive:
                 record, error, requests, _ = self._run(**options)
                 self.assertIsNone(error, str(error))
-                self.assertEqual(primitive.call_count, 1)
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(primitive.call_count, 2)
+                self.assertEqual(len(requests), 5)
                 self.assertNotIn("completion_rechecks", record)
 
     def test_non_typeerror_reconstruction_failure_is_not_swallowed(self):
@@ -1824,3 +1970,255 @@ class RequiredCompletionWait(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HerdrHealthAssertions(unittest.TestCase):
+    def fixture(self):
+        return {'herdr': {'admission': 'open', 'restart_required': False,
+                'configured_channels': ['41'], 'endpoints': {'test': {'local': True}},
+                'input_holds': 0, 'reconnect': {'channels': 1, 'published': 1,
+                'withheld': 0, 'unknown': 0, 'pending': 0}}}
+
+    def row(self):
+        return {'executions': [{'channel': '41', 'provider': 'claude', 'state': 'bound',
+                 'pane': 'provider_running', 'launch_evidence': 'recorded', 'nonce': 'one', 'input_hold': None}]}
+
+    def test_ready_and_clean_and_published(self):
+        from tui_relay import herdr
+        block = herdr.ready(self.fixture(), endpoint='test', channel='41')
+        herdr.clean_turn(block)
+        self.assertEqual(herdr.published_row(block, self.row(), channel='41', provider='claude')['nonce'], 'one')
+
+    def test_preflight_fails_closed(self):
+        from tui_relay import herdr
+        for key, value in [('admission', 'stopped(env)'), ('restart_required', True),
+                           ('restart_required', None), ('configured_channels', ['42']),
+                           ('endpoints', {'other': {'local': True}}), ('endpoints', None)]:
+            data = self.fixture()
+            data['herdr'][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(assertions.AssertionError):
+                herdr.ready(data, endpoint='test', channel='41')
+        with self.assertRaises(assertions.AssertionError):
+            herdr.ready({}, endpoint='test', channel='41')
+
+    def test_input_holds_unknown_is_not_zero(self):
+        from tui_relay import herdr
+        for value in (None, False, '0', 'unreadable', 'not_counted_yet', 1, -1):
+            with self.subTest(value=value), self.assertRaises(assertions.AssertionError):
+                herdr.clean_turn({'input_holds': value})
+
+    def test_restart_counts_do_not_prove_target_row_alone(self):
+        from tui_relay import herdr
+        for status in ({}, {'executions': []}, {'executions': self.row()['executions'] * 2}):
+            with self.assertRaises(assertions.AssertionError):
+                herdr.published_row(self.fixture()['herdr'], status, channel='41', provider='claude')
+        for key, value in [('channel', '42'), ('provider', 'codex'), ('state', 'pending'),
+                           ('pane', 'root_replaced'), ('pane', 'unreadable'), ('launch_evidence', 'none'),
+                           ('input_hold', {}), ('nonce', '')]:
+            status = self.row()
+            status['executions'][0][key] = value
+            with self.subTest(key=key), self.assertRaises(assertions.AssertionError):
+                herdr.published_row(self.fixture()['herdr'], status, channel='41', provider='claude')
+
+    def test_restart_rejects_incomplete_or_ambiguous_aggregate(self):
+        from tui_relay import herdr
+        for key, value in [('withheld', 1), ('unknown', 1), ('pending', 1), ('published', 0),
+                           ('published', True), ('channels', 2), ('unknown', None)]:
+            block = self.fixture()['herdr']
+            block['reconnect'][key] = value
+            with self.subTest(key=key), self.assertRaises(assertions.AssertionError):
+                herdr.published_row(block, self.row(), channel='41', provider='claude')
+
+    def test_local_key_cannot_bless_mixed_remote_mapping(self):
+        from tui_relay import herdr
+        payload = self.fixture()
+        payload['herdr']['endpoints']['remote'] = {'local': False}
+        with self.assertRaisesRegex(assertions.AssertionError, 'locality'):
+            herdr.ready(payload, endpoint='test', channel='41')
+
+    def test_observe_uses_only_health_and_readonly_status(self):
+        from tui_relay import herdr
+        args = Namespace(base_url='http://unused.test', channel_id='41', cell='claude-herdr',
+                         herdr_endpoint='test', herdr_status_bin='/test/agentdesk')
+        with patch.object(driver, '_read_api_json', return_value=(200, self.fixture())) as health, \
+             patch.object(herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps(self.row()))) as status:
+            result = herdr.observe(driver, args, clean=True, reconnected=True)
+        health.assert_called_once_with(args.base_url, '/api/health', timeout=5)
+        status.assert_called_once_with(['/test/agentdesk', 'herdr', 'status'], capture_output=True, text=True, check=True, timeout=30)
+        self.assertEqual(result['row']['nonce'], 'one')
+
+
+class DeliverHarnessContract(unittest.TestCase):
+    def test_deliver_http_route_body_and_response(self):
+        from tui_relay import discord
+        from tui_relay.test_discord_client import _Response
+        payload = {'ok': True, 'delivery': 'queued', 'reason': 'external_turn_active', 'inject_veto': 'not_busy'}
+        with patch.object(discord.urllib.request, 'urlopen', return_value=_Response(payload)) as request:
+            result = discord.DiscordClient('http://unused.test/').deliver('test/agent', 'hello', '123', 'e2e', 'run-1')
+        req = request.call_args.args[0]
+        self.assertEqual(req.full_url, 'http://unused.test/api/agents/test%2Fagent/turn/deliver')
+        self.assertEqual(req.get_method(), 'POST')
+        self.assertEqual(json.loads(req.data), {'text': 'hello', 'author_discord_user_id': '123', 'source': 'e2e', 'origin_id': 'run-1'})
+        self.assertEqual(result, payload)
+        with patch.object(discord.urllib.request, 'urlopen', return_value=_Response({'ok': False})):
+            with self.assertRaisesRegex(RuntimeError, 'invalid/refused'):
+                discord.DiscordClient('http://unused.test').deliver('agent', 'hello', '123', 'e2e', 'run-1')
+
+    def test_author_only_from_environment_and_step_result(self):
+        client = MagicMock()
+        client.deliver.return_value = {'delivery': 'injected', 'reason': None, 'inject_veto': None, 'channel_id': '41'}
+        record = {}
+        step = {'deliver_prompt': {'text': 'marker {run_id}'}}
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(assertions.AssertionError, 'AGENTDESK_E2E_DELIVER_AUTHOR_ID'):
+                driver.deliver_step(client, step, cell='claude-herdr', run_id='run', channel_id='41', record=record)
+        client.deliver.assert_not_called()
+        with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}):
+            driver.deliver_step(client, step, cell='claude-herdr', run_id='run', channel_id='41', record=record)
+            with self.assertRaisesRegex(assertions.AssertionError, 'unsupported deliver options'):
+                driver.deliver_step(client, {'deliver_prompt': {'text': 'hello', 'author': '999'}}, cell='claude-herdr', run_id='run', channel_id='41', record=record)
+        client.deliver.assert_called_once_with('adk-claude-tui-e2e', '[E2E:DELIVER:run-scenario-deliver-0]\nmarker run', '123', 'adk-e2e-orchestrator', 'run-scenario-deliver-0')
+        self.assertEqual(record['deliver_results'][0]['delivery'], 'injected')
+        driver.run_assertion({'deliver_result': {'delivery': ['injected'], 'inject_veto': [None]}}, window=assertions.Window('1'), record=record)
+        for spec in ({'delivery': ['queued']}, {'inject_veto': ['not_busy']}, {'delivery': []}, {}):
+            with self.assertRaises(assertions.AssertionError):
+                driver.run_assertion({'deliver_result': spec}, window=assertions.Window('1'), record=record)
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({'deliver_result': {'delivery': ['injected']}}, window=assertions.Window('1'), record={})
+
+    def test_step_delay_default_override_and_invalid(self):
+        with patch.object(driver.time, 'sleep') as sleep:
+            driver.post_send_sleep({})
+            driver.post_send_sleep({'post_send_sleep_s': 0})
+            driver.post_send_sleep({'post_send_sleep_s': 0.25})
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [3, 0, 0.25])
+            for value in (-1, '3', True, float('inf'), float('nan')):
+                with self.assertRaises(ValueError):
+                    driver.post_send_sleep({'post_send_sleep_s': value})
+
+    def test_bulk_assertions_fail_closed_until_lane_lands(self):
+        from types import SimpleNamespace
+        window = assertions.Window('1')
+        with patch.object(driver, 'assertions', SimpleNamespace(AssertionError=assertions.AssertionError)):
+            for spec in ({'no_placeholder_left': True}, {'completion_per_turn': {'exact': 1}}):
+                with self.assertRaisesRegex(assertions.AssertionError, 'assertion not available yet'):
+                    driver.run_assertion(spec, window=window)
+        no_placeholder, completion = MagicMock(), MagicMock()
+        with patch.object(assertions, 'no_placeholder_left', no_placeholder, create=True), \
+             patch.object(assertions, 'completion_per_turn', completion, create=True):
+            driver.run_assertion({'no_placeholder_left': True}, window=window)
+            driver.run_assertion({'completion_per_turn': {'exact': 2, 'marker': '{run_id}-body'}}, window=window, run_id='run')
+        no_placeholder.assert_called_once_with(window)
+        completion.assert_called_once_with(window, exact=2, marker='run-body')
+
+    def test_deliver_dispatch_in_legacy_and_herdr_runner(self):
+        scenario = {'id': 'deliver-test', 'agent_mode': 'real_live', 'coverage_class': 'live',
+                    'steps': [{'deliver_prompt': 'test {run_id}', 'post_send_sleep_s': 0.5}],
+                    'assertions': [{'deliver_result': {'delivery': ['queued'], 'inject_veto': [None]}}]}
+        for cell in ('claude-pipe', 'claude-herdr'):
+            client = MagicMock()
+            client.send_control.return_value = {'id': '100'}
+            client.fetch_messages.return_value = []
+            client.deliver.return_value = {'delivery': 'queued', 'reason': 'turn_active', 'channel_id': '41'}
+            args = Namespace(cell=cell, channel_id='41', dry_run=False, base_url='http://unused.test',
+                             reset_before_each=False, hard_reset_session_each=False, allow_destructive=False,
+                             queue_runtime_root='unused', final_refetches=1, thread_channel_id=None)
+            with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}), \
+                 patch.object(driver, 'assert_cell_idle', return_value={'status': 'idle'}), \
+                 patch.object(driver.herdr, 'observe', return_value={'herdr': {}}), patch.object(driver.time, 'sleep') as sleep:
+                result = driver.run_scenario(scenario, args=args, client=client, run_id='run')
+            self.assertEqual(result['status'], 'pass', result)
+            self.assertEqual(result['deliver_results'][0]['reason'], 'turn_active')
+            client.deliver.assert_called_once()
+            self.assertIn(((0.5,), {}), [(c.args, c.kwargs) for c in sleep.call_args_list])
+
+
+class HerdrReviewRepairs(unittest.TestCase):
+    def load(self, **values):
+        import yaml
+        scenario = {'id': 'repair', 'cells': ['claude-herdr'], 'agent_mode': 'real_live',
+                    'coverage_class': 'live', 'steps': [], 'assertions': [], **values}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'scenario.yaml').write_text(yaml.safe_dump(scenario))
+            return driver.load_scenarios(Path(tmp), cell='claude-herdr')
+
+    def test_schema_rejects_scalar_typo_and_unsupported_options_before_send(self):
+        cases = [dict(steps=['send_prompt']),
+                 dict(steps=[{'deliver_prompt': 'hello'}], assertions=[{'deliver_result': {'delivery': ['started']}, 'requires_feature': 'disabled'}]),
+                 dict(steps=[{'restart_dcserver': 'dev'}]),
+                 dict(assertions=[{'no_placeholder_left': False}]),
+                 dict(steps=[{'send_prompt': 'hello', 'post_send_slepp_s': 0}]),
+                 dict(steps=[{'restart_dcserver': {'targte': 'dev'}}]),
+                 dict(assertions=[{'text_present': 'OK', 'no_dupicate_content': True}]),
+                 dict(assertions=[{'completion_per_turn': {'excat': 1}}]),
+                 dict(steps=[{'deliver_prompt': 'hello'}]),
+                 dict(steps=[{'deliver_prompt': {'text': 'hello', 'agent': 'production-agent'}}],
+                      assertions=[{'deliver_result': {'delivery': ['started']}}]),
+                 dict(steps=[{'deliver_prompt': {'text': 'hello', 'origin_id': 'fixed'}}],
+                      assertions=[{'deliver_result': {'delivery': ['started']}}])]
+        with patch.object(driver.discord.DiscordClient, 'deliver') as send:
+            for values in cases:
+                with self.subTest(values=values), self.assertRaises(ValueError):
+                    self.load(**values)
+            send.assert_not_called()
+
+    def test_unconfirmed_deliver_requires_explicit_negative_contract(self):
+        self.load(steps=[{'deliver_prompt': 'hello'}], assertions=[{'deliver_result': {'delivery': ['unconfirmed']}}])
+        for allowed, succeeds in [(['started'], False), (['unconfirmed'], True)]:
+            spec = {'deliver_result': {'delivery': allowed}}
+            kw = {'window': assertions.Window('1'), 'record': {'deliver_results': [{'delivery': 'unconfirmed'}]}}
+            if succeeds:
+                driver.run_assertion(spec, **kw)
+            else:
+                with self.assertRaises(assertions.AssertionError):
+                    driver.run_assertion(spec, **kw)
+
+    def test_deliver_generated_identity_binding_and_channel_fail_closed(self):
+        client = MagicMock()
+        client.deliver.return_value = {'delivery': 'started', 'channel_id': '41'}
+        with patch.dict(os.environ, {'AGENTDESK_E2E_DELIVER_AUTHOR_ID': '123'}):
+            for run in ('matrix-a-p1-claude-herdr', 'matrix-a-p2-claude-herdr', 'matrix-b-p1-claude-herdr'):
+                record = {'id': 'G1'}
+                driver.deliver_step(client, {'deliver_prompt': 'hello'}, cell='claude-herdr', run_id=run, channel_id='41', record=record)
+            calls = client.deliver.call_args_list
+            self.assertEqual(len({c.args[1] for c in calls}), 3)
+            self.assertEqual(len({c.args[4] for c in calls}), 3)
+            self.assertTrue(all(c.args[0] == 'adk-claude-tui-e2e' for c in calls))
+            with self.assertRaisesRegex(assertions.AssertionError, 'unsupported.*agent'):
+                driver.deliver_step(client, {'deliver_prompt': {'text': 'hello', 'agent': 'production-agent'}}, cell='claude-herdr', run_id='run', channel_id='41', record={})
+            self.assertEqual(client.deliver.call_count, 3)
+            client.deliver.return_value['channel_id'] = '999'
+            with self.assertRaisesRegex(assertions.AssertionError, 'channel'):
+                driver.deliver_step(client, {'deliver_prompt': 'hello'}, cell='claude-herdr', run_id='run', channel_id='41', record={})
+
+    def test_matrix_partial_evidence_is_not_pass(self):
+        for totals, expected in [({'pass': 1}, 'pass'), ({'not_applicable': 1}, 'partial'),
+                                 ({'known_gap': 1}, 'partial'), ({'unexpected_pass': 1}, 'unexpected_pass'),
+                                 ({'dry_run': 1}, 'dry_run'), ({}, 'partial'), ({'fail': 1}, 'fail')]:
+            with self.subTest(totals=totals):
+                self.assertEqual(matrix.evidence_status(totals), expected)
+
+    def test_restart_target_mismatch_preflight_and_incarnation_carry(self):
+        from tui_relay import herdr
+        scenario = {'steps': [{'restart_dcserver': {}}]}
+        for url, target in [('http://127.0.0.1:8797', 'release'), ('http://127.0.0.1:8791', 'dev')]:
+            with self.assertRaisesRegex(ValueError, 'restart target'):
+                herdr.validate_restart_binding(scenario, Namespace(base_url=url, restart_target_override=target))
+        checks = {r['check'] for r in herdr.omissions(scenario)}
+        self.assertIn('server_incarnation_changed', checks)
+
+    def test_matrix_rejects_cross_provider_actual_channel_alias(self):
+        with self.assertRaisesRegex(ValueError, 'same actual channel'):
+            matrix.validate_channel_bindings({'claude-tui': '41', 'codex-herdr': '41'})
+        matrix.validate_channel_bindings({'claude-tui': '41', 'codex-herdr': '42'})
+
+    def test_e22_excludes_codex_without_shell_capability(self):
+        scenarios = driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='codex-herdr')
+        self.assertNotIn('E-22', [s['id'] for s in scenarios])
+        self.assertIn('E-22', [s['id'] for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr')])
+
+    def test_cli_run_id_is_explicit_and_default_is_unique(self):
+        with patch.object(sys, 'argv', ['driver', '--cell', 'claude-herdr', '--channel-id', '41', '--run-id', 'source-compare-run']):
+            self.assertEqual(driver.parse_args().run_id, 'source-compare-run')
+        with patch.object(sys, 'argv', ['driver', '--cell', 'claude-herdr', '--channel-id', '41']):
+            self.assertNotEqual(driver.parse_args().run_id, driver.parse_args().run_id)

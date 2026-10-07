@@ -20,7 +20,7 @@ class CellHelpers(unittest.TestCase):
     def test_supported_cells_cover_provider_runtime_matrix(self):
         self.assertEqual(
             set(driver.SUPPORTED_CELLS),
-            {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"},
+            {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui", "claude-herdr", "codex-herdr"},
         )
 
     def test_cell_provider(self):
@@ -213,6 +213,7 @@ class ScenarioFilter(unittest.TestCase):
             "claude-tui",
             "codex-pipe",
             "codex-tui",
+            "claude-herdr", "codex-herdr",
         }
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
@@ -253,11 +254,11 @@ class ScenarioFilter(unittest.TestCase):
             self.assertEqual(health_steps[0]["global_active_max"], 0)
             self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
 
-    def test_e19_session_continuity_scope_is_tui_only(self):
+    def test_e19_session_continuity_scope_is_tui_and_herdr(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell in {"claude-tui", "codex-tui"}:
+            if cell in {"claude-tui", "codex-tui", "claude-herdr", "codex-herdr"}:
                 self.assertIn("E-19", ids)
                 e19 = next(s for s in scenarios if s.get("id") == "E-19")
                 prompt_text = "\n".join(
@@ -299,7 +300,7 @@ class ScenarioFilter(unittest.TestCase):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell not in {"claude-pipe", "claude-tui"}:
+            if cell not in {"claude-pipe", "claude-tui", "claude-herdr"}:
                 self.assertNotIn("E-22", ids)
                 continue
             e22 = next(s for s in scenarios if s.get("id") == "E-22")
@@ -454,3 +455,112 @@ class ScenarioFilter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HerdrCells(unittest.TestCase):
+    def test_resolution_and_no_tmux_session(self):
+        for provider in ('claude', 'codex'):
+            cell = provider + '-herdr'
+            self.assertEqual(driver.cell_provider(cell), provider)
+            self.assertEqual(driver.cell_runtime(cell), 'herdr')
+            self.assertEqual(driver.cell_default_agent(cell), f'adk-{provider}-tui-e2e')
+            with self.assertRaisesRegex(ValueError, 'no tmux'):
+                driver.cell_session_name(cell)
+
+    def test_required_scenarios(self):
+        for cell in ('claude-herdr', 'codex-herdr'):
+            ids = {s['id'] for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell=cell)}
+            self.assertTrue({'E-1', 'E-2', 'E-3', 'E-12', 'E-15', 'E-18', 'E-19', 'E-35', 'E-36'} <= ids)
+            self.assertIn('E-50' if cell == 'claude-herdr' else 'E-51', ids)
+            self.assertTrue({'E-4', 'E-10', 'E-14', 'E-21', 'E-31'}.isdisjoint(ids))
+
+    def test_all_herdr_dry_runs_never_touch_tmux_network_or_runtime(self):
+        from unittest.mock import patch
+        import io
+        from contextlib import redirect_stdout
+        class Forbidden:
+            def __getattr__(self, name):
+                raise AssertionError('forbidden side effect: ' + name)
+        for cell in ('claude-herdr', 'codex-herdr'):
+            with patch.object(driver.sys, 'argv', ['driver', '--cell', cell, '--channel-id', '41', '--base-url', 'http://unused.test', '--dry-run']):
+                args = driver.parse_args()
+            args.reset_before_each = True
+            args.hard_reset_session_each = True
+            for scenario in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell=cell):
+                with self.subTest(cell=cell, scenario=scenario['id']), \
+                     patch.object(driver, 'tmux', Forbidden()), \
+                     patch.object(driver.urllib.request, 'urlopen', side_effect=AssertionError('network')), \
+                     patch.object(driver.subprocess, 'run', side_effect=AssertionError('process')), \
+                     patch.object(driver, 'reset_channel_state', side_effect=AssertionError('reset')), \
+                     patch.object(driver, 'hard_reset_provider_session', side_effect=AssertionError('kill')), \
+                     redirect_stdout(io.StringIO()) as output:
+                    result = driver.run_scenario(scenario, args=args, client=Forbidden(), run_id='dry')
+                self.assertEqual(result['status'], 'dry_run')
+                self.assertFalse(result['real_provider_contacted'])
+                self.assertIn('planned', output.getvalue())
+                self.assertFalse(any(a.get('passed') for a in result['assertions']))
+
+    def test_restart_uses_readonly_row_nonce_without_tmux(self):
+        from unittest.mock import Mock, patch
+        from argparse import Namespace
+        import json
+        scenario = next(s for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr') if s['id'] == 'E-19')
+        before = {'channel': '41', 'provider': 'claude', 'state': 'bound', 'nonce': 'same',
+                  'pane': 'provider_running', 'launch_evidence': 'recorded', 'input_hold': None}
+        health = {'status': 'healthy', 'herdr': {'admission': 'open', 'restart_required': False,
+                  'configured_channels': ['41'], 'endpoints': {'test': {'local': True}}, 'input_holds': 0,
+                  'reconnect': dict(channels=1, published=1, withheld=0, unknown=0, pending=0)}}
+        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=True,
+                         restart_script=None, restart_target_override='dev', herdr_isolated_server=True,
+                         herdr_endpoint='test', herdr_status_bin='/test/agentdesk', final_refetches=1)
+        rows = []
+        client = Mock()
+        client.send_control.return_value = {'id': '100'}
+        def wait(channel, **kwargs):
+            marker = '[E2E:E19:PRE]' if not rows else '[E2E:E19:POST] E19_SECRET_ALPHA_5AF3C2'
+            row = {'id': str(102 + len(rows)), 'content': marker, 'author': {'id': '42', 'bot': True}}
+            rows.append(row)
+            return row, list(rows)
+        client.wait_for_message.side_effect = wait
+        client.fetch_messages.side_effect = lambda *a, **k: list(rows)
+        with patch.object(driver, 'tmux', None), patch.object(driver, '_read_api_json', return_value=(200, health)) as get, \
+             patch.object(driver.herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps({'executions': [before]}))) as run, \
+             patch.object(driver.herdr.time, 'sleep'), patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
+            result = driver.run_scenario(scenario, args=args, client=client, run_id='restart')
+        self.assertEqual(result['status'], 'not_applicable', result)
+        self.assertEqual([c.args[0][:2] for c in run.call_args_list],
+                         [['/test/agentdesk', 'herdr'], ['launchctl', 'kickstart'], ['/test/agentdesk', 'herdr']])
+        self.assertTrue(all(c.args[1] == '/api/health' for c in get.call_args_list))
+        self.assertEqual(result['herdr_observations'][1]['row']['nonce'], 'same')
+
+    def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):
+        from unittest.mock import Mock, patch
+        from argparse import Namespace
+        scenario = next(s for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr') if s['id'] == 'E-36')
+        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=False,
+                         phase_deadline_s=3540, final_refetches=1)
+        rows, sent = [], []
+        client = Mock()
+        client.send_control.return_value = {'id': '100'}
+        def add(marker):
+            row = {'id': str(102 + len(rows)), 'content': marker.replace('{run_id}', 'phase'), 'author': {'id': '42', 'bot': True}}
+            rows.append(row)
+        def send(channel, prompt):
+            step = scenario['steps'][len(sent)]
+            sent.append(prompt)
+            if step['request_key'] == 'QB':
+                add(scenario['steps'][-2]['body_marker'])
+            add(step.get('hold_marker', step['body_marker']))
+            return {'id': '101'}
+        client.send.side_effect = send
+        client.wait_for_message.side_effect = lambda channel, **k: (next((r for r in rows if k['predicate'](r)), None), list(rows))
+        client.fetch_messages.side_effect = lambda *a, **k: list(rows)
+        with patch.object(driver, 'tmux', None), patch.object(driver.herdr, 'observe', return_value={'herdr': {}}), \
+             patch.object(driver.normal_intake_evidence, 'validate', side_effect=AssertionError('legacy intake')):
+            result = driver.run_scenario(scenario, args=args, client=client, run_id='phase')
+        self.assertEqual(result['status'], 'not_applicable', result)
+        self.assertEqual(client.send.call_count, 12)
+        client.send_prompt.assert_not_called()
+        self.assertEqual(result['e36_acceptance']['native_intake_queue_join'], 'not_applicable')

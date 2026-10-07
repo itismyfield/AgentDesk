@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 102
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 104
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -18,7 +18,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ADK_API_URL` | `src/cli/monitoring.rs:33` | This module's api_base() prefers ADK_API_URL over AGENTDESK_API_URL — the hint must match that order. |
-| `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs:18` (+1 more) | `ADK_BUSY_INJECT` turns on busy-turn injection for turn/deliver, read once per process: `external` for TUI-direct turns, `all` for Discord turns too; unset or… |
+| `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs:24` (+1 more) | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
+| `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs:430` (+1 more) | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs:6` (+1 more) |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs:204` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs:53` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
@@ -29,6 +30,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs:227` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs:27` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs:31` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
+| `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:176` (+1 more) | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs:44` (+1 more) | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs:6` (+1 more) |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs:34` (+1 more) | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
@@ -39,7 +41,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:110` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:422` |  |
-| `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:553` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
+| `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:547` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs:66` | `0` lets watcher respawn take over a live Claude original again. |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:220` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:81` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
