@@ -424,5 +424,111 @@ class AutonomousDispatchTests(unittest.TestCase):
                 driver.validate_scenario_schema({kind: [{action: {**params, "unexpected": True}}]})
 
 
+class FinalSnapshotDriverTests(unittest.TestCase):
+    MARKER = "[E2E:T:fixture:ONE]"
+
+    def run_surface(self, *, change=None, pages=None, specs=None, initial=None):
+        from argparse import Namespace
+        state = initial if initial is not None else [message(101, self.MARKER + "\n\n-# ✅ 완료")]
+        client = Mock(base_url="http://offline.invalid")
+        client.send_control.return_value = {"id": "100"}
+        requests = []
+
+        def fetch(channel, *, after_id, limit):
+            requests.append(after_id)
+            if pages is not None:
+                return pages(after_id)
+            return [row.copy() for row in state if int(row["id"]) > int(after_id)]
+
+        def idle(**kwargs):
+            if change == "footer":
+                state[0] = message(101, self.MARKER)
+            elif change == "delete":
+                state.clear()
+            elif change == "panel":
+                state[:] = [row for row in state if row["id"] != "102"]
+            return {"status": "idle"}
+
+        client.fetch_messages.side_effect = fetch
+        scenario = {"id": "surface-proof", "agent_mode": "none", "coverage_class": "fixture",
+                    "steps": [], "report_marker_counts": [self.MARKER],
+                    "assertions": specs if specs is not None else [{"completion_per_turn": {"exact": 1, "marker": self.MARKER}}]}
+        args = Namespace(queue_runtime_root="/offline-denied", final_refetches=1)
+        with patch.object(driver.time, "sleep"), patch.object(driver, "assert_cell_idle", side_effect=idle):
+            record = driver.run_one_cell(scenario=scenario, cell="claude-tui", channel_id="123",
+                                        client=client, run_id="fixture", dry_run=False, args=args)
+        return record, requests
+
+    def test_idle_footer_loss_is_rejected_by_actual_dispatch(self):
+        with self.assertRaisesRegex(driver.ScenarioStepAssertionError, "completion"):
+            self.run_surface(change="footer")
+
+    def test_idle_deleted_inline_message_is_rejected(self):
+        with self.assertRaisesRegex(driver.ScenarioStepAssertionError, "completion"):
+            self.run_surface(change="delete")
+
+    def test_unchanged_idle_surface_passes_without_duplicate_results(self):
+        record, requests = self.run_surface()
+        self.assertEqual(requests, ["100", "100"])
+        self.assertEqual(len(record["assertions"]), 2)
+        self.assertTrue(record["revalidated_after_idle"][0]["passed"])
+        self.assertEqual(record["marker_counts"][self.MARKER], 1)
+
+    def test_full_page_is_followed_until_snapshot_is_complete(self):
+        rows = [message(mid, "plain body") for mid in range(101, 201)]
+        rows += [message(201, self.MARKER + "\n\n-# ✅ 완료")]
+        record, requests = self.run_surface(pages=lambda cursor: [row for row in rows if int(row["id"]) > int(cursor)][:100])
+        self.assertEqual(requests, ["100", "200", "100", "200"])
+        self.assertEqual(record["raw_count"], 101)
+
+    def test_nonadvancing_full_page_fails_closed(self):
+        rows = [message(mid, "plain body") for mid in range(101, 201)]
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "pagination did not advance"):
+            self.run_surface(pages=lambda cursor: rows)
+
+
+    def test_deleted_status_panel_cannot_pass_historical_raw_assertions(self):
+        specs = [{"status_panel_after_body": {"body_marker": self.MARKER}},
+                 {"single_status_panel": {}},
+                 {"completion_chrome_after_body": {"body_marker": self.MARKER, "required": True}}]
+        for spec in specs:
+            with self.subTest(spec=spec), self.assertRaises(driver.ScenarioStepAssertionError) as caught:
+                self.run_surface(change="panel", specs=[spec],
+                                 initial=[message(101, self.MARKER), message(102, "✅ 완료")])
+            record = caught.exception.record
+            self.assertEqual(record["raw_count"], 1)
+            self.assertEqual(record["recent_raw"][0]["id"], "101")
+
+    def test_deleted_body_updates_final_counts_and_report(self):
+        with self.assertRaises(driver.ScenarioStepAssertionError) as caught:
+            self.run_surface(change="delete", specs=[{"raw_text_present": self.MARKER}])
+        record = caught.exception.record
+        self.assertEqual(record["marker_counts"][self.MARKER], 0)
+        self.assertEqual((record["raw_count"], record["relay_count"]), (0, 0))
+        self.assertEqual(record["recent_raw"], [])
+        result = {"assertions": []}
+        driver._merge_record_into_result(result, record)
+        self.assertFalse(result["revalidated_after_idle"][0]["passed"])
+
+    def test_actual_captured_full_page_is_not_mistaken_for_complete(self):
+        from argparse import Namespace
+        rows = [message(mid, "plain body") for mid in range(100, 200)]
+        response = Mock(status=200, headers={}, read=Mock(return_value=json.dumps(rows).encode()))
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        client = driver.discord.DiscordClient("http://offline.invalid", captures=[], capture_after_id="99")
+        scenario = {"id": "captured-full", "agent_mode": "none", "coverage_class": "fixture",
+                    "steps": [], "assertions": []}
+        with patch.object(driver.urllib.request, "urlopen", return_value=response) as get, \
+             patch.object(driver.discord.DiscordClient, "send_control", return_value={"id": "100"}), \
+             patch.object(driver.time, "sleep"), \
+             self.assertRaisesRegex(driver.HarnessEvidenceError, "captured snapshot incomplete"):
+            driver.run_one_cell(scenario=scenario, cell="claude-tui", channel_id="123", client=client,
+                                run_id="fixture", dry_run=False,
+                                args=Namespace(queue_runtime_root="/offline-denied", final_refetches=1))
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(len(client.captures[0]["pages"][0]["messages"]), 100)
+
+
 if __name__ == "__main__":
     unittest.main()

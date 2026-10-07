@@ -308,20 +308,26 @@ class Window:
         if is_relay_response(message):
             self.messages.append(message)
 
-    def reconcile_snapshot(self, rows: Sequence[dict[str, Any]], *, after_id: str) -> None:
-        # Discord pages the oldest messages after the cursor, so only ids below the newest
-        # returned id lie inside the fetch; a truncated page never reads as a deletion.
+    def reconcile_snapshot(
+        self, rows: Sequence[dict[str, Any]], *, after_id: str, complete: bool = False
+    ) -> None:
+        # A complete query covers every id after the cursor, including an empty result.
+        # A truncated oldest-first page only proves absence below its newest returned id.
         present = {_numeric_id(row) for row in rows} - {None}
-        if not present or (cursor := _numeric_id({"id": after_id})) is None:
+        if (cursor := _numeric_id({"id": after_id})) is None:
             return
-        newest = max(present)
-        self.deleted_ids = {
+        newest = max(present) if present else cursor
+        self.deleted_ids.difference_update(str(message_id) for message_id in present)
+        self.deleted_ids.update({
             str(message_id)
             for message in self.raw_messages
             if (message_id := _numeric_id(message)) is not None
-            and cursor < message_id < newest
+            and cursor < message_id
+            and (complete or message_id < newest)
             and message_id not in present
-        }
+        })
+        self.messages = [message for message in self.raw_messages if is_relay_response(message)
+                         and str(message.get("id") or "") not in self.deleted_ids]
 
 
 def _numeric_id(message: dict[str, Any]) -> int | None:
