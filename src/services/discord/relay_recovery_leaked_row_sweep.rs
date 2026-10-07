@@ -29,6 +29,20 @@ async fn recover_candidate(
         return false;
     };
 
+    #[cfg(test)]
+    tui_direct_pending_start::retirement_recheck_tests::pause(
+        "leaked_row_after_runtime",
+        channel_id,
+    )
+    .await;
+    if super::super::health::legacy_supervision::legacy_retired(
+        provider.as_str(),
+        channel_id,
+        "leaked_row_after_runtime",
+    ) {
+        return false;
+    }
+
     let record = tui_direct_pending_start::TuiDirectPendingStart {
         provider: provider.as_str().to_string(),
         channel_id,
@@ -48,7 +62,7 @@ async fn recover_candidate(
         attempt_count: 0,
         captured_source: None,
     };
-    tui_direct_pending_start::demote_stale_foreign_inflight_if_current(&shared, &record).await
+    tui_direct_pending_start::demote_leaked_foreign_inflight_if_current(&shared, &record).await
 }
 
 pub(in crate::services::discord) async fn sweep_leaked_inflight_rows(

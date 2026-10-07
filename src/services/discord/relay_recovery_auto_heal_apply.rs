@@ -231,6 +231,7 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     let skipped_reason = match apply_result.status {
         "reattach_episode_changed" => Some("durable_reattach_confirmation_episode_changed"),
         "host_deferred" => Some("host_not_legacy_tmux"),
+        "legacy_retired" => Some("legacy_retired"),
         _ => None,
     };
     let skipped = skipped_reason.is_some();
@@ -296,7 +297,7 @@ fn settle_auto_heal_confirmation(
             // clears `consecutive_refunds` and the pending retry window, so
             // committing a repeating no-op reset the failure backoff on every
             // pass and the reattach loop could neither converge nor give up.
-            if apply_result.status == "host_deferred" {
+            if matches!(apply_result.status, "host_deferred" | "legacy_retired") {
                 // Nothing ran: the reservation goes back and the failure backoff stays as is.
                 cancel_unapplied_auto_heal_attempt(key);
             } else if matches!(
@@ -434,6 +435,30 @@ mod tests {
             counters.consecutive_refunds, 1,
             "a no-transition reuse must register exactly one refund"
         );
+    }
+
+    #[tokio::test]
+    async fn retirement_returns_unapplied_reservation_without_resetting_refund_streak() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "codex",
+            6_325_420_300,
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 3), Ok(2));
+        refund_auto_heal_attempt(&key, 1_000);
+        assert_eq!(reserve_auto_heal_attempt(&key, 2_000, 3), Ok(2));
+        let mut result = reused_live_watcher_apply_result();
+        result.status = "legacy_retired";
+
+        settle_auto_heal_confirmation(&mut result, ReattachConfirmation::NotRequired, &key, 2_000);
+
+        assert!(!relay_recovery_status_counts_as_applied(result.status));
+        let counters = auto_heal_attempt_counters_for_tests(&key).expect("budget window");
+        assert_eq!(counters.attempts, 0);
+        assert_eq!(counters.consecutive_refunds, 1);
     }
 
     /// The other side of #5021: a reattach that really spawned a watcher still

@@ -16,6 +16,10 @@ const DEAD_FRONTIER_CANCEL_IDENTITY_SITE: &str = "relay_recovery_dead_frontier_c
 #[path = "tests/host_deferred.rs"]
 mod host_deferred_tests;
 
+#[cfg(test)]
+#[path = "tests/retirement.rs"]
+mod retirement_tests;
+
 pub(super) async fn apply_relay_recovery_decision(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
@@ -104,6 +108,29 @@ async fn apply_relay_recovery_decision_admitted(
                     removed_mailbox_token: false,
                     post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
                     post_mailbox_queue_depth: Some(after.intervention_queue.len()),
+                    reattach_watcher_spawned: None,
+                    reattach_watcher_replaced: None,
+                    reattach_initial_offset: None,
+                    reattach_error: None,
+                };
+            }
+            #[cfg(test)]
+            retirement_tests::host_barrier(channel).await;
+            // Automatic cleanup can lose ownership while the host check awaits.
+            if matches!(
+                source,
+                RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog
+            ) && super::super::health::legacy_supervision::legacy_retired(
+                provider.as_str(),
+                channel.get(),
+                "orphan_token_before_finish",
+            ) {
+                return RelayRecoveryApplyResult {
+                    status: "legacy_retired",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: false,
+                    post_mailbox_has_cancel_token: None,
+                    post_mailbox_queue_depth: None,
                     reattach_watcher_spawned: None,
                     reattach_watcher_replaced: None,
                     reattach_initial_offset: None,

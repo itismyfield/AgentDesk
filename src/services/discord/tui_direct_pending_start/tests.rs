@@ -1992,7 +1992,7 @@ fn stale_foreign_demote_racing_fresh_claim_does_not_clear_fresh_row() {
                 channel,
             );
         assert!(
-            !submit_stale_foreign_inflight_cancel(&shared, &provider, channel, &stale_probe).await,
+            !submit_stale_foreign_inflight_cancel(&shared, &provider, channel, &stale_probe, ForeignRecoverySource::PendingStart).await,
             "identity mismatch is a no-op; the fresh turn must remain live"
         );
         let current = super::super::inflight::load_inflight_state(&provider, channel_id)

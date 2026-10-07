@@ -152,11 +152,22 @@ pub(super) fn channel_lock(provider: &str, channel_id: u64) -> Arc<tokio::sync::
         .clone()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForeignRecoverySource {
+    PendingStart,
+    LeakedRowSweep,
+}
+
+#[cfg(test)]
+#[path = "tui_direct_pending_start/retirement_recheck_tests.rs"]
+pub(in crate::services::discord) mod retirement_recheck_tests;
+
 async fn submit_stale_foreign_inflight_cancel(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
     channel_id: poise::serenity_prelude::ChannelId,
     probe: &super::destructive_cancel_gate::DestructiveCancelProbeSnapshot,
+    source: ForeignRecoverySource,
 ) -> bool {
     let finalizer_turn_id = probe.pin.finalizer_turn_id;
     if finalizer_turn_id == 0 {
@@ -176,6 +187,18 @@ async fn submit_stale_foreign_inflight_cancel(
         );
         return false;
     }
+    #[cfg(test)]
+    retirement_recheck_tests::pause("leaked_row_cancel_after_mailbox", channel_id.get()).await;
+    if source == ForeignRecoverySource::LeakedRowSweep
+        && super::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id.get(),
+            "leaked_row_cancel_after_mailbox",
+        )
+    {
+        return false;
+    }
+
     // #5071 T3-A1: pin the live execution identity alongside the cancel
     // pointer, the owner channel and the output path, so the registry CAS below
     // re-reads all of them as conjuncts. This helper compares only the session
@@ -323,6 +346,7 @@ async fn submit_committed_foreign_inflight_complete(
     channel_id: poise::serenity_prelude::ChannelId,
     probe: &super::destructive_cancel_gate::DestructiveCancelProbeSnapshot,
     restart_orphan_evidence: bool,
+    source: ForeignRecoverySource,
 ) -> bool {
     let finalizer_turn_id = probe.pin.finalizer_turn_id;
     if finalizer_turn_id == 0 {
@@ -366,6 +390,18 @@ async fn submit_committed_foreign_inflight_complete(
             current_save_generation = current.save_generation,
             "tui_direct_pending_start: committed FOREIGN complete no-op; terminal envelope or identity pin no longer matches"
         );
+        return false;
+    }
+
+    #[cfg(test)]
+    retirement_recheck_tests::pause("leaked_row_complete_after_mailbox", channel_id.get()).await;
+    if source == ForeignRecoverySource::LeakedRowSweep
+        && super::health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id.get(),
+            "leaked_row_complete_after_mailbox",
+        )
+    {
         return false;
     }
 
@@ -428,6 +464,21 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
     shared: &Arc<SharedData>,
     record: &TuiDirectPendingStart,
 ) -> bool {
+    demote_stale_foreign_inflight(shared, record, ForeignRecoverySource::PendingStart).await
+}
+
+pub(in crate::services::discord) async fn demote_leaked_foreign_inflight_if_current(
+    shared: &Arc<SharedData>,
+    record: &TuiDirectPendingStart,
+) -> bool {
+    demote_stale_foreign_inflight(shared, record, ForeignRecoverySource::LeakedRowSweep).await
+}
+
+async fn demote_stale_foreign_inflight(
+    shared: &Arc<SharedData>,
+    record: &TuiDirectPendingStart,
+    source: ForeignRecoverySource,
+) -> bool {
     let Some(provider) = crate::services::provider::ProviderKind::from_str(&record.provider) else {
         return false;
     };
@@ -482,6 +533,7 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
             channel,
             &probe,
             !terminal_envelope_present,
+            source,
         )
         .await;
         if cleared {
@@ -531,7 +583,8 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
 
     #[cfg(test)]
     run_destructive_cancel_post_gate_hook_for_tests(DestructiveCancelHookPoint::PostGate);
-    let demoted = submit_stale_foreign_inflight_cancel(shared, &provider, channel, &probe).await;
+    let demoted =
+        submit_stale_foreign_inflight_cancel(shared, &provider, channel, &probe, source).await;
     if demoted {
         tracing::warn!(
             provider = %record.provider,
