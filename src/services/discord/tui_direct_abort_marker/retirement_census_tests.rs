@@ -12,7 +12,11 @@ async fn assert_retired_marker_preserved(covered: bool) {
         temp.path(),
     );
     let shared = crate::services::discord::make_shared_data_for_tests();
-    let discord = MockDiscord::start().await;
+    shared.turn_view_reconciler.enable_test_http_reactions();
+    let discord = MockDiscord::start_with(std::sync::Arc::new(|method, _| {
+        (method == axum::http::Method::PUT).then_some((204, serde_json::Value::Null))
+    }))
+    .await;
     let _http = crate::services::discord::shared_state::test_rest::install(discord.http.clone());
     let (retired, legacy) = if covered {
         (6_325_507_001, 6_325_507_002)
@@ -27,7 +31,7 @@ async fn assert_retired_marker_preserved(covered: bool) {
         let marker = AbortedAnchorMarker {
             provider: "codex".into(),
             channel_id: channel,
-            anchor_message_id: channel * 10,
+            anchor_message_id: channel * 1_000_000,
             tmux_session_name: format!("test-marker-{channel}"),
             aborted_at_ms: aborted_at,
             covered_at_ms: None,
