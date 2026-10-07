@@ -11,14 +11,14 @@ use crate::services::discord::catch_up::retry_state::arm_catch_up_retry_for_test
 use crate::services::provider::CancelToken;
 
 /// A snowflake base minted 30s ago, inside both catch-up age windows.
-fn recent_snowflake_base() -> u64 {
+pub(super) fn recent_snowflake_base() -> u64 {
     const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
     let discord_ms = chrono::Utc::now().timestamp_millis() - 30_000 - DISCORD_EPOCH_MS;
     u64::try_from(discord_ms).expect("after Discord epoch") << 22
 }
 
 /// Every source message the queue carries; consecutive inputs merge into one entry.
-async fn queued_ids(harness: &RelayE2eHarness) -> Vec<u64> {
+pub(super) async fn queued_ids(harness: &RelayE2eHarness) -> Vec<u64> {
     let mailbox = harness.mailbox().await;
     let mut ids: Vec<u64> = mailbox
         .intervention_queue
@@ -35,7 +35,7 @@ async fn queued_ids(harness: &RelayE2eHarness) -> Vec<u64> {
 }
 
 /// Holds a live turn on `active` at its placeholder POST, leaving the mailbox busy.
-async fn hold_a_turn(
+pub(super) async fn hold_a_turn(
     harness: &RelayE2eHarness,
     active: u64,
 ) -> (AbortOnDrop<Result<(), Error>>, Arc<CancelToken>) {
@@ -52,8 +52,18 @@ async fn hold_a_turn(
 
 /// Interrupts the held turn with a live `!stop`, which posts no reply.
 async fn stop_the_turn(harness: &RelayE2eHarness, token: &CancelToken, stop: u64) {
+    stop_the_turn_with(harness, token, stop, "!stop").await;
+}
+
+/// [`stop_the_turn`] with the command spelled as `text` (a leading mention allowed).
+pub(super) async fn stop_the_turn_with(
+    harness: &RelayE2eHarness,
+    token: &CancelToken,
+    stop: u64,
+    text: &str,
+) {
     harness
-        .deliver_user_message(stop, "!stop")
+        .deliver_user_message(stop, text)
         .await
         .expect("live intake handles the command");
     assert!(
@@ -70,7 +80,7 @@ async fn stop_the_turn(harness: &RelayE2eHarness, token: &CancelToken, stop: u64
     );
 }
 
-fn assert_no_unhandled(harness: &RelayE2eHarness) {
+pub(super) fn assert_no_unhandled(harness: &RelayE2eHarness) {
     let unhandled = harness.unhandled_requests();
     assert!(unhandled.is_empty(), "{unhandled:?}");
 }
@@ -171,14 +181,14 @@ async fn a_stop_keeps_earlier_dropped_input_recoverable() {
         harness.run_catch_up().await;
 
         let queued = queued_ids(&harness).await;
-        if !queued.contains(&missed) {
+        if queued != vec![missed] {
             lost.push((dropped, queued));
         }
         assert_no_unhandled(&harness);
     }
     assert!(
         lost.is_empty(),
-        "input before the stop must stay recoverable: {lost:?}"
+        "only the input before the stop recovers, never the stop: {lost:?}"
     );
 }
 

@@ -752,6 +752,8 @@ src/
 │   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
+│   │   │   ├── consumed_commands.rs
+│   │   │   ├── consumed_commands_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
@@ -1533,6 +1535,7 @@ src/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
+│   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs

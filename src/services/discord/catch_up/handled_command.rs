@@ -1,5 +1,5 @@
-//! Text-command evidence for catch-up. The live command path answers with a
-//! Discord reply, so this bot's reply in the scanned history marks the command handled.
+//! Text-command evidence for catch-up: live intake's consumed record, or this
+//! bot's reply to the command in the scanned history.
 
 use poise::serenity_prelude as serenity;
 use serenity::{MessageId, MessageReferenceKind};
@@ -10,8 +10,8 @@ use super::settled_frontier::SettledFrontier;
 pub(super) enum TextCommandEvidence {
     /// Not a `!` text command; recovery is unchanged.
     NotCommand,
-    /// This bot replied to the command, so the live command path consumed it.
-    Replied,
+    /// Live intake recorded the command or this bot replied to it: it was consumed.
+    Consumed,
     /// No reply from this bot is in the scanned history; recovery is unchanged.
     NoReply,
     /// This bot's identity is unknown, so its replies cannot be recognized.
@@ -24,7 +24,7 @@ pub(super) fn text_command_evidence(
     scanned: &[serenity::Message],
     bot_user_id: Option<u64>,
 ) -> TextCommandEvidence {
-    if !without_leading_mention(text).starts_with('!') {
+    if !is_text_command(text) {
         return TextCommandEvidence::NotCommand;
     }
     let Some(bot_user_id) = bot_user_id else {
@@ -38,10 +38,15 @@ pub(super) fn text_command_evidence(
             })
     });
     if replied {
-        TextCommandEvidence::Replied
+        TextCommandEvidence::Consumed
     } else {
         TextCommandEvidence::NoReply
     }
+}
+
+/// The live intake's command test: `!` after an optional leading `<@id>` / `<@!id>`.
+pub(super) fn is_text_command(text: &str) -> bool {
+    without_leading_mention(text).starts_with('!')
 }
 
 /// Seals the frontier before a command whose handling cannot be read and

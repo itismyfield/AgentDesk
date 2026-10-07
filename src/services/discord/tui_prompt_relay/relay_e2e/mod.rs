@@ -13,6 +13,7 @@
 //! scenario module inherits that only once it is named in the same invocation.
 
 mod catch_up_pagination_e2e;
+mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode;
@@ -307,6 +308,29 @@ impl RelayE2eHarness {
             new_message: user_message(id, text),
         };
         router::handle_event(&self.ctx, &event, &self.data).await
+    }
+
+    /// [`Self::deliver_user_message`] on its own task, for scenarios that act while it runs.
+    pub(super) fn spawn_user_message(
+        &self,
+        id: u64,
+        text: &str,
+    ) -> tokio::task::JoinHandle<Result<(), Error>> {
+        let event = serenity::FullEvent::Message {
+            new_message: user_message(id, text),
+        };
+        let (ctx, data) = (self.ctx.clone(), self.clone_data());
+        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+    }
+
+    /// [`Self::run_catch_up`] on its own task.
+    pub(super) fn spawn_catch_up(&self) -> tokio::task::JoinHandle<()> {
+        let (http, shared) = (self.ctx.http.clone(), self.shared.clone());
+        let provider = self.data.provider.clone();
+        tokio::spawn(async move {
+            crate::services::discord::catch_up::catch_up_missed_messages(&http, &shared, &provider)
+                .await
+        })
     }
 
     /// Spawns production intake for `id` and returns once the mock has its
