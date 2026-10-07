@@ -488,6 +488,23 @@ pub(crate) fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
     fold_records(context, &ownership_records(channel)?)
 }
 
+pub(crate) fn context_for_nonce(
+    channel: u64,
+    tmux: &str,
+    nonce: Option<&str>,
+) -> io::Result<Option<BindingContext>> {
+    let _logs = lock_logs();
+    Ok(ownership_records(channel)?
+        .into_iter()
+        .filter_map(|record| record.codex_ownership)
+        .rev()
+        .find(|record| {
+            record.context.tmux_session == tmux
+                && nonce.is_none_or(|nonce| record.context.execution_nonce == nonce)
+        })
+        .map(|record| record.context))
+}
+
 fn same_native(left: &SourceId, right: &SourceId) -> bool {
     left.session_id == right.session_id
         && (left.dev, left.ino) == (right.dev, right.ino)

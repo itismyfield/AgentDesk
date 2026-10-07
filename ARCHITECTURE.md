@@ -2295,8 +2295,11 @@ src/
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── adopt_skip.rs
+│   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs
 │   │   │   ├── codex_hook.rs
+│   │   │   ├── codex_verified.rs
+│   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs

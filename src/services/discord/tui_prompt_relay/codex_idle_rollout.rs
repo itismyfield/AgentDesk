@@ -30,6 +30,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
             if now >= next_rehydrate {
                 let shared_for_rehydrate = shared.clone();
                 let rehydrate_result = tokio::task::spawn_blocking(move || {
+                    crate::services::tui_prompt_dedupe::resolve_codex_claims();
                     rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate);
                 })
                 .await;

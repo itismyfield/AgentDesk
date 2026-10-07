@@ -347,6 +347,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_forwarding/probe/tests.rs",
         "src/services/scheduled_messages/postgres_tests.rs",
         "src/services/tui_prompt_dedupe/binding_events/codex_claim_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified_tests.rs",
         "src/services/tui_prompt_dedupe/binding_events/lane_tests.rs",
         "src/services/tui_prompt_dedupe/pending_tests.rs",
         "src/services/tui_prompt_dedupe/pending_history_tests.rs",

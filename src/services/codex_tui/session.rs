@@ -134,22 +134,54 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
             "refusing Codex TUI marker for a subagent rollout");
         return Err("cannot persist a Codex TUI marker for a subagent rollout".to_string());
     }
-    let rollout_start_offset = preserved_rollout_start_offset_for_marker(
-        tmux_session_name,
+    let ownership = crate::services::tui_prompt_dedupe::codex_verified_marker_metadata(
+        authority,
         rollout_path,
-        rollout_start_offset,
-    );
+        session_id,
+    )?;
     let path = crate::services::tmux_common::session_temp_path(
         tmux_session_name,
         crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
     );
-    let value = serde_json::json!({
+    let already_owned = ownership.as_ref().is_some_and(|proof| {
+        std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|marker| {
+                marker["codex_ownership"] == *proof
+                    && marker["rollout_path"].as_str() == rollout_path.to_str()
+            })
+    });
+    let rollout_start_offset = if ownership.is_some() && !already_owned {
+        Some(0)
+    } else {
+        preserved_rollout_start_offset_for_marker(
+            tmux_session_name,
+            rollout_path,
+            rollout_start_offset,
+        )
+    };
+    let mut value = serde_json::json!({
         "rollout_path": rollout_path.display().to_string(),
         "session_id": session_id
             .map(str::trim)
             .filter(|value| !value.is_empty()),
         "rollout_start_offset": rollout_start_offset,
     });
+    if let Some(ownership) = ownership {
+        value["codex_ownership"] = ownership;
+        use std::io::Write;
+        let parent = Path::new(&path)
+            .parent()
+            .ok_or("Codex marker has no parent")?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+        temp.write_all(format!("{value}\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        temp.as_file().sync_all().map_err(|e| e.to_string())?;
+        temp.persist(&path).map_err(|e| e.to_string())?;
+        return crate::services::discord::runtime_store::fsync_parent_dir(Path::new(&path))
+            .map_err(|e| e.to_string());
+    }
     std::fs::write(&path, format!("{value}\n"))
         .map_err(|error| format!("failed to write Codex TUI rollout marker: {error}"))
 }
@@ -200,6 +232,12 @@ fn install_binding(
     let rollout_path = PathBuf::from(&binding.output_path);
     let session_id = binding.session_id.clone();
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        if !dedupe::codex_verified_publication_allowed(authority, &binding) {
+            return false;
+        }
+        let verified =
+            dedupe::codex_verified_marker_metadata(authority, &rollout_path, session_id.as_deref())
+                .is_ok_and(|metadata| metadata.is_some());
         // A recovery install with hooks on gets the same check; its reader keeps the old source.
         if (launched || crate::services::codex::codex_direct_tui_hook_overrides_enabled())
             && dedupe::codex_tail_source_retired(authority, &binding)
@@ -225,16 +263,16 @@ fn install_binding(
                 error,
                 "failed to persist Codex TUI rollout marker; runtime binding unchanged"
             );
-            return true;
+            return !verified;
         }
-        if launched {
+        let registered = if launched {
             dedupe::register_launched_tmux_runtime_binding_under_source_authority(
                 authority, binding,
-            );
+            )
         } else {
-            dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
-        }
-        true
+            dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding)
+        };
+        !verified || registered
     })
 }
 

@@ -150,6 +150,16 @@ pub(crate) fn observe_binding_hook(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| decode_binding_header(h).ok());
     if provider == "codex"
+        && let Some(outcome) = crate::services::tui_prompt_dedupe::observe_verified_codex_hook(
+            payload_session_id,
+            payload,
+            &hook,
+            envelope.as_ref(),
+        )
+    {
+        return outcome;
+    }
+    if provider == "codex"
         && crate::services::codex::codex_source_mode_snapshot()
             == crate::services::codex::CodexSourceMode::Shadow
     {
