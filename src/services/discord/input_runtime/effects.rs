@@ -10,7 +10,9 @@ use serde_json::Value;
 use super::fence::{self, Closing};
 use crate::services::discord::input_transition::Effects;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_input::handover::{Composer, EnqueueOutcome, MoveEvidence};
+use crate::services::tui_input::handover::{
+    Composer, EnqueueOutcome, MoveEvidence, Reconciliation,
+};
 use crate::services::tui_input::rows::Row;
 use crate::services::turn_orchestrator::input_handback::{self, Destination};
 
@@ -104,8 +106,8 @@ impl Effects for ProdEffects {
         })
     }
 
-    // Only the row's own exact attempt witness proves acceptance; nothing proves the composer empty.
-    fn reconcile(&mut self, _key: u64, row: &Row) -> io::Result<MoveEvidence> {
+    // The ledger's witnesses or the row's own exact attempt witness decide; no composer proof exists.
+    fn reconcile(&mut self, _key: u64, row: &Row) -> io::Result<Reconciliation> {
         worker()?;
         let accepted = row.attempt.as_ref().is_some_and(|attempt| {
             matches!(
@@ -113,12 +115,7 @@ impl Effects for ProdEffects {
                 Ok(Some(_))
             )
         });
-        Ok(MoveEvidence {
-            user_record: accepted,
-            turn_open: false,
-            never_started: false,
-            composer: Composer::Draft,
-        })
+        Ok(Reconciliation::from_row(row).min(Reconciliation::from_legacy(row.state, accepted)))
     }
 
     fn provider_alive(&mut self) -> io::Result<bool> {

@@ -3606,4 +3606,5 @@ fn anchor_slot_rig_teardown_preserves_absent_root() {
 }
 
 mod headless_row_tests;
+mod input_effect_tests;
 mod retire_tests;

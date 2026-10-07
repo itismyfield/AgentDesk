@@ -377,13 +377,13 @@ until frontier.empty?
   end
   case job_id
   when "scripts_required_context"
-    unless job.key?("if") && job["if"] == "always()"
-      warn "#{path}: Script checks publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
+    unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
+      warn "#{path}: Script checks publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
       exit 1
     end
   when "relay-authority-contract"
-    unless job.key?("if") && job["if"] == "always()"
-      warn "#{path}: relay-authority-contract publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
+    unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
+      warn "#{path}: relay-authority-contract publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
       exit 1
     end
   else
@@ -494,7 +494,7 @@ expected_mirror_steps = [
 expected_mirror_job = {
   "name" => "Script checks",
   "needs" => ["changes", *script_check_shard_jobs.keys],
-  "if" => "always()",
+  "if" => "${{ !cancelled() }}",
   "runs-on" => "ubuntu-latest",
   "steps" => expected_mirror_steps,
 }
@@ -544,7 +544,7 @@ mirror_source = mirror_source&.gsub(
   "expected=<required-check-pin-sha256>",
 )
 mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
-unless mirror_source_sha256 == "86cea9c1d95dc6062fe6edfb3fa8334e491c98f9d7f73f6a45796b9a2b9c12df"
+unless mirror_source_sha256 == "d78151431f9f92845ded58a8b9d11046bfe644522f7a1399b09f95ecc5910928"
   warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -883,9 +883,9 @@ targets = {
     "label" => "cross-OS required-context mirror",
     "name" => "Fast check cross OS required context (ubuntu-latest)",
     "needs" => %w[changes check_fast_cross_os check_fast_cross_os_targets],
-    "if" => "always()",
+    "if" => "${{ !cancelled() }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "b3f62e36af947ceaede19310676c24f3eb09e33ee2bbbda186df545443bd2390",
+    "job_sha256" => "a805ae940c4b5cc781b0857dccd3c5ee7d8cb5ad79df4c011f3b1c4df13e224b",
     "require_debug_env" => false,
     "cargo_steps" => %w[check_fast_cross_os check_fast_cross_os_targets].to_h do |runner|
       [
@@ -1069,9 +1069,9 @@ targets = {
     "label" => "relay-authority contract job",
     "name" => "relay-authority-contract",
     "needs" => %w[relay_authority_targets relay_authority_mutations],
-    "if" => "always()",
+    "if" => "${{ !cancelled() }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "188f42334c40446fd80b192f8c23a19310010c25ef3a4d9b70cecc97659053a7",
+    "job_sha256" => "2f9a677bab6a53fb6bcb65bbc29ba493c400551beb043ca6b6d6a9bc7e575bbe",
     "job_timeout_minutes" => 10,
     "cargo_steps" => {
       "Pin required-check mirror content (#5321)" => {
@@ -1789,8 +1789,8 @@ RUBY
   done < <(workflow_files)
 }
 
-# Path-filtered required contexts publish from `if: always()` result mirrors so
-# a failed or cancelled `changes` job cannot leave the required name skipped.
+# Path-filtered required contexts publish from `if: ${{ !cancelled() }}` result mirrors so a failed
+# or timed-out `changes` job cannot leave the required name skipped (skipped counts as passing).
 validate_path_filter_required_mirrors() {
   if ! command -v ruby >/dev/null 2>&1; then
     error "ruby is required to validate path-filter required mirrors structurally"
@@ -1932,7 +1932,7 @@ specs.each do |spec|
   expected_mirror = {
     "name" => context,
     "needs" => ["changes", runner_id],
-    "if" => "always()",
+    "if" => "${{ !cancelled() }}",
     "runs-on" => "ubuntu-latest",
     "steps" => [
       {"uses" => "actions/checkout@v4"},
@@ -1955,7 +1955,7 @@ specs.each do |spec|
   if !mirror.is_a?(Hash)
     errors << "#{context} required-context mirror job #{mirror_id} must exist"
   elsif mirror != expected_mirror
-    errors << "#{context} required-context mirror #{mirror_id} must retain its exact `if: always()` job surface, helper pin, and fail-closed result-mirror step"
+    errors << "#{context} required-context mirror #{mirror_id} must retain its exact `if: ${{ !cancelled() }}` job surface, helper pin, and fail-closed result-mirror step"
   elsif raw_jobs[mirror_id] != stringify(expected_mirror)
     errors << "#{context} required-context mirror #{mirror_id} must retain the exact raw YAML scalars"
   end
