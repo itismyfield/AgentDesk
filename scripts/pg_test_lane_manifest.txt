@@ -1189,6 +1189,7 @@ services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_i
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
 services::discord::health::turn_deliver::inject_tests::a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reservation_pg
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
+services::discord::health::turn_deliver::inject_tests::an_injection_without_a_discord_message_records_no_disposition_pg
 services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg

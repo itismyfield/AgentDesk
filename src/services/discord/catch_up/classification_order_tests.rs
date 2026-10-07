@@ -2827,3 +2827,6 @@ mod handled_command_tests;
 
 #[path = "consumed_commands_tests.rs"]
 mod consumed_commands_tests;
+
+#[path = "injected_catch_up_tests.rs"]
+mod injected_catch_up_tests;

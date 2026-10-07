@@ -960,6 +960,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // The completed-turn ledger prevents DLQ for delivered ids and restores absorbed arms.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
+        let injected = inject_disposition::scan_view(provider);
+        injected.merge(&mut known_arms, &mut existing_ids);
+        injected.log_hits(
+            "phase1",
+            channel_id,
+            messages.iter().map(|msg| msg.id.get()),
+        );
         let consumed = consumed_commands::read(provider, channel_id);
 
         let allowed_bot_ids: Vec<u64> = {
@@ -1372,6 +1379,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // skips (no enqueue): an answered message is never re-surfaced.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&mailbox, &mut known_arms, &mut existing_ids);
+        let injected = inject_disposition::scan_view(provider);
+        injected.merge(&mut known_arms, &mut existing_ids);
+        injected.log_hits(
+            "phase2",
+            channel_id,
+            unanswered_slice.iter().map(|m| m.id.get()),
+        );
         let consumed = consumed_commands::read(provider, channel_id);
         let barrier = open_barriers.get(&channel_id).map(|r| r.barrier);
         let mut frontier = Phase2Frontier::new(barrier, last_bot_response_id);

@@ -1,6 +1,7 @@
 //! A busy-turn injection's place in the mailbox order: reserved before the paste, settled by the
 //! injection's owner.
 use super::*;
+use crate::services::discord::inject_disposition::{self as disposition, InjectionOutcome};
 use crate::services::discord::input_runtime::fence::{self, Permit};
 
 /// iMessage refusal reasons for a handback that was never written, or whose result never came back.
@@ -22,6 +23,7 @@ pub(crate) struct InjectionLease;
 #[derive(Debug)]
 pub(crate) struct InjectionTicket {
     lease: Arc<InjectionLease>,
+    message: Option<MessageId>,
 }
 
 /// The mailbox claim the owner judged: token, kind and message.
@@ -30,6 +32,10 @@ pub(crate) type ExpectedClaim = Option<(Arc<CancelToken>, ActiveTurnKind, Option
 #[derive(Debug)]
 pub(crate) enum ReserveOutcome {
     Reserved(InjectionTicket),
+    /// The message is already queued, reserved for dispatch, or held by the active turn.
+    Owned,
+    /// The message was already injected.
+    Consumed,
     HolderChanged,
     Backlog,
     /// Closed, fenced or unreachable: nothing was reserved.
@@ -38,7 +44,7 @@ pub(crate) enum ReserveOutcome {
 
 pub(crate) enum InjectionSettlement {
     /// The pane took the input or may have; nothing is queued.
-    Delivered,
+    Delivered(InjectionOutcome),
     /// Nothing reached the pane: the input takes the queue front, the place it reserved.
     HandBack(Box<Intervention>),
 }
@@ -173,6 +179,15 @@ pub(super) fn reserve(
     expected: &ExpectedClaim,
     persistence: &QueuePersistenceContext,
 ) -> ReserveOutcome {
+    if let Some(message) = message_id {
+        let now = std::time::Instant::now();
+        if disposition::terminal(Some(&persistence.provider), message, now).is_some() {
+            return ReserveOutcome::Consumed;
+        }
+        if mailbox_holds(state, message) {
+            return ReserveOutcome::Owned;
+        }
+    }
     let claim = state.cancel_token.as_ref();
     let same_claim = match (claim, expected) {
         (None, None) => true,
@@ -202,7 +217,75 @@ pub(super) fn reserve(
     }
     let lease = Arc::new(InjectionLease);
     state.injection_reserved = Some((message_id, lease.clone()));
-    ReserveOutcome::Reserved(InjectionTicket { lease })
+    if let Some(message) = message_id {
+        // A catch-up enqueue classified before this reservation is refused by its claim CAS.
+        state.record_injection_claim(message);
+    }
+    let message = message_id;
+    ReserveOutcome::Reserved(InjectionTicket { lease, message })
+}
+
+/// Whether the mailbox already holds `message`: queued, handed out to a live dispatch, or in the
+/// turn. A dispatch whose lease was dropped no longer holds it.
+fn mailbox_holds(state: &ChannelMailboxState, message: MessageId) -> bool {
+    let queued = (state.intervention_queue.iter())
+        .any(|item| item.message_id == message || item.source_message_ids.contains(&message));
+    let dispatching =
+        state.pending_user_dispatch == Some(message) && !pending_dispatch_lease_is_orphaned(state);
+    queued
+        || dispatching
+        || state.active_user_message_id == Some(message)
+        || state.active_absorbed_source_ids.contains(&message)
+}
+
+/// The provider this actor last persisted for; `None` on an actor that has not persisted yet.
+fn actor_provider(state: &ChannelMailboxState) -> Option<&ProviderKind> {
+    state
+        .last_persistence
+        .as_ref()
+        .map(|persistence| &persistence.provider)
+}
+
+/// `message` under a reservation whose owner still holds its lease.
+fn reserved_live(state: &ChannelMailboxState, message: MessageId) -> bool {
+    let live = |(reserved, lease): &(Option<MessageId>, Arc<InjectionLease>)| {
+        *reserved == Some(message) && Arc::strong_count(lease) > 1
+    };
+    state.injection_reserved.as_ref().is_some_and(live)
+}
+
+/// Whether an injection owns `message`, live or ended; a claim of it yields. Reads, never clears.
+pub(super) fn owns(state: &ChannelMailboxState, message: MessageId) -> bool {
+    let now = std::time::Instant::now();
+    reserved_live(state, message)
+        || disposition::terminal(actor_provider(state), message, now).is_some()
+}
+
+/// Refuses an enqueue of injected input: every source ended in a pane, or one is mid-injection.
+pub(super) fn enqueue_refusal(
+    state: &ChannelMailboxState,
+    intervention: &Intervention,
+) -> Option<EnqueueRefusalReason> {
+    let sources = &intervention.source_message_ids;
+    let now = std::time::Instant::now();
+    let provider = actor_provider(state);
+    let ended = |source: &MessageId| disposition::terminal(provider, *source, now).is_some();
+    let (reason, label) = if !sources.is_empty() && sources.iter().all(ended) {
+        (EnqueueRefusalReason::AlreadyActiveTurn, "injected_terminal")
+    } else if sources.iter().any(|source| reserved_live(state, *source)) {
+        (
+            EnqueueRefusalReason::ClaimedSinceObservation,
+            "injection_in_progress",
+        )
+    } else {
+        return None;
+    };
+    tracing::info!(
+        message_id = intervention.message_id.get(),
+        label,
+        "injected input refused"
+    );
+    Some(reason)
 }
 
 /// Queued input or a dequeued head this actor has not loaded still runs first; an error when the
@@ -236,10 +319,15 @@ pub(super) fn settle(
     persistence: &QueuePersistenceContext,
 ) -> SettleOutcome {
     state.last_persistence = Some(persistence.clone());
-    let InjectionSettlement::HandBack(intervention) = settlement else {
-        release(state, &ticket);
-        let queue_exit_events = Vec::new();
-        return SettleOutcome::Committed { queue_exit_events };
+    let intervention = match settlement {
+        InjectionSettlement::HandBack(intervention) => intervention,
+        InjectionSettlement::Delivered(outcome) => {
+            let (provider, now) = (&persistence.provider, std::time::Instant::now());
+            disposition::note_terminal(provider, channel_id, ticket.message, outcome, now);
+            release(state, &ticket);
+            let queue_exit_events = Vec::new();
+            return SettleOutcome::Committed { queue_exit_events };
+        }
     };
     if let Some(error) = absorb_disk_queue_error(state, channel_id, persistence) {
         return SettleOutcome::NotCommitted { ticket, error };

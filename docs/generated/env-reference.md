@@ -18,7 +18,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ADK_API_URL` | `src/cli/monitoring.rs:33` | This module's api_base() prefers ADK_API_URL over AGENTDESK_API_URL — the hint must match that order. |
-| `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs:24` (+1 more) | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
+| `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs:25` (+1 more) | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs:430` (+1 more) | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs:6` (+1 more) |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs:204` |  |
@@ -113,7 +113,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs:20` (+21 more) | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs:33` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
-| `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:528` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:529` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs:19` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs:20` (+1 more) |  |
 | `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs:22` (+1 more) | Test seam: a child process stops at this create stage until stdin yields a line. |
