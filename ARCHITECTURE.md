@@ -569,6 +569,10 @@ src/
 │   │   ├── process.rs
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
+│   │   ├── busy_inject/
+│   │   │   ├── screen.rs
+│   │   │   ├── stash.rs
+│   │   │   └── stash_tests.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/

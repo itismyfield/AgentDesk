@@ -22,6 +22,7 @@ const FAST: Timing = Timing {
     recheck_interval: Duration::from_millis(5),
     confirm_window: Duration::from_millis(300),
     confirm_poll: Duration::from_millis(20),
+    restore_window: Duration::from_millis(100),
 };
 
 fn text() -> String {
@@ -79,7 +80,9 @@ effects() {
 echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
 case "$2" in
-display-message) next attach ;;
+display-message)
+  # A bare count gets a never-attached generation and a roomy pane.
+  a=$(next attach); case "$a" in *,*) echo "$a" ;; *) echo "$a,,200,50" ;; esac ;;
 capture-pane) next cap ;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
 send-keys|paste-buffer)
@@ -271,10 +274,22 @@ fn the_header_names_the_source_and_cannot_start_a_command_or_close_early() {
 #[test]
 fn every_pre_paste_veto_leaves_the_pane_untouched() {
     type Setup = fn(&Fake);
-    let cases: [(&str, Setup, Veto); 9] = [
+    let cases: [(&str, Setup, Veto); 10] = [
         (
             "attached",
             |f| f.answers("attach", &["1"]),
+            Veto::HumanAttached,
+        ),
+        (
+            "last attached in the current second",
+            |f| {
+                // One second ahead, so a clock tick during the test cannot age it out.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                f.answers("attach", &[&format!("0,{},200,50", now + 1)])
+            },
             Veto::HumanAttached,
         ),
         (
@@ -289,8 +304,8 @@ fn every_pre_paste_veto_leaves_the_pane_untouched() {
         ),
         ("modal", |f| f.caps(&[modal_screen()]), Veto::Modal),
         (
-            "draft",
-            |f| f.caps(&[screen("half typed", "")]),
+            "draft beside a stash",
+            |f| f.caps(&[screen("half typed", &format!("{:>58}", "› stashed"))]),
             Veto::Draft,
         ),
         ("idle pane", |f| f.caps(&[idle_empty()]), Veto::NotBusy),
@@ -375,9 +390,13 @@ fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
 #[test]
 fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
     let folded = "[Pasted text #1 +1 lines]".to_string();
-    for owned in [text(), folded] {
+    // A person's stash beside an empty composer needs no C-s; Claude hands it back on the submit.
+    let stashed = format!("{:>58}", "› stashed");
+    for (owned, status) in [(text(), ""), (folded, ""), (text(), stashed.as_str())] {
         let fake = Fake::new();
-        fake.caps(&[busy_empty(), screen(&owned, "")]);
+        let empty =
+            busy_empty().replace(&format!("\n\n{BORDER}"), &format!("\n{status}\n{BORDER}"));
+        fake.caps(&[empty, screen(&owned, status)]);
         fake.accept_on_enter();
         assert_eq!(fake.run(&FAST), Outcome::Injected, "{owned}");
         assert_eq!(fake.keys(), (1, 1, 0));

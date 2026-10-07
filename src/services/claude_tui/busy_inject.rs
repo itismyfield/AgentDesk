@@ -1,5 +1,11 @@
 //! One external human input pasted into a busy hosted Claude TUI composer. Nothing here
-//! enqueues: after the first pane mutation the only outcomes are Injected or Unconfirmed.
+//! enqueues: after the paste the only outcomes are Injected or Unconfirmed. A person's draft
+//! is first moved into Claude's stash (`stash`), so NotSent can follow that one key.
+
+mod screen;
+mod stash;
+#[cfg(all(test, unix))]
+mod stash_tests;
 
 use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +55,48 @@ pub(crate) enum Outcome {
     Unconfirmed(Unconfirmed),
 }
 
+/// Whether the external input reached Claude, read off the outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    NotAttempted,
+    AttemptedUnconfirmed,
+    Observed,
+}
+
+/// What became of a person's composer draft; only Unchanged and RestoredObserved leave the pane free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftState {
+    Unchanged,
+    StashedVerified,
+    RestoredObserved,
+    Unknown,
+}
+
+/// The delivery and the draft are judged apart: a delivered input is never resent for its draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Report {
+    pub outcome: Outcome,
+    pub draft: DraftState,
+}
+
+impl Report {
+    fn new(outcome: Outcome, draft: DraftState) -> Self {
+        Self { outcome, draft }
+    }
+
+    fn not_sent(veto: Veto) -> Self {
+        Self::new(Outcome::NotSent(veto), DraftState::Unchanged)
+    }
+
+    pub(crate) fn delivery(&self) -> Delivery {
+        match self.outcome {
+            Outcome::NotSent(_) => Delivery::NotAttempted,
+            Outcome::Unconfirmed(_) => Delivery::AttemptedUnconfirmed,
+            Outcome::Injected => Delivery::Observed,
+        }
+    }
+}
+
 pub(crate) struct Timing {
     pub lock_retries: &'static [Duration],
     pub settle: Duration,
@@ -56,6 +104,8 @@ pub(crate) struct Timing {
     pub recheck_interval: Duration,
     pub confirm_window: Duration,
     pub confirm_poll: Duration,
+    /// How long after the submit Claude may take to put a stashed draft back.
+    pub restore_window: Duration,
 }
 
 pub(crate) const TIMING: Timing = Timing {
@@ -69,6 +119,7 @@ pub(crate) const TIMING: Timing = Timing {
     recheck_interval: Duration::from_millis(200),
     confirm_window: Duration::from_secs(3),
     confirm_poll: Duration::from_millis(250),
+    restore_window: Duration::from_secs(2),
 };
 
 pub(crate) struct Request<'a> {
@@ -211,41 +262,68 @@ impl Pane {
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn attached(&self) -> Option<u32> {
+    fn state(&self) -> Option<PaneState> {
         let out = self.ok(&[
             "display-message",
             "-p",
             "-t",
             &self.target,
-            "#{session_attached}",
+            "#{session_attached},#{session_last_attached},#{pane_width},#{pane_height}",
         ])?;
-        out.trim().parse().ok()
+        let mut fields = out.trim_end_matches('\n').split(',');
+        let attached = fields.next()?.parse().ok()?;
+        // Never-attached sessions report an empty value, else epoch seconds. A reply without it is
+        // read as empty, which any past attach breaks, and its unknown size keeps the stash off.
+        let last = fields.next().unwrap_or_default().to_string();
+        if !last.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut size = || fields.next().and_then(|field| field.parse::<usize>().ok());
+        Some(PaneState {
+            generation: Generation { attached, last },
+            size: size().zip(size()),
+        })
     }
 
-    /// Runs `command` in the server only while no client is attached. tmux runs a client's
-    /// queued commands in one pass, so an attach cannot land between the test and the key.
-    fn guarded(&self, command: &str) -> Guard {
+    fn generation(&self) -> Option<Generation> {
+        self.state().map(|state| state.generation)
+    }
+
+    /// Runs `command` in the server only while no client is attached and none attached since
+    /// `g0`. tmux runs a client's queued commands in one pass, so an attach cannot land between.
+    fn guarded(&self, g0: &Generation, command: &str) -> Guard {
         let vetoed = format!(
-            "display-message -p -t '{}' '{VETOED} #{{session_attached}}'",
+            "display-message -p -t '{}' '{VETOED} #{{session_attached}} #{{session_last_attached}}'",
             self.target
+        );
+        let condition = format!(
+            "#{{&&:#{{==:#{{session_attached}},0}},#{{==:#{{session_last_attached}},{}}}}}",
+            g0.last
         );
         let args = [
             "if-shell",
             "-F",
             "-t",
             &self.target,
-            "#{==:#{session_attached},0}",
+            &condition,
             command,
             &vetoed,
         ];
         let Some(out) = self.ok(&args) else {
             return Guard::Failed;
         };
-        // The else branch ran, so the command did not; its count says whether a client held it.
+        // The else branch ran, so the command did not; a count means a person attached since g0.
         match out.trim().strip_prefix(VETOED).map(str::trim) {
             None if out.trim().is_empty() => Guard::Applied,
             None => Guard::Failed,
-            Some(count) if count.parse::<u32>().is_ok_and(|clients| clients > 0) => Guard::Vetoed,
+            Some(rest)
+                if rest
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|count| count.parse::<u32>().is_ok()) =>
+            {
+                Guard::Vetoed
+            }
             Some(_) => Guard::Gone,
         }
     }
@@ -270,6 +348,19 @@ enum Guard {
     Failed,
 }
 
+/// Attach count and last attach second; a change between two reads means a person could type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Generation {
+    attached: u32,
+    last: String,
+}
+
+struct PaneState {
+    generation: Generation,
+    /// Columns and rows, which decide whether Claude folds or wraps a paste.
+    size: Option<(usize, usize)>,
+}
+
 fn modal(capture: &str) -> bool {
     use crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog;
     use crate::services::tmux_common::{
@@ -282,8 +373,20 @@ fn modal(capture: &str) -> bool {
         || tmux_capture_indicates_claude_tui_mcp_auth_required(&plain)
 }
 
-/// Pre-mutation pane verdict: an empty composer under a live turn, or the veto.
-fn judge_before_paste(capture: &str, transcript: &Path) -> Result<(), Veto> {
+enum Plan {
+    Direct,
+    /// The person's draft rows as Claude shows them, to recognise it when it comes back.
+    Stash(Vec<String>),
+}
+
+/// Pre-mutation pane verdict: an empty composer under a live turn, a draft Claude can stash and
+/// give back, or the veto.
+fn judge_before_paste(
+    capture: &str,
+    transcript: &Path,
+    text: &str,
+    size: Option<(usize, usize)>,
+) -> Result<Plan, Veto> {
     use crate::services::tmux_common::{
         tmux_capture_indicates_claude_tui_busy,
         tmux_capture_indicates_claude_tui_exact_empty_composer,
@@ -293,21 +396,29 @@ fn judge_before_paste(capture: &str, transcript: &Path) -> Result<(), Veto> {
         return Err(Veto::Modal);
     }
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
-    if tmux_capture_indicates_claude_tui_prompt_draft(&plain)
-        || !tmux_capture_indicates_claude_tui_exact_empty_composer(&plain)
-    {
-        return Err(Veto::Draft);
-    }
-    // Enter on an idle pane would start a new turn instead of queueing behind this one.
+    let empty = !tmux_capture_indicates_claude_tui_prompt_draft(&plain)
+        && tmux_capture_indicates_claude_tui_exact_empty_composer(&plain);
+    let plan = if empty {
+        Plan::Direct
+    } else {
+        Plan::Stash(screen::stashable(capture, text, size).ok_or(Veto::Draft)?)
+    };
+    // Enter on an idle pane would start a new turn instead of queueing behind this one. Claude
+    // hides its busy chrome while the composer holds text, so a draft rests on the transcript.
     let turn = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript);
-    if !turn.is_busy() || !tmux_capture_indicates_claude_tui_busy(&plain) {
+    if !turn.is_busy() || (empty && !tmux_capture_indicates_claude_tui_busy(&plain)) {
         return Err(Veto::NotBusy);
     }
-    Ok(())
+    Ok(plan)
 }
 
 /// Tries the composer lock a bounded number of times, then injects under it.
 pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Outcome {
+    inject_report(pane, request, timing).outcome
+}
+
+/// `inject` with the draft axis kept apart from the delivery.
+pub(crate) fn inject_report(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
     let text = frame(request.source, request.author, request.nonce, request.text);
     // Both names reach tmux command strings, so only plain characters are accepted.
     let plain = |value: &str, extra: &[char]| {
@@ -322,9 +433,10 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
         || !request.nonce.chars().all(|c| c.is_ascii_alphanumeric())
         || request.nonce.is_empty()
     {
-        return Outcome::NotSent(Veto::InvalidInput);
+        return Report::not_sent(Veto::InvalidInput);
     }
     let started = Instant::now();
+    // The whole transaction, restore watch included, runs under the lock: one stash at a time.
     let locked = at_offsets(
         timing.lock_retries,
         || started.elapsed(),
@@ -335,7 +447,7 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
             })
         },
     );
-    locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
+    locked.unwrap_or(Report::not_sent(Veto::LockContended))
 }
 
 /// Runs `attempt` at each offset from the first try until one returns a value.
@@ -354,43 +466,176 @@ pub(crate) fn at_offsets<T>(
     None
 }
 
-fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing) -> Outcome {
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing) -> Report {
     // The composer lock fences other AgentDesk writers only; a person reaches the pane by attaching.
-    match pane.attached() {
-        None => return Outcome::NotSent(Veto::AttachUnknown),
-        Some(clients) if clients > 0 => return Outcome::NotSent(Veto::HumanAttached),
-        Some(_) => {}
-    }
-    let Some(before) = pane.capture() else {
-        return Outcome::NotSent(Veto::PaneUnavailable);
+    // The second is read first, so an attach after the state read lands in a later second.
+    let floor = unix_seconds();
+    let state = match pane.state() {
+        None => return Report::not_sent(Veto::AttachUnknown),
+        Some(state) if state.generation.attached > 0 => {
+            return Report::not_sent(Veto::HumanAttached);
+        }
+        // A second attach within this second would leave the generation unchanged.
+        Some(state)
+            if state
+                .generation
+                .last
+                .parse::<u64>()
+                .is_ok_and(|last| last >= floor) =>
+        {
+            return Report::not_sent(Veto::HumanAttached);
+        }
+        Some(state) => state,
     };
-    if let Err(veto) = judge_before_paste(&before, request.transcript) {
-        return Outcome::NotSent(veto);
+    let Some(before) = pane.capture() else {
+        return Report::not_sent(Veto::PaneUnavailable);
+    };
+    if stash::held(request.session, &before) {
+        return Report::not_sent(Veto::Draft);
     }
+    let plan = match judge_before_paste(&before, request.transcript, text, state.size) {
+        Ok(plan) => plan,
+        Err(veto) => return Report::not_sent(veto),
+    };
     let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
-        return Outcome::NotSent(Veto::TranscriptUnavailable);
+        return Report::not_sent(Veto::TranscriptUnavailable);
     };
     let Ok(mut file) = tempfile::NamedTempFile::new() else {
-        return Outcome::NotSent(Veto::LoadFailed);
+        return Report::not_sent(Veto::LoadFailed);
     };
     if file
         .write_all(text.as_bytes())
         .and_then(|()| file.flush())
         .is_err()
     {
-        return Outcome::NotSent(Veto::LoadFailed);
+        return Report::not_sent(Veto::LoadFailed);
     }
     let buffer = format!("agentdesk-busy-inject-{}", request.nonce);
     let path = file.path().to_string_lossy().into_owned();
     if pane.ok(&["load-buffer", "-b", &buffer, &path]).is_none() {
-        return Outcome::NotSent(Veto::LoadFailed);
+        return Report::not_sent(Veto::LoadFailed);
     }
+    let attempt = Attempt {
+        pane,
+        g0: state.generation,
+        request,
+        text,
+        offset,
+        buffer,
+        timing,
+    };
+    match plan {
+        Plan::Direct => Report::new(paste_into_empty(&attempt), DraftState::Unchanged),
+        Plan::Stash(draft) => stash::run(&attempt, &draft),
+    }
+}
+
+/// One locked attempt past the pre-paste verdict, with the frame loaded into a tmux buffer.
+struct Attempt<'a> {
+    pane: &'a Pane,
+    /// The attach generation read just before the pre-paste capture.
+    g0: Generation,
+    request: &'a Request<'a>,
+    text: &'a str,
+    offset: u64,
+    buffer: String,
+    timing: &'a Timing,
+}
+
+impl Attempt<'_> {
+    fn key(&self, key: &str) -> Guard {
+        let command = format!("send-keys -t '{}' {key}", self.pane.target);
+        self.pane.guarded(&self.g0, &command)
+    }
+
+    fn paste(&self) -> Guard {
+        let command = format!(
+            "paste-buffer -p -r -d -b {} -t '{}'",
+            self.buffer, self.pane.target
+        );
+        self.pane.guarded(&self.g0, &command)
+    }
+
+    fn drop_buffer(&self) {
+        let _ = self.pane.ok(&["delete-buffer", "-b", &self.buffer]);
+    }
+
+    /// No client now and none since g0.
+    fn unattended(&self) -> bool {
+        self.pane.generation().as_ref() == Some(&self.g0)
+    }
+
+    /// Rechecks after the paste until `owns` accepts a capture; the last capture is kept.
+    fn await_own(
+        &self,
+        owns: impl Fn(&str) -> bool,
+        last: &mut Option<String>,
+    ) -> Result<(), Unconfirmed> {
+        std::thread::sleep(self.timing.settle);
+        for attempt in 0..self.timing.rechecks {
+            if attempt > 0 {
+                std::thread::sleep(self.timing.recheck_interval);
+            }
+            if !self.unattended() {
+                return Err(Unconfirmed::AttachedAfterPaste);
+            }
+            let Some(after) = self.pane.capture() else {
+                return Err(Unconfirmed::CaptureFailed);
+            };
+            let shown_modal = modal(&after);
+            let owned = !shown_modal && owns(&after);
+            *last = Some(after);
+            if shown_modal {
+                return Err(Unconfirmed::ModalAfterPaste);
+            }
+            if owned {
+                return Ok(());
+            }
+        }
+        Err(Unconfirmed::DraftNotOwned)
+    }
+
+    /// One guarded Enter, then the transcript watch; nothing is ever sent twice.
+    fn enter(&self) -> Outcome {
+        // The server does not report when it applied the key, so the window starts just before
+        // the request; a slow reply (an after-send-keys hook) only shortens it.
+        let deadline = Instant::now() + self.timing.confirm_window;
+        // A person may still type after the last capture; an attach by then withholds the Enter.
+        match self.key("Enter") {
+            Guard::Applied => {}
+            Guard::Vetoed => return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
+            Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
+        }
+        // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
+        let request = self.request;
+        loop {
+            if Instant::now() >= deadline {
+                return Outcome::Unconfirmed(Unconfirmed::NotObserved);
+            }
+            if transcript_carries(request.transcript, self.offset, request.nonce)
+                && Instant::now() < deadline
+            {
+                return Outcome::Injected;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(self.timing.confirm_poll.min(left));
+        }
+    }
+}
+
+/// The composer was empty: paste, prove the bytes are ours, then one Enter.
+fn paste_into_empty(attempt: &Attempt<'_>) -> Outcome {
     // From the paste on, absence of evidence never proves the input was not taken.
-    let paste = format!("paste-buffer -p -r -d -b {buffer} -t '{}'", pane.target);
-    match pane.guarded(&paste) {
+    match attempt.paste() {
         Guard::Applied => {}
         guard @ (Guard::Vetoed | Guard::Gone) => {
-            let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
+            attempt.drop_buffer();
             return Outcome::NotSent(if matches!(guard, Guard::Vetoed) {
                 Veto::HumanAttached
             } else {
@@ -399,51 +644,11 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
         }
         Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::PasteFailed),
     }
-    std::thread::sleep(timing.settle);
-    let mut owned = false;
-    for attempt in 0..timing.rechecks {
-        if attempt > 0 {
-            std::thread::sleep(timing.recheck_interval);
-        }
-        if pane.attached() != Some(0) {
-            return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste);
-        }
-        let Some(after) = pane.capture() else {
-            return Outcome::Unconfirmed(Unconfirmed::CaptureFailed);
-        };
-        if modal(&after) {
-            return Outcome::Unconfirmed(Unconfirmed::ModalAfterPaste);
-        }
-        // Exact body, or a folded placeholder matching only in shape and line count;
-        // anything else may hold a person's keys.
-        if own_draft(ShadowProvider::Claude, &after, text, true) {
-            owned = true;
-            break;
-        }
+    // Exact body, or a folded placeholder matching only in shape and line count;
+    // anything else may hold a person's keys.
+    let owns = |after: &str| own_draft(ShadowProvider::Claude, after, attempt.text, true);
+    if let Err(detail) = attempt.await_own(owns, &mut None) {
+        return Outcome::Unconfirmed(detail);
     }
-    if !owned {
-        return Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
-    }
-    // The server does not report when it applied the key, so the window starts just before
-    // the request; a slow reply (an after-send-keys hook) only shortens it.
-    let deadline = Instant::now() + timing.confirm_window;
-    // A person may still type after the last capture; an attach by then withholds the Enter.
-    match pane.guarded(&format!("send-keys -t '{}' Enter", pane.target)) {
-        Guard::Applied => {}
-        Guard::Vetoed => return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
-        Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
-    }
-    // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
-    loop {
-        if Instant::now() >= deadline {
-            return Outcome::Unconfirmed(Unconfirmed::NotObserved);
-        }
-        if transcript_carries(request.transcript, offset, request.nonce)
-            && Instant::now() < deadline
-        {
-            return Outcome::Injected;
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        std::thread::sleep(timing.confirm_poll.min(left));
-    }
+    attempt.enter()
 }
