@@ -498,6 +498,34 @@ async fn a_channel_closed_to_legacy_input_takes_no_paste() {
     assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
 
+/// A row stamped with another runtime stops the attempt before the session-transition guard
+/// or any pane I/O: a held transition does not turn it into `transition_busy`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_session_of_another_runtime_stops_before_the_transition_and_the_pane() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ch = 6_245_802;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let pane = InjectPane::new(ch, "all");
+    let load = crate::services::discord::inflight::load_inflight_state_read_only;
+    let mut row = load(&ProviderKind::Claude, ch).expect("seeded row");
+    row.runtime_kind = Some(RuntimeHandoffKind::LegacyTmuxWrapper);
+    crate::services::discord::inflight::save_inflight_state(&row).expect("stamped row");
+    let transition = shared.session_transition_lock(ChannelId::new(ch));
+    let _held = transition.try_lock_owned().expect("transition free");
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(ch),
+        provider: ProviderKind::Claude,
+        text: "status?".to_string(),
+        author_id: 200,
+        source: "imessage".to_string(),
+        metadata: None,
+        channel_name_hint: None,
+    };
+    let outcome = inject::attempt(&shared, &request).await;
+    let refused = inject::InjectAttempt::NotSent("session_unresolved");
+    assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
+}
+
 /// Holds `sessions` so a host lookup parks until the returned transaction ends.
 async fn lock_sessions(pool: &sqlx::PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
     let mut lock = pool.begin().await.unwrap();
@@ -620,16 +648,13 @@ async fn a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the
             None
         } else {
             let core = shared.core.lock().await;
+            let reached = test_hook::final_lookup_signal(ch);
             lock.rollback().await.unwrap();
-            let past_lookup = async {
-                while lookup_waiting(&pool).await {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            };
+            let at_lookup =
+                tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified());
             tokio::select! {
                 outcome = &mut input => panic!("deliver finished past a held name lookup: {outcome}"),
-                () = past_lookup => {}
+                reached = at_lookup => reached.expect("resolve reached its final name lookup"),
             }
             let enqueue = crate::services::discord::mailbox_enqueue_intervention;
             let channel = ChannelId::new(ch);

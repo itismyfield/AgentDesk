@@ -156,7 +156,7 @@ async fn observe(
     (snapshot, row)
 }
 
-/// The channel's name, the one input to its pane that needs a lock.
+/// The channel's name, read under the core lock.
 async fn channel_name(shared: &SharedData, channel: ChannelId) -> Option<String> {
     let data = shared.core.lock().await;
     let session = data.sessions.get(&channel);
@@ -209,7 +209,8 @@ async fn resolve(
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
-    // A session that resolves to no Claude TUI pane stops here, before any lock.
+    // A session that resolves to no Claude TUI pane stops here, before acquiring the
+    // session-transition guard or issuing pane I/O.
     let read = crate::services::discord::inflight::load_inflight_state_read_only;
     let row = read(&request.provider, channel);
     let named = channel_name(shared, request.channel_id).await;
@@ -233,6 +234,8 @@ async fn resolve(
     }
     // Paths that skip the transition may have queued or claimed while the lookups awaited; the
     // mailbox read below is the last await before the paste.
+    #[cfg(test)]
+    test_hook::final_name_lookup(channel);
     let named = channel_name(shared, request.channel_id).await;
     let (snapshot, row) = observe(shared, request).await;
     if holder(&snapshot, row.as_ref(), channel)? != first {
@@ -407,12 +410,26 @@ fn unconfirmed_name(detail: Unconfirmed) -> &'static str {
 pub(crate) mod test_hook {
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Notify;
 
     use super::InjectMode;
 
     static FORCED: Mutex<Option<HashMap<u64, (InjectMode, PathBuf)>>> = Mutex::new(None);
     static CRASHING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    static FINAL_LOOKUP: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
+
+    /// Fires when the channel's resolve is about to take the core lock for its final name lookup.
+    pub(crate) fn final_lookup_signal(channel_id: u64) -> Arc<Notify> {
+        let mut signals = FINAL_LOOKUP.lock().unwrap_or_else(|e| e.into_inner());
+        let signals = signals.get_or_insert_with(HashMap::new);
+        signals.entry(channel_id).or_default().clone()
+    }
+
+    pub(super) fn final_name_lookup(channel_id: u64) {
+        final_lookup_signal(channel_id).notify_one();
+    }
 
     pub(crate) fn forced(channel_id: u64) -> Option<(InjectMode, PathBuf)> {
         let forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
