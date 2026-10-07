@@ -149,6 +149,24 @@ async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pendin
     })
     .await
     .expect("reclaim must reach the held await and finish");
+    if site == "leaked_row_after_runtime" {
+        // Backfill advances the durable generation, so the old snapshot cannot reclaim it yet.
+        assert!(!applied);
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        let after = discord::health::legacy_supervision::test_support::fingerprint(&path);
+        if retire {
+            assert_eq!(after, before, "retirement must stop the writing loader");
+        } else {
+            assert_ne!(after, before, "the Legacy loader must persist its backfill");
+            let written: discord::inflight::InflightTurnState =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(written.finalizer_turn_id, user_msg);
+            assert!(written.save_generation > row.save_generation);
+            assert_ne!(written.updated_at, row.updated_at);
+        }
+        return;
+    }
     let should_apply = !retire || pending_start;
     assert_eq!(
         applied, should_apply,
@@ -192,7 +210,7 @@ fn run_matrix(site: &'static str, channel: u64, pending_control: bool) {
 }
 
 #[test]
-fn retirement_after_runtime_lookup_preserves_real_reclaim() {
+fn retirement_after_runtime_lookup_preserves_writing_loader() {
     run_matrix("leaked_row_after_runtime", 6_325_512_001, false);
 }
 
