@@ -9,6 +9,7 @@ use super::tests::{admit_any_host, seed_busy_channel, still_busy};
 use crate::config::TestEnvVarGuard;
 use crate::services::discord::health::legacy_supervision::RetiredForTest;
 use crate::services::discord::health::legacy_supervision::test_support::fingerprint;
+use crate::services::discord::inflight::{load_inflight_state, save_inflight_state};
 use crate::services::provider::ProviderKind;
 
 async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
@@ -18,6 +19,10 @@ async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared.settings.write().await.provider = ProviderKind::Claude;
     let token = seed_busy_channel(&shared, channel).await;
+    // The row and mailbox must name the same episode for guarded finalizer cleanup.
+    let mut state = load_inflight_state(&ProviderKind::Claude, channel).unwrap();
+    state.turn_nonce = token.turn_nonce().map(str::to_owned);
+    save_inflight_state(&state).unwrap();
     shared.restart.global_active.store(1, Ordering::Relaxed);
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let row = crate::services::discord::inflight::inflight_state_path(
