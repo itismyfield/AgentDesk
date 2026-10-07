@@ -672,6 +672,8 @@ src/
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── channel_home.rs
+│   │   ├── channel_home_boot.rs
+│   │   ├── channel_home_boot_tests.rs
 │   │   ├── channel_home_claim_tests.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
@@ -748,6 +750,8 @@ src/
 │   │   │   └── too_old_notice.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── home_fence.rs
+│   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── input_clear.rs
 │   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── native.rs
@@ -1262,6 +1266,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
+│   │   │   ├── channel_homes_tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs
@@ -2247,12 +2252,14 @@ src/
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_tests.rs
 │   │   │   ├── deliver.rs
+│   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs

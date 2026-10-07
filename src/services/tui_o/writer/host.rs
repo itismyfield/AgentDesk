@@ -1,5 +1,6 @@
 //! Starts the O writer on the gateway runtime: one actor per channel this home may adopt, creating
-//! a new channel's first store unless Legacy took it. Ready only while resumed and Owned.
+//! a new channel's first store unless Legacy took it. Ready only while resumed and Owned. A
+//! delegated channel waits on, posts under and is ready by its registered home gate instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -18,6 +19,7 @@ use super::deliver::{ChannelWriter, StopCause};
 use super::resume::{self, Backoff};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::cluster::channel_home::{self, HomeOwnership};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
@@ -129,7 +131,7 @@ impl Readiness {
         let Some(live) = live.get(&channel).filter(|_| self.is_ready(channel)) else {
             return false;
         };
-        let owned = matches!(live.gate.current(), GatewayOwnership::Owned { .. });
+        let owned = owned_now(channel, &live.gate);
         owned && live.resumed.has_changed().is_ok() && *live.resumed.borrow()
     }
 
@@ -212,11 +214,39 @@ pub struct HostParts<I> {
     pub readiness: Arc<Readiness>,
 }
 
+/// Whether `channel` is Owned now: by its registered home gate with a lapsed hold ended, else by
+/// the writer's gate.
+fn owned_now(channel: u64, gate: &OwnershipGate) -> bool {
+    match channel_home::registered_channel(channel) {
+        Some(home) => matches!(home.ownership(), HomeOwnership::Owned { .. }),
+        None => matches!(gate.current(), GatewayOwnership::Owned { .. }),
+    }
+}
+
 /// Spawns one host task per channel this provider's bot may adopt. Without a PG gateway lease the
-/// gate never becomes Owned, so those channels are held with an alarm and get no actor.
+/// gate never becomes Owned, so those channels are held with an alarm and get no actor; a
+/// delegated channel is gated by its registered home gate instead of that lease.
 pub fn start<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
+    prepare: impl FnOnce() -> HostParts<I>,
+) -> Vec<JoinHandle<()>> {
+    spawn_hosts(provider, pg_gateway, cutover::boot_ownership(), prepare)
+}
+
+/// [`start`] off the gateway lease for `delegated`, each a channel with a registered home gate.
+pub fn start_delegated<I: HostIo>(
+    provider: ShadowProvider,
+    delegated: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
+    prepare: impl FnOnce() -> HostParts<I>,
+) -> Vec<JoinHandle<()>> {
+    spawn_hosts(provider, false, delegated, prepare)
+}
+
+fn spawn_hosts<I: HostIo>(
+    provider: ShadowProvider,
+    pg_gateway: bool,
+    owned: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
     let kind = match provider {
@@ -226,10 +256,7 @@ pub fn start<I: HostIo>(
     let ours = |(channel, channel_kind, candidate): (u64, _, Option<Candidate>)| {
         Some((channel, candidate.filter(|_| channel_kind == Some(kind))?))
     };
-    let channels: Vec<_> = cutover::boot_ownership()
-        .into_iter()
-        .filter_map(ours)
-        .collect();
+    let channels: Vec<_> = owned.into_iter().filter_map(ours).collect();
     if channels.is_empty() {
         return Vec::new();
     }
@@ -244,7 +271,8 @@ pub fn start<I: HostIo>(
         if !readiness.claim(channel) {
             continue;
         }
-        let root = match (pg_gateway, &runtime_root) {
+        let home = channel_home::registered_channel(channel);
+        let root = match (pg_gateway || home.is_some(), &runtime_root) {
             (false, _) => Err("no PG gateway lease"),
             (true, None) => Err("runtime root unresolved"),
             (true, Some(root)) => Ok(root.clone()),
@@ -256,7 +284,8 @@ pub fn start<I: HostIo>(
                 continue;
             }
         };
-        let (gate, readiness) = (Arc::clone(&gate), Arc::clone(&readiness));
+        let gate = home.map_or_else(|| Arc::clone(&gate), |home| home.gate());
+        let readiness = Arc::clone(&readiness);
         let host = host_channel(
             Arc::clone(&io),
             channel,
@@ -338,7 +367,7 @@ async fn host_channel<I: HostIo>(
                 until_owned(&gate).await;
                 let facts = io.activation_facts(channel, provider).await;
                 // Facts read before a lost gate are not acted on; wait for Owned and read again.
-                if matches!(gate.current(), GatewayOwnership::Owned { .. }) {
+                if owned_now(channel, &gate) {
                     break facts;
                 }
             };

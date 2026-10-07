@@ -328,6 +328,7 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     const OWNERS: &[&str] = &[
         "src/db/o_channel_homes.rs",
         "src/services/cluster/channel_home.rs",
+        "src/services/cluster/channel_home_boot.rs",
         "src/services/cluster/channel_home_drain.rs",
         "src/services/cluster/channel_home_port.rs",
     ];
@@ -366,6 +367,8 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     assert!(probe.contains("fn a()") && probe.contains("fn d<") && !probe.contains("fn b()"));
     // A non-owner reading the home table: the words it may not name, or `None` when it reads none.
     let outside = |relative: &str, code: &str| {
+        // `confirm::` is the O writer's settle module; the gate's `confirm` is only ever called.
+        let code = &code.replace("confirm::", "");
         let tokens: Vec<&str> = code
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .collect();
@@ -402,6 +405,16 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
         ]),
         "the scan catches a production build of the drain port"
     );
+    let opened = "use crate::services::cluster::channel_home;\n\
+                  use super::confirm::{self, Verdict};\n\
+                  fn open(h: &channel_home::HomeGate) { h.confirm(&w, t); confirm::settle(); }";
+    let opened = outside("src/services/tui_o/writer/deliver.rs", opened);
+    let opened_named = vec!["src/services/tui_o/writer/deliver.rs: confirm".to_string()];
+    assert_eq!(
+        opened,
+        Some(opened_named),
+        "a gate confirm beside the module"
+    );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut stack = vec![root.join("src")];
@@ -437,12 +450,13 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
                 }
                 continue;
             }
-            // Each loop is named once, at its definition: nothing in the owners starts one.
+            // Each loop is named once at its definition and once where the boot starts it.
             for (owner, start) in [
                 ("src/services/cluster/channel_home.rs", "run_lease"),
                 ("src/services/cluster/channel_home_drain.rs", "run_drain"),
             ] {
-                let expected = usize::from(relative == owner);
+                let starter = relative == "src/services/cluster/channel_home_boot.rs";
+                let expected = usize::from(relative == owner || starter);
                 let named = tokens.iter().filter(|token| **token == start).count();
                 if named != expected {
                     violations.push(format!("{relative}: {start} x{named}"));

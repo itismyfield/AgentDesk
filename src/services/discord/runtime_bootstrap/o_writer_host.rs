@@ -1,5 +1,6 @@
 //! Gateway side of the O writer host: the gateway's own HTTP client and bot id, the shared
-//! delivery lease cells, the process alarm router and the facts a first activation checks.
+//! delivery lease cells, the process alarm router and the facts a first activation checks. Off the
+//! gateway, a delegated channel's writer posts through the bot token's REST client instead.
 
 use super::*;
 
@@ -29,6 +30,8 @@ struct GatewayHost {
     configured_id: Option<String>,
     /// The boot turn selection a newly adopted channel is confirmed against.
     turn: TurnConfig,
+    /// Off the gateway: the bot token's REST client every hosted channel posts through.
+    rest: Option<Arc<serenity::Http>>,
 }
 
 /// With clustering, the configured id the home judgement used, refused when bootstrap published
@@ -60,16 +63,34 @@ async fn published_self_id(max_wait: Duration) -> Option<String> {
     }
 }
 
+/// A port over the REST client once it names its bot; a failed lookup is retried.
+async fn rest_port(http: Arc<serenity::Http>) -> Arc<GatewayPort> {
+    loop {
+        match http.get_current_user().await {
+            Ok(user) => return Arc::new(GatewayPort::new(Arc::clone(&http), user.id.get())),
+            Err(error) => {
+                tracing::warn!(%error, "[tui_o] REST writer port: bot user lookup failed")
+            }
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 impl HostIo for GatewayHost {
     type Port = GatewayPort;
     type Lease = ChannelLeases;
     type Alarms = Arc<AlarmRouter>;
     type Bindings = ChannelBindingLog;
 
-    /// Waits for the context the gateway caches on ready, so no token fallback stands in for it.
+    /// Waits for the context the gateway caches on ready, so no token fallback stands in for it;
+    /// off the gateway, for the REST client to name its bot.
     fn port(&self) -> impl Future<Output = Arc<GatewayPort>> + Send {
         let shared = Arc::clone(&self.shared);
+        let rest = self.rest.clone();
         async move {
+            if let Some(http) = rest {
+                return rest_port(http).await;
+            }
             loop {
                 if let Some(ctx) = shared.http.cached_serenity_ctx.get() {
                     let bot_id = ctx.cache.current_user().id.get();
@@ -175,6 +196,40 @@ impl HostIo for GatewayHost {
     }
 }
 
+fn shadow_of(provider: &ProviderKind) -> Option<ShadowProvider> {
+    match provider.as_str() {
+        "claude" => Some(ShadowProvider::Claude),
+        "codex" => Some(ShadowProvider::Codex),
+        _ => None,
+    }
+}
+
+fn parts(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    config: Option<&TuiOConfig>,
+    rest: Option<Arc<serenity::Http>>,
+) -> host::HostParts<GatewayHost> {
+    let alarms = Arc::new(AlarmRouter::for_process(config, shared.pg_pool.clone()));
+    let boot = crate::services::tui_o::channel_policy::boot();
+    let configured_id = boot
+        .and_then(|boot| boot.configured_id())
+        .map(str::to_owned);
+    host::HostParts {
+        io: Arc::new(GatewayHost {
+            shared: Arc::clone(shared),
+            alarms,
+            self_id_wait: SELF_ID_WAIT,
+            configured_id,
+            turn: config.map(|c| c.turn.clone()).unwrap_or_default(),
+            rest,
+        }),
+        runtime_root: crate::config::runtime_root(),
+        gate: crate::services::tui_o::ownership::gate(provider.as_str()),
+        readiness: host::process_readiness(),
+    }
+}
+
 /// Starts the writer host for this provider's gateway runtime; it never waits on the gateway.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
@@ -182,31 +237,30 @@ pub(super) fn spawn(
     config: Option<&TuiOConfig>,
     pg_gateway: bool,
 ) {
-    let shadow = match provider.as_str() {
-        "claude" => ShadowProvider::Claude,
-        "codex" => ShadowProvider::Codex,
-        _ => return,
+    let Some(shadow) = shadow_of(provider) else {
+        return;
     };
     // Nothing below runs unless this bot may adopt a channel, so an off or empty writer takes no lock.
-    host::start(shadow, pg_gateway, || {
-        let alarms = Arc::new(AlarmRouter::for_process(config, shared.pg_pool.clone()));
-        let boot = crate::services::tui_o::channel_policy::boot();
-        let configured_id = boot
-            .and_then(|boot| boot.configured_id())
-            .map(str::to_owned);
-        host::HostParts {
-            io: Arc::new(GatewayHost {
-                shared: Arc::clone(shared),
-                alarms,
-                self_id_wait: SELF_ID_WAIT,
-                configured_id,
-                turn: config.map(|c| c.turn.clone()).unwrap_or_default(),
-            }),
-            runtime_root: crate::config::runtime_root(),
-            gate: crate::services::tui_o::ownership::gate(provider.as_str()),
-            readiness: host::process_readiness(),
-        }
-    });
+    host::start(shadow, pg_gateway, || parts(shared, provider, config, None));
+}
+
+/// Starts the writer for each delegated channel whose home gate is registered here and whose Herdr
+/// endpoint runs on this node, off the gateway; with none, nothing is built.
+pub(super) fn spawn_delegated(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    config: Option<&TuiOConfig>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let Some(shadow) = shadow_of(provider) else {
+        return Vec::new();
+    };
+    let delegated = crate::services::cluster::channel_home_boot::delegated_boot_ownership(
+        super::herdr_runs_here,
+    );
+    host::start_delegated(shadow, delegated, || {
+        let rest = shared.serenity_http_or_token_fallback();
+        parts(shared, provider, config, rest)
+    })
 }
 
 #[cfg(test)]
@@ -227,6 +281,15 @@ pub(super) mod test_host {
             self_id_wait,
             configured_id: configured_id.map(str::to_owned),
             turn: TurnConfig::default(),
+            rest: None,
         }
+    }
+
+    /// The host a standby writer gets: every port posts over `http`.
+    pub(in crate::services::discord::runtime_bootstrap) fn rest(
+        shared: &Arc<SharedData>,
+        http: Arc<serenity::Http>,
+    ) -> Arc<impl HostIo<Port = GatewayPort>> {
+        parts(shared, &ProviderKind::Claude, None, Some(http)).io
     }
 }

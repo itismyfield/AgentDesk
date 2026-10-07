@@ -8,6 +8,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedObservation, HostedRecord, HostedState,
     load_hosted_execution_pg,
 };
+use crate::services::cluster::channel_home::{self, HomeRefusal};
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_writer_ready};
 use crate::services::provider::ProviderKind;
@@ -49,6 +50,10 @@ pub(crate) enum HerdrRefusal {
     },
     OWriterNotReady,
     ExecutorNotWired,
+    /// The channel is delegated and this node does not hold its home.
+    HomeNotHeld,
+    /// This node holds the delegated channel's home while a drain keeps its intake closed.
+    HomeDraining,
 }
 
 impl std::fmt::Display for HerdrRefusal {
@@ -66,6 +71,8 @@ impl std::fmt::Display for HerdrRefusal {
             Self::AdmissionStopped { cause } => write!(f, "admission_stopped({})", cause.as_str()),
             Self::OWriterNotReady => f.write_str("o_writer_not_ready"),
             Self::ExecutorNotWired => f.write_str("executor_not_wired"),
+            Self::HomeNotHeld => f.write_str("home_not_held"),
+            Self::HomeDraining => f.write_str("home_draining"),
         }
     }
 }
@@ -99,6 +106,15 @@ async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
     }
 }
 
+/// A delegated channel's turn runs only where its home is held with intake open; a channel with
+/// no registered home reads nothing more.
+fn home_refusal(channel_id: u64) -> Option<HerdrRefusal> {
+    Some(match channel_home::refusal(channel_id)? {
+        HomeRefusal::NotHeld => HerdrRefusal::HomeNotHeld,
+        HomeRefusal::Draining => HerdrRefusal::HomeDraining,
+    })
+}
+
 /// Called again right before spawn, after [`refusal_before_turn`]. Admission and O readiness are
 /// read only for a configured channel.
 pub(crate) async fn for_turn(
@@ -107,6 +123,10 @@ pub(crate) async fn for_turn(
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
+    // Read after the turn took its mailbox, so a drain that closes intake later waits for it.
+    if let Some(refusal) = home_refusal(channel_id) {
+        return TurnHost::Refused(refusal);
+    }
     let Some(endpoint) = session_hosts::herdr_endpoint(channel_id) else {
         // An unconfigured channel's unreadable row keeps the existing path; a Herdr row refuses.
         return match herdr_trace(&read_row(pool, session_key).await) {
@@ -120,8 +140,8 @@ pub(crate) async fn for_turn(
     }
 }
 
-/// The turn's first judgement, before it resets, reconciles or clears anything. An unconfigured
-/// channel passes without I/O; a configured one is refused: headless turns run no Herdr executor.
+/// The turn's first judgement, before it resets, reconciles or clears anything: a delegated channel
+/// not held here or a configured one is refused, any other passes without I/O.
 pub(crate) async fn refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -131,6 +151,9 @@ pub(crate) async fn refusal_before_turn<F>(
 where
     F: std::future::Future<Output = Option<String>>,
 {
+    if let Some(refusal) = home_refusal(channel_id) {
+        return Some(refusal);
+    }
     session_hosts::herdr_endpoint(channel_id)?;
     let session_key = session_key().await;
     match for_turn(pool, provider, channel_id, session_key.as_deref()).await {

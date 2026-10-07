@@ -2166,6 +2166,11 @@ services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_f
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
 services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_lease_and_a_restart_reopens_by_write_pg
+services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
+services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
+services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
+services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -2986,6 +2991,7 @@ services::discord::commands::control::clear_persist_failure_tests::failed_clear_
 services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
 services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
@@ -5894,6 +5900,11 @@ services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_ar
 services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_arrive_handles_prestarted_release_once
 services::discord::runtime_bootstrap::bootstrap_tests::voice_auto_join_provider_map_includes_agent_voice_channel
 services::discord::runtime_bootstrap::bootstrap_tests::wait_for_local_http_bind_returns_quickly_when_port_is_bound
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
+services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
+services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
+services::discord::runtime_bootstrap::channel_homes_tests::turns_count_as_restored_only_where_the_role_restored_them
 services::discord::runtime_bootstrap::framework_setup::slash_command_registration_tests::node_command_is_registered
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::dense_flapping_expires_and_day_old_history_does_not_retrigger_manual_hold
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::holder_resumes_handback_after_disable_skips_pending_settlement
@@ -10514,6 +10525,8 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::an_open_turn
 services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intake_open_when_the_stall_ends_restarts_it
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
+services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate
+services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound
@@ -10596,6 +10609,8 @@ services::tui_o::writer::tests::actor::the_writer_stays_dormant_unless_enabled
 services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
+services::tui_o::writer::tests::deliver_home::a_delegated_channel_posts_under_its_home_through_the_drain_and_none_after_close
+services::tui_o::writer::tests::deliver_home::the_final_close_waits_for_an_admission_in_progress
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
 services::tui_o::writer::tests::no_post_starts_its_request_after_ownership_closes
 services::tui_o::writer::tests::nothing_is_prepared_or_posted_without_ownership_and_the_delivery_lease
@@ -10920,6 +10935,8 @@ services::turn_cancel_queue_guard::tests::queue_truth_purge_requires_a_complete_
 services::turn_cancel_queue_guard::tests::records_the_queued_message_a_cancel_removed
 services::turn_cancel_queue_guard::tests::the_guard_never_writes_to_the_mailbox
 services::turn_cancel_queue_guard::tests::the_promoted_message_is_not_recorded_as_lost
+services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
+services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
 services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg

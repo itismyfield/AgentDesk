@@ -24710,6 +24710,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/cluster/channel_home_boot_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fb066ff10e4a530a792cfcdbe02da59a99a4682917e09d7720ffe662b01861b0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/cluster/channel_home_drain_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
