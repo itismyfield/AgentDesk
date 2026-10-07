@@ -8,6 +8,57 @@ use crate::services::provider::ProviderKind;
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+#[tokio::test(start_paused = true)]
+async fn c2_boot_pending_start_restore_skips_even_legacy_open_protection() {
+    use crate::services::discord::tui_prompt_relay::synthetic_start::{
+        RESTORE_CLAIM_FOR_TEST, RESTORE_VIEW_FOR_TEST, restore_pending_starts,
+    };
+    let _guard = worker_test_lock();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let shared = make_shared_data_for_tests();
+    let protected = record("claude", 6_325_608, 6_325_618);
+    let legacy = record("claude", 6_325_609, 6_325_619);
+    for rec in [&protected, &legacy] {
+        persist(rec).unwrap();
+    }
+    let protected_path = super::super::state::root().unwrap().join(format!(
+        "{}_{}_{}.json",
+        protected.provider, protected.channel_id, protected.anchor_message_id
+    ));
+    let before = std::fs::read(&protected_path).unwrap();
+    reset_present_for_tests();
+    let gate = Gate::protect(ProviderKind::Claude, protected.channel_id).unwrap();
+    let _health = input_runtime::fence::test_health::Clear::new(&gate);
+    // Protected LegacyOpen must skip the boot index and worker, unlike runtime admission.
+    let claims = Arc::new(AtomicU32::new(0));
+    RESTORE_VIEW_FOR_TEST
+        .with(|slot| *slot.borrow_mut() = Some(gated_view(Arc::new(AtomicBool::new(true)))));
+    RESTORE_CLAIM_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(counting_claim(claims.clone())));
+    restore_pending_starts(&shared, &ProviderKind::Claude);
+    assert!(
+        !pending_synthetic_start_present("claude", protected.channel_id),
+        "boot restored the protected presence index"
+    );
+    assert!(pending_synthetic_start_present("claude", legacy.channel_id));
+    settle().await;
+    assert_eq!(
+        claims.load(Ordering::SeqCst),
+        1,
+        "unprotected restore claims once"
+    );
+    assert_eq!(std::fs::read(&protected_path).unwrap(), before);
+    assert!(!pending_synthetic_start_present(
+        "claude",
+        protected.channel_id
+    ));
+    reset_present_for_tests();
+}
+
 /// Reports the prior turn finalized once `ready` is set.
 fn gated_view(ready: Arc<AtomicBool>) -> ViewFn {
     Box::new(move |_shared, _record| {

@@ -3,6 +3,72 @@
 use super::*;
 use crate::services::discord::input_runtime::fence::{self, Gate};
 
+fn protect_after_scan(channel: u64) {
+    AFTER_EXCLUDING_SCAN.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let gate = Gate::protect(ProviderKind::Codex, channel).unwrap();
+            let _closing = gate.close().unwrap();
+        }));
+    });
+}
+
+#[tokio::test]
+async fn c2_loop_rechecks_protection_installed_after_loading() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let root = inflight_runtime_root().unwrap();
+    for (index, channel) in (6_325_601..6_325_604).enumerate() {
+        let mut state = row(channel);
+        if index == 1 {
+            state.restart_generation = Some(1);
+        }
+        if index == 2 {
+            state.rebind_origin = true;
+        }
+        save_inflight_state_in_root(&root, &state).unwrap();
+        let path = inflight_state_path(&root, &ProviderKind::Codex, channel);
+        let before = std::fs::read(&path).unwrap();
+        protect_after_scan(channel);
+        match index {
+            0 => assert_eq!(
+                mark_all_inflight_states_restart_mode_checked(
+                    &ProviderKind::Codex,
+                    InflightRestartMode::DrainRestart,
+                ),
+                Ok(0),
+                "marking must recheck after the snapshot"
+            ),
+            1 => assert_eq!(invalidate_stale_generation(&ProviderKind::Codex, 2), 0),
+            _ => {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                crate::services::discord::recovery_engine::restore_inflight_turns(
+                    &std::sync::Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+                    &shared,
+                    &ProviderKind::Codex,
+                )
+                .await;
+            }
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "late-protected row changed"
+        );
+        let gate = fence::lookup(&ProviderKind::Codex, channel).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        assert!(
+            !crate::services::discord::input_runtime::health_reasons()
+                .iter()
+                .any(|reason| reason.contains(&format!("channel={channel}"))),
+            "loop recheck must avoid even a refused writer attempt"
+        );
+    }
+}
+
 fn row(channel_id: u64) -> InflightTurnState {
     InflightTurnState::new(
         ProviderKind::Codex,

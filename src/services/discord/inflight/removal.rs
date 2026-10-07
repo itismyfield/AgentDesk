@@ -665,7 +665,13 @@ pub(super) fn load_inflight_states_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> Vec<InflightTurnState> {
-    load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel).states
+    let states =
+        load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel).states;
+    #[cfg(test)]
+    if let Some(hook) = super::AFTER_EXCLUDING_SCAN.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+    states
 }
 
 /// Rows the loader's verdict would retire are hidden, never unlinked or
