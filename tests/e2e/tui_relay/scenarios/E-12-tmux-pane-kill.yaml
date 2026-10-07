@@ -2,7 +2,8 @@ id: E-12
 title: 진행 중 tmux kill-pane → "세션 종료" 1회 알림, hang 0 (9.1)
 agent_mode: real_live
 coverage_class: live
-cells: [claude-tui, codex-tui]  # kill-pane assumes a tmux-hosted TUI
+# Herdr: kill_pane is not_applicable; run force cancel expected-fail (#5340 P11) instead.
+cells: [claude-tui, codex-tui, claude-herdr, codex-herdr]  # kill-pane assumes a tmux-hosted TUI
 isolation: required
 destructive: true
 notes: |

@@ -9,6 +9,24 @@ from datetime import datetime, timedelta
 import math
 import re
 
+def herdr_profile(scenario, cell):
+    if cell not in {"claude-herdr", "codex-herdr"}:
+        return None
+    issue = {"E-12": "#5340 P11", "E-18": "#5340 HTTP HostOwned follow-up (not P10-3)", "E-18-stop": "#5340 P10-3"}.get(scenario)
+    if not issue and cell == "codex-herdr" and scenario in {
+            "E-2", "E-5", "E-8", "E-19", "E-30", "E-36", "E-51"}:
+        issue = "#5340 P10-2"
+    return {"profile": "herdr_expected_failure", "issue": issue} if issue else None
+
+
+def apply_herdr_result(result, profile, *, passed):
+    classification = "UNEXPECTED_PASS" if passed else "KNOWN_GAP"
+    result.setdefault("known_gaps", []).append({**profile, "classification": classification,
+                                               "observed_reason": result.get("reason")})
+    result["status"] = "unexpected_pass" if passed else "known_gap"
+    result["reason"] = f"{classification}: {profile['issue']}"
+
+
 PROFILE = "e22_headless_cumulative_republication_v1"
 CHANNEL_ID = "1509350490461180105"
 BOT_ID = "1474932782395293736"
