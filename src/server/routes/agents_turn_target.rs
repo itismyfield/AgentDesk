@@ -154,6 +154,15 @@ pub(super) async fn external_turn_conflict(
     Some((StatusCode::CONFLICT, Json(body)))
 }
 
+/// The supervised presence of the agent's turn channel; null outside turn mode.
+pub(super) async fn turn_presence(pool: &sqlx::PgPool, id: &str) -> serde_json::Value {
+    let target = resolve_agent_turn_target(pool, id, None, None).await.ok();
+    let status = crate::services::discord::health::turn_presence_status;
+    target
+        .and_then(|target| status(target.channel_id))
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Starts a headless turn on a resolved agent target; returns its turn id and start status.
 /// Shared by the turn-start route and the voice conductor.
 pub(super) async fn start_headless_turn_on_target(

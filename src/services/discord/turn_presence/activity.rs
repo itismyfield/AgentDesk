@@ -125,10 +125,136 @@ pub(in crate::services::discord) async fn activity_now(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Observed {
+    reading_now(shared, provider, channel).await.observed
+}
+
+/// What a judgment was made on, so a later publisher can tell whether it still holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Stamp {
+    key: Key,
+    generation: u64,
+    revision: u64,
+    source: Option<String>,
+}
+
+/// One fresh judgment and the watch state it read.
+pub(in crate::services::discord) struct Reading {
+    pub observed: Observed,
+    stamp: Option<Stamp>,
+    watch: Option<Arc<Mutex<Watch>>>,
+}
+
+impl Reading {
+    pub(in crate::services::discord) fn session(&self) -> Option<&str> {
+        self.stamp.as_ref().map(|stamp| stamp.key.session.as_str())
+    }
+
+    pub(in crate::services::discord) fn source(&self) -> Option<&str> {
+        self.stamp
+            .as_ref()
+            .and_then(|stamp| stamp.source.as_deref())
+    }
+
+    /// Runs `publish` inside the watch's lock only while its key, generation and revision are
+    /// still the ones this judgment read; a reading made before any lock holds nothing to check.
+    pub(in crate::services::discord) fn publish_if_current<R>(
+        &self,
+        publish: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
+            return Some(publish());
+        };
+        let guard = lock(watch);
+        let current = guard.key.as_ref() == Some(&stamp.key)
+            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
+        current.then(publish)
+    }
+}
+
+#[cfg(test)]
+impl Reading {
+    /// A judgment with no watch behind it, published unconditionally.
+    pub(in crate::services::discord) fn unwatched_for_tests(
+        observed: Observed,
+        session: Option<&str>,
+        source: Option<&str>,
+    ) -> Self {
+        let stamp = session.map(|session| Stamp {
+            key: Key {
+                provider: ShadowProvider::Claude,
+                session: session.into(),
+                seq: 0,
+            },
+            generation: 0,
+            revision: 0,
+            source: source.map(str::to_string),
+        });
+        Self {
+            observed,
+            stamp,
+            watch: None,
+        }
+    }
+
+    /// A judgment whose watch has since moved one revision on under the same key and generation.
+    pub(in crate::services::discord) fn overtaken_for_tests(observed: Observed) -> Self {
+        let key = Key {
+            provider: ShadowProvider::Claude,
+            session: "overtaken".into(),
+            seq: 1,
+        };
+        let watch = Watch {
+            key: Some(key.clone()),
+            generation: 1,
+            revision: 1,
+            ..Watch::default()
+        };
+        let stamp = Stamp {
+            key,
+            generation: 1,
+            revision: 0,
+            source: None,
+        };
+        Self {
+            observed,
+            stamp: Some(stamp),
+            watch: Some(Arc::new(Mutex::new(watch))),
+        }
+    }
+}
+
+type Answer = (Observed, Option<Stamp>);
+
+/// The answer and the state it was decided on, read under the same lock.
+fn at(guard: &Watch, answer: Observed) -> Answer {
+    let source = match &guard.outcome {
+        Outcome::Source { facts, .. } => Some(facts.binding().source.path.display().to_string()),
+        _ => None,
+    };
+    let stamp = guard.key.clone().map(|key| Stamp {
+        key,
+        generation: guard.generation,
+        revision: guard.revision,
+        source,
+    });
+    (answer, stamp)
+}
+
+/// A fresh judgment with the state it read, for publishers outside the effect points.
+pub(in crate::services::discord) async fn reading_now(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Reading {
+    let unstamped = |observed| Reading {
+        observed,
+        stamp: None,
+        watch: None,
+    };
     let shadow = match provider {
         ProviderKind::Claude => ShadowProvider::Claude,
         ProviderKind::Codex => ShadowProvider::Codex,
-        _ => return observed(Activity::Unknown, "provider_unsupported"),
+        _ => return unstamped(observed(Activity::Unknown, "provider_unsupported")),
     };
     let target = match shared.tmux_watchers.channel_binding(&channel) {
         Some(watcher) if watcher.owner_channel_id == channel => {
@@ -148,13 +274,20 @@ pub(in crate::services::discord) async fn activity_now(
         #[cfg(test)]
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
+    let held = watch.clone();
     let judged =
-        tokio::task::spawn_blocking(move || observe(&watch, &ports, shadow, channel.get(), target));
-    judged
-        .await
-        .unwrap_or(observed(Activity::Unknown, "probe_failed"))
+        tokio::task::spawn_blocking(move || judge(&held, &ports, shadow, channel.get(), target));
+    match judged.await {
+        Ok((observed, stamp)) => Reading {
+            observed,
+            stamp,
+            watch: Some(watch),
+        },
+        Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
+    }
 }
 
+#[cfg(test)]
 fn observe(
     watch: &Arc<Mutex<Watch>>,
     ports: &Arc<dyn Ports>,
@@ -162,16 +295,26 @@ fn observe(
     channel: u64,
     target: Target,
 ) -> Observed {
+    judge(watch, ports, provider, channel, target).0
+}
+
+fn judge(
+    watch: &Arc<Mutex<Watch>>,
+    ports: &Arc<dyn Ports>,
+    provider: ShadowProvider,
+    channel: u64,
+    target: Target,
+) -> Answer {
     let session = match target {
         Target::Bound(session) => session,
         Target::Unbound(Some(session)) if ports.session_present(&session) => {
-            return observed(Activity::Unknown, "watcher_unbound");
+            return (observed(Activity::Unknown, "watcher_unbound"), None);
         }
-        Target::Unbound(_) => return observed(Activity::Idle, "no_session"),
+        Target::Unbound(_) => return (observed(Activity::Idle, "no_session"), None),
     };
     let seq = match ports.binding_seq(channel) {
         Ok(seq) => seq,
-        Err(_) => return observed(Activity::Unknown, "binding_unreadable"),
+        Err(_) => return (observed(Activity::Unknown, "binding_unreadable"), None),
     };
     let key = Key {
         provider,
@@ -185,17 +328,18 @@ fn observe(
         guard.key = Some(key.clone());
         return rebuild(watch, guard, ports, channel, key, None);
     }
+    let stored = |reason| observed(Activity::Unknown, reason);
     let (facts, from_start) = match &mut guard.outcome {
-        Outcome::Rebuilding => return observed(Activity::Unknown, "catching_up"),
+        Outcome::Rebuilding => return at(&guard, stored("catching_up")),
         Outcome::NoSource => {
             return ask_pane(watch, guard, &key, || {
                 no_turn_evidence(ports.as_ref(), &key)
             });
         }
-        Outcome::Pending => return observed(Activity::Unknown, "binding_pending"),
-        Outcome::Unreadable { .. } => return observed(Activity::Unknown, "binding_unreadable"),
-        Outcome::Halted => return observed(Activity::Unknown, "facts_halted"),
-        Outcome::TooLarge => return observed(Activity::Unknown, "transcript_too_large"),
+        Outcome::Pending => return at(&guard, stored("binding_pending")),
+        Outcome::Unreadable { .. } => return at(&guard, stored("binding_unreadable")),
+        Outcome::Halted => return at(&guard, stored("facts_halted")),
+        Outcome::TooLarge => return at(&guard, stored("transcript_too_large")),
         Outcome::Source { facts, from_start } => (facts, *from_start),
     };
     let polled = facts.poll(CHUNK_BUDGET).map(|fact| {
@@ -210,13 +354,13 @@ fn observe(
     let (fact, caught_up, (awaiting, evidence)) = match (polled, resume) {
         (Ok(polled), _) => polled,
         (Err(_), Some(resume)) => {
-            rebuild(watch, guard, ports, channel, key, Some(resume));
-            return observed(Activity::Unknown, "facts_resumed");
+            let (_, stamp) = rebuild(watch, guard, ports, channel, key, Some(resume));
+            return (observed(Activity::Unknown, "facts_resumed"), stamp);
         }
         (Err(_), _) => {
             guard.outcome = Outcome::Halted;
             guard.revision += 1;
-            return observed(Activity::Unknown, "facts_halted");
+            return at(&guard, observed(Activity::Unknown, "facts_halted"));
         }
     };
     let advanced = fact.through > guard.through;
@@ -228,12 +372,12 @@ fn observe(
         guard.revision += 1;
     }
     if !caught_up {
-        return observed(Activity::Unknown, "catching_up");
+        return at(&guard, observed(Activity::Unknown, "catching_up"));
     }
     match fact.state {
-        TurnState::Idle => observed(Activity::Idle, "closed"),
+        TurnState::Idle => at(&guard, observed(Activity::Idle, "closed")),
         TurnState::Open { .. } if guard.grew_at.elapsed() < STALE_OPEN_AFTER => {
-            observed(Activity::Busy, "open")
+            at(&guard, observed(Activity::Busy, "open"))
         }
         TurnState::Open { .. } if provider == ShadowProvider::Claude => {
             ask_pane(watch, guard, &key, || match ports.pane_busy(&key.session) {
@@ -241,12 +385,12 @@ fn observe(
                 false => observed(Activity::Unknown, "open_without_progress"),
             })
         }
-        TurnState::Open { .. } => observed(Activity::Unknown, "open_without_progress"),
-        TurnState::Unknown if awaiting => observed(Activity::Unknown, "facts_resumed"),
+        TurnState::Open { .. } => at(&guard, observed(Activity::Unknown, "open_without_progress")),
+        TurnState::Unknown if awaiting => at(&guard, observed(Activity::Unknown, "facts_resumed")),
         TurnState::Unknown if from_start && !evidence => ask_pane(watch, guard, &key, || {
             no_turn_evidence(ports.as_ref(), &key)
         }),
-        TurnState::Unknown => observed(Activity::Unknown, "no_turn_boundary"),
+        TurnState::Unknown => at(&guard, observed(Activity::Unknown, "no_turn_boundary")),
     }
 }
 
@@ -257,14 +401,14 @@ fn ask_pane(
     guard: MutexGuard<'_, Watch>,
     key: &Key,
     ask: impl FnOnce() -> Observed,
-) -> Observed {
+) -> Answer {
     let read = (guard.generation, guard.revision);
     drop(guard);
     let answer = ask();
     let guard = lock(watch);
     match guard.key.as_ref() == Some(key) && (guard.generation, guard.revision) == read {
-        true => answer,
-        false => observed(Activity::Unknown, "superseded"),
+        true => at(&guard, answer),
+        false => at(&guard, observed(Activity::Unknown, "superseded")),
     }
 }
 
@@ -284,10 +428,11 @@ fn rebuild(
     channel: u64,
     key: Key,
     resume: Option<(SourceBinding, Resume)>,
-) -> Observed {
+) -> Answer {
     guard.generation += 1;
     guard.outcome = Outcome::Rebuilding;
     let generation = guard.generation;
+    let answer = at(&guard, observed(Activity::Unknown, "catching_up"));
     drop(guard);
     let (worker, worker_ports, failed) = (watch.clone(), ports.clone(), key.clone());
     let spawned = ports.spawn(Box::new(move || {
@@ -307,7 +452,7 @@ fn rebuild(
             None,
         );
     }
-    observed(Activity::Unknown, "catching_up")
+    answer
 }
 
 /// Only the generation that asked may install, checked in the same critical section.

@@ -666,6 +666,46 @@ fn a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown() {
     assert_eq!(observed, expected);
 }
 
+/// A supervisor publishes a judgment only while the watch still holds what it read: a later poll
+/// that read new records, or one that only found bytes left unread, voids it.
+#[test]
+fn a_reading_publishes_only_while_its_watch_is_unmoved() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, path) = claude(root.path(), &[summary()]);
+    assert_eq!(probe.settle(), (Activity::Idle, "no_turn_evidence_ready"));
+    let ports: Arc<dyn Ports> = probe.fake.clone();
+    let read = || {
+        let (observed, stamp) = judge(
+            &probe.watch,
+            &ports,
+            probe.provider,
+            CHANNEL,
+            probe.target.clone(),
+        );
+        let watch = Some(probe.watch.clone());
+        Reading {
+            observed,
+            stamp,
+            watch,
+        }
+    };
+    let fresh = read();
+    assert_eq!(fresh.session(), Some(SESSION));
+    assert_eq!(fresh.publish_if_current(|| "published"), Some("published"));
+    let stale = read();
+    write(&path, &[prompt("a")]);
+    assert_eq!(probe.ask(), (Activity::Busy, "open"));
+    assert_eq!(stale.publish_if_current(|| "published"), None);
+    let stale = read();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    write!(file, "{}", end()).unwrap();
+    assert_eq!(probe.ask(), (Activity::Unknown, "catching_up"));
+    assert_eq!(stale.publish_if_current(|| "published"), None);
+}
+
 /// A bound transcript gone missing reads unknown beside a ready pane, and the same file put back
 /// is read again on the unreadable retry.
 #[test]

@@ -8822,6 +8822,7 @@ services::discord::turn_presence::activity::tests::a_bound_transcript_gone_missi
 services::discord::turn_presence::activity::tests::a_channel_outside_turn_mode_never_reaches_the_probe
 services::discord::turn_presence::activity::tests::a_finished_rebuild_is_kept_for_its_key
 services::discord::turn_presence::activity::tests::a_pane_read_overtaken_by_a_new_generation_or_read_answers_unknown
+services::discord::turn_presence::activity::tests::a_reading_publishes_only_while_its_watch_is_unmoved
 services::discord::turn_presence::activity::tests::a_rebuilt_open_turn_takes_its_age_from_the_file
 services::discord::turn_presence::activity::tests::a_replaced_or_shrunk_transcript_reads_facts_halted
 services::discord::turn_presence::activity::tests::a_superseded_worker_installs_nothing
@@ -8832,6 +8833,16 @@ services::discord::turn_presence::activity::tests::effect_point_errors_resume_ty
 services::discord::turn_presence::activity::tests::every_observation_maps_to_its_activity_and_reason
 services::discord::turn_presence::activity::tests::pending_rejected_and_resolved_binds_are_read_one_seq_at_a_time
 services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
+services::discord::turn_presence::supervisor::tests::a_mailbox_token_keeps_presence_from_typing
+services::discord::turn_presence::supervisor::tests::a_new_supervisor_over_an_idle_channel_stays_silent
+services::discord::turn_presence::supervisor::tests::a_queue_two_wakes_did_not_move_is_held_and_noticed_with_its_cause
+services::discord::turn_presence::supervisor::tests::a_send_overtaken_by_idle_counts_nothing_and_schedules_nothing
+services::discord::turn_presence::supervisor::tests::a_slow_send_holds_only_its_own_channel
+services::discord::turn_presence::supervisor::tests::an_idle_queue_is_woken_on_the_transition_and_every_half_minute
+services::discord::turn_presence::supervisor::tests::an_overtaken_reading_is_never_published
+services::discord::turn_presence::supervisor::tests::busy_types_at_once_then_every_eight_seconds_and_idle_stops_it
+services::discord::turn_presence::supervisor::tests::only_confirmed_channels_are_supervised_and_reported
+services::discord::turn_presence::supervisor::tests::unknown_for_a_minute_notices_once_per_half_hour
 services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg
 services::discord::turn_teardown_clearance::tests::a_turn_is_cleared_only_by_the_row_its_writer_posted_pg
 services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
