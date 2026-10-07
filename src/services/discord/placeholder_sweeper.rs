@@ -39,6 +39,8 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 mod panel_shape;
+#[cfg(test)]
+mod retirement_tests;
 mod tick;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
@@ -801,10 +803,17 @@ async fn sweep_orphan_status_panel(
     // evidence keeps the Discord panel and inflight row for a later retry.
     // Panel-only/TUI-direct rows have no real user-message identity to finalize,
     // so only those terminal-marker rows can discard their stale marker.
-    if !abandoned_tmux_cleanup_decision_for(shared, provider, state)
-        .await
-        .allows_discord_cleanup()
-    {
+    let decision = abandoned_tmux_cleanup_decision_for(shared, provider, state).await;
+    #[cfg(test)]
+    retirement_tests::after_owner_probe().await;
+    if !decision.allows_discord_cleanup() {
+        return;
+    }
+    if super::health::legacy_supervision::legacy_retired(
+        provider.as_str(),
+        state.channel_id,
+        "inline_orphan_panel_after_owner_probe",
+    ) {
         return;
     }
     // Do not delete a panel a replacement turn now owns, or one whose turn has

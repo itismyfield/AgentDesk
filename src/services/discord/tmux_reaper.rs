@@ -2,9 +2,12 @@ use super::*;
 
 use futures::future::BoxFuture;
 
+mod finalize;
 mod host_guard;
 #[cfg(all(test, unix))]
 mod host_guard_tests;
+#[cfg(test)]
+mod retirement_await_tests;
 
 use super::host_teardown_gate::shared_teardown;
 use super::inflight::KeyedTeardown;
@@ -15,6 +18,7 @@ use crate::services::tmux_common::current_tmux_owner_marker;
 use crate::services::tmux_diagnostics::{
     probe_tmux_session_pane_liveness, record_tmux_exit_reason,
 };
+use finalize::finalize_stale_busy_turn;
 use host_guard::{
     HostGate, keyed_host_gate, routine_teardown, tmux_session_not_missing, unified_thread_target,
 };
@@ -59,61 +63,6 @@ fn recorded_inflight_tmux_session_name(
 ) -> Option<String> {
     crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
         .and_then(|state| state.tmux_session_name)
-}
-
-async fn finalize_stale_busy_turn(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    observed_user_msg_id: serenity::MessageId,
-    observed_turn_nonce: Option<String>,
-    tmux_session_name: &str,
-    trigger: &'static str,
-) -> bool {
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::warn!(
-        "  [{ts}] stale-busy self-heal: finalizing turn {} in channel {} after tmux session {} disappeared (trigger={trigger})",
-        observed_user_msg_id.get(),
-        channel_id.get(),
-        tmux_session_name,
-    );
-    let outcome = shared
-        .turn_finalizer
-        .submit_terminal_with_episode_nonce(
-            turn_finalizer::TurnKey::new(
-                channel_id,
-                observed_user_msg_id.get(),
-                shared.restart.current_generation,
-            ),
-            provider.clone(),
-            turn_finalizer::TerminalEvent::Cancel,
-            turn_finalizer::FinalizeContext::stale_busy_mailbox(),
-            observed_turn_nonce,
-            shared.clone(),
-        )
-        .await;
-
-    let finalized_matching_turn = matches!(
-        outcome,
-        turn_finalizer::FinalizeOutcome::Finalized {
-            removed_token: Some(_),
-            ..
-        }
-    );
-    let released = finalized_matching_turn
-        && mailbox_snapshot(shared, channel_id)
-            .await
-            .active_user_message_id
-            != Some(observed_user_msg_id);
-    tracing::info!(
-        channel_id = channel_id.get(),
-        user_msg_id = observed_user_msg_id.get(),
-        trigger,
-        finalized = finalized_matching_turn,
-        released,
-        "stale-busy self-heal finalizer result"
-    );
-    released
 }
 
 /// Self-heal one busy mailbox whose managed tmux session may have been killed
@@ -188,6 +137,12 @@ async fn heal_stale_busy_mailbox_with_probe(
         &observed_tmux_session_name,
         current_tmux_session_name.as_deref(),
     ) || (respect_watcher_authority && shared.tmux_watchers.contains_key(&channel_id))
+    {
+        return false;
+    }
+
+    // Retirement can land during the mailbox, host or final tmux probe await.
+    if super::health::legacy_supervision::legacy_retired(provider.as_str(), channel_id.get(), site)
     {
         return false;
     }
@@ -986,7 +941,7 @@ mod tests {
     }
 
     /// These tests exercise the probe and identity gates; the host guard has keyed tests.
-    fn admit_any_host<'a>(
+    pub(super) fn admit_any_host<'a>(
         _: &'a Arc<crate::services::discord::SharedData>,
         _: &'a ProviderKind,
         _: ChannelId,
@@ -1581,7 +1536,7 @@ agents:
     }
 
     /// Seeds a busy Claude channel whose recorded tmux session the probe will call dead.
-    async fn seed_busy_channel(
+    pub(super) async fn seed_busy_channel(
         shared: &Arc<crate::services::discord::SharedData>,
         channel: u64,
     ) -> Arc<CancelToken> {
@@ -1629,7 +1584,10 @@ agents:
         token
     }
 
-    async fn still_busy(shared: &Arc<crate::services::discord::SharedData>, channel: u64) -> bool {
+    pub(super) async fn still_busy(
+        shared: &Arc<crate::services::discord::SharedData>,
+        channel: u64,
+    ) -> bool {
         crate::services::discord::mailbox_snapshot(shared, ChannelId::new(channel))
             .await
             .active_user_message_id

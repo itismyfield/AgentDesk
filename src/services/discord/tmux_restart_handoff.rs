@@ -16,6 +16,8 @@ async fn load_dispatch_type_for_restart_handoff(
     shared: &SharedData,
     dispatch_id: &str,
 ) -> Option<String> {
+    #[cfg(test)]
+    retirement_await_tests::checkpoint("dispatch_lookup").await;
     let pool = shared.pg_pool.as_ref()?;
     sqlx::query("SELECT dispatch_type FROM task_dispatches WHERE id = $1")
         .bind(dispatch_id)
@@ -364,17 +366,39 @@ pub(super) async fn start_restart_handoff_from_state(
                 "tmux session died mid-turn (watcher death recovery) — session={}",
                 state.tmux_session_name.as_deref().unwrap_or("<unknown>")
             );
-            super::turn_bridge::fail_dispatch_with_retry(
-                shared.api_port,
-                Some(dispatch_id),
-                &failure_text,
-            )
-            .await;
+            if super::health::legacy_supervision::legacy_retired(
+                provider_kind.as_str(),
+                channel_id.get(),
+                "watcher_death_dispatch_after_lookup",
+            ) {
+                return false;
+            }
+            #[cfg(test)]
+            let record_only = retirement_await_tests::record_dispatch_failure();
+            #[cfg(not(test))]
+            let record_only = false;
+            if !record_only {
+                super::turn_bridge::fail_dispatch_with_retry(
+                    shared.api_port,
+                    Some(dispatch_id),
+                    &failure_text,
+                )
+                .await;
+            }
         }
     }
 
+    #[cfg(test)]
+    retirement_await_tests::checkpoint("core_lock").await;
     let seeded_channel_name = {
         let mut data = shared.core.lock().await;
+        if super::health::legacy_supervision::legacy_retired(
+            provider_kind.as_str(),
+            channel_id.get(),
+            "watcher_death_metadata_after_lock",
+        ) {
+            return false;
+        }
         seed_restart_handoff_session_metadata(&mut data.sessions, channel_id, &state)
     };
     if seeded_channel_name {
@@ -498,6 +522,8 @@ pub(super) async fn resume_aborted_restart_turn(
         // (no live pane ⇒ not "busy", no active turn ⇒ kickable), and the
         // dispatch path spawns a fresh session for the queued item.
         let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        #[cfg(test)]
+        retirement_await_tests::checkpoint("rowless_snapshot").await;
         let has_queued_backlog = !snapshot.intervention_queue.is_empty();
         // codex review P2: only auto-drain when the mailbox is IDLE. The
         // watcher death handler runs asynchronously, so by the time it fires a
@@ -517,6 +543,13 @@ pub(super) async fn resume_aborted_restart_turn(
             && snapshot.active_request_owner.is_none()
             && snapshot.active_user_message_id.is_none();
         if has_queued_backlog && mailbox_idle {
+            if super::health::legacy_supervision::legacy_retired(
+                provider_kind.as_str(),
+                channel_id.get(),
+                "watcher_death_backlog_after_snapshot",
+            ) {
+                return false;
+            }
             tracing::info!(
                 "  [{ts}] ↻ watcher death recovery: idle mailbox for channel {} (provider {}) with queued backlog — scheduling idle-queue kickoff (#3014)",
                 channel_id.get(),
@@ -945,3 +978,7 @@ mod retired_channel_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tmux_restart_handoff_retirement_await_tests.rs"]
+mod retirement_await_tests;

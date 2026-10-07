@@ -77,7 +77,7 @@ async fn sweep_skips_replied_commands_and_recovers_everything_else() {
         discord_message(channel_id, dispatch, INFO_BOT_ID, true, DISPATCH),
     ];
     let newest_first = history.iter().rev().cloned().collect();
-    let (api, _outbox) = TestCatchUpApi::new(history);
+    let api = TestCatchUpApi::new(history);
     let api = api
         .with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID))
         .with_phase2_messages(newest_first);
@@ -109,7 +109,7 @@ async fn sweep_defers_a_command_when_own_identity_is_unknown() {
     let (plain, clear, cleared, later) = (id(1, 90), id(2, 80), id(3, 79), id(4, 70));
     write_checkpoint(root.path(), &provider, channel_id, plain.get() - 1);
 
-    let (mut api, _outbox) = TestCatchUpApi::new(vec![
+    let mut api = TestCatchUpApi::new(vec![
         discord_message(channel_id, plain, HUMAN_ID, false, "먼저 이것"),
         discord_message(channel_id, clear, HUMAN_ID, false, "!clear"),
         reply_to(channel_id, cleared, clear, "세션을 초기화했어요."),

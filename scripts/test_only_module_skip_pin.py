@@ -34,6 +34,12 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/health/recovery/retirement_await_tests.rs",
+        "src/services/discord/placeholder_sweeper/retirement_tests.rs",
+        "src/services/discord/tmux_reaper/retirement_await_tests.rs",
+        "src/services/discord/tmux_restart_handoff_retirement_await_tests.rs",
+        "src/services/discord/tui_direct_abort_marker/retirement_census_tests.rs",
+        "src/services/discord/tui_direct_pending_start/retirement_recheck_tests.rs",
         "src/services/discord/inflight/removal/input_fence_reaper_tests.rs",
         "src/services/discord/inflight/restart_mark_fence_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/live_bridge_guard_tests.rs",
@@ -167,6 +173,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/server/routes/dispatched_sessions_tests.rs",
         "src/server/routes/runtime_profile_tests.rs",
         "src/server/routes/scheduled_messages/postgres_tests.rs",
+        "src/server/routes/session_evidence_tests.rs",
         "src/server/routes/skills_manifest_audit_tests.rs",
         "src/server/routes/tests/auto_queue_preflight_harness_tests.rs",
         "src/services/agent_recovery/durable/postgres_tests.rs",
@@ -211,6 +218,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/catch_up/frontier_sweep_tests.rs",
         "src/services/discord/catch_up/handled_command_tests.rs",
         "src/services/discord/catch_up/merged_alias_tests.rs",
+        "src/services/discord/catch_up/too_old_drop_pg_tests.rs",
         "src/services/discord/commands/inspect/tests.rs",
         "src/services/discord/delivery_lease_cell/exact_lease/tests.rs",
         "src/services/discord/formatting/replace_long_message_tests.rs",
@@ -429,6 +437,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
         "src/services/discord/runtime_bootstrap/gateway_handback_mock.rs",

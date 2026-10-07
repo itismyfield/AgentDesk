@@ -60,6 +60,7 @@ src/server/routes/message_outbox.rs
 src/server/routes/pipeline_stage_save_tests.rs
 src/server/routes/queue_api.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
+src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
@@ -101,7 +102,7 @@ src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
-src/services/discord/catch_up/too_old_notice.rs
+src/services/discord/catch_up/too_old_drop_pg_tests.rs
 src/services/discord/commands/control.rs
 src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/input_clear_tests.rs
@@ -123,6 +124,7 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
+src/services/discord/placeholder_sweeper/retirement_tests.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
 src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs
 src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs
@@ -275,6 +277,7 @@ server::routes::message_outbox::tests
 server::routes::pipeline::stage_save_tests
 server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
+server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -320,7 +323,7 @@ services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
-services::discord::catch_up::too_old_notice::tests
+services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
 services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::home_fence::tests
 services::discord::commands::control::input_clear::tests
@@ -344,6 +347,7 @@ services::discord::inflight::host_recovery_guard::keyed_tests
 services::discord::inflight::rebind_reap::tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::placeholder_sweeper::abandon_guard::tests
+services::discord::placeholder_sweeper::retirement_tests
 services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -895,6 +899,10 @@ server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_e
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_patch_distinguishes_values_from_null_clears
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert
+server::routes::session_evidence::tests::session_evidence_ambiguous_owner_and_sessions_fail_closed_pg
+server::routes::session_evidence::tests::session_evidence_missing_raw_identity_is_null_pg
+server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
+server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_does_not_reclaim_active_null_expiry_semaphore_holder
@@ -1119,8 +1127,7 @@ services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_b
 services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::admin_host_guard::tests::the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg
-services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
-services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
+services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::production_sweep_too_old_drops_leave_no_outbox_notice_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
@@ -1186,6 +1193,7 @@ services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_star
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
+services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg
