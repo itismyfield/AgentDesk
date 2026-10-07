@@ -285,6 +285,7 @@ jobs:
               - 'src/services/auto_queue/route_generate.rs'
               - 'src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs'
               - 'src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs'
+              - 'src/services/auto_queue/runtime/verified_reset_pg_tests.rs'
               - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
               - 'src/services/cluster/attachment_transfer/storage_tests.rs'
               - 'src/services/cluster/channel_home_boot_tests.rs'

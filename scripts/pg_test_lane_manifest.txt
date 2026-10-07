@@ -79,6 +79,7 @@ src/services/auto_queue/planning.rs
 src/services/auto_queue/route_generate.rs
 src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs
+src/services/auto_queue/runtime/verified_reset_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
 src/services/cluster/channel_home_boot_tests.rs
@@ -302,6 +303,7 @@ services::auto_queue::route::route_generate::dependency_hold_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
 services::auto_queue::runtime::slot_reset_host_pg_tests::host
+services::auto_queue::runtime::verified_reset_pg_tests
 services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
@@ -1013,6 +1015,7 @@ services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_o
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
+services::auto_queue::runtime::verified_reset_pg_tests::autoqueue_actual_reset_rechecks_pin_after_legacy_verdict_pg
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_cards_outside_active_loop_state_pg
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_future_iterations_before_touching_git_pg
@@ -1563,6 +1566,7 @@ services::routines::reliability_pg_tests::consecutive_failure_alert_fires_once_p
 services::routines::reliability_pg_tests::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg
 services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
 services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
+services::routines::session_control::tests::routine_actual_reset_rechecks_pin_after_legacy_verdict_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_respects_clear_boundary_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_then_validate_roundtrip_pg
