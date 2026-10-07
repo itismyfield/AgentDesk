@@ -1,5 +1,5 @@
 //! The drain's reads of a delegated channel in this process: the channel's turn, what the O actor
-//! last published that it owes and the writer's running POSTs. It keeps no state; not built yet.
+//! last published that it owes and the writer's running POSTs. It keeps no state.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::future::Future;
@@ -96,8 +96,8 @@ impl DrainPort for ChannelHomePort {
         std::future::ready(deliver::posts_in_flight(self.channel))
     }
 
-    /// The gateway's session reset is reachable only from the Discord runtime, which does not
-    /// hand it to the drain yet, so a releasing drain waits here.
+    /// The gateway's session reset is reachable only from the Discord runtime, which supplies it
+    /// beside this port at boot; through this port alone a releasing drain waits here.
     fn reset_legacy_source(&self) -> impl Future<Output = Result<(), ResetRefused>> + Send {
         std::future::ready(Err(ResetRefused::NotWired))
     }

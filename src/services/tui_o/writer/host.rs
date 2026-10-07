@@ -231,6 +231,24 @@ pub fn start<I: HostIo>(
     pg_gateway: bool,
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
+    spawn_hosts(provider, pg_gateway, cutover::boot_ownership(), prepare)
+}
+
+/// [`start`] off the gateway lease for `delegated`, each a channel with a registered home gate.
+pub fn start_delegated<I: HostIo>(
+    provider: ShadowProvider,
+    delegated: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
+    prepare: impl FnOnce() -> HostParts<I>,
+) -> Vec<JoinHandle<()>> {
+    spawn_hosts(provider, false, delegated, prepare)
+}
+
+fn spawn_hosts<I: HostIo>(
+    provider: ShadowProvider,
+    pg_gateway: bool,
+    owned: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
+    prepare: impl FnOnce() -> HostParts<I>,
+) -> Vec<JoinHandle<()>> {
     let kind = match provider {
         ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
@@ -238,10 +256,7 @@ pub fn start<I: HostIo>(
     let ours = |(channel, channel_kind, candidate): (u64, _, Option<Candidate>)| {
         Some((channel, candidate.filter(|_| channel_kind == Some(kind))?))
     };
-    let channels: Vec<_> = cutover::boot_ownership()
-        .into_iter()
-        .filter_map(ours)
-        .collect();
+    let channels: Vec<_> = owned.into_iter().filter_map(ours).collect();
     if channels.is_empty() {
         return Vec::new();
     }

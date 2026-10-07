@@ -1027,12 +1027,14 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
                 rc = P.main()
             return rc, json.loads(evidence.read_text()), evaluation.call_count
 
-    def test_r2_12_stale_base_fails_before_selector_fresh_base_passes(self):
+    def test_r2_12_stale_base_heals_with_fresh_candidate_stale_candidate_fails(self):
         now = datetime(2026, 10, 2, 11, 41, 35, 1, tzinfo=timezone.utc)
         after = self.files(stamp="2026-10-02T11:41:35Z")
-        rc, evidence, calls = self.run_main(self.files(), after, now)
+        rc, evidence, calls = self.run_main(self.files(), self.files(), now)
         self.assertEqual((rc, calls), (2, 0))
         self.assertIn("older than 30 days", evidence["reason"])
+        rc, evidence, calls = self.run_main(self.files(), after, now)
+        self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"), evidence)
         rc, evidence, calls = self.run_main(self.files(stamp="2026-09-07T00:00:00Z"), after, now)
         self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"), evidence)
 

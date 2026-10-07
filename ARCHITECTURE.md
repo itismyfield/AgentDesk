@@ -672,6 +672,8 @@ src/
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── channel_home.rs
+│   │   ├── channel_home_boot.rs
+│   │   ├── channel_home_boot_tests.rs
 │   │   ├── channel_home_claim_tests.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
@@ -1267,6 +1269,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
+│   │   │   ├── channel_homes_tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs

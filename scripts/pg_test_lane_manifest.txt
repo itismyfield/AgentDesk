@@ -80,6 +80,7 @@ src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
+src/services/cluster/channel_home_boot_tests.rs
 src/services/cluster/channel_home_drain_tests.rs
 src/services/cluster/channel_home_tests.rs
 src/services/cluster/execution_capacity/tests.rs
@@ -143,6 +144,7 @@ src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
+src/services/discord/runtime_bootstrap/channel_homes_tests.rs
 src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
@@ -297,6 +299,7 @@ services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
 services::cluster::channel_home::tests
+services::cluster::channel_home_boot::tests
 services::cluster::channel_home_drain::tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
@@ -361,6 +364,7 @@ services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::router::message_handler::watchdog::host_tests
+services::discord::runtime_bootstrap::channel_homes_tests
 services::discord::runtime_bootstrap::gateway_handback_integration_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
@@ -998,6 +1002,10 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
+services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_lease_and_a_restart_reopens_by_write_pg
+services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
+services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
+services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -1243,6 +1251,9 @@ services::discord::router::message_handler::provider_isolation::host_tests::a_ru
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
+services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg

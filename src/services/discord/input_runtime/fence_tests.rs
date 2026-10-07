@@ -209,14 +209,23 @@ fn borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
     ));
     std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
     std::fs::write(&queue, serde_json::to_vec(&vec![item(1)]).unwrap()).unwrap();
-    assert_eq!(
-        enqueue_borrowed(&destination, &item(2), &guard).unwrap(),
-        EnqueueOutcome::Persisted
-    );
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&queue).unwrap()).unwrap(),
-        serde_json::json!([item(1), item(2)])
-    );
+    #[cfg(windows)]
+    let original = std::fs::read(&queue).unwrap();
+    let outcome = enqueue_borrowed(&destination, &item(2), &guard).unwrap();
+    #[cfg(not(windows))]
+    {
+        assert_eq!(outcome, EnqueueOutcome::Persisted);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&queue).unwrap()).unwrap(),
+            serde_json::json!([item(1), item(2)])
+        );
+    }
+    #[cfg(windows)]
+    {
+        // Without a parent-directory flush, handback must refuse without writing.
+        assert_eq!(outcome, EnqueueOutcome::Rejected);
+        assert_eq!(std::fs::read(&queue).unwrap(), original);
+    }
     let wrong = Destination {
         provider: &ProviderKind::Codex,
         ..destination
@@ -228,7 +237,11 @@ fn borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect
     assert!(enqueue_borrowed(&destination, &pinned, &guard).is_err());
     let bytes = std::fs::read(&queue).unwrap();
     std::fs::write(queue.with_extension("dispatch"), b"invalid").unwrap();
-    assert!(enqueue_borrowed(&destination, &item(3), &guard).is_err());
+    let invalid_dispatch = enqueue_borrowed(&destination, &item(3), &guard);
+    #[cfg(not(windows))]
+    assert!(invalid_dispatch.is_err());
+    #[cfg(windows)]
+    assert_eq!(invalid_dispatch.unwrap(), EnqueueOutcome::Rejected);
     assert_eq!(std::fs::read(queue).unwrap(), bytes);
 }
 
