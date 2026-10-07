@@ -34,7 +34,9 @@ pub struct StreamLineState {
     /// [`ReadHarvestStats`] for the counting rules.
     pub forwarded_message_count: u64,
     pub forwarded_assistant_text_bytes: u64,
-    /// The Claude turn's own interrupt marker was read; only the Herdr terminal reader ends on it.
+    /// A Claude turn-end record (result, interrupt, turn_duration, stop_hook_summary) was read, and
+    /// whether it was the interrupt marker; only the Herdr terminal reader ends on them.
+    pub turn_ended: bool,
     pub interrupted: bool,
 }
 
@@ -81,10 +83,10 @@ pub fn process_stream_line(
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
-    if msg_type == "user"
-        && crate::services::tui_turn_state::claude_user_envelope_is_interrupt_marker(&json)
-    {
-        state.interrupted = true;
+    let claude = crate::services::provider::ProviderKind::Claude;
+    if crate::services::tui_turn_state::envelope_is_turn_end_terminator(&claude, &json) {
+        state.turn_ended = true;
+        state.interrupted |= msg_type == "user";
     }
 
     if msg_type == "assistant" {

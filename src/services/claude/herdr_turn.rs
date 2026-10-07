@@ -676,8 +676,8 @@ fn prompt_and_read(
     Ok(())
 }
 
-/// Under settlement the transcript is read to its provider's own record: the turn's result, or its
-/// interrupt marker sent as a typed abort. Neither idleness, EOF nor a dead pane ends the turn.
+/// Under settlement the transcript is read to its provider's own turn-end record, its interrupt
+/// marker sent as a typed abort. Neither idleness, EOF nor a dead pane ends the turn.
 fn read_to_provider_terminal(
     transcript: &str,
     start: u64,
@@ -700,17 +700,24 @@ fn read_to_provider_terminal(
             let _ = offsets.send(StreamMessage::OutputOffset { offset });
         },
         move |line, state| process_stream_line(line, &lines, state),
-        |state| state.final_result.is_some() || state.interrupted,
+        |state| state.final_result.is_some() || state.turn_ended,
         |_| false,
         |_| {},
         |file| opened = SourceFileIdentity::from_open_file(file),
     )
     .map_err(|failure| failure.error)?;
-    let (ReadOutputResult::Completed { offset }, None, true) =
-        (read, &state.final_result, state.interrupted)
-    else {
+    let (ReadOutputResult::Completed { offset }, None) = (read, &state.final_result) else {
         return Ok(());
     };
+    if !state.interrupted {
+        // A turn_duration end carries no result; the streamed text is the reply, as idle Done had it.
+        let session_id = state.last_session_id.clone();
+        let _ = sender.send(StreamMessage::Done {
+            result: String::new(),
+            session_id,
+        });
+        return Ok(());
+    }
     let (source_file_dev, source_file_ino) = match opened {
         SourceFileIdentity::Unix { dev, ino } => (dev, ino),
         _ => (0, 0),

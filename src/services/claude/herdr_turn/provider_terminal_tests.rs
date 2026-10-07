@@ -7,6 +7,7 @@ const ASSISTANT: &str =
     r#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#;
 const INTERRUPT: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
 const RESULT: &str = r#"{"type":"result","subtype":"success","result":"answer"}"#;
+const TURN_END: &str = r#"{"type":"system","subtype":"turn_duration","durationMs":10}"#;
 
 fn herdr_token() -> Arc<CancelToken> {
     let token = Arc::new(CancelToken::new());
@@ -61,8 +62,8 @@ fn terminals(frames: &[StreamMessage]) -> Vec<String> {
         .collect()
 }
 
-/// A Herdr Claude read ends only on its own record: the interrupt as a typed abort at its end, a
-/// result as a plain Done; a dead pane without either sends no Done or error.
+/// A Herdr Claude read ends only on its turn-end record: the interrupt as a typed abort at its end,
+/// a result or turn_duration as a plain Done; a dead pane without one sends no Done or error.
 #[test]
 fn a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal() {
     let dir = tempfile::tempdir().unwrap();
@@ -95,6 +96,14 @@ fn a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal() {
     let path = dir.path().join("result.jsonl");
     let frames = read(&path, &[ASSISTANT, RESULT], &token, Duration::from_secs(5));
     assert_eq!(terminals(&frames), ["done:answer"]);
+    let path = dir.path().join("duration.jsonl");
+    let frames = read(
+        &path,
+        &[ASSISTANT, TURN_END],
+        &token,
+        Duration::from_secs(5),
+    );
+    assert_eq!(terminals(&frames), ["done:"]);
 
     let path = dir.path().join("running.jsonl");
     let frames = read(&path, &[ASSISTANT], &token, Duration::from_millis(300));
