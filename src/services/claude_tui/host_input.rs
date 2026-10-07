@@ -287,6 +287,10 @@ impl InputTransport for TmuxInput {
     }
 
     fn capture_draft(&mut self, session: &str) -> Option<String> {
+        #[cfg(test)]
+        if let Some(program) = spy::draft_route(session) {
+            return capture_draft_with(program, session, DRAFT_CAPTURE_TIMEOUT);
+        }
         capture_draft_with("tmux", session, DRAFT_CAPTURE_TIMEOUT)
     }
 
@@ -824,6 +828,8 @@ pub(crate) fn classify(
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use spy::FakeDraftPane;
 #[cfg(test)]
 pub(crate) use spy::{SpyGuard, SpyState};
 
@@ -957,6 +963,66 @@ mod spy {
             self.0
                 .borrow_mut()
                 .record(format!("retire:{reason_code}:{reason}"));
+        }
+    }
+
+    static DRAFT_ROUTES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+
+    fn draft_routes()
+    -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::path::PathBuf>> {
+        DRAFT_ROUTES.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(super) fn draft_route(session: &str) -> Option<std::path::PathBuf> {
+        draft_routes().get(session).cloned()
+    }
+
+    /// A tmux stand-in for one session's draft capture on any thread: `-e` prints the `pane` file
+    /// as written, a capture without it drops attributes, and every call is logged.
+    #[cfg(unix)]
+    pub(crate) struct FakeDraftPane {
+        dir: tempfile::TempDir,
+        session: String,
+    }
+
+    #[cfg(unix)]
+    impl FakeDraftPane {
+        pub(crate) fn new(session: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path().display();
+            let script = format!(
+                "#!/bin/sh\necho \"$*\" >> '{d}/log'\ncase \" $* \" in *\" -e \"*) cat '{d}/pane' ;; \
+                 *) sed \"s/$(printf '\\033')\\[[0-9;]*m//g\" '{d}/pane' ;; esac\n"
+            );
+            let program = dir.path().join("tmux");
+            std::fs::write(&program, script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(dir.path().join("pane"), "").unwrap();
+            draft_routes().insert(session.to_string(), program);
+            Self {
+                dir,
+                session: session.to_string(),
+            }
+        }
+
+        pub(crate) fn show(&self, pane: &str) {
+            std::fs::write(self.dir.path().join("pane"), pane).unwrap();
+        }
+
+        /// How many `-e` captures read this pane.
+        pub(crate) fn draft_reads(&self) -> usize {
+            let log = std::fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
+            log.lines().filter(|line| line.contains(" -e ")).count()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeDraftPane {
+        fn drop(&mut self) {
+            draft_routes().remove(&self.session);
         }
     }
 

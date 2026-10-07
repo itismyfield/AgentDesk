@@ -654,6 +654,19 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
+    /// The production backend reads a protected pane with its attributes, so a faint placeholder
+    /// stays apart from typed text.
+    #[cfg(unix)]
+    #[test]
+    fn the_tmux_backend_reads_the_pane_with_its_attributes() {
+        let session = format!("relay-draft-{}", uuid::Uuid::new_v4().simple());
+        let pane = host_input::FakeDraftPane::new(&session);
+        let row = "\x1b[39m\u{276f}\u{a0}\x1b[2mTry \"refactor <filepath>\"\x1b[0m\n";
+        pane.show(row);
+        assert_eq!(TmuxSendBackend.capture(&session).as_deref(), Some(row));
+        assert_eq!(pane.draft_reads(), 1);
+    }
+
     fn send_request(text: &str, submit: bool) -> SendRequest {
         SendRequest {
             session_name: "test-session".to_string(),

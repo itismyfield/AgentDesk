@@ -655,3 +655,80 @@ fn the_stash_is_read_from_the_status_row_above_the_active_box_only() {
     let ghost = pane(60, "", &["❯\u{00a0}/he\x1b[2mlp\x1b[0m"], true);
     assert_eq!(screen::read(&ghost).composer, Composer::Unknown);
 }
+
+/// Rows `capture-pane -p -e` gave from Claude Code 2.1.292 (default theme, 120 columns), and
+/// variants with a cursor cell or faint runs of other shapes: only the measured placeholder is empty.
+#[test]
+fn only_the_measured_placeholder_shape_reads_as_an_empty_composer() {
+    let border = format!("\x1b[38;5;244m{}", "\u{2500}".repeat(120));
+    let footer = "\x1b[39m  \x1b[38;5;211m\u{23f5}\u{23f5} bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m";
+    let screen =
+        |status: &str, row: &str| format!("{status}\n{border}\n{row}\n{border}\n{footer}\n");
+    let text = |row: &str| Composer::Text(vec![row.to_string()]);
+    let captured = [
+        (
+            "idle placeholder",
+            "\x1b[39m\u{276f}\u{a0}\x1b[2mTry \"refactor <filepath>\"\x1b[0m",
+            Composer::Empty,
+        ),
+        (
+            "draft",
+            "\x1b[39m\u{276f}\u{a0}hello there",
+            text("hello there"),
+        ),
+        (
+            "typed like the placeholder",
+            "\x1b[39m\u{276f}\u{a0}Try \"edit <filepath> to...\"",
+            text("Try \"edit <filepath> to...\""),
+        ),
+        (
+            "busy empty",
+            "\x1b[38;5;246m\u{276f}\u{a0}\x1b[39m",
+            Composer::Empty,
+        ),
+    ];
+    let variants = [
+        (
+            "cursor cell in a draft",
+            "\x1b[39m\u{276f}\u{a0}hel\x1b[7ml\x1b[27mo",
+            text("hello"),
+        ),
+        (
+            "faint closed by SGR 22",
+            "\x1b[39m\u{276f}\u{a0}\x1b[2mhuman draft\x1b[22m",
+            Composer::Unknown,
+        ),
+        (
+            "faint after a plain space",
+            "\x1b[39m\u{276f} \x1b[2mTry \"x\"\x1b[0m",
+            Composer::Unknown,
+        ),
+        (
+            "colour inside the faint run",
+            "\x1b[39m\u{276f}\u{a0}\x1b[2m\x1b[38;5;246mTry \"x\"\x1b[0m",
+            Composer::Unknown,
+        ),
+        (
+            "placeholder behind a cursor cell",
+            "\x1b[39m\u{276f}\u{a0}\x1b[7m \x1b[27m\x1b[2mTry \"x\"\x1b[0m",
+            Composer::Unknown,
+        ),
+        (
+            "partial suggestion",
+            "\x1b[39m\u{276f}\u{a0}/he\x1b[2mlp\x1b[0m",
+            Composer::Unknown,
+        ),
+    ];
+    for (name, row, composer) in captured.into_iter().chain(variants) {
+        let got = screen::read(&screen("", row));
+        assert_eq!(
+            (got.composer, got.stash),
+            (composer, Stash::AbsentInRecognizedLayout),
+            "{name}"
+        );
+    }
+    // Typing `/he` lists commands above the box; that status row is no stash row anyone measured.
+    let listed = "                                \x1b[38;5;246m\u{2014} what t\x1b[1m\x1b[39mhe\x1b[0m\x1b[38;5;246m `claude doctor` terminal diagnostics cover \u{2014} from local data (duplicate or\u{2026}\x1b[39m";
+    let got = screen::read(&screen(listed, "\x1b[39m\u{276f}\u{a0}/he"));
+    assert_eq!((got.composer, got.stash), (text("/he"), Stash::Unknown));
+}

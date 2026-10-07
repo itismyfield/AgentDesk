@@ -58,7 +58,41 @@ fn input_file_path_in_root(
         .join(format!("{user_msg_id}.json"))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_CLOCK_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static RELEASE_FAULTS: std::cell::RefCell<std::collections::VecDeque<bool>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Pins this thread's store clock; `None` returns it to the wall clock.
+#[cfg(test)]
+pub(in crate::services::discord) fn set_clock_for_tests(now_ms: Option<u64>) {
+    TEST_CLOCK_MS.with(|clock| clock.set(now_ms));
+}
+
+/// The fallible steps of this thread's next releases, in order (listing, then each save): `true`
+/// fails that step once.
+#[cfg(test)]
+pub(in crate::services::discord) fn fail_release_steps_for_tests(steps: &[bool]) {
+    RELEASE_FAULTS.with(|faults| faults.borrow_mut().extend(steps));
+}
+
+#[cfg(test)]
+fn injected_release_fault() -> bool {
+    RELEASE_FAULTS.with(|faults| faults.borrow_mut().pop_front().unwrap_or(false))
+}
+
+#[cfg(not(test))]
+fn injected_release_fault() -> bool {
+    false
+}
+
 fn now_ms() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = TEST_CLOCK_MS.with(std::cell::Cell::get) {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -594,31 +628,55 @@ pub(in crate::services::discord) fn sweep_expired() -> usize {
     removed
 }
 
+/// One release pass: inputs given a fresh budget, and whether a failed step left any for a later
+/// pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::services::discord) struct DraftRelease {
+    pub released: usize,
+    pub retry: bool,
+}
+
 /// Gives this channel's inputs whose last retry met a draft protection a fresh budget once that
-/// protection is gone; inputs held by busy turns keep theirs. Returns how many were lifted.
+/// protection is gone; inputs held by busy turns keep theirs. A failed step never stops the rest.
 pub(in crate::services::discord) fn release_draft_holds(
     provider: &ProviderKind,
     channel_id: u64,
-) -> usize {
-    let release = || -> Result<usize, String> {
+) -> DraftRelease {
+    let release = || -> Result<DraftRelease, String> {
         let root = runtime_store::discord_busy_followup_retries_root()
             .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
         let _guard = STORE_WRITE_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let dir = root.join(provider.as_str()).join(channel_id.to_string());
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Ok(0);
+        let listed = if injected_release_fault() {
+            Err(std::io::Error::other("injected listing failure"))
+        } else {
+            fs::read_dir(dir)
         };
-        let mut released = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = match listed {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DraftRelease::default());
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut pass = DraftRelease::default();
+        for entry in entries {
+            let Ok(path) = entry.map(|entry| entry.path()) else {
+                pass.retry = true;
+                continue;
+            };
             let stem = path.file_stem().and_then(|stem| stem.to_str());
             let Some(user_msg_id) = stem.and_then(|stem| stem.parse().ok()) else {
                 continue;
             };
-            let state = load_in_root(&root, provider, channel_id, user_msg_id);
-            let Some(state) = state.filter(|state| state.draft_hold) else {
+            let Ok(bytes) = fs::read(&path) else {
+                pass.retry = true;
+                continue;
+            };
+            let state = serde_json::from_slice::<BusyFollowupRetryState>(&bytes);
+            let Some(state) = state.ok().filter(|state| state.draft_hold) else {
                 continue;
             };
             let fresh = BusyFollowupRetryState {
@@ -627,16 +685,26 @@ pub(in crate::services::discord) fn release_draft_holds(
                 draft_hold: false,
                 ..state
             };
-            save_in_root(&root, provider, channel_id, user_msg_id, fresh)?;
-            released += 1;
+            let saved = if injected_release_fault() {
+                Err("injected save failure".to_string())
+            } else {
+                save_in_root(&root, provider, channel_id, user_msg_id, fresh)
+            };
+            match saved {
+                Ok(()) => pass.released += 1,
+                Err(_) => pass.retry = true,
+            }
         }
-        Ok(released)
+        Ok(pass)
     };
-    let released = match fence::lookup(provider, channel_id) {
+    let pass = match fence::lookup(provider, channel_id) {
         None => release(),
         Some(_) => fence::write(provider, channel_id, release),
     };
-    released.unwrap_or(0)
+    pass.unwrap_or(DraftRelease {
+        released: 0,
+        retry: true,
+    })
 }
 
 /// Busy-notice bindings kept for one channel, counted per input file.

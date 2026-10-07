@@ -38,10 +38,11 @@ const UNKNOWN: Screen = Screen {
     stash: Stash::Unknown,
 };
 
-/// One captured row: all visible text, and the part not drawn faint.
+/// One captured row: all visible text, the part not drawn faint, and the row as captured.
 struct Row {
     plain: String,
     solid: String,
+    raw: String,
 }
 
 fn row(raw: &str) -> Row {
@@ -79,7 +80,8 @@ fn row(raw: &str) -> Row {
             _ => {}
         }
     }
-    Row { plain, solid }
+    let raw = raw.to_string();
+    Row { plain, solid, raw }
 }
 
 /// SGR 2 turns faint on; 0, 22 and an empty list turn it off. Colour arguments are skipped.
@@ -167,10 +169,10 @@ fn composer(rows: &[Row]) -> Composer {
         let (Some(plain), Some(solid)) = (line(index, &row.plain), line(index, &row.solid)) else {
             return Composer::Unknown;
         };
-        // A faint placeholder or ghost suggestion only ever stands in for an empty composer.
+        // Only the measured placeholder shape proves an empty composer; other faint rows stay unread.
         if plain != solid {
             let blank = rows.len() == 1 && solid.trim().is_empty();
-            return if blank {
+            return if blank && measured_placeholder(&row.raw) {
                 Composer::Empty
             } else {
                 Composer::Unknown
@@ -187,6 +189,17 @@ fn composer(rows: &[Row]) -> Composer {
         (_, true) => Composer::Unknown,
         _ => Composer::Text(lines),
     }
+}
+
+/// The idle placeholder as Claude Code 2.1.292 draws it: the prompt and a no-break space, then one
+/// faint run of plain text closed by a full reset at the row's end. The words are never checked.
+fn measured_placeholder(raw: &str) -> bool {
+    let Some((_, rest)) = raw.split_once("\u{276f}\u{00a0}") else {
+        return false;
+    };
+    let run = rest.trim_end().strip_prefix("\x1b[2m");
+    let text = run.and_then(|run| run.strip_suffix("\x1b[0m"));
+    text.is_some_and(|text| !text.trim().is_empty() && !text.contains('\x1b'))
 }
 
 /// Only the row right above the top border counts; scrollback never does.
