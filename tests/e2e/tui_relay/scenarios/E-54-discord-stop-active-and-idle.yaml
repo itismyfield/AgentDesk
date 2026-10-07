@@ -1,0 +1,79 @@
+id: E-54
+title: S15 Discord !stop interrupts a hold turn, then is harmless while idle
+agent_mode: real_live
+coverage_class: live
+cells: [claude-tui]
+isolation: required
+destructive: true
+acceptance_criteria:
+  - Start a hold turn through normal Discord intake and observe HOLD before stopping.
+  - Send a marker-bearing !stop and reach idle before the hold command can finish.
+  - Suppress the late answer beyond the original hold interval.
+  - Send !stop again while idle and receive exactly one no-active-turn reply.
+notes: |
+  The hold starts with send_discord_prompt; no terminal input is injected.
+  This covers the Discord-turn stop path, not the token-free direct-turn path.
+  Interruption is judged by early idle plus the absent late relay; native
+  transcript interrupt counting needs a separate source observer.
+  The fixed late sentinel is scoped by the isolated scenario message window;
+  marker_absent does not expand run_id in the current driver.
+  Health allows only the exact 2026-10-07 bulk inventory baseline reasons;
+  new degraded reasons and loss of target ownership still fail. HTTP health
+  responses must remain 2xx because assert_health rejects HTTP 503.
+report_marker_counts:
+  - "[E2E:S15:{run_id}:HOLD]"
+steps:
+  - send_discord_prompt: |
+      E2E S15 interruption probe. First output [E2E:S15:{run_id}:HOLD].
+      Then call Bash in the foreground with run_in_background=false:
+      python3 -c "import time; time.sleep(90)"
+      Keep the turn active while that command runs. Do not launch a background task.
+      Only after the command finishes normally, output exactly S15_LATE_SHOULD_NOT_APPEAR.
+      If interrupted or cancelled, stop immediately and never output that late sentinel.
+  - wait_for_discord_text: "[E2E:S15:{run_id}:HOLD]"
+    timeout_s: 120
+  - wait_idle_s: 2
+  - send_discord_prompt: "!stop [E2E:S15:{run_id}:STOP]"
+  - assert_health: &bulk_idle_health
+      require_status: [healthy, degraded]
+      allowed_degraded_reasons:
+        - "tui_o:released:1474933804887179286"
+        - "tui_o:released:1475086789696946196"
+        - "tui_o:released:1478248459445469264"
+        - "tui_o:released:1478652416533463101"
+        - "tui_o:released:1478652616295583805"
+        - "tui_o:released:1478652735300829185"
+        - "tui_o:released:1478653028000338114"
+        - "tui_o:released:1478653071214252103"
+        - "tui_o:released:1480531508820185241"
+        - "tui_o:released:1481478222439907560"
+        - "tui_o:released:1490141479707086938"
+        - "tui_o:released:1500628371829428350"
+        - "tui_o:released:1509350778043895902"
+        - "tui_o:released:1527859708180828350"
+        - "tui_o:released:1536866287983132752"
+        - "tui_o:released:1536887557290197062"
+        - "tui_o:too_many_readers:1509350490461180105"
+        - "relay_verdict_unknown_codex_1509350778043895902"
+      timeout_s: 25
+      poll_interval_s: 1
+      global_active_max: 0
+      global_finalizing_max: 0
+  - wait_idle_s: 95
+  - send_discord_prompt: "!stop [E2E:S15:{run_id}:IDLE_STOP]"
+  - wait_for_raw_discord_text: "중지할 활성 턴이 없어요."
+    timeout_s: 20
+  - assert_health:
+      <<: *bulk_idle_health
+      timeout_s: 20
+assertions:
+  - text_present: "[E2E:S15:{run_id}:HOLD]"
+  - no_duplicate_marker: "[E2E:S15:{run_id}:HOLD]"
+  - marker_absent:
+      marker: "S15_LATE_SHOULD_NOT_APPEAR"
+      surface: relay
+  - chrome_count:
+      text: "중지할 활성 턴이 없어요."
+      exact: 1
+  - raw_text_absent: "이 세션의 호스트를 확인하지 못해 중지하지 않았어요."
+  - no_duplicate_content: true
