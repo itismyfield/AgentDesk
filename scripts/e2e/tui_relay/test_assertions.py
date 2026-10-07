@@ -1506,7 +1506,7 @@ class E35CurrentRunContract(unittest.TestCase):
                     client.send.return_value = {"id": "2"}
                     # The real wait first sees the current marker; final edits must still pass assertions.
                     client.wait_for_message.return_value = (body, [body])
-                    client.fetch_messages.side_effect = [messages] if cell.endswith("-herdr") else [[], [body], messages]
+                    client.fetch_messages.side_effect = [messages] if cell.endswith("-herdr") else [[], [body], messages, messages]
                     args = Namespace(base_url=client.base_url, cell=cell, channel_id="42", thread_channel_id=None,
                                      dry_run=False, reset_before_each=True, hard_reset_session_each=not cell.endswith("-herdr"),
                                      allow_destructive=False, queue_runtime_root="unused", final_refetches=1)
@@ -1667,7 +1667,7 @@ class RequiredCompletionWait(unittest.TestCase):
     def test_observed_4649ms_lag_passes_without_resetting_body_anchor(self):
         record, error, requests, _ = self._run()
         self.assertIsNone(error, str(error))
-        self.assertEqual(len(requests), 6)
+        self.assertEqual(len(requests), 7)
         trace = record["completion_rechecks"][0]
         self.assertEqual(trace, {"refetches": 2, "deadline_at": 110, "elapsed_s": 5, "outcome": "PASS"})
         self.assertEqual(record["_body_observations"][self.MARKER], 100)
@@ -1693,7 +1693,7 @@ class RequiredCompletionWait(unittest.TestCase):
             with self.subTest(return_delay=delay):
                 record, error, requests, _ = self._run(return_delay=delay)
                 self.assertEqual(error is None, passed)
-                self.assertEqual(len(requests), 5)
+                self.assertEqual(len(requests), 6 if passed else 5)
                 self.assertEqual(record["completion_rechecks"][0]["refetches"], 1)
                 self.assertEqual(record["completion_rechecks"][0]["outcome"], "PASS" if passed else "EXHAUSTED")
         record, error, requests, _ = self._run(retry_after=8)
@@ -1712,7 +1712,7 @@ class RequiredCompletionWait(unittest.TestCase):
     def test_panel_deleted_after_completing_above_body_is_judged_on_final_state(self):
         record, error, requests, _ = self._run(move_at=0)
         self.assertIsNone(error, str(error))
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(requests), 5)
         self.assertNotIn("completion_rechecks", record)
 
     def test_panel_move_within_follow_window_passes_and_later_move_fails(self):
@@ -1759,7 +1759,7 @@ class RequiredCompletionWait(unittest.TestCase):
             with self.subTest(options=options):
                 record, error, requests, _ = self._run(**options)
                 self.assertEqual(error is not None, bool(options.get("other_failure")))
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(len(requests), 4 if options.get("other_failure") else 5)
                 self.assertNotIn("completion_rechecks", record)
                 self.assertNotIn("revalidated_after_recheck", record)
         callback = MagicMock()
@@ -1780,7 +1780,7 @@ class RequiredCompletionWait(unittest.TestCase):
                 if missing:
                     self.assertIsInstance(error, driver.ScenarioStepAssertionError)
                     self.assertIn("completion chrome not found", str(error))
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(len(requests), 4 if missing else 5)
                 self.assertEqual(sleeps, [1.0])
                 self.assertNotIn("completion_rechecks", record)
                 self.assertNotIn("revalidated_after_recheck", record)
@@ -1822,8 +1822,8 @@ class RequiredCompletionWait(unittest.TestCase):
             ) as primitive:
                 record, error, requests, _ = self._run(**options)
                 self.assertIsNone(error, str(error))
-                self.assertEqual(primitive.call_count, 1)
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(primitive.call_count, 2)
+                self.assertEqual(len(requests), 5)
                 self.assertNotIn("completion_rechecks", record)
 
     def test_non_typeerror_reconstruction_failure_is_not_swallowed(self):
