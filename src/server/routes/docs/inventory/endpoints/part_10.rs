@@ -52,9 +52,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "status": "failed",
                     "target": "channel:1479671301387059200",
                     "bot": "notify",
-                    "source": "catch_up_too_old",
-                    "reason_code": "catch_up_too_old",
-                    "session_key": "catch_up_too_old:1479671301387059200:1524946021082337372",
                     "retry_count": 5,
                     "error_snippet": "source not allowed for this caller",
                     "dedupe_key": "message_outbox:v1:…",
@@ -83,11 +80,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("dry_run", body_param("boolean", false, "Defaults true; false applies only would_redrive outcomes.")),
         ])
         .with_example(
-            json!({"body": {"ids": [13651, 13652, 13653], "idempotency_key": "issue-4424-catchup-notices-v1", "reason": "recover verified P0 incident rows", "dry_run": false}}),
-            json!({"ok": true, "dry_run": false, "idempotency_key": "issue-4424-catchup-notices-v1", "results": [{"id": 13651, "outcome": "redriven"}]}),
+            json!({"body": {"ids": [13651, 13652, 13653], "idempotency_key": "failed-outbox-redrive-v1", "reason": "recover verified P0 incident rows", "dry_run": false}}),
+            json!({"ok": true, "dry_run": false, "idempotency_key": "failed-outbox-redrive-v1", "results": [{"id": 13651, "outcome": "redriven"}]}),
         )
         .with_dry_run_example(
-            json!({"body": {"ids": [13651, 13652, 13653], "idempotency_key": "issue-4424-catchup-notices-v1", "reason": "recover verified P0 incident rows"}}),
+            json!({"body": {"ids": [13651, 13652, 13653], "idempotency_key": "failed-outbox-redrive-v1", "reason": "recover verified P0 incident rows"}}),
             json!({"ok": true, "dry_run": true, "results": [{"id": 13651, "outcome": "would_redrive"}]}),
         )
         .with_error_example(
@@ -95,7 +92,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"ids": [13651], "idempotency_key": "issue-4424-v1", "reason": "operator recovery", "dry_run": false}}),
             json!({"ok": false, "code": "source_not_allowed", "id": 13651, "error": "message_outbox row 13651 source `unknown` is not registered for LoopbackInternal"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/failed/redrive -H 'Content-Type: application/json' -d '{\"ids\":[13651,13652,13653],\"idempotency_key\":\"issue-4424-catchup-notices-v1\",\"reason\":\"recover verified P0 incident rows\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/failed/redrive -H 'Content-Type: application/json' -d '{\"ids\":[13651,13652,13653],\"idempotency_key\":\"failed-outbox-redrive-v1\",\"reason\":\"recover verified P0 incident rows\"}'"),
         ep(
             "DELETE",
             "/api/e2e/discord/channels/{channel_id}/messages/{message_id}",

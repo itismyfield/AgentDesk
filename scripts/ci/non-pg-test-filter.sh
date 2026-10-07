@@ -124,7 +124,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
-  --skip services::discord::catch_up::too_old_notice::tests
+  --skip services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::home_fence::tests
   --skip services::discord::commands::control::input_clear::tests
@@ -853,7 +853,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_worker::o_route_tests
   services::cluster::machine_resources::store::tests
   services::discord::admin_host_guard::tests
-  services::discord::catch_up::too_old_notice::tests
+  services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::home_fence::tests
   services::discord::commands::control::input_clear::tests
