@@ -3467,7 +3467,7 @@ mod queued_placeholder_cluster_characterization_tests {
 
 #[cfg(test)]
 pub(crate) use recovery_engine::{codex_rebind_spawn_for_tests, codex_restart_output_for_tests};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use tmux::tmux_output_stream::{
     codex_native_read_for_tests, codex_source_witness_present_for_tests,
 };
