@@ -61,6 +61,12 @@ pub(super) enum StopTarget {
     /// No tmux name: the process backend, unchanged.
     Process,
     LegacyTmux(LegacyTmuxName),
+    /// Explicit user stop; row and endpoint are still read at delivery.
+    HerdrPending {
+        name: String,
+        pool: sqlx::PgPool,
+        state: Arc<crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState>,
+    },
     /// Test-only until a Herdr turn carries its verified target to the stop.
     #[cfg(test)]
     Herdr(HerdrStopTarget),
@@ -77,8 +83,9 @@ pub(in crate::services::discord) enum StopSettlement {
     /// The host was not admitted, by the stop's verdict or by the executor's claim.
     Refused,
     /// The host's own source owner still owes the turn's output.
-    #[cfg(test)]
     HostOwned,
+    /// No Enter was attempted; the input executor ends its own cancelled run.
+    LocalUnsubmitted,
 }
 
 /// What a stop did: whether it recorded a termination, and who settles the turn.
@@ -190,7 +197,9 @@ impl StopTarget {
             Self::LegacyTmux(name) => ExpectedBinding::Decided(Some(&name.name)),
             #[cfg(test)]
             Self::Herdr(target) => ExpectedBinding::Decided(Some(&target.session)),
-            Self::Refused { name, .. } => ExpectedBinding::Decided(Some(name)),
+            Self::HerdrPending { name, .. } | Self::Refused { name, .. } => {
+                ExpectedBinding::Decided(Some(name))
+            }
         }
     }
 
@@ -200,6 +209,15 @@ impl StopTarget {
             Self::Process | Self::LegacyTmux(_) if !host_refused => StopSettlement::Legacy,
             #[cfg(test)]
             Self::Herdr(_) => StopSettlement::HostOwned,
+            Self::HerdrPending { state, .. } => {
+                use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+                match *state.submission.lock().unwrap_or_else(|e| e.into_inner()) {
+                    HerdrSubmission::Unsubmitted => StopSettlement::LocalUnsubmitted,
+                    HerdrSubmission::Submitted | HerdrSubmission::Unknown => {
+                        StopSettlement::HostOwned
+                    }
+                }
+            }
             _ => StopSettlement::Refused,
         }
     }
@@ -222,9 +240,10 @@ pub(super) async fn interrupt_unhosted(
     token: &Arc<CancelToken>,
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
-    #[cfg(not(test))]
-    let _ = token;
     match target {
+        StopTarget::HerdrPending { pool, .. } if user_stop_reason(reason) => {
+            super::codex_stop_delivery::interrupt_herdr(pool, token, provider).await
+        }
         #[cfg(test)]
         StopTarget::Herdr(herdr) if matches!(provider, ProviderKind::Claude) => {
             super::claude_stop_delivery::herdr::interrupt_claude_turn_on_herdr(token, herdr, reason)
@@ -245,6 +264,62 @@ pub(super) async fn interrupt_unhosted(
             not_sent()
         }
     }
+}
+
+/// HTTP and automatic stops never enter this command-only admission boundary.
+pub(super) fn admit_herdr_command(
+    target: &mut StopTarget,
+    token: &CancelToken,
+    provider: &ProviderKind,
+    channel: u64,
+    token_hash: &str,
+    pool: Option<&sqlx::PgPool>,
+) {
+    use crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled;
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+    if !herdr_cancel_enabled() || !holder(channel) {
+        return;
+    }
+    let StopTarget::Refused {
+        name,
+        refusal: StopRefusal::Marker,
+    } = target
+    else {
+        return;
+    };
+    let (Some(pool), Some(state)) = (pool, token.herdr_interrupt_state()) else {
+        return;
+    };
+    let owner = &state.owner;
+    if owner.logical_key != *name
+        || owner.provider != provider.as_str()
+        || owner.channel_id != channel.to_string()
+        || owner.discord_token_hash != token_hash
+        || read_host_kind_marker(name)
+            != HostKindMarker::Known(crate::services::session_host::HostKind::Herdr)
+    {
+        return;
+    }
+    state
+        .user_stop
+        .store(true, std::sync::atomic::Ordering::Release);
+    *target = StopTarget::HerdrPending {
+        name: name.clone(),
+        pool: pool.clone(),
+        state,
+    };
+}
+
+pub(super) fn holder(channel: u64) -> bool {
+    use crate::services::cluster::channel_home::{HomeRefusal, refusal};
+    channel != 0 && refusal(channel) != Some(HomeRefusal::NotHeld)
+}
+
+pub(super) fn user_stop_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "/stop" | "!stop" | "!cc stop" | "!skill stop" | "/skill stop" | "/cc stop"
+    )
 }
 
 pub(super) fn not_sent() -> ProviderTurnInterruptOutcome {

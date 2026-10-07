@@ -13,6 +13,15 @@ use std::time::Duration;
 // async orchestration + session-teardown logic stays here and reaches the
 // moved items by their original bare names via these glob/explicit re-imports.
 mod claude_stop_delivery;
+mod codex_stop_delivery;
+/// Complete an already admitted user stop once cold-start attach has made its source available.
+pub(crate) async fn interrupt_herdr(
+    pool: &sqlx::PgPool,
+    token: &std::sync::Arc<CancelToken>,
+    provider: &ProviderKind,
+) {
+    let _ = codex_stop_delivery::interrupt_herdr(pool, token, provider).await;
+}
 mod interrupt_policy;
 mod judged_stop;
 mod pid_exit;

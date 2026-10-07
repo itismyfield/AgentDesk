@@ -274,7 +274,22 @@ fn first_prompt(
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, turn.channel_id);
     hold(nonce)?;
-    let run = run_herdr(&target, &plan, turn.cancel.as_deref());
+    let run = if crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled()
+        && let Some(token) = turn.cancel.as_deref()
+    {
+        use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+        let state = token.prepare_herdr_interrupt(ProviderKind::Codex, &turn.owner);
+        let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+        let run = run_herdr(&target, &plan, Some(token));
+        *submitted = match &run.run {
+            InputRun::Applied => HerdrSubmission::Submitted,
+            InputRun::Indeterminate { .. } if run.enter_attempted => HerdrSubmission::Unknown,
+            _ => HerdrSubmission::Unsubmitted,
+        };
+        run
+    } else {
+        run_herdr(&target, &plan, turn.cancel.as_deref())
+    };
     if run.run != InputRun::Applied {
         if composer_untouched(&run) {
             warn_release(logical, release_hold(nonce));
@@ -301,6 +316,17 @@ fn first_prompt(
         return Err(format!("herdr turn: codex execution {nonce} is not bound"));
     }
     warn_release(logical, release_hold(nonce));
+    if cancel_requested(turn.cancel.as_deref())
+        && let Some(token) = turn.cancel.as_ref()
+    {
+        runtime.block_on(
+            crate::services::discord::turn_bridge::tmux_runtime::interrupt_herdr(
+                turn.pool,
+                token,
+                &ProviderKind::Codex,
+            ),
+        );
+    }
     let session_id = source.session_id.clone();
     let _ = sender.send(StreamMessage::Init {
         session_id: session_id.clone(),

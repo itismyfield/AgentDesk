@@ -1345,6 +1345,13 @@ fn pane_looks_ready_for_codex_prompt_with_ansi(pane: &str) -> bool {
     pane_looks_ready_for_codex_prompt(&plain)
 }
 
+/// Running text alone is insufficient when a modal or prompt draft owns the composer.
+pub(crate) fn herdr_turn_in_progress(pane: &str) -> bool {
+    recent_codex_active_turn_marker(pane).is_some()
+        && !pane_has_codex_interactive_modal_in_pane(pane)
+        && active_composer_visible_prompt_draft_in_pane(pane).is_none()
+}
+
 fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
     recent_codex_active_turn_marker(pane).is_some()
 }
