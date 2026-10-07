@@ -63,6 +63,7 @@ fn seed(row: &InflightTurnState, age: i64) -> std::path::PathBuf {
     path
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inline_panel_rechecks_retirement_after_owner_probe() {
     let _root = crate::config::TestRuntimeRootGuard::new();
