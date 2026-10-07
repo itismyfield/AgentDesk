@@ -486,6 +486,41 @@ class FinalSnapshotDriverTests(unittest.TestCase):
         with self.assertRaisesRegex(driver.HarnessEvidenceError, "pagination did not advance"):
             self.run_surface(pages=lambda cursor: rows)
 
+    def test_nonadvancing_short_page_fails_closed_by_actual_dispatch(self):
+        first = [message(101, self.MARKER + "\n\n-# ✅ 완료")]
+        first += [message(mid, "plain body") for mid in range(102, 201)]
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "pagination did not advance"):
+            self.run_surface(pages=lambda cursor: first if cursor == "100" else first[:1])
+
+    def test_advancing_short_page_passes_actual_dispatch(self):
+        first = [message(101, self.MARKER + "\n\n-# ✅ 완료")]
+        first += [message(mid, "plain body") for mid in range(102, 201)]
+        last = [message(mid, "plain body") for mid in range(201, 204)]
+        record, requests = self.run_surface(pages=lambda cursor: first if cursor == "100" else last)
+        self.assertEqual(requests, ["100", "200", "100", "200"])
+        self.assertTrue(record["revalidated_after_idle"][0]["passed"])
+        self.assertEqual(record["raw_count"], 103)
+
+    def test_cursor_violations_in_short_and_full_pages_fail_closed(self):
+        for size in (2, 100):
+            for bad_id in ("100", "99"):
+                rows = [message(101, self.MARKER + "\n\n-# ✅ 완료")]
+                rows += [message(mid, "plain body") for mid in range(102, 100 + size)]
+                rows.append(message(bad_id, "plain body"))
+                with self.subTest(size=size, bad_id=bad_id), self.assertRaisesRegex(
+                    driver.HarnessEvidenceError, "pagination did not advance"
+                ):
+                    self.run_surface(pages=lambda cursor: rows)
+
+    def test_nonnumeric_ids_in_short_and_full_pages_fail_closed(self):
+        for size in (2, 100):
+            for bad_id in ("not-a-snowflake", "²"):
+                rows = [message(101, self.MARKER + "\n\n-# ✅ 완료")]
+                rows += [message(mid, "plain body") for mid in range(102, 100 + size)]
+                rows.append(message(bad_id, "plain body"))
+                with self.subTest(size=size, bad_id=bad_id), self.assertRaises(driver.HarnessEvidenceError):
+                    self.run_surface(pages=lambda cursor: rows)
+
 
     def test_deleted_status_panel_cannot_pass_historical_raw_assertions(self):
         specs = [{"status_panel_after_body": {"body_marker": self.MARKER}},

@@ -3664,6 +3664,12 @@ def run_one_cell(
         rows, cursor = [], after_id
         for _ in range(100):
             page = client.fetch_messages(channel_id, after_id=cursor, limit=100)
+            try:
+                ids = [assertions._numeric_id(row) for row in page]
+            except ValueError as exc:
+                raise HarnessEvidenceError("Discord snapshot contains an invalid numeric ID") from exc
+            if any(mid is None or mid <= int(cursor) for mid in ids):
+                raise HarnessEvidenceError("Discord snapshot pagination did not advance")
             _ingest_observed(page)
             rows.extend(page)
             captures = getattr(client, "captures", None)
@@ -3675,9 +3681,6 @@ def run_one_cell(
             if page_size < 100:
                 window.reconcile_snapshot(rows, after_id=after_id, complete=True)
                 return rows
-            ids = [assertions._numeric_id(row) for row in page]
-            if any(mid is None or mid <= int(cursor) for mid in ids):
-                raise HarnessEvidenceError("Discord snapshot pagination did not advance")
             cursor = str(max(ids))
         raise HarnessEvidenceError("Discord snapshot incomplete after 100 pages")
 
